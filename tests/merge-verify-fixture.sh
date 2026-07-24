@@ -69,10 +69,13 @@ git_q() { git -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
 
 # ── The identity-diff recipe, exactly as Step 7(d) documents it ──────────────
 # Kept in one place so a drift between fixture and skill is a one-line fix.
+# Root-anchored on purpose (`:/`, `,top`): the plain `-- .` form is cwd-relative
+# and silently narrows to a subtree. test_merge_config.py pins this string against
+# SKILL.md so the fixture can't drift from the documented recipe.
 identity_diff() {
     local base="$1"
-    git diff --name-only "$base" -- . \
-        ':(exclude)MIND_MAP.md' ':(exclude)MIND_MAP_OVERFLOW.md' ':(exclude).agent'
+    git diff --name-only "$base" -- \
+        ':/' ':(exclude,top)MIND_MAP.md' ':(exclude,top)MIND_MAP_OVERFLOW.md' ':(exclude,top).agent'
 }
 
 # Build a repo of a given shape with a real divergent merge, and echo the
@@ -200,16 +203,56 @@ echo "=== S7: merge-verify verdicts on real repos ==="
     assert_not_contains "$out" "SKIPPED" "S7 a broken declaration is not reported as SKIPPED"
 }
 
-echo "=== S8: a verify command may not quietly dirty the tree it just verified ==="
+echo "=== S8: a tree-mutating verify command is invisible to an identity diff run BEFORE it ==="
 {
     tb=$(build_repo "$WORK/s8" backend-frontend)
     cd "$WORK/s8"; git_q merge --no-edit -q feature
-    # A formatter-style command is legal but interacts with 7(d): the skill warns
-    # against backgrounding these. Assert the interaction is visible, not hidden.
-    printf '{"merge_verify":{"command":"echo mutated >> backend/app.py"}}' > .agent/config.json
+    # Production order is 7(d) THEN 7(e), so a formatter-style command that writes
+    # during verification lands after the identity check has already concluded.
+    # This is why 7(e) tells you to re-run (d) when the command writes.
+    # (a) a TRACKED file rewritten by the command: invisible before, visible after.
+    printf '{"merge_verify":{"command":"echo mutated >> frontend/app.ts"}}' > .agent/config.json
+    before="$(identity_diff "$tb" | grep -c 'frontend/app.ts' || true)"
     python3 "$MERGE_VERIFY" >/dev/null 2>&1
-    out="$(identity_diff "$tb")"
-    assert_contains "$out" "backend/app.py" "S8 a tree-mutating verify command shows up in the identity diff"
+    after_hunks="$(git diff "$tb" -- ':/frontend/app.ts' | grep -c '^+mutated' || true)"
+    assert_eq "$before" "1" "S8a the pre-verify diff saw the merge's own change to that file"
+    assert_eq "$after_hunks" "1" "S8a re-running the diff AFTER verification surfaces the command's write"
+
+    # (b) an UNTRACKED artifact: git diff cannot see it at all, at any point —
+    # which is why 7(e) also tells you to check `git status --porcelain`, not
+    # just to re-run the diff.
+    printf '{"merge_verify":{"command":"echo junk > build-artifact.txt"}}' > .agent/config.json
+    python3 "$MERGE_VERIFY" >/dev/null 2>&1
+    assert_not_contains "$(identity_diff "$tb")" "build-artifact.txt" \
+        "S8b an untracked artifact is invisible to git diff (a known blind spot)"
+    assert_contains "$(git status --porcelain)" "build-artifact.txt" \
+        "S8b ...but git status --porcelain catches it, as 7(e) instructs"
+}
+
+echo "=== S9: the identity diff is root-anchored (same scope from any cwd) ==="
+{
+    tb=$(build_repo "$WORK/s9" backend-frontend)
+    cd "$WORK/s9"; git_q merge --no-edit -q feature
+    from_root="$(identity_diff "$tb")"
+    cd backend
+    from_subdir="$(identity_diff "$tb")"
+    assert_eq "$from_subdir" "$from_root" "S9 scope identical from a subdirectory (cwd-relative form would narrow)"
+    assert_contains "$from_subdir" "frontend/app.ts" "S9 sibling lane still seen from inside backend/"
+    cd ..
+}
+
+echo "=== S10: an early failing step cannot report GREEN ==="
+{
+    tb=$(build_repo "$WORK/s10" backend-frontend)
+    cd "$WORK/s10"; git_q merge --no-edit -q feature
+    # bash reports the LAST command's status; without set -e this is a green
+    # stamp on a red run — the defect class this whole task exists to remove.
+    printf '{"merge_verify":{"command":"echo step1; false; echo step3"}}' > .agent/config.json
+    set +e; python3 "$MERGE_VERIFY" >/dev/null 2>&1; rc=$?; set -e
+    assert_eq "$rc" "1" "S10 failing middle step exits FAILED(1), not GREEN"
+    printf '{"merge_verify":{"command":"false | true"}}' > .agent/config.json
+    set +e; python3 "$MERGE_VERIFY" >/dev/null 2>&1; rc=$?; set -e
+    assert_eq "$rc" "1" "S10 failing pipe head exits FAILED(1) (pipefail)"
 }
 
 echo

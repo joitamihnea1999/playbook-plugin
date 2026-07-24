@@ -33,7 +33,9 @@ The `/playbook:merge` skill always verifies *the merge itself*: mind-map integri
 }
 ```
 
-- `command` — whatever "green" means for **this** repo. Point it at your full gate, not one layer's: a merge that runs only the backend suite can certify itself while the frontend is red. Runs from the repo root, after the merge commit, via `bash` (so quoting, `&&`, and multi-line commands all behave).
+- `command` — whatever "green" means for **this** repo. Point it at your full gate, not one layer's: a merge that runs only the backend suite can certify itself while the frontend is red.
+
+Where and how it runs: from the repo root, on the **merged working tree after conflicts are resolved but before the merge commit is created** (so a command that inspects `git log`/`HEAD` sees the pre-merge target, not the merge). It runs via `bash` under `set -e -o pipefail`, so quoting is preserved, `&&` and multi-line commands work, and a failing *early* step fails the gate — without `set -e` bash reports only the last command's status, so `typecheck` failing followed by a successful `echo done` would report success. If your command writes to the tree (formatters, codegen), say so to yourself: the skill re-checks code identity afterwards, but a command that rewrites source during verification makes "the merge introduced no code" harder to assert.
 
 Four outcomes, and the exit code is the verdict — only the first allows `--push`:
 
@@ -43,6 +45,7 @@ Four outcomes, and the exit code is the verdict — only the first allows `--pus
 | **FAILED** (1) | declared command exited non-zero | blocked |
 | **BLOCKED** (2) | declared but unusable — malformed JSON, wrong shape, misspelled key | blocked |
 | **SKIPPED** (3) | nothing declared: no file, no key, empty command | blocked; merge is presented for you to push by hand |
+| **CONFIGURED** (4) | `--plan` only — a command exists but was deliberately not run | blocked (a classification is not a result) |
 
 Two deliberate asymmetries:
 
@@ -50,6 +53,8 @@ Two deliberate asymmetries:
 - **Broken is not the same as absent.** A misspelled `commnd` key blocks instead of silently skipping, because a typo must not quietly disable a gate you believe you declared. `tasks doctor` warns about these long before merge time.
 
 Nothing is inferred on your behalf: if you declare no command, the skill will not guess one.
+
+**Commit the file.** Nothing forces you to — `merge-verify.py` runs whatever `.agent/config.json` it finds on disk — but an untracked config means the gate exists only in your clone: your merges verify, everyone else's report SKIPPED. `tasks doctor` warns when a `merge_verify` is declared in a file git isn't tracking. And because the command is read from the *merged* tree, an incoming branch can change it — the same trust you already extend to running that branch's tests, but worth a `git diff "$target_before" -- .agent/config.json` when the branch isn't yours.
 
 ## `.agent/models.json` — judge panel pins
 

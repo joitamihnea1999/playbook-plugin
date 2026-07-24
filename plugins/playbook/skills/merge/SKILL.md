@@ -237,7 +237,10 @@ commit.
 
 > **Speed (optional): start the project's verify command now, in the background.**
 > Applies only if the project declares one (`merge_verify.command`; check without
-> running it: `python3 <this-skill-dir>/merge-verify.py --plan`). Once code
+> running it: `python3 <this-skill-dir>/merge-verify.py --plan` — exit 4 means a
+> command is declared, exit 3 means there is none and this note doesn't apply.
+> Exit 4 is deliberately NOT 0: a classification never satisfies the push gate).
+> Once code
 > conflicts are resolved here, the code working tree is **frozen** — the only
 > remaining edits (Steps 5–6) touch `MIND_MAP.md` / `MIND_MAP_OVERFLOW.md`, never
 > code. So you can kick the command off now and let it run *while* you do the
@@ -248,10 +251,13 @@ commit.
 > (don't rely on `wait <pid>` — a later agent shell isn't the parent and can't wait
 > on it):
 > ```bash
-> verify_log=$(mktemp -t merge-verify-log)   # fresh file per run — never a fixed /tmp path
+> # Fresh file per run — never a fixed /tmp path. The XXXXXX template is required
+> # by GNU mktemp (`mktemp -t name` is BSD-only and errors on Linux).
+> verify_log=$(mktemp "${TMPDIR:-/tmp}/merge-verify-log.XXXXXX")
+> echo "verify log: $verify_log"   # PRINT it — a later shell can't see this variable
 > ( python3 <this-skill-dir>/merge-verify.py; echo "merge-verify wrapper exit=$?" ) > "$verify_log" 2>&1 &
 > ```
-> At Step 7(e) read `$verify_log` back: it ends in `merge-verify wrapper exit=<0|1|2|3>`
+> At Step 7(e) read that printed path back: it ends in `merge-verify wrapper exit=<0|1|2|3>`
 > (the same four-way verdict Step 7(e) documents). **Trust it only if** the log is
 > the one THIS run created, the exit line is present (an absent line means it's
 > still running or was killed — wait or re-run), **and you made no code edit after
@@ -341,7 +347,11 @@ tasks merge-doctor <source> <target>            # exit 0
 #     a repo may keep code in services/, api/, cmd/, or just main.py at the root,
 #     and diffing a dir that doesn't exist reports green for having looked at
 #     nothing.
-git diff "$target_before" -- . ':(exclude)MIND_MAP.md' ':(exclude)MIND_MAP_OVERFLOW.md' ':(exclude).agent'
+#     The pathspecs are ROOT-ANCHORED (`:/` and `,top`) on purpose: the plain
+#     `-- .` form is relative to your cwd, so running it from a subdirectory
+#     would silently narrow the check to that subtree and still exit 0 — a
+#     partial scope wearing a whole-tree result.
+git diff "$target_before" -- ':/' ':(exclude,top)MIND_MAP.md' ':(exclude,top)MIND_MAP_OVERFLOW.md' ':(exclude,top).agent'
 #     Every hunk must be attributable to source's incoming change OR target's local
 #     addition. Often additive-only — but source MAY legitimately refactor/delete,
 #     so judge attribution, don't assume "additive == clean": a hunk you can't trace
@@ -358,7 +368,16 @@ git diff "$target_before" -- . ':(exclude)MIND_MAP.md' ':(exclude)MIND_MAP_OVERF
 python3 <this-skill-dir>/merge-verify.py
 #     Exit code IS the verdict — 0 GREEN (ran, exited 0) / 1 FAILED (ran, non-zero)
 #     / 2 BLOCKED (merge_verify present but unusable — malformed JSON, wrong shape,
-#     misspelled key) / 3 SKIPPED (nothing declared: no file, no key, empty command).
+#     misspelled key, or present-but-unreadable) / 3 SKIPPED (nothing declared: no
+#     file, no key, empty command) / 4 CONFIGURED (--plan only: never satisfies the
+#     gate, since nothing ran). The command runs under `set -e -o pipefail`, so a
+#     failing early step fails the gate instead of being masked by a later one.
+#
+#     If the declared command WRITES to the working tree (formatter, codegen,
+#     build artifacts), re-run (d) afterwards — its verdict described the tree as
+#     it was BEFORE this step, and anything the command left behind would
+#     otherwise ride into the commit unexamined. `git status --porcelain` should
+#     be clean of anything you haven't attributed.
 #     SKIPPED is a legitimate outcome and the run continues — but the check did NOT
 #     happen, so it must be stated in the commit line and the final presentation,
 #     and it blocks --push (Step 8). Never substitute a command of your own when a
@@ -398,15 +417,18 @@ Then **present**: `git show HEAD --stat`, the full `MIND_MAP.md` head, the
      `merge-doctor` exit 0 in condition 3, which is line-start + merge-touched);
   2. `ref-integrity.py` exit 0;
   3. `tasks merge-doctor` exit 0;
-  4. the Step 7(d) identity diff — post-commit `git diff "$target_before" HEAD -- .
-     ':(exclude)MIND_MAP.md' ':(exclude)MIND_MAP_OVERFLOW.md' ':(exclude).agent'` —
-     shows only changes you've attributed to source's incoming code or target's
-     local additions, NOT `git diff <target> HEAD` (vacuous, see Step 7d). Any
-     unattributable hunk blocks `--push`; stop and present for the user to judge;
-  5. `merge-verify.py` **exit 0** — the project's declared command ran and passed.
-     Exit 1 (FAILED), 2 (BLOCKED) and 3 (SKIPPED) all block the auto-push. A
-     backgrounded run counts only if its log is this run's, carries the exit line,
-     and no code changed since launch.
+  4. the Step 7(d) identity diff — post-commit `git diff "$target_before" HEAD --
+     ':/' ':(exclude,top)MIND_MAP.md' ':(exclude,top)MIND_MAP_OVERFLOW.md'
+     ':(exclude,top).agent'` — shows only changes you've attributed to source's
+     incoming code or target's local additions, NOT `git diff <target> HEAD`
+     (vacuous, see Step 7d). Any unattributable hunk blocks `--push`; stop and
+     present for the user to judge. If the verify command in (5) wrote to the tree,
+     this must be the run made AFTER it, not before;
+  5. `merge-verify.py` **exit 0 from an actual run** — the project's declared
+     command ran and passed. Exit 1 (FAILED), 2 (BLOCKED), 3 (SKIPPED) and 4
+     (CONFIGURED, i.e. `--plan` classified but ran nothing) all block the
+     auto-push. A backgrounded run counts only if its log is this run's, carries
+     the exit line, and no code changed since launch.
 
   If any of (1)–(5) is red, **do not push** — stop and report which gate failed.
 
@@ -490,13 +512,19 @@ exactly that; if you don't, it says so instead of inventing one.
   NEW dangling `[[slug]]` links fail. Exit 0 clean / 1 findings. `--help` for usage.
 - **`merge-verify.py`** (ships in this skill dir; pure stdlib). Runs the command
   the project declares in `.agent/config.json` as `{"merge_verify": {"command":
-  "…"}}`, writing it to a temp script and running it via `bash` so a command
-  containing quotes (`pytest -k 'not slow'`) keeps its meaning. Exit code is the
-  verdict — **0** GREEN, **1** FAILED (the command's own rc is in the status line),
-  **2** BLOCKED (declared but unusable: malformed JSON, wrong shape, misspelled
-  key), **3** SKIPPED (nothing declared). `--plan` classifies without running (for
-  the Step 4 background note); `-C <dir>` sets the project root. Only exit 0 clears
-  push-gate 5. `--help` for usage.
+  "…"}}`, writing it to a temp script and running it via `bash` under
+  `set -e -o pipefail` — so quoting survives (`pytest -k 'not slow'`) and a failing
+  early step fails the gate instead of being masked by a later success. Exit code
+  is the verdict — **0** GREEN, **1** FAILED (the command's own rc is in the status
+  line, never leaked into these codes), **2** BLOCKED (declared but unusable:
+  malformed JSON, wrong shape, misspelled key, or present-but-unreadable), **3**
+  SKIPPED (nothing declared), **4** CONFIGURED (`--plan` only — classified, ran
+  nothing). `--plan` classifies without running (for the Step 4 background note);
+  `-C <dir>` sets the project root. Only exit 0 clears push-gate 5. `--help` for
+  usage. **Trust note:** the command is read from the MERGED tree, so an incoming
+  branch can change it — the same exposure you already accept by running that
+  branch's test code. `git diff "$target_before" -- .agent/config.json` before
+  trusting a run on a branch you don't control.
 - **`tasks merge-doctor <source> <target>`** — mechanical contamination check
   (per-user cross-contamination, stranded markers, legacy `.agent/` paths) with
   stratified `[ACTIONABLE]`/`[EXPECTED]`/`[INFORMATIONAL]` output. Inspects the

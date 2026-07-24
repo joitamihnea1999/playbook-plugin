@@ -300,19 +300,56 @@ def _merge_verify_issues(cfg: dict) -> list[str]:
     """
     if not isinstance(cfg, dict) or "merge_verify" not in cfg:
         return []
-    mod = _merge_verify_module()
+    # Loading compiles the shipped runner, so a corrupt or partially-written
+    # copy raises here. Doctor is advisory: it must report that it couldn't
+    # check, never take the whole run down with it.
+    try:
+        mod = _merge_verify_module()
+    except Exception as e:
+        return [f"could not be validated ({e})"]
     if mod is None:  # skill dir absent (partial install) — nothing to say
         return []
     try:
         command = mod.command_from_config(cfg)
     except mod.Unusable as exc:
         return [f"{exc} — the merge skill will BLOCK on this, not skip it"]
-    except Exception as e:  # advisory check must never crash doctor
+    except Exception as e:
         return [f"could not be validated ({e})"]
     if command is None:
         return ["declared but empty — merges will report SKIPPED "
                 "(no post-merge soundness check will run)"]
     return []
+
+
+def _merge_verify_untracked(project_path: Path, cfg: dict) -> list[str]:
+    """Warn when a declared `merge_verify` lives in a file git isn't tracking.
+
+    A verify command only does its job if every clone sees it; an untracked
+    config means the gate exists on one machine and every other clone reports
+    SKIPPED. Advisory — plenty of legitimate setups (a fresh repo, a non-git
+    checkout) hit this transiently.
+    """
+    if not isinstance(cfg, dict) or "merge_verify" not in cfg:
+        return []
+    import subprocess
+
+    def _git(*args):
+        return subprocess.run(["git", *args], cwd=project_path,
+                              capture_output=True, text=True)
+
+    try:
+        # Not a git work tree at all (e.g. a dogfooding workspace whose repos are
+        # nested inside it) — "other clones" would be a meaningless thing to say.
+        inside = _git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return []
+        proc = _git("ls-files", "--error-unmatch", ".agent/config.json")
+    except (OSError, subprocess.SubprocessError):
+        return []  # no git available — nothing useful to say
+    if proc.returncode == 0:
+        return []
+    return ["declared in an untracked .agent/config.json — other clones will "
+            "report SKIPPED; `git add .agent/config.json` to make it repo policy"]
 
 
 def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
@@ -3056,7 +3093,18 @@ def main():
             try:
                 _cfg = _json.loads(cfg_path.read_text(encoding="utf-8", errors="replace"))
             except (ValueError, OSError) as e:
-                warn("config: .agent/config.json parses", f"invalid JSON ({e}); defaults used")
+                # "defaults used" is true for the review knobs but NOT for
+                # merge_verify: an unparseable config makes the merge skill
+                # BLOCK, so say so when the file was trying to declare one.
+                _extra = ""
+                try:
+                    if "merge_verify" in cfg_path.read_text(encoding="utf-8", errors="replace"):
+                        _extra = ("; the merge skill will BLOCK on this rather "
+                                  "than skip its verify step")
+                except OSError:
+                    pass
+                warn("config: .agent/config.json parses",
+                     f"invalid JSON ({e}); defaults used{_extra}")
                 _cfg = None
             if isinstance(_cfg, dict):
                 _jb = _cfg.get("judge_budget_usd")
@@ -3081,6 +3129,8 @@ def main():
                 # the merge's verify step rather than being ignored, so a typo
                 # found by doctor is a typo found cheaply.
                 for _m in _merge_verify_issues(_cfg):
+                    warn("config: merge_verify", _m)
+                for _m in _merge_verify_untracked(project_path, _cfg):
                     warn("config: merge_verify", _m)
             elif _cfg is not None:
                 warn("config: .agent/config.json shape", "top-level value is not a JSON object; ignored")

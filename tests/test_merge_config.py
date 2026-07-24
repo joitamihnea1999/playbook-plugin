@@ -21,10 +21,12 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 # The runtime tree is plugins/playbook/ (dispatcher sets PYTHONPATH there).
@@ -32,7 +34,7 @@ _HERE = Path(__file__).resolve().parent
 _PLUGIN = _HERE.parent / "plugins/playbook"
 sys.path.insert(0, str(_PLUGIN))
 
-from tasks.cli import _merge_verify_issues  # noqa: E402
+from tasks.cli import _merge_verify_issues, _merge_verify_untracked  # noqa: E402
 from tasks.core import SHARED_POLICY_PATHS, run_merge_doctor  # noqa: E402
 
 _SKILL_DIR = _PLUGIN / "skills" / "merge"
@@ -40,9 +42,18 @@ _MERGE_VERIFY = _SKILL_DIR / "merge-verify.py"
 _SKILL_MD = _SKILL_DIR / "SKILL.md"
 
 # Exit-code contract — the push gate is "exit 0 and nothing else".
-GREEN, FAILED, BLOCKED, SKIPPED = 0, 1, 2, 3
+GREEN, FAILED, BLOCKED, SKIPPED, CONFIGURED = 0, 1, 2, 3, 4
 
 _GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+
+# The Step 7(d) recipe, pinned. Root-anchored pathspecs (`:/`, `,top`) so the
+# scope can't narrow to the cwd; whole-tree minus the paths the semantic steps
+# own, so it never diffs a directory that may not exist.
+IDENTITY_DIFF_PATHSPECS = (
+    "':/' ':(exclude,top)MIND_MAP.md' ':(exclude,top)MIND_MAP_OVERFLOW.md' "
+    "':(exclude,top).agent'"
+)
+IDENTITY_DIFF = f'git diff "$target_before" -- {IDENTITY_DIFF_PATHSPECS}'
 
 
 def _load_runner():
@@ -113,6 +124,30 @@ class TestClassification(unittest.TestCase):
         _write_config(self.root, {"merge_verify": {"command": "make test",
                                                    "timeout_secs": 900}})
         self.assertEqual(mv.resolve_command(str(self.root)), "make test")
+
+    def test_present_but_unreadable_is_unusable_not_skipped(self):
+        # A committed policy file that can't be read has still been declared;
+        # calling that "nothing declared" is a false statement (impl panel, 7/9).
+        _write_config(self.root, {"merge_verify": {"command": "make test"}})
+        cfg = self.root / ".agent" / "config.json"
+        cfg.chmod(0o000)
+        self.addCleanup(cfg.chmod, 0o644)
+        if os.access(cfg, os.R_OK):  # running as root — the mode is unenforced
+            self.skipTest("cannot make a file unreadable as this user")
+        with self.assertRaises(mv.Unusable) as ctx:
+            mv.resolve_command(str(self.root))
+        self.assertIn("cannot be read", str(ctx.exception))
+
+    def test_directory_shaped_config_is_unusable_not_skipped(self):
+        (self.root / ".agent" / "config.json").mkdir(parents=True)
+        with self.assertRaises(mv.Unusable):
+            mv.resolve_command(str(self.root))
+
+    def test_missing_agent_dir_is_skipped(self):
+        # NotADirectoryError path: .agent exists as a FILE, so there is no
+        # config to speak of — genuinely absent, not broken.
+        (self.root / ".agent").write_text("not a dir", encoding="utf-8")
+        self.assertIsNone(mv.resolve_command(str(self.root)))
 
     def test_malformed_json_is_unusable_not_skipped(self):
         _write_config(self.root, '{"merge_verify": {"command": "x"},}')
@@ -193,9 +228,32 @@ class TestExitCodes(unittest.TestCase):
         marker = self.root / "ran"
         _write_config(self.root, {"merge_verify": {"command": f"touch {marker}"}})
         rc, out = _run_cli(self.root, "--plan")
-        self.assertEqual(rc, GREEN)
         self.assertIn("CONFIGURED", out)
         self.assertFalse(marker.exists(), "--plan must not execute the command")
+
+    def test_plan_mode_does_not_return_the_push_gate_code(self):
+        # --plan ran nothing, so it must not hand back the one code push-gate 5
+        # accepts — otherwise a classification probe reads as a passing gate.
+        _write_config(self.root, {"merge_verify": {"command": "exit 99"}})
+        rc, _ = _run_cli(self.root, "--plan")
+        self.assertEqual(rc, CONFIGURED)
+        self.assertNotEqual(rc, GREEN)
+
+    def test_early_failing_step_does_not_report_green(self):
+        # bash reports only the LAST command's status: without `set -e` a red
+        # suite followed by a successful line would pass the gate.
+        for command in ("false\ntrue",
+                        "echo start\nfalse\necho end",
+                        "false | true"):
+            with self.subTest(command=command):
+                _write_config(self.root, {"merge_verify": {"command": command}})
+                rc, out = _run_cli(self.root)
+                self.assertEqual(rc, FAILED, f"{command!r} must not be GREEN:\n{out}")
+
+    def test_failing_last_step_still_fails(self):
+        _write_config(self.root, {"merge_verify": {"command": "true\nfalse"}})
+        rc, _ = _run_cli(self.root)
+        self.assertEqual(rc, FAILED)
 
     def test_plan_mode_reports_skipped_when_nothing_declared(self):
         rc, out = _run_cli(self.root, "--plan")
@@ -278,6 +336,57 @@ class TestDoctorAdvisory(unittest.TestCase):
             with self.subTest(junk=junk):
                 self.assertEqual(_merge_verify_issues(junk), [])
 
+    def test_a_corrupt_shipped_runner_does_not_crash_doctor(self):
+        # The advisory loads merge-verify.py to reuse its rules; a corrupt or
+        # half-written copy must degrade to a warning, not abort the whole run.
+        import tasks.cli as cli
+        with unittest.mock.patch.object(
+            cli, "_merge_verify_module",
+            side_effect=SyntaxError("invalid syntax"),
+        ):
+            issues = _merge_verify_issues({"merge_verify": {"command": "x"}})
+        self.assertEqual(len(issues), 1)
+        self.assertIn("could not be validated", issues[0])
+
+    def test_missing_runner_is_silent(self):
+        import tasks.cli as cli
+        with unittest.mock.patch.object(cli, "_merge_verify_module", return_value=None):
+            self.assertEqual(_merge_verify_issues({"merge_verify": {"command": "x"}}), [])
+
+
+class TestUntrackedPolicyAdvisory(unittest.TestCase):
+    """A verify command only works if every clone sees it, so an untracked
+    declaration is worth mentioning — but only where tracking is a real notion."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = {"merge_verify": {"command": "make test"}}
+
+    def test_warns_when_declared_but_untracked(self):
+        _git(self.root, "init", "-q")
+        _write_config(self.root, self.cfg)
+        issues = _merge_verify_untracked(self.root, self.cfg)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("untracked", issues[0])
+
+    def test_silent_when_tracked(self):
+        _git(self.root, "init", "-q")
+        _write_config(self.root, self.cfg)
+        _git(self.root, "add", ".agent/config.json")
+        self.assertEqual(_merge_verify_untracked(self.root, self.cfg), [])
+
+    def test_silent_outside_a_git_work_tree(self):
+        # The dogfooding workspace is not itself a repo; "other clones" would be
+        # a meaningless warning there.
+        _write_config(self.root, self.cfg)
+        self.assertEqual(_merge_verify_untracked(self.root, self.cfg), [])
+
+    def test_silent_when_nothing_declared(self):
+        _git(self.root, "init", "-q")
+        self.assertEqual(_merge_verify_untracked(self.root, {}), [])
+
 
 class TestMergeDoctorPolicyExemption(unittest.TestCase):
     """A committed config.json is how `merge_verify` reaches every clone, so
@@ -353,14 +462,18 @@ class TestSkillLiteralFence(unittest.TestCase):
         self.assertIn("merge_verify", text)
         self.assertIn(".agent/config.json", text)
 
-    def test_identity_diff_excludes_the_owned_paths(self):
-        # The identity diff must be whole-tree-minus-owned, never a named dir:
-        # a missing dir diffs to empty and reports green for checking nothing.
-        text = _SKILL_MD.read_text(encoding="utf-8")
-        for excl in ("':(exclude)MIND_MAP.md'",
-                     "':(exclude)MIND_MAP_OVERFLOW.md'",
-                     "':(exclude).agent'"):
-            self.assertIn(excl, text)
+    def test_identity_diff_scope_is_pinned_verbatim(self):
+        # Substring-checking the excludes was too weak: re-scoping the diff to
+        # `-- services/` kept every assertion green while shipping a vacuous
+        # instruction again. Pin the whole command, and require it root-anchored
+        # (`:/` + `,top`) so it can't silently narrow when run from a subdir.
+        self.assertIn(IDENTITY_DIFF, _SKILL_MD.read_text(encoding="utf-8"))
+
+    def test_the_fixture_executes_the_documented_diff(self):
+        # The fixture hand-copies the recipe; if the two drift, the fixture
+        # proves something the skill no longer tells anyone to run.
+        fixture = (_HERE / "merge-verify-fixture.sh").read_text(encoding="utf-8")
+        self.assertIn(IDENTITY_DIFF_PATHSPECS, fixture)
 
     def test_runner_ships_with_the_skill(self):
         self.assertTrue(_MERGE_VERIFY.exists())
