@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -132,15 +132,32 @@ def resolve_agent_dir(project_path: Path) -> Path:
     return project_path / ".agent" / name
 
 
-# ── Per-install configuration (.agent/config.json) ──────────────────────────
-# Install-wide review knobs, read at the .agent/ ROOT (not the per-user subdir —
-# budget and review timeout are per-install, shared across users in a multi-user
-# repo). Precedence for every setting: CLI flag > env var > config.json >
-# built-in default. A missing file, malformed JSON, or an out-of-range value
-# never crashes the CLI — it falls back to the default (warning once).
+# ── Configuration (.agent/config.json) ──────────────────────────────────────
+# Read at the .agent/ ROOT (not the per-user subdir — these are shared across
+# users in a multi-user repo). Precedence for every setting: CLI flag > env var >
+# config.json > built-in default. A missing file, malformed JSON, or an
+# out-of-range value never crashes the CLI — it falls back to the default
+# (warning once).
+#
+# Two tiers of ownership live in this one file:
+#   • Review knobs (judge_budget_usd, review_timeout_secs) are naturally
+#     per-install — a spend cap is a wallet decision, and a timeout depends on
+#     the machine. Committing them just sets a default others can override via
+#     the PLAYBOOK_* env tier.
+#   • Project policy (merge_verify) only works when it IS committed: the merge
+#     skill runs the declared command to decide whether a merge may auto-push,
+#     so every clone must see the same declaration. A repo that keeps this file
+#     untracked leaves that check permanently skipped.
+# Hence the file is committable, and merge-doctor treats a tracked copy as
+# correct rather than legacy detritus (SHARED_POLICY_PATHS below).
 
 DEFAULT_JUDGE_BUDGET_USD = "2"
 DEFAULT_REVIEW_TIMEOUT_SECS = 300
+
+# Paths under .agent/ that are legitimately tracked in git — repo-level policy
+# rather than per-install state. Everything else at the .agent/ root that is
+# tracked is legacy detritus the merge skill wants `git rm --cached`ed.
+SHARED_POLICY_PATHS = frozenset({".agent/config.json"})
 
 
 def load_config(project_path: Path) -> dict:
@@ -1038,6 +1055,14 @@ def run_merge_doctor(project_path: Path, source: str, target: str) -> int:
             # rel looks like ".agent/<first>/..." for nested paths.
             parts = rel.split("/", 2)
             if len(parts) >= 2 and parts[1] in all_users:
+                continue
+            if rel in SHARED_POLICY_PATHS:
+                # Deliberately committable: config.json can carry repo-level
+                # policy (e.g. merge_verify, which the merge skill runs and
+                # which only works if every clone sees it), so a tracked copy
+                # is correct rather than legacy detritus. Without this the
+                # merge skill's own Step 7(b) gate would fail on any repo that
+                # follows its instruction to commit the file.
                 continue
             if _md_tracked(rel, project_path):
                 actionable.append(

@@ -117,7 +117,7 @@ Tell the agent what you want built, what constraints matter, and what done looks
 
 ## Configuration
 
-Two small JSON files tune the review machinery per install: `.agent/config.json` (judge budget, review timeout) and `.agent/models.json` (which models sit on the judge panel; keep them alive with `tasks models check` / `select`). Details, precedence rules, and maintenance workflow: [docs/configuration.md](docs/configuration.md).
+Two small JSON files under `.agent/`: `config.json` (judge budget, review timeout — and `merge_verify`, the command the merge skill runs to check your branches are healthy before it will auto-push) and `models.json` (which models sit on the judge panel; keep them alive with `tasks models check` / `select`). The review knobs are per-install; `merge_verify` is project policy, so commit it. Details, precedence rules, and maintenance workflow: [docs/configuration.md](docs/configuration.md).
 
 ## Two agents, one task
 

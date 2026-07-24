@@ -9,8 +9,9 @@ description: >
   things a plain `git merge` gets wrong — silent per-user cross-contamination,
   prose conflict markers in the mind map, and stale OVERFLOW node numbering —
   then runs bundled deterministic verification (ref-integrity + contamination
-  + backend byte-identity) and stops for you to push, or pushes itself with
-  `--push` once every gate is green.
+  + code identity + the project's own declared verify command, if it has one)
+  and stops for you to push, or pushes itself with `--push` once every gate is
+  green.
 argument-hint: <source-branch> [target-branch] [--push]
 ---
 
@@ -41,7 +42,8 @@ merge` gets four things wrong:
 This skill is **self-contained**: it runs the whole procedure — the parts that
 need judgment (the MIND_MAP/OVERFLOW semantic merge) and the parts that are
 mechanical (contamination detection via `tasks merge-doctor`, structural checks
-via the bundled `ref-integrity.py`, backend byte-identity, tests) — in one pass.
+via the bundled `ref-integrity.py`, code identity, and the project's own verify
+command when it declares one) — in one pass.
 **A clean merge needs no Playbook task, no design-phase gates, and no
 plan/impl/panel review tail.** Those reviews repeatedly caught only MIND_MAP /
 OVERFLOW traps; with those baked into the checklist below and a bundled
@@ -139,7 +141,10 @@ local, reversible state (`git reset --hard` undoes it) right up to the push.
   `git push` themselves. No mid-run idle gate; the push stays a human action.
 - **`--push`:** the skill pushes automatically, but **ONLY when the full green
   gate passes** (see Step 8). If any gate is red, it stops and reports which —
-  it never auto-pushes a merge that failed verification.
+  it never auto-pushes a merge that failed verification. It also never auto-pushes
+  a merge nobody *could* verify: if the project declares no soundness command (or
+  its declaration is unusable), that's not a failure but it isn't a pass either, so
+  the push goes back to the human with the situation stated.
 
 When `tasks merge-doctor` reports findings, read the labeled sections:
 `[ACTIONABLE]` (fix it, re-run), `[EXPECTED]` (mid-merge surface the semantic
@@ -187,7 +192,7 @@ one); the **upstream remote** (`git remote`; if not exactly one, ask).
 ```bash
 git checkout <target>
 git merge --ff-only <remote>/<target>          # if not a clean ff, surface to user
-target_before=$(git rev-parse HEAD)            # pre-merge target tip — the backend-identity baseline (Step 7d / push-gate 4). Capture it NOW: after commit, <target> advances to HEAD, so `git diff <target> HEAD` is always empty (vacuous).
+target_before=$(git rev-parse HEAD)            # pre-merge target tip — the code-identity baseline (Step 7d / push-gate 4). Capture it NOW: after commit, <target> advances to HEAD, so `git diff <target> HEAD` is always empty (vacuous).
 git merge --no-commit --no-ff <source>         # --no-commit: fix rename/rename before committing
 git status
 ```
@@ -230,20 +235,30 @@ rule is keep the `.agent/**/chat_log.md` ignore + grandfather only already-commi
 logs) leaves your own log un-ignored AND untracked, one `add -A` from an accidental
 commit.
 
-> **Speed (optional): start the test suite now, in the background.** Once code
-> conflicts are resolved here, the backend/code working tree is **frozen** — the
-> only remaining edits (Steps 5–6) touch `MIND_MAP.md` / `MIND_MAP_OVERFLOW.md`,
-> never code. So you can kick off the backend tests in the background and let them
-> run *while* you do the semantic MIND_MAP merge, then just collect the result at
-> Step 7(e) — overlapping ~90s of tests with work you'd do anyway. This is a pure
-> wall-clock win, not a quality trade: the same suite runs on the same code state,
-> and tests stay a hard gate. Launch so the log itself records the exit status
+> **Speed (optional): start the project's verify command now, in the background.**
+> Applies only if the project declares one (`merge_verify.command`; check without
+> running it: `python3 <this-skill-dir>/merge-verify.py --plan`). Once code
+> conflicts are resolved here, the code working tree is **frozen** — the only
+> remaining edits (Steps 5–6) touch `MIND_MAP.md` / `MIND_MAP_OVERFLOW.md`, never
+> code. So you can kick the command off now and let it run *while* you do the
+> semantic MIND_MAP merge, then collect at Step 7(e) — overlapping the wait with
+> work you'd do anyway. Not a quality trade: same command, same code state, still a
+> hard gate. Launch into a **fresh unique log** so a stale log from an earlier run
+> can never be mistaken for this one, and record the exit status in the log itself
 > (don't rely on `wait <pid>` — a later agent shell isn't the parent and can't wait
 > on it):
-> `bash -lc 'bash .claude/bin/run-backend-tests; echo "tests exit=$?"' > /tmp/merge-tests.log 2>&1 &`
-> Then at Step 7(e) you read the `tests exit=` line back. **Precondition for trusting
-> the result: you made no code edit after launching** (if you did, re-run at Step 7).
-> A cautious agent can skip this and just run tests inline at Step 7(e).
+> ```bash
+> verify_log=$(mktemp -t merge-verify-log)   # fresh file per run — never a fixed /tmp path
+> ( python3 <this-skill-dir>/merge-verify.py; echo "merge-verify wrapper exit=$?" ) > "$verify_log" 2>&1 &
+> ```
+> At Step 7(e) read `$verify_log` back: it ends in `merge-verify wrapper exit=<0|1|2|3>`
+> (the same four-way verdict Step 7(e) documents). **Trust it only if** the log is
+> the one THIS run created, the exit line is present (an absent line means it's
+> still running or was killed — wait or re-run), **and you made no code edit after
+> launching.** Two cases where you should NOT background it: a command that writes
+> to the working tree (formatters, codegen, build artifacts) — it would invalidate
+> the frozen-tree premise and pollute Step 7(d)'s identity diff — and a command
+> whose runtime you don't know. When in doubt, just run it inline at Step 7(e).
 
 ### Step 5 — Semantic MIND_MAP merge
 
@@ -291,9 +306,14 @@ Skipping this step is the documented failure mode. Step 7's
 
 ### Step 7 — Bundled verification (the VERIFY gate — replaces the review tail)
 
-`ref-integrity.py --base` is THE structural sign-off: it checks the reference
-graph AND, differentially against the merge-base, whether this merge left a full
-node unmirrored (catching a skipped Step 6). Run, in order, fix anything red:
+This step verifies **the merge**: that the mind map is structurally sound, that no
+per-user file got cross-contaminated, and that the merge introduced no code of its
+own. Whether the *branches* are healthy is the project's business, not this
+skill's — (e) runs the command the project declares for that, or states plainly
+that it has none. `ref-integrity.py --base` is THE structural sign-off: it checks
+the reference graph AND, differentially against the merge-base, whether this merge
+left a full node unmirrored (catching a skipped Step 6). Run, in order, fix
+anything red:
 
 ```bash
 # (a) structural + differential integrity (contiguity, ↗-contract, refs resolve,
@@ -313,26 +333,39 @@ tasks merge-doctor <source> <target>            # exit 0
 #     so it won't false-positive on prose/markdown like a documented '<<<<<<' or a
 #     markdown '=======' underline. Don't run a raw `grep <<<<<<` (it flags those).
 
-# (d) backend / code identity — proof the merge introduced no code of its own.
+# (d) code identity — proof the merge introduced no code of its own.
 #     Diff vs the PRE-MERGE target tip ($target_before from Step 2), NOT `<target>
 #     HEAD` (vacuous: <target> == HEAD both before commit and after). Pre-commit,
-#     omit the second ref so it diffs the merged WORKING TREE:
-git diff "$target_before" -- backend/           # every hunk must be attributable to
-#     source's incoming change OR target's local addition. Often additive-only — but
-#     source MAY legitimately refactor/delete, so judge attribution, don't assume
-#     "additive == clean": a hunk you can't trace to either side = botched conflict
-#     resolution → re-resolve. (Post-commit the same check is `git diff "$target_before"
-#     HEAD -- backend/`; see push-gate 4.)
+#     omit the second ref so it diffs the merged WORKING TREE. Scope is the WHOLE
+#     TREE minus the three paths the semantic steps own — never a named code dir:
+#     a repo may keep code in services/, api/, cmd/, or just main.py at the root,
+#     and diffing a dir that doesn't exist reports green for having looked at
+#     nothing.
+git diff "$target_before" -- . ':(exclude)MIND_MAP.md' ':(exclude)MIND_MAP_OVERFLOW.md' ':(exclude).agent'
+#     Every hunk must be attributable to source's incoming change OR target's local
+#     addition. Often additive-only — but source MAY legitimately refactor/delete,
+#     so judge attribution, don't assume "additive == clean": a hunk you can't trace
+#     to either side = botched conflict resolution → re-resolve. An EMPTY diff here
+#     is meaningful, not vacuous — it says the merge introduced no code at all.
+#     (Post-commit, add HEAD as the second ref; see push-gate 4.)
 
-# (e) test suite — run ONCE, preserving the real exit code. If you backgrounded it
-#     after Step 4 (see the Step 4 speed note) AND made no code edit since, COLLECT
-#     by reading the marker the launch wrote: `grep 'tests exit=' /tmp/merge-tests.log`
-#     (don't `wait <pid>` — a new shell isn't the launcher's parent). Trust it ONLY
-#     if the marker is present AND the code tree is unchanged since launch; otherwise
-#     run inline now. run-backend-tests is committed non-executable on some repos
-#     (invoke via `bash`), and a `| tail` would mask the failure (pipe exit = tail's
-#     0); wrap in bash so the status survives any caller shell (zsh has no ${PIPESTATUS}):
-bash -lc 'bash .claude/bin/run-backend-tests; rc=$?; echo "tests exit=$rc"; exit "$rc"'
+# (e) project soundness — the project's OWN declared command, if it declares one.
+#     Running a test suite is not this skill's job; certifying that YOUR branches
+#     are healthy is. So the command comes from the project, never from here:
+#       .agent/config.json → {"merge_verify": {"command": "<green for THIS repo>"}}
+#     merge-verify.py ships in THIS skill's directory. Run it from the repo root;
+#     don't pipe it through `| tail` (the pipe's exit status would be tail's 0):
+python3 <this-skill-dir>/merge-verify.py
+#     Exit code IS the verdict — 0 GREEN (ran, exited 0) / 1 FAILED (ran, non-zero)
+#     / 2 BLOCKED (merge_verify present but unusable — malformed JSON, wrong shape,
+#     misspelled key) / 3 SKIPPED (nothing declared: no file, no key, empty command).
+#     SKIPPED is a legitimate outcome and the run continues — but the check did NOT
+#     happen, so it must be stated in the commit line and the final presentation,
+#     and it blocks --push (Step 8). Never substitute a command of your own when a
+#     project declares none, and never let a BLOCKED config read as "nothing
+#     configured" — that is the vacuous-green failure this step exists to prevent.
+#     If you backgrounded it after Step 4 (see the speed note there) AND made no
+#     code edit since, collect by reading that run's log instead of re-running.
 ```
 
 ### Step 8 — Commit, present, and (optionally) push
@@ -340,13 +373,23 @@ bash -lc 'bash .claude/bin/run-backend-tests; rc=$?; echo "tests exit=$rc"; exit
 Create the merge commit (a real one, not a fast-forward) with a message that
 documents what was reconciled, the per-user resets, the MIND_MAP/OVERFLOW
 resolution, and `.gitignore` changes, ending with a `Verified:` line that states
-what was *actually* found — `Verified: ref-integrity clean, merge-doctor SAFE,
-backend byte-identical (or additive-only, per the diff), tests green`. Don't write
-"byte-identical" when the diff was additive — the push gate accepts additive-only,
-so the audit trail must say which one held.
+what was *actually* found:
 
-Then **present**: `git show HEAD --stat`, the full `MIND_MAP.md` head, and the
-`ref-integrity.py` report.
+```
+Verified: ref-integrity clean, merge-doctor SAFE, code identity <byte-identical
+| additive-only | attributed, per the diff>, project verify <green | FAILED
+| skipped: no merge_verify.command declared | BLOCKED: unusable merge_verify>
+```
+
+**Write what held, not the happiest phrasing.** Don't write "byte-identical" when
+the diff was additive (the push gate accepts additive-only, so the trail must say
+which). And never write a bare "verified" when Step 7(e) came back SKIPPED — a
+reader of that commit must be able to tell that no soundness command ran. Claiming
+verification you didn't do is the exact defect that let a red tree ride across a
+merge that announced itself clean.
+
+Then **present**: `git show HEAD --stat`, the full `MIND_MAP.md` head, the
+`ref-integrity.py` report, and the Step 7(e) verdict line.
 
 - **Default:** STOP here. Tell the user the exact command — `git push <remote>
   <target>` — and let them run it.
@@ -355,15 +398,27 @@ Then **present**: `git show HEAD --stat`, the full `MIND_MAP.md` head, and the
      `merge-doctor` exit 0 in condition 3, which is line-start + merge-touched);
   2. `ref-integrity.py` exit 0;
   3. `tasks merge-doctor` exit 0;
-  4. `git diff "$target_before" HEAD -- backend/` (and other code dirs) shows only
-     changes you've attributed to source's incoming code or target's local additions
-     — NOT `git diff <target> HEAD` (vacuous, see Step 7d). Any unattributable hunk
-     blocks `--push`; stop and present for the user to judge;
-  5. test command exit 0 — via the bash-wrapped Step 7(e) form that returns the
-     real status, never a `| tail`-masked pipe (a backgrounded run counts only if
-     its `tests exit=` marker is present and no code changed since launch).
+  4. the Step 7(d) identity diff — post-commit `git diff "$target_before" HEAD -- .
+     ':(exclude)MIND_MAP.md' ':(exclude)MIND_MAP_OVERFLOW.md' ':(exclude).agent'` —
+     shows only changes you've attributed to source's incoming code or target's
+     local additions, NOT `git diff <target> HEAD` (vacuous, see Step 7d). Any
+     unattributable hunk blocks `--push`; stop and present for the user to judge;
+  5. `merge-verify.py` **exit 0** — the project's declared command ran and passed.
+     Exit 1 (FAILED), 2 (BLOCKED) and 3 (SKIPPED) all block the auto-push. A
+     backgrounded run counts only if its log is this run's, carries the exit line,
+     and no code changed since launch.
 
   If any of (1)–(5) is red, **do not push** — stop and report which gate failed.
+
+  **On SKIPPED specifically:** the merge is *not* broken and nothing needs fixing —
+  the project simply declares no soundness command, so nobody has checked that
+  these branches are healthy. That is a judgment call about risk, which belongs to
+  the human, so `--push` hands it back rather than deciding it silently: present
+  the merge, say plainly that no verify command is declared, and give them both the
+  `git push` command and the one-line fix (`merge_verify.command` in
+  `.agent/config.json`) if they'd rather make it automatic next time. Auto-pushing
+  an unverified merge because *nothing said no* is precisely the vacuous green this
+  skill refuses.
 
 If the remote rejects the push (non-bare clone with `<target>` checked out),
 surface it — the fix is in the remote; **do not change remote config without
@@ -375,7 +430,7 @@ explicit consent.**
 
 A clean merge does not need them. For a large or unusual merge you may opt in:
 `tasks impl-review <N>` and `tasks panel-review <N> --timeout 800`. These add
-little over a byte-identical backend + passing `ref-integrity.py`, and the
+little over an attributable code diff + passing `ref-integrity.py`, and the
 oversized prompt (two mind-map files + trace) is what made panel-review time out —
 so reach for them deliberately, not by default.
 
@@ -394,6 +449,13 @@ so reach for them deliberately, not by default.
   from char-count drift — `ref-integrity.py --remap` is the net (gotcha #6).
 - **Pushing to a checked-out remote branch.** Git refuses to protect the remote's
   working tree; the fix is in the remote, with the user's consent.
+- **Reporting "verified" for checks that never ran.** A gate that passes because it
+  looked at nothing is worse than no gate: it puts a green stamp on an unexamined
+  tree. Two shapes of this, both guarded: scoping the identity diff to a directory
+  that may not exist (Step 7d diffs the whole tree minus the owned paths instead),
+  and treating an undeclared or unusable `merge_verify` as a pass (Step 7e returns
+  SKIPPED/BLOCKED, both of which block `--push` and must be named in the commit
+  line). If you ever can't say *what* a gate checked, it didn't check anything.
 
 ## Parameterization
 
@@ -407,9 +469,16 @@ so reach for them deliberately, not by default.
 | MIND_MAP / OVERFLOW paths | `MIND_MAP.md`, `MIND_MAP_OVERFLOW.md` at repo root |
 | OLD→NEW renumber map | Built by hand in Step 6; passed to `ref-integrity.py --remap` |
 | Active-user marker | `.agent/current_user`, install-local (gitignored, Step 3) |
+| Code-identity scope | Whole tree minus the owned paths — nothing to configure (Step 7d) |
+| Project soundness command | `merge_verify.command` in `.agent/config.json` — **repo policy, commit it**. Absent/empty ⇒ SKIPPED (run continues, blocks `--push`); unusable ⇒ BLOCKED |
 
-The only literal strings the skill needs are `.agent/`, `MIND_MAP.md`, and
-`MIND_MAP_OVERFLOW.md`.
+The skill hardcodes no project-specific paths or commands. The literal strings it
+needs are `.agent/` (plus `.agent/config.json` as the one config channel),
+`MIND_MAP.md`, and `MIND_MAP_OVERFLOW.md` — everything else is either an argument,
+auto-detected, or declared by the project in that config file. In particular it
+knows nothing about your directory layout, your language, or your test runner: if
+you want a post-merge soundness check, you declare the command and the skill runs
+exactly that; if you don't, it says so instead of inventing one.
 
 ## Bundled tooling
 
@@ -419,6 +488,15 @@ The only literal strings the skill needs are `.agent/`, `MIND_MAP.md`, and
   resolves (code fences / inline code / `[0]` excluded). With `--remap OLD:NEW,…`
   it proves the renumbered region has no stale self-refs; with `--base <ref>` only
   NEW dangling `[[slug]]` links fail. Exit 0 clean / 1 findings. `--help` for usage.
+- **`merge-verify.py`** (ships in this skill dir; pure stdlib). Runs the command
+  the project declares in `.agent/config.json` as `{"merge_verify": {"command":
+  "…"}}`, writing it to a temp script and running it via `bash` so a command
+  containing quotes (`pytest -k 'not slow'`) keeps its meaning. Exit code is the
+  verdict — **0** GREEN, **1** FAILED (the command's own rc is in the status line),
+  **2** BLOCKED (declared but unusable: malformed JSON, wrong shape, misspelled
+  key), **3** SKIPPED (nothing declared). `--plan` classifies without running (for
+  the Step 4 background note); `-C <dir>` sets the project root. Only exit 0 clears
+  push-gate 5. `--help` for usage.
 - **`tasks merge-doctor <source> <target>`** — mechanical contamination check
   (per-user cross-contamination, stranded markers, legacy `.agent/` paths) with
   stratified `[ACTIONABLE]`/`[EXPECTED]`/`[INFORMATIONAL]` output. Inspects the

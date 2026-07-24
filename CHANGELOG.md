@@ -2,6 +2,21 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.4.5] — 2026-07-25
+
+### Changed
+- **The merge skill no longer hardcodes one project's layout or test runner** (field report, AloVet 2026-07-24; task 021). Step 7's verification bundle assumed a `backend/` directory and a `run-backend-tests` command, which contradicted the skill's own claim to need only `.agent/` and the two mind-map files. On a repo without them the code-identity check diffed a directory that didn't exist — reporting green for having examined nothing — and the test step errored outright. Both are now repo-agnostic:
+  - **Code identity** diffs the whole tree minus the paths the semantic steps own (`git diff "$target_before" -- . ':(exclude)MIND_MAP.md' ':(exclude)MIND_MAP_OVERFLOW.md' ':(exclude).agent'`). This covers code wherever it lives, including root-level files like `package.json` or `main.py` that a configured directory list would miss, and an empty result now truthfully means "the merge introduced no code."
+  - **Project soundness** runs the command the project declares in `.agent/config.json` as `{"merge_verify": {"command": "…"}}`, via the new bundled `merge-verify.py`. Nothing is inferred: declare no command and the skill says so instead of guessing one.
+- **`.agent/config.json` is now documented as committable**, with two tiers of ownership: review knobs (`judge_budget_usd`, `review_timeout_secs`) stay per-install and overridable through `PLAYBOOK_*` env vars, while `merge_verify` is project policy that only works when every clone sees it. `merge-doctor` treats a tracked `config.json` as correct rather than legacy detritus — previously it demanded `git rm --cached` on it, which would have failed the merge skill's own Step 7(b) gate for any repo that followed the new instruction to commit the file.
+
+### Added
+- **`skills/merge/merge-verify.py`** (pure stdlib, ships with the skill). Runs the declared command via a temp script so quoting is preserved (`pytest -k 'not slow'` keeps its meaning), and reports a four-way verdict through its exit code: **0** GREEN, **1** FAILED (the command's own rc appears in the status line), **2** BLOCKED (declared but unusable), **3** SKIPPED (nothing declared). `--plan` classifies without running; `-C` sets the project root.
+- `tasks doctor` now warns on an unusable or empty `merge_verify`, using the same rules the merge enforces (doctor loads the skill's resolver rather than keeping a second copy that could drift).
+
+### Migration
+- **Repos that relied on the old hardcoded gate must declare `merge_verify.command`.** Without it a merge still runs and verifies itself, but reports `SKIPPED` for project soundness and **will not auto-push with `--push`** — it stops and hands the push to you with the situation stated. This is deliberately stricter than the field report proposed (which suggested a skipped check should not block): on the day this ships every repo is unconfigured, so a non-blocking skip would mean `--push` auto-pushing with zero soundness verification — the exact failure the report was written about. Point `merge_verify.command` at your **full** gate, not one layer's; a merge that runs only the backend suite can certify itself while the frontend is red (the incident behind this change).
+
 ## [1.4.4] — 2026-07-23
 
 ### Fixed

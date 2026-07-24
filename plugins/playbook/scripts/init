@@ -48,17 +48,19 @@ else
     SKIPPED+=(".agent/playbooks/ (exists)")
 fi
 
-# --- (a3) .agent/config.json — per-install review knobs ---
-# Install-wide, hand-editable. Precedence for each setting: CLI flag > env var >
-# this file > built-in default. Only written when absent — never clobbers a
-# user-tuned file. (Values here are the built-in defaults, spelled out so the
-# knobs are discoverable.)
+# --- (a3) .agent/config.json — review knobs + project policy ---
+# Hand-editable. Precedence for each setting: CLI flag > env var > this file >
+# built-in default. Only written when absent — never clobbers a user-tuned file.
+# (Values here are the built-in defaults, spelled out so the knobs are
+# discoverable.) `merge_verify` is deliberately NOT scaffolded: its absence is
+# meaningful (no post-merge soundness command declared), and writing a guessed
+# command would be worse than none.
 CONFIG_JSON="$PROJECT_DIR/.agent/config.json"
 if [ ! -f "$CONFIG_JSON" ]; then
     mkdir -p "$PROJECT_DIR/.agent"
     cat > "$CONFIG_JSON" <<'CONFIG'
 {
-  "_doc": "Per-install playbook review settings. Precedence: CLI flag > env var > this file > default. judge_budget_usd caps the claude judge's --max-budget-usd (claude backend only; codex/agy/pi have no budget knob). review_timeout_secs bounds every review agent (plan/impl/panel). Env overrides: PLAYBOOK_JUDGE_BUDGET_USD, PLAYBOOK_REVIEW_TIMEOUT_SECS.",
+  "_doc": "Playbook settings. Precedence: CLI flag > env var > this file > default. REVIEW KNOBS (naturally per-install; committing them just sets a default others can override via env): judge_budget_usd caps the claude judge's --max-budget-usd (claude backend only; codex/agy/grok/pi have no budget knob); review_timeout_secs bounds every review agent (plan/impl/panel). Env overrides: PLAYBOOK_JUDGE_BUDGET_USD, PLAYBOOK_REVIEW_TIMEOUT_SECS. PROJECT POLICY — commit this file if you set it: merge_verify {command} is the post-merge soundness command the merge skill runs before it will auto-push, e.g. {\"merge_verify\": {\"command\": \"make test\"}}. Every clone must see the same declaration, so an untracked config leaves that check permanently skipped. Absent or empty means the merge reports SKIPPED and hands the push back to you; a malformed declaration BLOCKS the merge's verify step rather than being ignored. See docs/configuration.md.",
   "judge_budget_usd": 2,
   "review_timeout_secs": 300
 }

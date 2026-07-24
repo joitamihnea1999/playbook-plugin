@@ -269,6 +269,52 @@ def _panel_triage_frame() -> list[str]:
     ]
 
 
+def _merge_verify_module():
+    """Load the merge skill's merge-verify.py as a module, or None.
+
+    The skill ships standalone (it must run from its own directory with no
+    package on the path), so it can't be imported normally — and its filename is
+    hyphenated. Loading it by path is still worth it: doctor then validates
+    `merge_verify` with the exact rules a merge will enforce, instead of a second
+    copy of them that can drift.
+    """
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "skills" / "merge" / "merge-verify.py"
+    if not path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("_playbook_merge_verify", path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _merge_verify_issues(cfg: dict) -> list[str]:
+    """Advisory warnings for config.json's `merge_verify` declaration.
+
+    Empty when nothing is declared (a legitimate choice) or when the declaration
+    is usable. A present-but-broken declaration BLOCKS the merge skill's verify
+    step rather than being silently ignored, so surfacing it in doctor is how a
+    typo gets caught before it costs someone a merge.
+    """
+    if not isinstance(cfg, dict) or "merge_verify" not in cfg:
+        return []
+    mod = _merge_verify_module()
+    if mod is None:  # skill dir absent (partial install) — nothing to say
+        return []
+    try:
+        command = mod.command_from_config(cfg)
+    except mod.Unusable as exc:
+        return [f"{exc} — the merge skill will BLOCK on this, not skip it"]
+    except Exception as e:  # advisory check must never crash doctor
+        return [f"could not be validated ({e})"]
+    if command is None:
+        return ["declared but empty — merges will report SKIPPED "
+                "(no post-merge soundness check will run)"]
+    return []
+
+
 def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     """Capture the repo's mutable state before spawning judges, so a rogue judge
     that writes the working tree can be detected afterward (#1 tamper guard).
@@ -3029,6 +3075,13 @@ def main():
                         _ok = False
                     if not _ok:
                         warn("config: review_timeout_secs", f"{_rt!r} not a positive integer; default 300s used")
+                # merge_verify — the post-merge soundness command the merge skill
+                # runs (skills/merge/merge-verify.py). Advisory here, but worth
+                # surfacing early: at merge time an unusable declaration BLOCKS
+                # the merge's verify step rather than being ignored, so a typo
+                # found by doctor is a typo found cheaply.
+                for _m in _merge_verify_issues(_cfg):
+                    warn("config: merge_verify", _m)
             elif _cfg is not None:
                 warn("config: .agent/config.json shape", "top-level value is not a JSON object; ignored")
 
