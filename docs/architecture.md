@@ -47,11 +47,13 @@ Every surface that reads or writes runtime state resolves the lane — hooks, th
 - A **malformed** marker is never treated as "use the root" — not for writes and not for reads. State-creating surfaces refuse; the shell loggers and the nudge hook skip silently; the provider adapters report *no active task* rather than falling back to root state (a stale root task must not be able to satisfy the gate); the Codex hooks apply their per-event policy — PreToolUse fails closed, the rest fail open.
 - A repo that has *both* root `.agent/tasks/` and per-user lanes is a legitimate mixed layout — root is itself a lane — and is left alone.
 
-**Upgrading an existing install:** two files are *copies* that live outside the plugin — `.claude/hooks/monitor-nudge.sh` (per project) and `~/.claude/bash-log.{sh,zsh}` (per machine). An install that predates lane support keeps its old copy until you re-run `/playbook:init`; until then monitor nudges aren't delivered on a multi-user repo, and shell history is logged to the root instead of your lane.
+**Upgrading an existing install:** two files are *copies* that live outside the plugin — `.claude/hooks/monitor-nudge.sh` (per project) and `~/.claude/bash-log.{sh,zsh}` (per machine). They keep their old contents until you re-run `/playbook:init`. A `bash-log.sh` from before v1.4.5 **silently disables gate logging entirely** (it could kill any `set -e` hook); an install predating lane support logs shell history to the root instead of your lane and doesn't deliver monitor nudges on a multi-user repo. If your gate log stopped for no apparent reason, re-run `/playbook:init`.
 
 ## Task system
 
 A task is a directory under `.agent/tasks/<N>-<type>-<name>/` (or `.agent/<user>/tasks/…`) whose `task.md` is both the plan and the execution trace: Design Phase gates (understand → structure → reflect → verify) → judge review → Work Plan gates → implementation review → pre-review. State lives on disk, keyed by a PID-based session ID that works across providers — which is why tasks survive context compaction and session restarts, and why two agents can hand a task off through the file alone.
+
+The final pre-review gate asks for the mind map to be updated by editing the **owning subsystem node in place** — a new node only for a genuinely new subsystem, never one node per task. Without that rule a long-lived map grows into an append-only changelog of tasks; with it, what you learned lands where the next reader will actually look for it.
 
 ## The monitor
 

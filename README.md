@@ -139,6 +139,6 @@ Nodes cross-reference each other - **[5]** links to **[19]** which links back. W
 
 Not everything needs a task. Questions, shell commands, docs, git - just ask. The rule is simple: the moment the agent touches code files, declare a task first. The hooks enforce this.
 
-Works on macOS, Linux, and Windows.
+Works on macOS, Linux, and Windows (Git Bash / MSYS).
 
-<!-- readme-audit: v1.4.5 @ 2026-07-27 -->
+<!-- readme-audit: v1.4.5 @ 2026-07-28 -->
