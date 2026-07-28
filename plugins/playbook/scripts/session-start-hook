@@ -48,9 +48,26 @@ if [ -n "$PROJECT_DIR" ]; then
     create_wrapper "$PROJECT_DIR" playbook-grok
     create_wrapper "$PROJECT_DIR" playbook-pi
 
-    # Provision session directory for this session
-    SESSION_DIR="$AGENT_DIR/sessions/$SESSION_ID"
-    mkdir -p "$SESSION_DIR"
+    # Provision session directory for this session — unless this is a fresh
+    # clone of a multi-user repo, where AGENT_DIR is the shared root and
+    # provisioning would mint a phantom lane beside the real ones. Warn instead
+    # of exiting: session start is where the user can actually see and fix it.
+    LANES_NO_MARKER=$(lanes_without_marker "$PROJECT_DIR" | tr '\n' ' ')
+    if [ -n "$LANES_NO_MARKER" ]; then
+        {
+            echo "[playbook] WARNING: per-user lanes exist but .agent/current_user is missing."
+            echo "           Lane(s): ${LANES_NO_MARKER% }"
+            echo "           The marker is gitignored, so a clone never receives it. Until you"
+            echo "           pick a lane, session state is NOT being recorded and gate"
+            echo "           enforcement will treat every edit as having no active task:"
+            echo ""
+            echo "               echo '<your-username>' > \"$PROJECT_DIR/.agent/current_user\""
+            echo ""
+        } >&2
+    else
+        SESSION_DIR="$AGENT_DIR/sessions/$SESSION_ID"
+        mkdir -p "$SESSION_DIR"
+    fi
 
     # GC: sweep stale session dirs from crashed/killed sessions (current_state >24h old)
     SESSIONS_DIR="$AGENT_DIR/sessions"

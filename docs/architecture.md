@@ -31,13 +31,31 @@ Six hooks enforce the structure at the OS level, because warnings don't stick �
 
 A `bash-log` shell integration records commands into `.agent/bash_history`, so terminal work is auditable alongside the chat log.
 
+## Per-user lanes
+
+On a repo shared by several people (or several workstations), agent runtime state is namespaced per user so nobody tramples anyone else's sessions:
+
+- **Legacy / single-user** — no marker, everything lives under `.agent/`.
+- **Multi-user** — `.agent/current_user` names the lane, and runtime state lives under `.agent/<user>/`: `tasks/`, `sessions/`, `playbooks/`, `monitor/`, `chat_log.md`, `bash_history`.
+
+Two files stay at the `.agent/` root by design and are **not** lane-scoped: `config.json` (shared repo policy — `merge_verify` only works if every clone sees the same declaration) and `models.json` (per-clone judge pins).
+
+Every surface that reads or writes runtime state resolves the lane — hooks, the `tasks` CLI, the `playbook-*` launchers, the codex hooks, the monitor and its nudge hook, and the shell command loggers. Four rules keep that consistent:
+
+- **The marker is exactly one line.** A trailing CR is stripped (CRLF markers work), surrounding whitespace is ignored, and a missing final newline is fine — but a *second* content line is invalid, not "use the first one". Otherwise `alice\n../evil` would resolve to lane `alice` in the shell readers while Python rejected the same file.
+- `.agent/current_user` is **gitignored and install-local**, so it never arrives with a clone. On a fresh clone of a multi-user repo — lanes present, marker absent — nothing is allowed to invent a lane. Surfaces you invoke directly (`tasks new`, `tasks init`, `/playbook:init`, the `playbook-*` launchers, the monitor) **fail loud**; hooks, which must never take a session down, **skip quietly** and `session-start-hook` prints a warning. Enforcement still fails closed: with no knowable lane there is no active task, so edits are blocked. Fix: `echo '<your-username>' > .agent/current_user`.
+- A **malformed** marker is never treated as "use the root" — not for writes and not for reads. State-creating surfaces refuse; the shell loggers and the nudge hook skip silently; the provider adapters report *no active task* rather than falling back to root state (a stale root task must not be able to satisfy the gate); the Codex hooks apply their per-event policy — PreToolUse fails closed, the rest fail open.
+- A repo that has *both* root `.agent/tasks/` and per-user lanes is a legitimate mixed layout — root is itself a lane — and is left alone.
+
+**Upgrading an existing install:** two files are *copies* that live outside the plugin — `.claude/hooks/monitor-nudge.sh` (per project) and `~/.claude/bash-log.{sh,zsh}` (per machine). An install that predates lane support keeps its old copy until you re-run `/playbook:init`; until then monitor nudges aren't delivered on a multi-user repo, and shell history is logged to the root instead of your lane.
+
 ## Task system
 
-A task is a directory under `.agent/tasks/<N>-<type>-<name>/` whose `task.md` is both the plan and the execution trace: Design Phase gates (understand → structure → reflect → verify) → judge review → Work Plan gates → implementation review → pre-review. State lives on disk, keyed by a PID-based session ID that works across providers — which is why tasks survive context compaction and session restarts, and why two agents can hand a task off through the file alone.
+A task is a directory under `.agent/tasks/<N>-<type>-<name>/` (or `.agent/<user>/tasks/…`) whose `task.md` is both the plan and the execution trace: Design Phase gates (understand → structure → reflect → verify) → judge review → Work Plan gates → implementation review → pre-review. State lives on disk, keyed by a PID-based session ID that works across providers — which is why tasks survive context compaction and session restarts, and why two agents can hand a task off through the file alone.
 
 ## The monitor
 
-A second Claude process that watches the front agent's session transcript incrementally and posts nudges through a hook when the trajectory goes wrong. Separate context window — it judges from outside, without the front agent's anchoring. Components: `.claude/bin/monitor` (wrapper), the plugin's `scripts/monitor` + `monitor-lib/`, and per-project rules under `.agent/monitor/` (scaffolded by init).
+A second Claude process that watches the front agent's session transcript incrementally and posts nudges through a hook when the trajectory goes wrong. Separate context window — it judges from outside, without the front agent's anchoring. Components: `.claude/bin/monitor` (wrapper), the plugin's `scripts/monitor` + `monitor-lib/`, and per-project rules under `.agent/monitor/` — or `.agent/<user>/monitor/` on a multi-user repo, where each user gets their own monitor state (scaffolded by init).
 
 ## The sandbox
 

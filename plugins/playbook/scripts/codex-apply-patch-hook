@@ -44,14 +44,29 @@ def _bootstrap_imports() -> None:
 
 
 def _find_project_root() -> Path:
+    """Project root for this hook invocation.
+
+    The wrapper-set env var wins. The fallback walk defers to
+    provider.paths.find_project_root, which matches the multi-user layout
+    (`.agent/<user>/tasks/`) as well as the legacy one — a `.agent/tasks`-only
+    walk lands on cwd in a per-user repo, and every lane-relative path computed
+    from it is then wrong.
+
+    Requires _bootstrap_imports() to have run. If the import is somehow
+    unavailable, degrade to the legacy walk rather than take the hook down.
+    """
     env_root = os.environ.get("PLAYBOOK_PROJECT_ROOT")
     if env_root:
         return Path(env_root)
-    cwd = Path.cwd()
-    for path in [cwd] + list(cwd.parents):
-        if (path / ".agent" / "tasks").exists():
-            return path
-    return cwd
+    try:
+        from provider.paths import find_project_root
+    except ImportError:
+        cwd = Path.cwd()
+        for path in [cwd] + list(cwd.parents):
+            if (path / ".agent" / "tasks").exists():
+                return path
+        return cwd
+    return find_project_root() or Path.cwd()
 
 
 def _write_sentinel(event: str) -> None:

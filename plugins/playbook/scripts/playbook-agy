@@ -14,29 +14,37 @@
 
 set -e
 
-# Find project root (directory containing .agent/tasks/)
-find_project_root() {
-    local dir="$PWD"
-    while [ "$dir" != "/" ]; do
-        if [ -d "$dir/.agent/tasks" ]; then
-            echo "$dir"
-            return 0
-        fi
-        dir="$(dirname "$dir")"
-    done
-    echo ""
-}
+# Root + lane resolution come from the shared hook library — never re-vendored
+# here. A wrapper that walks for `.agent/tasks/` alone is blind to the
+# multi-user layout (`.agent/<user>/tasks/`) and provisions the wrong lane.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+if [ -f "$SCRIPT_DIR/gate-echo-lib.sh" ]; then
+    LIB_DIR="$SCRIPT_DIR"
+elif [ -f "$SCRIPT_DIR/../scripts/gate-echo-lib.sh" ]; then
+    LIB_DIR="$(cd "$SCRIPT_DIR/../scripts" && pwd -P)"
+else
+    echo "Error: cannot locate Playbook hook library (gate-echo-lib.sh) near $SCRIPT_DIR" >&2
+    echo "Reinstall the plugin, or run agy directly if you meant to skip gate enforcement." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$LIB_DIR/gate-echo-lib.sh"
 
 PROJECT_ROOT="$(find_project_root)"
+
+# Fail loud rather than provision a phantom root lane on a fresh clone.
+require_lane_marker "$PROJECT_ROOT" "playbook-agy"
 
 # PID-based session ID: pid-$$ (this wrapper's PID = parent of agy process)
 SESSION_ID="pid-$$"
 export PLAYBOOK_SESSION_ID="$SESSION_ID"
 export PLAYBOOK_PROJECT_ROOT="$PROJECT_ROOT"
 
-# Provision session directory so state files have a home
+# Provision session directory so state files have a home — in the SAME lane the
+# hooks and the tasks CLI read (invalid marker exits 1 via set -e).
 if [ -n "$PROJECT_ROOT" ]; then
-    mkdir -p "$PROJECT_ROOT/.agent/sessions/$SESSION_ID"
+    AGENT_DIR="$(resolve_agent_dir "$PROJECT_ROOT")"
+    mkdir -p "$AGENT_DIR/sessions/$SESSION_ID"
 fi
 
 exec agy "$@"

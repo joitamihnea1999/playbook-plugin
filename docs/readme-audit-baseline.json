@@ -1,13 +1,13 @@
 {
- "audited_commit": "66f236cc946a104f39098d1354d0ec4976877c6a",
- "version": "1.4.3",
- "date": "2026-07-20",
- "covered_paths": [
-  "plugins/playbook/commands",
-  "plugins/playbook/skills",
-  "plugins/playbook/provider",
-  "plugins/playbook/tasks",
-  "plugins/playbook/hooks",
-  "plugins/playbook/scripts"
- ]
+  "audited_commit": "aabfcb3b7addbac5adeaa02a8ec9733a7ec40a88",
+  "version": "1.4.5",
+  "date": "2026-07-27",
+  "covered_paths": [
+    "plugins/playbook/commands",
+    "plugins/playbook/skills",
+    "plugins/playbook/provider",
+    "plugins/playbook/tasks",
+    "plugins/playbook/hooks",
+    "plugins/playbook/scripts"
+  ]
 }

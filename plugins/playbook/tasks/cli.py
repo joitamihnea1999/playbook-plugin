@@ -7,7 +7,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from tasks.core import create_task, list_tasks, task_status, PLAYBOOKS, _find_playbook_skill, resolve_session_id, resolve_agent_dir, run_merge_doctor
+from tasks.core import create_task, list_tasks, task_status, PLAYBOOKS, _find_playbook_skill, resolve_session_id, resolve_agent_dir, require_lane_marker, run_merge_doctor
 
 
 def _state_file(project_path: Path) -> Path:
@@ -267,6 +267,89 @@ def _panel_triage_frame() -> list[str]:
         ),
         "",
     ]
+
+
+def _merge_verify_module():
+    """Load the merge skill's merge-verify.py as a module, or None.
+
+    The skill ships standalone (it must run from its own directory with no
+    package on the path), so it can't be imported normally — and its filename is
+    hyphenated. Loading it by path is still worth it: doctor then validates
+    `merge_verify` with the exact rules a merge will enforce, instead of a second
+    copy of them that can drift.
+    """
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "skills" / "merge" / "merge-verify.py"
+    if not path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("_playbook_merge_verify", path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _merge_verify_issues(cfg: dict) -> list[str]:
+    """Advisory warnings for config.json's `merge_verify` declaration.
+
+    Empty when nothing is declared (a legitimate choice) or when the declaration
+    is usable. A present-but-broken declaration BLOCKS the merge skill's verify
+    step rather than being silently ignored, so surfacing it in doctor is how a
+    typo gets caught before it costs someone a merge.
+    """
+    if not isinstance(cfg, dict) or "merge_verify" not in cfg:
+        return []
+    # Loading compiles the shipped runner, so a corrupt or partially-written
+    # copy raises here. Doctor is advisory: it must report that it couldn't
+    # check, never take the whole run down with it.
+    try:
+        mod = _merge_verify_module()
+    except Exception as e:
+        return [f"could not be validated ({e})"]
+    if mod is None:  # skill dir absent (partial install) — nothing to say
+        return []
+    try:
+        command = mod.command_from_config(cfg)
+    except mod.Unusable as exc:
+        return [f"{exc} — the merge skill will BLOCK on this, not skip it"]
+    except Exception as e:
+        return [f"could not be validated ({e})"]
+    if command is None:
+        return ["declared but empty — merges will report SKIPPED "
+                "(no post-merge soundness check will run)"]
+    return []
+
+
+def _merge_verify_untracked(project_path: Path, cfg: dict) -> list[str]:
+    """Warn when a declared `merge_verify` lives in a file git isn't tracking.
+
+    A verify command only does its job if every clone sees it; an untracked
+    config means the gate exists on one machine and every other clone reports
+    SKIPPED. Advisory — plenty of legitimate setups (a fresh repo, a non-git
+    checkout) hit this transiently.
+    """
+    if not isinstance(cfg, dict) or "merge_verify" not in cfg:
+        return []
+    import subprocess
+
+    def _git(*args):
+        return subprocess.run(["git", *args], cwd=project_path,
+                              capture_output=True, text=True)
+
+    try:
+        # Not a git work tree at all (e.g. a dogfooding workspace whose repos are
+        # nested inside it) — "other clones" would be a meaningless thing to say.
+        inside = _git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return []
+        proc = _git("ls-files", "--error-unmatch", ".agent/config.json")
+    except (OSError, subprocess.SubprocessError):
+        return []  # no git available — nothing useful to say
+    if proc.returncode == 0:
+        return []
+    return ["declared in an untracked .agent/config.json — other clones will "
+            "report SKIPPED; `git add .agent/config.json` to make it repo policy"]
 
 
 def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
@@ -1304,6 +1387,8 @@ def main():
         title = target.name.replace("-", " ").replace("_", " ").title()
         print(f"Initializing project: {target.name}")
 
+        # Refuse on the fresh-clone shape rather than mint a phantom root lane.
+        require_lane_marker(target, "tasks init")
         # Create .agent/tasks/ (or .agent/<user>/tasks/ in multi-user mode)
         tasks_dir = resolve_agent_dir(target) / "tasks"
         existed = tasks_dir.exists()
@@ -3010,7 +3095,18 @@ def main():
             try:
                 _cfg = _json.loads(cfg_path.read_text(encoding="utf-8", errors="replace"))
             except (ValueError, OSError) as e:
-                warn("config: .agent/config.json parses", f"invalid JSON ({e}); defaults used")
+                # "defaults used" is true for the review knobs but NOT for
+                # merge_verify: an unparseable config makes the merge skill
+                # BLOCK, so say so when the file was trying to declare one.
+                _extra = ""
+                try:
+                    if "merge_verify" in cfg_path.read_text(encoding="utf-8", errors="replace"):
+                        _extra = ("; the merge skill will BLOCK on this rather "
+                                  "than skip its verify step")
+                except OSError:
+                    pass
+                warn("config: .agent/config.json parses",
+                     f"invalid JSON ({e}); defaults used{_extra}")
                 _cfg = None
             if isinstance(_cfg, dict):
                 _jb = _cfg.get("judge_budget_usd")
@@ -3029,6 +3125,15 @@ def main():
                         _ok = False
                     if not _ok:
                         warn("config: review_timeout_secs", f"{_rt!r} not a positive integer; default 300s used")
+                # merge_verify — the post-merge soundness command the merge skill
+                # runs (skills/merge/merge-verify.py). Advisory here, but worth
+                # surfacing early: at merge time an unusable declaration BLOCKS
+                # the merge's verify step rather than being ignored, so a typo
+                # found by doctor is a typo found cheaply.
+                for _m in _merge_verify_issues(_cfg):
+                    warn("config: merge_verify", _m)
+                for _m in _merge_verify_untracked(project_path, _cfg):
+                    warn("config: merge_verify", _m)
             elif _cfg is not None:
                 warn("config: .agent/config.json shape", "top-level value is not a JSON object; ignored")
 

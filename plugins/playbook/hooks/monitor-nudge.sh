@@ -5,7 +5,11 @@
 # Works for both PostToolUse and UserPromptSubmit (reads event name from stdin).
 # Current CC: PostToolUse additionalContext works, UserPromptSubmit is broken (bug #12151).
 #
-# Reads .agent/monitor/nudge.md (T121 flat layout).
+# Reads <agent-dir>/monitor/nudge.md (T121 flat layout), where <agent-dir> is
+# the per-user lane `.agent/<user>/` when the repo declares one, else `.agent/`.
+# The monitor WRITES its nudge into that same lane (launch-monitor resolves
+# MONITOR_DIR the same way), so a root-only reader here would leave every nudge
+# undelivered on a multi-user repo.
 # If non-empty: atomic claim, emit additionalContext, log to chat_log.
 # If empty or missing: exit 0 silently (no-op).
 
@@ -19,11 +23,23 @@ if [ "${PLAYBOOK_ROLE:-}" = "monitor" ]; then
     exit 0
 fi
 
-# Find project root (walk up looking for .agent/tasks/)
+# Root + lane resolution are inlined rather than sourced from
+# scripts/gate-echo-lib.sh: this file is registered as a NON-plugin hook and is
+# copied into the project's own .claude/hooks/, so CLAUDE_PLUGIN_ROOT is unset
+# and the plugin's scripts/ dir is at no fixed relative path. The contract is
+# identical to that library (and to tasks/core.py and provider/paths.py);
+# tests/wrapper-multiuser-fixture.sh asserts this copy agrees with them.
+
+# Find project root: legacy `.agent/tasks/` OR multi-user `.agent/<user>/tasks/`.
 find_root() {
-    local dir="$PWD"
+    local dir="$PWD" sub
     while [ "$dir" != "/" ]; do
         [ -d "$dir/.agent/tasks" ] && echo "$dir" && return
+        if [ -d "$dir/.agent" ]; then
+            for sub in "$dir/.agent"/*/; do
+                [ -d "${sub}tasks" ] && echo "$dir" && return
+            done
+        fi
         dir="$(dirname "$dir")"
     done
 }
@@ -31,12 +47,34 @@ find_root() {
 PROJECT_DIR=$(find_root)
 [ -z "$PROJECT_DIR" ] && exit 0
 
+# Resolve this user's lane. An unusable marker means we cannot tell whose nudge
+# outbox to read: exit silently rather than read the shared root. Never fail the
+# hook — a nudge is advisory, and taking down every tool call over a bad marker
+# would be far worse than a missed nudge.
+AGENT_DIR="$PROJECT_DIR/.agent"
+if [ -f "$PROJECT_DIR/.agent/current_user" ]; then
+    CU=""; CU_EXTRA=""
+    # One-line contract — see gate-echo-lib.sh resolve_agent_dir.
+    { read -r CU; read -r CU_EXTRA; } < "$PROJECT_DIR/.agent/current_user" 2>/dev/null || true
+    CU="${CU%$'\r'}"
+    [ -n "$CU_EXTRA" ] && exit 0
+    case "$CU" in
+        ""|"."|"..") exit 0 ;;
+        [a-zA-Z0-9]*) ;;
+        *) exit 0 ;;
+    esac
+    case "$CU" in
+        *[!a-zA-Z0-9_.-]*) exit 0 ;;
+    esac
+    AGENT_DIR="$PROJECT_DIR/.agent/$CU"
+fi
+
 # Read stdin to extract hook_event_name (PostToolUse or UserPromptSubmit)
 INPUT=$(cat)
 export EVENT_NAME=$(echo "$INPUT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read() or '{}').get('hook_event_name','UserPromptSubmit'))" 2>/dev/null || echo "UserPromptSubmit")
 
 SESSION_ID="${PLAYBOOK_SESSION_ID:-pid-$PPID}"
-NUDGE_FILE="$PROJECT_DIR/.agent/monitor/nudge.md"
+NUDGE_FILE="$AGENT_DIR/monitor/nudge.md"
 
 # No nudge file or empty — silent exit
 [ -f "$NUDGE_FILE" ] || exit 0
@@ -68,7 +106,7 @@ print(json.dumps(out))
 " <<< "$NUDGE_CONTENT"
 
 # Log to chat_log
-LOCAL_LOG="$PROJECT_DIR/.agent/chat_log.md"
+LOCAL_LOG="$AGENT_DIR/chat_log.md"
 if [ -f "$LOCAL_LOG" ]; then
     TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
     {

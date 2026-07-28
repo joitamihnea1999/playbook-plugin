@@ -58,6 +58,10 @@ fi
 source "$HOOK_DIR/gate-echo-lib.sh"
 
 PROJECT_ROOT="$(find_project_root)"
+
+# Fail loud rather than provision a phantom root lane on a fresh clone.
+require_lane_marker "$PROJECT_ROOT" "playbook-pi"
+
 AGENT_DIR=""
 [ -n "$PROJECT_ROOT" ] && AGENT_DIR="$(resolve_agent_dir "$PROJECT_ROOT")"
 

@@ -32,6 +32,19 @@ if [ -z "${PLAYBOOK_PROJECT_DIR:-}" ]; then
 fi
 PROJECT_ROOT="$PLAYBOOK_PROJECT_DIR"
 
+# Per-user lane. launch-monitor exports it; when bootstrap.sh is run on its own
+# fall back to the shared resolver rather than a second hand-rolled copy.
+AGENT_DIR="${PLAYBOOK_AGENT_DIR:-}"
+if [ -z "$AGENT_DIR" ]; then
+    # shellcheck source=/dev/null
+    . "$MONITOR_SRC/../gate-echo-lib.sh"
+    # MONITOR_DIR is mkdir'd below, so guard before resolving (same reason as
+    # launch-monitor). When launch-monitor exported AGENT_DIR it already ran
+    # this check.
+    require_lane_marker "$PROJECT_ROOT" "monitor bootstrap"
+    AGENT_DIR="$(resolve_agent_dir "$PROJECT_ROOT")"
+fi
+
 # ── Session ID resolution (no fallback — see T119 Thread 4) ─────────────
 SESSION_ID="${PLAYBOOK_SESSION_ID:-}"
 for arg in "$@"; do
@@ -54,10 +67,13 @@ if ! echo "$SESSION_ID" | grep -Eq '^pid-[0-9]+$'; then
 fi
 
 SLUG=$(echo "$PROJECT_ROOT" | tr '/' '-')
-JSONL=$(ls -t ~/.claude/projects/$SLUG/*.jsonl 2>/dev/null | head -1)
+# Quote the directory: a project path containing spaces (iCloud Drive's
+# "Mobile Documents" is the common case) word-splits unquoted, so the glob never
+# matches and the monitor briefs itself with no recent events — silently.
+JSONL=$(ls -t "$HOME/.claude/projects/$SLUG"/*.jsonl 2>/dev/null | head -1)
 
 # Flat layout (T121): single state dir under target project, no pid subdir.
-MONITOR_DIR="$PROJECT_ROOT/.agent/monitor"
+MONITOR_DIR="$AGENT_DIR/monitor"
 mkdir -p "$MONITOR_DIR"
 
 # session.md lifecycle (T121): if header's pid matches SESSION_ID, append
@@ -121,7 +137,7 @@ echo ""
 # ── 3. Project retros ────────────────────────────────────────────────────
 echo "## PROJECT RETROS (what the project has learned about itself)"
 echo ""
-RETRO_FILES=$(ls -t "$PROJECT_ROOT"/.agent/retro-*.md 2>/dev/null | head -2)
+RETRO_FILES=$(ls -t "$AGENT_DIR"/retro-*.md 2>/dev/null | head -2)
 if [ -n "$RETRO_FILES" ]; then
     for f in $RETRO_FILES; do
         echo "### $(basename "$f")"
@@ -150,10 +166,12 @@ echo ""
 echo "## RECENT CLOSED TASKS (what got worked on lately)"
 echo ""
 # Find last 5 task.md files where Status is "done", extract Intent + Debrief
-python3 - "$PROJECT_ROOT" <<'PYEOF'
+python3 - "$AGENT_DIR" <<'PYEOF'
 import sys, re, glob, os
-root = sys.argv[1]
-tasks = sorted(glob.glob(os.path.join(root, '.agent/tasks/*/task.md')),
+# argv[1] is the RESOLVED AGENT DIR (lane-aware), not the project root — a
+# '.agent/tasks' glob off the root finds nothing in a multi-user repo.
+agent_dir = sys.argv[1]
+tasks = sorted(glob.glob(os.path.join(agent_dir, 'tasks/*/task.md')),
                key=os.path.getmtime, reverse=True)
 shown = 0
 for t in tasks:
@@ -194,10 +212,12 @@ echo ""
 echo "## ACTIVE TASK (the current struggle)"
 echo ""
 # Find the active task: most-recently-modified task.md whose Status is in_progress or pending
-ACTIVE_TASK=$(python3 - "$PROJECT_ROOT" <<'PYEOF'
+ACTIVE_TASK=$(python3 - "$AGENT_DIR" <<'PYEOF'
 import sys, re, glob, os
-root = sys.argv[1]
-tasks = sorted(glob.glob(os.path.join(root, '.agent/tasks/*/task.md')),
+# argv[1] is the RESOLVED AGENT DIR (lane-aware), not the project root — a
+# '.agent/tasks' glob off the root finds nothing in a multi-user repo.
+agent_dir = sys.argv[1]
+tasks = sorted(glob.glob(os.path.join(agent_dir, 'tasks/*/task.md')),
                key=os.path.getmtime, reverse=True)
 for t in tasks:
     try:
@@ -225,7 +245,7 @@ echo "## USER STEERING PATTERNS (where the user has been correcting the front ag
 echo ""
 echo "Grep of chat_log.md for correction/redirection phrases, most recent first:"
 echo ""
-CHAT_LOG="$PROJECT_ROOT/.agent/chat_log.md"
+CHAT_LOG="$AGENT_DIR/chat_log.md"
 if [ -f "$CHAT_LOG" ]; then
     grep -in -E '^(wait|stop|no,|no ,|no .|not what i meant|i thought you|don'"'"'t|why did|that is not|why was|you didn'"'"'t listen|we often|we don'"'"'t|we never)\b' "$CHAT_LOG" | tail -15 || echo "(no steering phrases matched)"
 else

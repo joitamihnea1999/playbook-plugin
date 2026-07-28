@@ -76,7 +76,8 @@ class SessionFacts:
     Claude: from hook stdin payload. Codex/Antigravity: wrapper UUID or pid-<N> fallback."""
 
     project_root: Path
-    """Absolute path to project root (contains .agent/tasks/).
+    """Absolute path to project root (contains `.agent/tasks/`, or
+    `.agent/<user>/tasks/` in a multi-user repo).
     Derived from find_project_root() walk, not $PWD directly."""
 
     active_task_number: Optional[int] = None

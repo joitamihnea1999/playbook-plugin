@@ -1,6 +1,11 @@
 # Configuration
 
-Two per-install JSON files, both under `.agent/` in your project, hand-editable and machine-specific: `config.json` is created by `/playbook:init`; `models.json` is deliberately NOT — create it with `tasks models select` (or by hand). It's gitignored by design.
+Two JSON files, both under `.agent/` in your project and hand-editable: `config.json` is created by `/playbook:init`; `models.json` is deliberately NOT — create it with `tasks models select` (or by hand). `models.json` holds machine-specific judge pins and is gitignored by design.
+
+`config.json` carries two kinds of setting, and the difference decides whether you commit it:
+
+- **Review knobs** (`judge_budget_usd`, `review_timeout_secs`) are naturally per-install — a spend cap is a wallet decision and a timeout depends on the machine. Committing them just sets a default your teammates can override through the env tier.
+- **Project policy** (`merge_verify`) only works when it *is* committed: the merge skill reads it to decide whether a merge may auto-push, so every clone has to see the same declaration. A repo that leaves `config.json` untracked leaves that check permanently skipped.
 
 ## `.agent/config.json` — review knobs
 
@@ -15,6 +20,41 @@ Two per-install JSON files, both under `.agent/` in your project, hand-editable 
 - `review_timeout_secs` — hard timeout for every review agent (plan / impl / panel). On expiry the whole process tree is terminated and the prior review log is left untouched. High-effort judge models can legitimately need more — raise it (600–900) if your reviews time out.
 
 **Precedence, highest first:** CLI flag (`--budget`, `--timeout` on `plan-review` / `impl-review` / `panel-review`) → env var (`PLAYBOOK_JUDGE_BUDGET_USD`, `PLAYBOOK_REVIEW_TIMEOUT_SECS`) → `.agent/config.json` → built-in default. A missing file or malformed value falls back to the default (surfaced by `tasks doctor`, never fatal).
+
+## `.agent/config.json` — `merge_verify` (project policy)
+
+The `/playbook:merge` skill always verifies *the merge itself*: mind-map integrity, per-user contamination, and that the merge introduced no code of its own. Whether your *branches* are healthy is a different question, and only your project knows what answering it looks like — so you declare the command:
+
+```json
+{
+  "merge_verify": {
+    "command": "pnpm -r typecheck && pnpm -r test && pytest"
+  }
+}
+```
+
+- `command` — whatever "green" means for **this** repo. Point it at your full gate, not one layer's: a merge that runs only the backend suite can certify itself while the frontend is red.
+
+Where and how it runs: from the repo root, on the **merged working tree after conflicts are resolved but before the merge commit is created** (so a command that inspects `git log`/`HEAD` sees the pre-merge target, not the merge). It runs via `bash` under `set -e -o pipefail`, so quoting is preserved, `&&` and multi-line commands work, and a failing *early* step fails the gate — without `set -e` bash reports only the last command's status, so `typecheck` failing followed by a successful `echo done` would report success. If your command writes to the tree (formatters, codegen), say so to yourself: the skill re-checks code identity afterwards, but a command that rewrites source during verification makes "the merge introduced no code" harder to assert.
+
+Four outcomes, and the exit code is the verdict — only the first allows `--push`:
+
+| Outcome | When | Effect on `--push` |
+|---|---|---|
+| **GREEN** (0) | declared command exited 0 | may auto-push |
+| **FAILED** (1) | declared command exited non-zero | blocked |
+| **BLOCKED** (2) | declared but unusable — malformed JSON, wrong shape, misspelled key | blocked |
+| **SKIPPED** (3) | nothing declared: no file, no key, empty command | blocked; merge is presented for you to push by hand |
+| **CONFIGURED** (4) | `--plan` only — a command exists but was deliberately not run | blocked (a classification is not a result) |
+
+Two deliberate asymmetries:
+
+- **Absent is not an error, but it is not a pass either.** With no `merge_verify`, the merge completes and reports honestly that no soundness command ran — then hands the push back to you rather than auto-pushing something nobody checked.
+- **Broken is not the same as absent.** A misspelled `commnd` key blocks instead of silently skipping, because a typo must not quietly disable a gate you believe you declared. `tasks doctor` warns about these long before merge time.
+
+Nothing is inferred on your behalf: if you declare no command, the skill will not guess one.
+
+**Commit the file.** Nothing forces you to — `merge-verify.py` runs whatever `.agent/config.json` it finds on disk — but an untracked config means the gate exists only in your clone: your merges verify, everyone else's report SKIPPED. `tasks doctor` warns when a `merge_verify` is declared in a file git isn't tracking. And because the command is read from the *merged* tree, an incoming branch can change it — the same trust you already extend to running that branch's tests, but worth a `git diff "$target_before" -- .agent/config.json` when the branch isn't yours.
 
 ## `.agent/models.json` — judge panel pins
 

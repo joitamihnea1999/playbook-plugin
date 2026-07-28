@@ -81,7 +81,7 @@ Structure (decided with the user, task 017):
 - **README.md — budget ~130 lines.** Audience: someone discovering the plugin. Keeps: what/why narrative, install, quickstart usage, feature tour (short), fork notice, the two images, a quick-nav line linking every docs/ page. The narrative voice of the existing README is a feature — edit for coverage, don't flatten the prose.
 - **docs/cli.md** — full tasks-CLI subcommand reference (all of them, including merge/retro/internal tooling, marked as such).
 - **docs/configuration.md** — config.json, models.json, env vars, budgets/timeouts, precedence rules.
-- **docs/providers.md** — the 5-provider matrix (claude/codex/agy/grok/pi), wrappers (`playbook-gemini` = deprecated alias of `playbook-agy`, one line), judge panel mechanics.
+- **docs/providers.md** — the 5-provider matrix (claude/codex/agy/grok/pi), wrappers, judge panel mechanics.
 - **docs/architecture.md** — hooks, enforcement/deny-list, monitor, sandbox, task-system internals.
 - **CHANGELOG.md** — keep-a-changelog style; the audit adds one entry per audited version range (features shipped since last audit — the gap table's "absent" rows are exactly this list).
 - README footer stamp: `<!-- readme-audit: vX.Y.Z @ YYYY-MM-DD -->` (machine-checkable, invisible on GitHub; a sha can't be known before its own commit, so the stamp carries version + date — the baseline JSON carries the sha).

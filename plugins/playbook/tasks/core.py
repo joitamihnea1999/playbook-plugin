@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -117,6 +117,60 @@ def _validate_username(name: str) -> None:
         raise SystemExit(1)
 
 
+def lanes_without_marker(project_path: Path) -> list[str]:
+    """Lane names present when the repo is in the "fresh clone" shape, else [].
+
+    `.agent/current_user` is gitignored install-local, so a clone of a
+    multi-user repo has lanes and no marker; `resolve_agent_dir` then answers
+    the root and the next write mints a phantom lane beside the real ones.
+
+    Narrow on purpose — a marker, an existing root `.agent/tasks/` (legitimate
+    mixed layout), or no lanes at all all return []. Kept behaviorally
+    identical to `require_lane_marker` in gate-echo-lib.sh and
+    `lanes_without_marker` in provider/paths.py; the shared vector table in
+    tests/test_provider_multiuser.py holds all three to the same answers.
+
+    Only state-CREATING paths may refuse on this. Read paths must degrade.
+    """
+    agent = project_path / ".agent"
+    if (agent / "current_user").exists():
+        return []
+    if (agent / "tasks").is_dir():
+        return []
+    if not agent.is_dir():
+        return []
+    try:
+        return sorted(
+            child.name for child in agent.iterdir()
+            if child.is_dir() and (child / "tasks").is_dir()
+        )
+    except OSError:
+        return []
+
+
+def require_lane_marker(project_path: Path, context: str = "playbook") -> None:
+    """Exit(1) with the fix instructions when in the fresh-clone shape.
+
+    For CLI entry points that create state. A hook must NOT call this — use
+    `lanes_without_marker` and skip quietly instead of taking the session down.
+    """
+    lanes = lanes_without_marker(project_path)
+    if not lanes:
+        return
+    print(
+        f"Error: {context} found per-user playbook lanes but no "
+        f".agent/current_user marker.\n\n"
+        f"  Project: {project_path}\n"
+        f"  Lane(s): {', '.join(lanes)}\n\n"
+        "The marker is gitignored install-local, so a fresh clone never receives it.\n"
+        "Without it every surface would fall back to the shared root .agent/, creating\n"
+        "a phantom lane beside the real ones. Pick your lane first:\n\n"
+        f"    echo '<your-username>' > \"{project_path}/.agent/current_user\"\n",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
 def resolve_agent_dir(project_path: Path) -> Path:
     """Return the agent state root for this project.
 
@@ -132,15 +186,32 @@ def resolve_agent_dir(project_path: Path) -> Path:
     return project_path / ".agent" / name
 
 
-# ── Per-install configuration (.agent/config.json) ──────────────────────────
-# Install-wide review knobs, read at the .agent/ ROOT (not the per-user subdir —
-# budget and review timeout are per-install, shared across users in a multi-user
-# repo). Precedence for every setting: CLI flag > env var > config.json >
-# built-in default. A missing file, malformed JSON, or an out-of-range value
-# never crashes the CLI — it falls back to the default (warning once).
+# ── Configuration (.agent/config.json) ──────────────────────────────────────
+# Read at the .agent/ ROOT (not the per-user subdir — these are shared across
+# users in a multi-user repo). Precedence for every setting: CLI flag > env var >
+# config.json > built-in default. A missing file, malformed JSON, or an
+# out-of-range value never crashes the CLI — it falls back to the default
+# (warning once).
+#
+# Two tiers of ownership live in this one file:
+#   • Review knobs (judge_budget_usd, review_timeout_secs) are naturally
+#     per-install — a spend cap is a wallet decision, and a timeout depends on
+#     the machine. Committing them just sets a default others can override via
+#     the PLAYBOOK_* env tier.
+#   • Project policy (merge_verify) only works when it IS committed: the merge
+#     skill runs the declared command to decide whether a merge may auto-push,
+#     so every clone must see the same declaration. A repo that keeps this file
+#     untracked leaves that check permanently skipped.
+# Hence the file is committable, and merge-doctor treats a tracked copy as
+# correct rather than legacy detritus (SHARED_POLICY_PATHS below).
 
 DEFAULT_JUDGE_BUDGET_USD = "2"
 DEFAULT_REVIEW_TIMEOUT_SECS = 300
+
+# Paths under .agent/ that are legitimately tracked in git — repo-level policy
+# rather than per-install state. Everything else at the .agent/ root that is
+# tracked is legacy detritus the merge skill wants `git rm --cached`ed.
+SHARED_POLICY_PATHS = frozenset({".agent/config.json"})
 
 
 def load_config(project_path: Path) -> dict:
@@ -368,6 +439,11 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
     Returns:
         Path to the created task.md file
     """
+    # Creating a task in the fresh-clone shape would mint a root `.agent/tasks/`
+    # — and because a root tasks dir is itself a legitimate lane, that single
+    # mkdir permanently converts the guarded shape into an "allowed mixed
+    # layout", disarming the guard for every other surface too.
+    require_lane_marker(project_path, "tasks new")
     tasks_dir = resolve_agent_dir(project_path) / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1038,6 +1114,14 @@ def run_merge_doctor(project_path: Path, source: str, target: str) -> int:
             # rel looks like ".agent/<first>/..." for nested paths.
             parts = rel.split("/", 2)
             if len(parts) >= 2 and parts[1] in all_users:
+                continue
+            if rel in SHARED_POLICY_PATHS:
+                # Deliberately committable: config.json can carry repo-level
+                # policy (e.g. merge_verify, which the merge skill runs and
+                # which only works if every clone sees it), so a tracked copy
+                # is correct rather than legacy detritus. Without this the
+                # merge skill's own Step 7(b) gate would fail on any repo that
+                # follows its instruction to commit the file.
                 continue
             if _md_tracked(rel, project_path):
                 actionable.append(

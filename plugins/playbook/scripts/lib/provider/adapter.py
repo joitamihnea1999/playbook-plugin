@@ -148,7 +148,8 @@ class ProviderAdapter(ABC):
     @property
     @abstractmethod
     def project_root(self) -> Path:
-        """Absolute path to project root (directory containing .agent/tasks/).
+        """Absolute path to project root (contains `.agent/tasks/`, or
+        `.agent/<user>/tasks/` in a multi-user repo).
 
         Derived from find_project_root() walk, not $PWD — hooks may fire from
         subdirectories. Never None; raises if project root cannot be found.
@@ -304,9 +305,41 @@ class ProviderAdapter(ABC):
             self._cached_capabilities: ProviderCapabilities = self.detect_capabilities()
         return self._cached_capabilities
 
+    def _agent_dir(self) -> Path | None:
+        """Per-user lane (or root `.agent/` in legacy layout), or None.
+
+        Returns None when `.agent/current_user` exists but is unusable. It must
+        NOT fall back to the root lane (D6): an earlier version did, on the
+        theory that these are read-only fast paths and every state-creating
+        surface already refuses to run — both halves of which were wrong.
+        `save_chat_log_offset` is a WRITE that goes through this helper and
+        would mkdir root state; and reading root `current_state` in a
+        multi-user repo can surface a STALE root task as active, so a bad
+        marker could satisfy the gate with someone else's leftover task.
+
+        Callers must treat None as "no lane is knowable": report no active
+        task, and skip writes entirely.
+        """
+        from provider.paths import InvalidUserMarkerError, resolve_agent_dir
+        try:
+            return resolve_agent_dir(self.project_root)
+        except InvalidUserMarkerError:
+            return None
+
     def _load_session_facts(self) -> SessionFacts:
         """Load SessionFacts from disk. Called fresh on each hook invocation."""
-        state_path = self.project_root / ".agent" / "sessions" / self.session_id / "current_state"
+        agent_dir = self._agent_dir()
+        if agent_dir is None:
+            # Unusable marker: no lane, therefore no active task. Never read the
+            # root as a substitute — see _agent_dir.
+            return SessionFacts(
+                session_id=self.session_id,
+                project_root=self.project_root,
+                active_task_number=None,
+                active_task_path=None,
+                chat_log_offset=0,
+            )
+        state_path = agent_dir / "sessions" / self.session_id / "current_state"
         task_number = None
         if state_path.exists():
             try:
@@ -317,7 +350,7 @@ class ProviderAdapter(ABC):
         if task_number is not None:
             # Locate task.md: match NNN-name where int(NNN) == task_number.
             # Uses int() comparison so "042-foo", "42-foo", "0042-foo" all match 42.
-            tasks_dir = self.project_root / ".agent" / "tasks"
+            tasks_dir = agent_dir / "tasks"
             if tasks_dir.exists():
                 for d in tasks_dir.iterdir():
                     dash = d.name.find("-")
@@ -339,8 +372,11 @@ class ProviderAdapter(ABC):
         )
 
     def _load_chat_log_offset(self) -> int:
-        """Read persisted byte offset from .agent/sessions/<session_id>/chat_log_offset."""
-        offset_path = self.project_root / ".agent" / "sessions" / self.session_id / "chat_log_offset"
+        """Read persisted byte offset from <agent-dir>/sessions/<session_id>/chat_log_offset."""
+        agent_dir = self._agent_dir()
+        if agent_dir is None:
+            return 0
+        offset_path = agent_dir / "sessions" / self.session_id / "chat_log_offset"
         if offset_path.exists():
             try:
                 return int(offset_path.read_text().strip())
@@ -353,8 +389,15 @@ class ProviderAdapter(ABC):
 
         Called by hook scripts after read_new_messages() returns the new offset.
         Without this, each hook call starts from 0 and re-processes all messages.
+
+        Skips entirely when the lane is unknowable (D6) — writing root state
+        under a malformed marker is precisely the contamination this task
+        exists to remove. Re-processing a few messages is the cheaper failure.
         """
-        offset_path = self.project_root / ".agent" / "sessions" / self.session_id / "chat_log_offset"
+        agent_dir = self._agent_dir()
+        if agent_dir is None:
+            return
+        offset_path = agent_dir / "sessions" / self.session_id / "chat_log_offset"
         try:
             offset_path.parent.mkdir(parents=True, exist_ok=True)
             offset_path.write_text(str(offset))
