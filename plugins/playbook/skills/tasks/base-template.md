@@ -79,7 +79,7 @@ pending
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md updated if new insights emerged
+- [ ] MIND_MAP.md: update the OWNING subsystem node **in place** — a NEW node only for a genuinely new subsystem, never one node per task
 
 ## Parked
 (Findings or ideas that emerged during work but are out of scope. Describe each with enough context for a future task to pick it up.)

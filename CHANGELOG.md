@@ -4,7 +4,20 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ## [1.4.5] — 2026-07-27
 
-Three efforts ship together in this release: the merge skill's genericization (task 021), the completion of per-user lane support across every plugin surface (task 022), and the DEBUG-trap fix that restored gate logging (task 023).
+Four efforts ship together in this release: the merge skill's genericization (task 021), the completion of per-user lane support across every plugin surface (task 022), the DEBUG-trap fix that restored gate logging (task 023), and a contributed set of Windows and workflow fixes (task 024).
+
+### Fixed (task 024 — Windows wrapper generation)
+
+- **On Git Bash / MSYS, every regenerated wrapper was silently truncated.** `create_wrapper` builds `.claude/bin/<name>` from a heredoc whose delimiter was `WRAPPER`, while the template's own body contains a line starting `WRAPPER_DIR=`. MSYS bash 5.2's `$( )` parser terminates a heredoc at a body line that merely *starts with* the delimiter, so the wrapper was cut to its first six lines. `session-start-hook` regenerates `tasks`, `sandbox` and all four `playbook-*` wrappers on every session start, so on Windows this rewrote `.claude/bin/tasks` — the CLI that arms the gate hook — as a stub, every session. The delimiter is now `END_WRAPPER_TEMPLATE`.
+
+  It does not reproduce on a permissive parser (macOS bash 3.2 captures the body either way), so `tests/test_wrapper_template.py` pins the structural invariant instead: no line of a heredoc body may start with that heredoc's own delimiter, checked across every shipped shell script, for quoted and unquoted forms alike, with terminator matching that follows bash (column zero; tabs stripped only for `<<-`). It also asserts a generated wrapper is *complete* — the existing atomicity fixture only checked that the file was non-empty, which a six-line stub satisfies.
+
+### Changed (task 024 — contributed workflow improvements)
+
+- **The mind-map pre-review gate now names the rule instead of a vague aspiration.** It was "MIND_MAP.md updated if new insights emerged", which invited one new node per task; it now asks for the OWNING subsystem node to be updated in place, with a new node only for a genuinely new subsystem. Applies to every task type with a pre-review section (`quick` has none by design).
+- **Judge prompts gained a hostile-sequence lens.** Plan and implementation reviews — single-judge and panel — now walk, for every state-changing flow: two concurrent requests, the same logical event delivered twice under distinct ids, reordered events, an external call succeeding while the local transaction rolls back, a crash after commit but before any post-commit step, and a retry after a lost response. Reviews state the invariant and the test that proves it, or raise a finding. Changes that touch no shared or persisted state say so in one line, so the lens stays sharp instead of manufacturing findings.
+
+  Both of these were contributed by **Cristi (ai-ring-vet)**, who also diagnosed the DEBUG-trap failure in task 023 — the hostile-sequence lens comes from a payments-heavy backend where it has caught real defects.
 
 ### Fixed (task 023 — gate logging silently stopped)
 
