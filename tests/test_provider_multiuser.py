@@ -217,6 +217,37 @@ class TestResolverParity(TempProjectCase):
         )
         return proc.returncode, proc.stdout.strip()
 
+    def _bash_log_resolve(self, project: Path, expected_lane: str | None):
+        """Run bash-log.sh against the project; return (rc, resolved_lane_name_or_None)."""
+        if expected_lane:
+            (project / ".agent" / expected_lane).mkdir(parents=True, exist_ok=True)
+        for h in project.glob(".agent/**/bash_history"):
+            h.unlink()
+        if (project / ".agent" / "bash_history").exists():
+            (project / ".agent" / "bash_history").unlink()
+
+        script = (
+            f'BASH_COMMAND="my_test_command"\n'
+            f'source "{SCRIPTS}/bash-log.sh"\n'
+            f'_cpb_log_cmd\n'
+        )
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, cwd=str(project)
+        )
+        if proc.returncode != 0:
+            return proc.returncode, None
+
+        histories = list(project.glob(".agent/**/bash_history"))
+        if not histories:
+            return 0, None
+        if len(histories) > 1:
+            raise ValueError(f"Multiple histories written: {histories}")
+
+        rel = histories[0].relative_to(project / ".agent")
+        if rel.name == "bash_history" and len(rel.parts) == 1:
+            return 0, ""
+        return 0, rel.parts[0]
+
     def test_valid_markers_agree_across_all_three(self):
         for name in VALID_MARKERS:
             with self.subTest(marker=name):
@@ -233,6 +264,10 @@ class TestResolverParity(TempProjectCase):
                 self.assertEqual(rc, 0, f"gate-echo-lib exited {rc}")
                 self.assertEqual(out, expected, "gate-echo-lib.sh")
 
+                rc, resolved_lane = self._bash_log_resolve(p, name)
+                self.assertEqual(rc, 0, f"bash-log.sh exited {rc}")
+                self.assertEqual(resolved_lane, name, "bash-log.sh")
+
     def test_invalid_markers_rejected_by_all_three(self):
         for bad in INVALID_MARKERS:
             with self.subTest(marker=bad):
@@ -246,6 +281,10 @@ class TestResolverParity(TempProjectCase):
 
                 rc, _ = self._bash_resolve(p)
                 self.assertNotEqual(rc, 0, "gate-echo-lib.sh accepted an invalid marker")
+
+                rc, resolved_lane = self._bash_log_resolve(p, None)
+                self.assertEqual(rc, 0, f"bash-log.sh exited {rc}")
+                self.assertIsNone(resolved_lane, "bash-log.sh accepted an invalid marker")
 
     def _write_raw(self, project: Path, data: str) -> None:
         (project / ".agent").mkdir(parents=True, exist_ok=True)
@@ -311,12 +350,23 @@ class TestResolverParity(TempProjectCase):
                     self.assertNotIn(f"nudge-{name}", proc.stdout,
                                      "monitor-nudge.sh delivered from a rejected marker")
 
+                # 5. bash-log.sh's inline copy
+                rc, resolved_lane = self._bash_log_resolve(p, expected)
+                self.assertEqual(rc, 0, f"bash-log.sh exited {rc}")
+                if expected:
+                    self.assertEqual(resolved_lane, expected, "bash-log.sh")
+                else:
+                    self.assertIsNone(resolved_lane, "bash-log.sh accepted a bad raw marker")
+
     def test_absent_marker_is_root_for_all_three(self):
         p = make_project(self.tmp / "legacy", "legacy")
         expected = str(p / ".agent")
         self.assertEqual(str(resolve_agent_dir(p)), expected)
         self.assertEqual(self._python_core_resolve(p), (0, expected))
         self.assertEqual(self._bash_resolve(p), (0, expected))
+        rc, resolved_lane = self._bash_log_resolve(p, "")
+        self.assertEqual(rc, 0)
+        self.assertEqual(resolved_lane, "")
 
 
 # ── 3. Rewired provider surfaces ─────────────────────────────────────────────

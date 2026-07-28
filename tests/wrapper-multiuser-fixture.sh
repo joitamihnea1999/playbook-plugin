@@ -682,6 +682,132 @@ open(p,"w",newline="").write("alice\n../evil\n")' "$d"
         || fail "S16 no-trailing-newline marker lost the log"
 }
 
+echo "=== S17: DEBUG trap must not kill set -e hooks (field report 2026-07-21) ==="
+{
+    # A bare `return` in a DEBUG-trap filter arm propagates the STALE $? of the
+    # hook's previous command; a DEBUG trap returning non-zero kills a `set -e`
+    # shell. Delivery path: BASH_ENV sources bash-log.sh into every
+    # non-interactive bash, i.e. every PostToolUse hook. state-echo-hook died
+    # at its first false `&&` conditional — silently, gate logging dead.
+    #
+    # S16's set -e probes could never catch this: their probe commands are
+    # `echo …`, which no filter arm matches, so the bare-return path never ran
+    # with a stale $?. The victim below is the failing shape: a false `&&`
+    # short-circuit (errexit-exempt, leaves $?=1) followed by a command that
+    # MATCHES a filter arm — one victim per arm family.
+    BASH_LOG="$SCRIPTS/bash-log.sh"
+
+    d="$WORK/s17"; build_project "$d" legacy
+    cat > "$d/victim.sh" <<'VICTIM'
+set -e
+IS_FREEHAND=false
+[ "$IS_FREEHAND" = true ] && echo "freehand branch"
+ARM_CMD
+echo "REACHED-THE-END"
+VICTIM
+
+    run_victim() {   # $1=bash-log file  $2=arm command; echoes output, RC in $?
+        local log_file="$1" arm="$2"
+        sed "s|ARM_CMD|$arm|" "$d/victim.sh" > "$d/victim-armed.sh"
+        (cd "$d" && BASH_ENV="$log_file" bash victim-armed.sh 2>&1)
+    }
+
+    # One representative per filter-arm family (test/[[ /assignment/source).
+    ARMS='[ -d /tmp ]
+[[ -n ok ]]
+HISTFILE=/dev/null
+source /dev/null'
+    while IFS= read -r arm; do
+        set +e
+        out="$(run_victim "$BASH_LOG" "$arm")"; rc=$?
+        set -e
+        assert_eq "$rc" "0" "S17[$arm] hook shell survives"
+        assert_contains "$out" "REACHED-THE-END" "S17[$arm] hook ran to completion"
+    done <<< "$ARMS"
+
+    # The patched-trap row of the field report's table: logging still works.
+    grep -q "REACHED-THE-END" "$d/.agent/bash_history" \
+        && pass "S17 bash_history still logs after the fix" \
+        || fail "S17 fix lost command logging"
+
+    # Negative control 1: bare-return mutant kills the victim.
+    # Loop over all 4 arms to ensure none are vacuous.
+    #
+    # The sed is range-scoped to the `case "$BASH_COMMAND"` block on purpose:
+    # `) return 0 ;;` also matches the three marker-validation arms further
+    # down, and an unscoped mutant would revert those too. They are unreachable
+    # in this victim (legacy shape, no `current_user`), so it would still go
+    # red — but for partly the wrong reason, and it would stop isolating the
+    # filter arms the moment a marker enters the scenario.
+    sed '/case "\$BASH_COMMAND" in/,/esac/ s|) return 0 ;;|) return ;;|' \
+        "$BASH_LOG" > "$d/bash-log-mutant-arms.sh"
+    assert_eq "$(grep -c ') return ;;' "$d/bash-log-mutant-arms.sh")" "4" \
+        "S17 negative control (arms): mutant reverted exactly the 4 filter arms"
+    while IFS= read -r arm; do
+        set +e
+        out="$(run_victim "$d/bash-log-mutant-arms.sh" "$arm")"; rc=$?
+        set -e
+        [ "$rc" -ne 0 ] \
+            && pass "S17 negative control (arms): bare-return mutant kills victim on [$arm] (rc=$rc)" \
+            || fail "S17 negative control (arms) VACUOUS: victim survived bare-return mutant on [$arm]"
+        assert_eq "$(printf '%s' "$out" | grep -c 'REACHED-THE-END' || true)" "0" \
+            "S17 negative control (arms): mutant died before the end on [$arm]"
+    done <<< "$ARMS"
+
+    # Now make bash_history a directory so append fails.
+    rm -f "$d/.agent/bash_history"
+    mkdir "$d/.agent/bash_history"
+
+    # Test the append-failure path: when bash_history is unwritable (e.g. is a directory),
+    # the fixed trap must return 0 and not kill the host shell.
+    set +e
+    out="$(run_victim "$BASH_LOG" "echo hello")"; rc=$?
+    set -e
+    assert_eq "$rc" "0" "S17 append-failure: hook shell survives unwritable history"
+    assert_contains "$out" "REACHED-THE-END" "S17 append-failure: hook ran to completion"
+    # …and silently. `echo … >> file 2>/dev/null` does not suppress a failure to
+    # OPEN the file (bash reports it before applying the redirect), so the
+    # unguarded form emits one "Is a directory" per command into hook output,
+    # which the agent then reads. The append must be wrapped in a brace group.
+    assert_eq "$(printf '%s' "$out" | grep -ci 'is a directory' || true)" "0" \
+        "S17 append-failure: no per-command stderr noise leaks into hook output"
+
+    # Negative control 2: no-append-failure-guard mutant kills the victim.
+    # Revert only the guard on the append line, leaving the arms fixed.
+    sed 's/^\( *\){ echo \(.*\); } 2>\/dev\/null || return 0$/\1echo \2/' \
+        "$BASH_LOG" > "$d/bash-log-mutant-append.sh"
+    assert_eq "$(grep -c 'return 0' "$d/bash-log-mutant-append.sh")" \
+        "$(( $(grep -c 'return 0' "$BASH_LOG") - 1 ))" \
+        "S17 negative control (append): mutant dropped exactly one guard"
+    set +e
+    out="$(run_victim "$d/bash-log-mutant-append.sh" "echo hello")"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] \
+        && pass "S17 negative control (append): mutant without append guard kills victim on failure (rc=$rc)" \
+        || fail "S17 negative control (append) VACUOUS: victim survived mutant without append guard on failure"
+    assert_eq "$(printf '%s' "$out" | grep -c 'REACHED-THE-END' || true)" "0" \
+        "S17 negative control (append): mutant without append guard died before the end"
+
+    # Negative control 3: the brace group is load-bearing, not style. Revert it
+    # to the inline `echo … >> file 2>/dev/null || return 0` form — which keeps
+    # the shell ALIVE (the `|| return 0` is intact) but stops suppressing the
+    # open error. Without this control, "simplifying" the braces away would
+    # stay green while every hook shell regained per-command stderr noise.
+    # Delimiter is '#', not '|': the pattern contains `||`, which would end a
+    # '|'-delimited s/// early (BSD sed: "bad flag in substitute command").
+    sed 's#{ echo \(.*\); } 2>/dev/null || return 0#echo \1 2>/dev/null || return 0#' \
+        "$BASH_LOG" > "$d/bash-log-mutant-inline.sh"
+    assert_eq "$(grep -c 'bash_history"; }' "$d/bash-log-mutant-inline.sh")" "0" \
+        "S17 negative control (inline): mutant actually removed the brace group"
+    set +e
+    out="$(run_victim "$d/bash-log-mutant-inline.sh" "echo hello")"; rc=$?
+    set -e
+    assert_eq "$rc" "0" "S17 negative control (inline): shell still survives (guard intact)"
+    [ "$(printf '%s' "$out" | grep -ci 'is a directory' || true)" -gt 0 ] \
+        && pass "S17 negative control (inline): inline form leaks the open error (proves the braces work)" \
+        || fail "S17 negative control (inline) VACUOUS: no leak from the inline form"
+}
+
 echo
 echo "============================================"
 echo "wrapper multi-user fixture: $PASS passed, $FAIL failed"

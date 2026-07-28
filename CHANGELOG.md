@@ -4,7 +4,14 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ## [1.4.5] — 2026-07-27
 
-Two efforts ship together in this release: the merge skill's genericization (task 021) and the completion of per-user lane support across every plugin surface (task 022).
+Three efforts ship together in this release: the merge skill's genericization (task 021), the completion of per-user lane support across every plugin surface (task 022), and the DEBUG-trap fix that restored gate logging (task 023).
+
+### Fixed (task 023 — gate logging silently stopped)
+
+- **Command logging was killing every `set -e` hook, so gate logging stopped entirely.** `bash-log.sh` is sourced into every non-interactive bash through `BASH_ENV`, where it installs a `DEBUG` trap. Four of the trap's noise-filter arms exited with a bare `return`, which inside a DEBUG trap re-emits the *stale* `$?` of the previously executed command — and a DEBUG trap returning non-zero terminates a `set -e` shell. `state-echo-hook` therefore died at its first false conditional, before writing `gate_key` or any `**[G…]**` entry: no error, no output, no gate log, indefinitely. The arms match exactly the commands hooks run constantly (`[ -d …`, `[[ …`), so the failure was immediate and total on any host where the bash logger was deployed. Every exit path of `_cpb_log_cmd` is now explicitly `return 0`.
+
+  Reported from the field with the root cause already isolated and the fix proven (Cristi / ai-ring-vet, 2026-07-21; gate logging dead on that install since 2026-07-01, the day a `playbook init` first deployed the logger). Reproduced here on bash 3.2 and 5.2 — it is not shell-version specific.
+- **An unwritable `bash_history` no longer takes the shell down with it, or floods hook output.** A failing append is itself a failing command inside the trap, so it killed `set -e` hosts by the same mechanism; it is now guarded. The guard uses a brace group (`{ echo …; } 2>/dev/null || return 0`) because `echo … >> file 2>/dev/null` does **not** suppress a failure to *open* the file — bash reports that before applying the redirect — which, once per command, meant one error line per command in every hook's output.
 
 ### Changed
 - **The merge skill no longer hardcodes one project's layout or test runner** (field report, AloVet 2026-07-24; task 021). Step 7's verification bundle assumed a `backend/` directory and a `run-backend-tests` command, which contradicted the skill's own claim to need only `.agent/` and the two mind-map files. On a repo without them the code-identity check diffed a directory that didn't exist — reporting green for having examined nothing — and the test step errored outright. Both are now repo-agnostic:
@@ -40,7 +47,7 @@ Two efforts ship together in this release: the merge skill's genericization (tas
 - **`codex-stop-hook` and `codex-user-prompt-hook` had no exception handler at all**, so a malformed marker exited 1 with a traceback rather than the per-event policy the design documents. Both now fail open, which is correct for hooks that cannot block.
 - **The Codex path helpers no longer create directories.** `_turn_baseline_file` and `_stop_block_marker_file` called `mkdir` inside what were nominally path lookups, so merely *reading* a baseline conjured a session dir — on a fresh clone, a phantom lane created by a function that only meant to look.
 - **One marker-parsing contract across every implementation.** The shell readers took only the first line and kept a trailing `\r`, so `alice\n../evil` resolved to lane `alice` where Python rejected it, and a CRLF marker silently disabled command logging and monitor nudges. The marker is now exactly one line, CR-stripped, whitespace-insensitive, with a missing final newline tolerated — matching Python, which needed no change.
-- `bash-log.sh` guards its `read` and returns 0 from the DEBUG trap: a marker without a trailing newline could trip `errexit`, and a non-zero trap return suppresses the user's own command under `extdebug`.
+- `bash-log.sh` lane resolution guards its `read`: a marker without a trailing newline could trip `errexit`.
 - **The monitor's briefing missed its transcript on any path containing a space** (`$SLUG` unquoted in `bootstrap.sh`) — iCloud Drive's "Mobile Documents" is the common case. The monitor's own instructions (`CLAUDE.md`, mind-map stub) also still named root paths, so its manual and fallback writes targeted the wrong lane.
 - Generated judge prompts gated the user's original messages on a root `.agent/chat_log.md`, telling judges to skip them on multi-user repos.
 
