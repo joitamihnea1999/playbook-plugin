@@ -20,6 +20,10 @@ Everything the `tasks` CLI does. In a playbook-managed project the agent calls i
 
 The review commands exist because an agent that reviews its own plan inside the conversation just agrees with itself. A judge is a separate headless agent that sees the repository but **not** your chat — so it can't anchor to the approach already committed to.
 
+A plan review runs six lenses — intent alignment, failure modes, hostile sequences, test coverage, simplify, and prove-it (file:line evidence, not assertions). An implementation review runs six of its own — simplify, self-critique, bug scan, hostile sequences, test quality, prove-it-works.
+
+The **hostile-sequence** lens walks every state-changing flow the change touches: two concurrent requests, the same logical event delivered twice under distinct ids, reordered events, an external call succeeding while the local transaction rolls back, a crash after commit but before any post-commit step, and a retry after a lost response. For each one it asks for the invariant the design relies on and the test that proves it. A change touching no shared or persisted state says so in one line, so the lens stays sharp instead of manufacturing findings.
+
 **`tasks plan-review <N>`** — single blind judge reads task N's plan before any code is written; findings are inserted into the task.md, where the agent must triage each one (accept/park/reject) rather than obey blindly.
 
 **`tasks impl-review <N>`** — the same, after implementation: does every Intent claim trace down through code to tests?

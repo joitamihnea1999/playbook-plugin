@@ -4,12 +4,20 @@
 # Purpose: forensic post-mortem record ("what did the agent actually run?")
 
 _cpb_log_cmd() {
-    # Filter shell internals and CC infrastructure noise
+    # Filter shell internals and CC infrastructure noise.
+    #
+    # Every exit from this function MUST be `return 0`, never bare `return`:
+    # inside a DEBUG trap a bare `return` propagates the *stale* `$?` of the
+    # previously executed command, and a DEBUG trap returning non-zero kills
+    # a `set -e` shell. Since these arms match exactly the commands hooks run
+    # constantly (`[ -d …`, `[[ …`), a bare return here silently killed every
+    # `set -e` PostToolUse hook (state-echo-hook → gate logging dead; field
+    # report 2026-07-21, reproduced on bash 3.2 and 5.2).
     case "$BASH_COMMAND" in
-        *shell-snapshots*|"pwd -P"*|"case \$- in"*|return|"[["*) return ;;
-        "[ -d "*|"[ -f "*|"[ -n "*|"[ -z "*|"[ ! "*) return ;;
-        HIST*=*|PATH=*|"set -o"*|"shopt "*|"trap "*|"export PATH"*) return ;;
-        source*|.) return ;;
+        *shell-snapshots*|"pwd -P"*|"case \$- in"*|return|"[["*) return 0 ;;
+        "[ -d "*|"[ -f "*|"[ -n "*|"[ -z "*|"[ ! "*) return 0 ;;
+        HIST*=*|PATH=*|"set -o"*|"shopt "*|"trap "*|"export PATH"*) return 0 ;;
+        source*|.) return 0 ;;
     esac
 
     # Walk up from $PWD looking for .agent/ directory
@@ -53,12 +61,24 @@ _cpb_log_cmd() {
             fi
             [[ -d "$_lane" ]] || return 0
             local _cmd="${BASH_COMMAND//$'\n'/\\n}"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') | AGENT | $_cmd" >> "$_lane/bash_history"
+            # `|| return 0`: an append failure (perms, disk, history path
+            # replaced by a directory) is a failing simple command inside the
+            # trap — under the host shell's `set -e` that would kill it the
+            # same way a bare return does.
+            #
+            # The brace group matters: `echo … >> file 2>/dev/null` does NOT
+            # silence a failure to OPEN the file, because bash reports that
+            # before it applies `2>/dev/null`. Since this runs per command, the
+            # unguarded form prints "Is a directory" once for EVERY command in
+            # every hook shell — and hook stderr/stdout is fed back to the
+            # agent. Redirecting the group suppresses it properly.
+            { echo "$(date '+%Y-%m-%d %H:%M:%S') | AGENT | $_cmd" >> "$_lane/bash_history"; } 2>/dev/null || return 0
             break
         fi
         _dir="${_dir%/*}"
         [[ -n "$_dir" ]] || _dir="/"
     done
+    return 0
 }
 set -o history
 trap '_cpb_log_cmd' DEBUG
