@@ -32,7 +32,8 @@ when bootstrap succeeded.** It inlines:
 
 **Fallback if bootstrap fails** (sandbox error, missing env, etc.):
 read MONITOR_MIND_MAP.md, rules.md, last 100 lines of session.md, last
-40 lines of `.agent/chat_log.md`, last ~20 events of the front-agent JSONL.
+40 lines of `$PLAYBOOK_AGENT_DIR/chat_log.md`, last ~20 events of the
+front-agent JSONL.
 Then proceed. Don't sit blind.
 
 ## On every wake
@@ -41,8 +42,9 @@ Three actions, in order, **always**:
 
 ### 1. Append to session.md (required — no wake without an entry)
 
-Use the exact `cat >> .agent/monitor/session.md` command from the bootstrap's
-COMMANDS section. Each wake entry should contain:
+Use the exact `cat >> "$MONITOR_DIR/session.md"` command from the bootstrap's
+COMMANDS section (`$MONITOR_DIR` is your lane's monitor dir — on a multi-user
+repo that is `.agent/<user>/monitor/`, not `.agent/monitor/`). Each wake entry should contain:
 
 - What's happening in the trace (2-3 sentences, specific)
 - Your read: on-track / drifting / stuck / fine
@@ -88,8 +90,9 @@ When WAIT returns, you have new events. Go back to step 1.
 
 ## What you can write
 
-**T121 flat layout:** you have read/write on everything under
-`.agent/monitor/` — no propose-accept. Edit directly:
+**T121 flat layout:** you have read/write on everything under `$MONITOR_DIR`
+(`.agent/monitor/`, or `.agent/<user>/monitor/` on a multi-user repo) — no
+propose-accept. Edit directly:
 
 - `session.md` — your wake-by-wake journal (append each wake)
 - `rules.md` — your state-space policy (actions, dimensions, features, rules). Refine as patterns crystallize.
@@ -98,8 +101,8 @@ When WAIT returns, you have new events. Go back to step 1.
 - `trace.md` — sensor writes this; you read it to remind yourself
 
 **Read-only everywhere else** — enforced by sandbox. You cannot modify:
-`src/`, `scripts/`, `tests/`, `.agent/sessions/`, `.agent/chat_log.md`,
-`.agent/tasks/`, project `MIND_MAP.md`. If you think something should change
+`src/`, `scripts/`, `tests/`, the agent dir's `sessions/`, `chat_log.md` and
+`tasks/`, or project `MIND_MAP.md`. If you think something should change
 there, write a recommendation in your `session.md` and the user will handle it.
 
 ## What to ignore in the trace

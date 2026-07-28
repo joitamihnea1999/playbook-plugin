@@ -2,10 +2,10 @@
 # launch-monitor — start claude as the conversation monitor, sandboxed
 #
 # Forked from .claude/bin/sandbox's pattern (which works). Differences:
-#   - Writable scope narrowed from whole PROJECT_DIR to .agent/monitor/
+#   - Writable scope narrowed from whole PROJECT_DIR to <agent-dir>/monitor/
 #   - Disables playbook plugin hooks via --settings '{}' so the monitor's own
 #     claude startup doesn't hang on session-start-hook (which would try to
-#     write to .agent/sessions/, outside our narrow scope)
+#     write to <agent-dir>/sessions/, outside our narrow scope)
 #
 # Usage:
 #   .claude/bin/monitor start                           (auto-detect oldest alive pid)
@@ -14,10 +14,32 @@
 set -e
 
 MONITOR_SRC="$(cd "$(dirname "$0")" && pwd)"
+
+# Shared root + lane resolution (same library the hooks use), so the monitor
+# agrees with the front agent about which `.agent/<user>/` lane is live.
+if [ -f "$MONITOR_SRC/../gate-echo-lib.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$MONITOR_SRC/../gate-echo-lib.sh"
+else
+    echo "Error: cannot locate gate-echo-lib.sh next to $MONITOR_SRC" >&2
+    exit 1
+fi
+
 # When shipped via plugin, $MONITOR_SRC lives in plugin cache — its ../../
 # would point into the plugin, not at the user's project. Use caller's $PWD
 # (inherited through .claude/bin/monitor wrapper) or explicit env var.
-PROJECT_DIR="${PLAYBOOK_PROJECT_DIR:-$PWD}"
+# find_project_root walks up, so launching from a subdirectory still resolves
+# the project (a bare $PWD would silently monitor the wrong tree).
+PROJECT_DIR="${PLAYBOOK_PROJECT_DIR:-}"
+if [ -z "$PROJECT_DIR" ]; then
+    PROJECT_DIR="$(find_project_root)"
+    [ -n "$PROJECT_DIR" ] || PROJECT_DIR="$PWD"
+fi
+# Refuse on the fresh-clone shape: the monitor mkdirs its state dir, so an
+# unguarded launch mints a phantom root lane. This is an interactive command,
+# so failing loud is right here (unlike the hooks, which must skip quietly).
+require_lane_marker "$PROJECT_DIR" "launch-monitor"
+AGENT_DIR="$(resolve_agent_dir "$PROJECT_DIR")"
 HOME_DIR="$HOME"
 
 # --- Parse --session-id ---
@@ -35,8 +57,14 @@ done
 # Picks oldest by ctime. Exits on 0 alive or 2+ alive (no heuristic
 # to pick the "real" main agent — user must disambiguate via --session-id).
 find_main_session() {
-    local sessions_dir="$PROJECT_DIR/.agent/sessions"
-    [ -d "$sessions_dir" ] || return 1
+    local sessions_dir="$AGENT_DIR/sessions"
+    # A missing sessions dir is the same user-facing situation as an empty one:
+    # nothing is running. `return 1` here used to kill the script via `set -e`
+    # before the message below was ever printed — exit 1 with no explanation.
+    if [ ! -d "$sessions_dir" ]; then
+        echo "Error: no main agent running (no alive pid-* under $sessions_dir/)" >&2
+        exit 1
+    fi
 
     local alive=()
     while IFS= read -r name; do
@@ -49,7 +77,7 @@ find_main_session() {
 
     local count="${#alive[@]}"
     if [ "$count" = "0" ]; then
-        echo "Error: no main agent running (no alive pid-* under .agent/sessions/)" >&2
+        echo "Error: no main agent running (no alive pid-* under $AGENT_DIR/sessions/)" >&2
         exit 1
     fi
     if [ "$count" = "1" ]; then
@@ -82,16 +110,17 @@ if ! echo "$SESSION_ID" | grep -Eq '^pid-[0-9]+$'; then
     exit 2
 fi
 
-# MONITOR_DIR lives in the TARGET project's .agent/monitor/, not the plugin.
-# Flat layout (T121): single state dir, not per-pid subdirs.
-MONITOR_DIR="$PROJECT_DIR/.agent/monitor"
+# MONITOR_DIR lives in the TARGET project's agent dir, not the plugin.
+# Flat layout (T121): single state dir, not per-pid subdirs. Lane-resolved, so
+# each user on a shared repo gets their own monitor state.
+MONITOR_DIR="$AGENT_DIR/monitor"
 mkdir -p "$MONITOR_DIR"
 
 # --- Seatbelt profile (forked from bin/sandbox) ---
-# Writable: .agent/monitor/ (flat layout — T121) + standard system areas.
+# Writable: <agent-dir>/monitor/ (flat layout — T121) + standard system areas.
 # Denied: everything else, including:
-#   - project src/, scripts/, tests/, .agent/sessions/, .agent/chat_log.md,
-#     .agent/tasks/, MIND_MAP.md
+#   - project src/, scripts/, tests/, <agent-dir>/sessions/, <agent-dir>/chat_log.md,
+#     <agent-dir>/tasks/, MIND_MAP.md
 # Monitor now has r/w on its own rules.md, MONITOR_MIND_MAP.md, session.md
 # (propose-accept dropped — trust-with-audit model).
 # ~/.local and ~/Library must be writable for claude's interactive UI startup.
@@ -114,7 +143,7 @@ PROFILE="(version 1)
 
 # --- Disable playbook plugin hooks for the monitor session ---
 # Without this, claude's session-start-hook fires on startup and tries to
-# write to .agent/sessions/<id>/ — sandbox-blocked → claude hangs. The
+# write to <agent-dir>/sessions/<id>/ — sandbox-blocked → claude hangs. The
 # monitor doesn't need playbook hooks; it uses its own CLAUDE.md + bootstrap.sh.
 NOHOOKS_FILE="/tmp/playbook-monitor-no-hooks-$$.json"
 echo '{}' > "$NOHOOKS_FILE"
@@ -124,6 +153,9 @@ echo "[launch-monitor] writable: $MONITOR_DIR (+ system dirs)" >&2
 
 export PLAYBOOK_SESSION_ID="$SESSION_ID"
 export PLAYBOOK_PROJECT_DIR="$PROJECT_DIR"
+# Hand the resolved lane to bootstrap.sh so it never re-derives it (one
+# resolver, one answer — a second copy is a second thing that can drift).
+export PLAYBOOK_AGENT_DIR="$AGENT_DIR"
 # Distinguish this claude session as the MONITOR, so the nudge-consume hook
 # skips (would otherwise eat our own nudges before front agent sees them).
 export PLAYBOOK_ROLE="monitor"

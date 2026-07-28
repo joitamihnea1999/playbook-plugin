@@ -7,7 +7,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from tasks.core import create_task, list_tasks, task_status, PLAYBOOKS, _find_playbook_skill, resolve_session_id, resolve_agent_dir, run_merge_doctor
+from tasks.core import create_task, list_tasks, task_status, PLAYBOOKS, _find_playbook_skill, resolve_session_id, resolve_agent_dir, require_lane_marker, run_merge_doctor
 
 
 def _state_file(project_path: Path) -> Path:
@@ -1387,6 +1387,8 @@ def main():
         title = target.name.replace("-", " ").replace("_", " ").title()
         print(f"Initializing project: {target.name}")
 
+        # Refuse on the fresh-clone shape rather than mint a phantom root lane.
+        require_lane_marker(target, "tasks init")
         # Create .agent/tasks/ (or .agent/<user>/tasks/ in multi-user mode)
         tasks_dir = resolve_agent_dir(target) / "tasks"
         existed = tasks_dir.exists()

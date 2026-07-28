@@ -117,6 +117,60 @@ def _validate_username(name: str) -> None:
         raise SystemExit(1)
 
 
+def lanes_without_marker(project_path: Path) -> list[str]:
+    """Lane names present when the repo is in the "fresh clone" shape, else [].
+
+    `.agent/current_user` is gitignored install-local, so a clone of a
+    multi-user repo has lanes and no marker; `resolve_agent_dir` then answers
+    the root and the next write mints a phantom lane beside the real ones.
+
+    Narrow on purpose — a marker, an existing root `.agent/tasks/` (legitimate
+    mixed layout), or no lanes at all all return []. Kept behaviorally
+    identical to `require_lane_marker` in gate-echo-lib.sh and
+    `lanes_without_marker` in provider/paths.py; the shared vector table in
+    tests/test_provider_multiuser.py holds all three to the same answers.
+
+    Only state-CREATING paths may refuse on this. Read paths must degrade.
+    """
+    agent = project_path / ".agent"
+    if (agent / "current_user").exists():
+        return []
+    if (agent / "tasks").is_dir():
+        return []
+    if not agent.is_dir():
+        return []
+    try:
+        return sorted(
+            child.name for child in agent.iterdir()
+            if child.is_dir() and (child / "tasks").is_dir()
+        )
+    except OSError:
+        return []
+
+
+def require_lane_marker(project_path: Path, context: str = "playbook") -> None:
+    """Exit(1) with the fix instructions when in the fresh-clone shape.
+
+    For CLI entry points that create state. A hook must NOT call this — use
+    `lanes_without_marker` and skip quietly instead of taking the session down.
+    """
+    lanes = lanes_without_marker(project_path)
+    if not lanes:
+        return
+    print(
+        f"Error: {context} found per-user playbook lanes but no "
+        f".agent/current_user marker.\n\n"
+        f"  Project: {project_path}\n"
+        f"  Lane(s): {', '.join(lanes)}\n\n"
+        "The marker is gitignored install-local, so a fresh clone never receives it.\n"
+        "Without it every surface would fall back to the shared root .agent/, creating\n"
+        "a phantom lane beside the real ones. Pick your lane first:\n\n"
+        f"    echo '<your-username>' > \"{project_path}/.agent/current_user\"\n",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
 def resolve_agent_dir(project_path: Path) -> Path:
     """Return the agent state root for this project.
 
@@ -385,6 +439,11 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
     Returns:
         Path to the created task.md file
     """
+    # Creating a task in the fresh-clone shape would mint a root `.agent/tasks/`
+    # — and because a root tasks dir is itself a legitimate lane, that single
+    # mkdir permanently converts the guarded shape into an "allowed mixed
+    # layout", disarming the guard for every other surface too.
+    require_lane_marker(project_path, "tasks new")
     tasks_dir = resolve_agent_dir(project_path) / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
 

@@ -12,7 +12,7 @@ Everything the `tasks` CLI does. In a playbook-managed project the agent calls i
 
 ## Create
 
-**`tasks new <type> <name> [intent]`** — create `.agent/tasks/<N>-<type>-<name>/task.md` from the base template, with the intent text filled in if given. The type selects the workflow pattern the plan will follow: `feature`→Build, `bug`→Fix, `explore`→Investigate, `review`→Evaluate. Recent chat messages are captured into the task's References so the plan can be checked against what you actually said. Creation does **not** activate — the agent should immediately run `tasks work <N>`.
+**`tasks new <type> <name> [intent]`** — create `.agent/tasks/<N>-<type>-<name>/task.md` from the base template, with the intent text filled in if given. The type selects the workflow pattern the plan will follow: `feature`→Build, `bug`→Fix, `explore`→Investigate, `review`→Evaluate. Recent chat messages are captured into the task's References so the plan can be checked against what you actually said. Creation does **not** activate — the agent should immediately run `tasks work <N>`. On a fresh clone of a multi-user repo (per-user lanes present but the gitignored `.agent/current_user` missing) this refuses rather than create a phantom root lane — set the marker first.
 
 **`tasks new --stub <type> <name> [intent]`** — create a lightweight stub that expands into the full template when activated. For capturing future work the moment you think of it, without paying the template cost yet.
 
@@ -64,7 +64,7 @@ The review commands exist because an agent that reviews its own plan inside the 
 
 **`tasks status`** — the active task's current gate position: the fastest way to see where a long run actually is.
 
-**`tasks init [--provider codex|antigravity|grok|pi] [--hooks]`** — mechanical project setup (normally invoked via `/playbook:init`): `.agent/` structure, `.claude/bin/` wrappers, settings, MIND_MAP.md stub. With `--provider`, additionally writes that agent's bootstrap file (`AGENTS.md` / `GEMINI.md`) and, with `--hooks`, installs its hook integration — see [providers](providers.md).
+**`tasks init [--provider codex|antigravity|grok|pi] [--hooks]`** — mechanical project setup (normally invoked via `/playbook:init`): `.agent/` structure, `.claude/bin/` wrappers, settings, MIND_MAP.md stub. With `--provider`, additionally writes that agent's bootstrap file (`AGENTS.md` / `GEMINI.md`) and, with `--hooks`, installs its hook integration — see [providers](providers.md). On a fresh clone of a multi-user repo (per-user lanes present but the gitignored `.agent/current_user` missing) this refuses rather than create a phantom root lane — set the marker first.
 
 ## Slash commands (user-invoked)
 

@@ -110,6 +110,15 @@ resolve_session_id() {
 #   absent .agent/current_user  → PROJECT_DIR/.agent        (legacy)
 #   valid  .agent/current_user  → PROJECT_DIR/.agent/<user> (multi-user)
 #   invalid content             → stderr + exit 1
+# Marker contract (identical in tasks/core.py, provider/paths.py, and every
+# inline shell copy — tests/test_provider_multiuser.py pins all of them to the
+# same vectors):
+#   * exactly ONE content line; a second non-empty line is INVALID
+#     (`alice\n../evil` must not silently resolve to lane `alice`)
+#   * a trailing CR is stripped, so CRLF markers work (Windows is supported)
+#   * a missing trailing newline is fine — `read` returns 1 but still assigns,
+#     hence `|| true`; without it errexit fires inside a DEBUG trap
+#   * surrounding whitespace is ignored, matching Python's .strip()
 resolve_agent_dir() {
     local project_dir="$1"
     local marker="$project_dir/.agent/current_user"
@@ -117,8 +126,16 @@ resolve_agent_dir() {
         echo "$project_dir/.agent"
         return 0
     fi
-    local name
-    name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' "$marker")
+    local name="" extra=""
+    # Read builtins only — the old sed+grep form accepted a MULTI-LINE marker
+    # (grep matches any line), so `alice\n../evil` resolved to lane `alice`
+    # while Python rejected the same file.
+    { read -r name; read -r extra; } < "$marker" 2>/dev/null || true
+    name="${name%$'\r'}"
+    if [ -n "$extra" ]; then
+        echo "Error: .agent/current_user must contain exactly one username line." >&2
+        exit 1
+    fi
     # Validate: non-empty, not . or .., no slash, matches [a-zA-Z0-9][a-zA-Z0-9_.-]*
     if [ -z "$name" ] || [ "$name" = "." ] || [ "$name" = ".." ]; then
         echo "Error: .agent/current_user contains invalid username '${name}'. Must be non-empty and not . or .." >&2
@@ -129,11 +146,80 @@ resolve_agent_dir() {
         [a-zA-Z0-9]*) ;;
         *) echo "Error: .agent/current_user contains invalid username '${name}'. Must start with a letter or digit." >&2; exit 1 ;;
     esac
-    if ! echo "$name" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9_.-]*$'; then
-        echo "Error: .agent/current_user contains invalid username '${name}'. Use only letters, digits, hyphens, underscores, dots." >&2
-        exit 1
-    fi
+    case "$name" in
+        *[!a-zA-Z0-9_.-]*)
+            echo "Error: .agent/current_user contains invalid username '${name}'. Use only letters, digits, hyphens, underscores, dots." >&2
+            exit 1 ;;
+    esac
     echo "$project_dir/.agent/$name"
+}
+
+# lanes_without_marker PROJECT_DIR
+# Echoes the per-user lane names when the repo is in the "fresh clone" shape
+# (lanes present, gitignored `.agent/current_user` absent, no root
+# `.agent/tasks/` — see require_lane_marker for why that last case is exempt),
+# empty otherwise. Never exits: hooks use this to SKIP quietly, since aborting
+# would brick the user's session over a state file.
+# Behaviorally identical to lanes_without_marker() in tasks/core.py and
+# provider/paths.py; the shared vector table in tests/test_provider_multiuser.py
+# holds all three to the same answers.
+lanes_without_marker() {
+    local project_dir="$1"
+    [ -n "$project_dir" ] || return 0
+    [ -f "$project_dir/.agent/current_user" ] && return 0
+    [ -d "$project_dir/.agent/tasks" ] && return 0
+    [ -d "$project_dir/.agent" ] || return 0
+    local sub found=""
+    for sub in "$project_dir/.agent"/*/; do
+        if [ -d "${sub}tasks" ]; then
+            found="${sub%/}"
+            found="${found##*/}"
+            echo "$found"
+        fi
+    done
+    return 0
+}
+
+# require_lane_marker PROJECT_DIR [CONTEXT]
+# Fail loud on the "fresh clone of a multi-user repo" shape: per-user lanes
+# (.agent/<user>/tasks/) exist, but .agent/current_user does NOT — because that
+# marker is gitignored install-local, so it never arrives with a clone.
+# resolve_agent_dir would silently answer the ROOT .agent/ there, and whoever
+# provisions state next creates a phantom root lane beside the real ones.
+#
+# Deliberately narrow: a repo that ALSO has root .agent/tasks/ is a legitimate
+# mixed/legacy layout (root is a real lane — see the lane model in core.py), so
+# it is left alone. Only the unambiguous lanes-but-no-root, no-marker case fails.
+#
+# Callers: the provider wrappers and `init` — anything that CREATES state.
+# Read-only surfaces must NOT call this; they should degrade, not abort.
+require_lane_marker() {
+    local project_dir="$1"
+    local context="${2:-playbook}"
+    [ -n "$project_dir" ] || return 0
+    [ -f "$project_dir/.agent/current_user" ] && return 0
+    [ -d "$project_dir/.agent/tasks" ] && return 0
+    [ -d "$project_dir/.agent" ] || return 0
+
+    local found
+    found=$(lanes_without_marker "$project_dir" | tr '\n' ' ')
+    found="${found% }"
+    [ -n "$found" ] || return 0
+
+    {
+        echo "Error: $context found per-user playbook lanes but no .agent/current_user marker."
+        echo ""
+        echo "  Project: $project_dir"
+        echo "  Lane(s): $found"
+        echo ""
+        echo "The marker is gitignored install-local, so a fresh clone never receives it."
+        echo "Without it every surface would fall back to the shared root .agent/, creating"
+        echo "a phantom lane beside the real ones. Pick your lane first:"
+        echo ""
+        echo "    echo '<your-username>' > \"$project_dir/.agent/current_user\""
+        echo ""
+    } >&2
+    exit 1
 }
 
 # agent_dir_writable PROJECT_DIR
@@ -142,6 +228,10 @@ resolve_agent_dir() {
 # the directory may exist but be read-only.
 agent_dir_writable() {
     local agent_dir
+    # Fresh-clone shape: no knowable lane. Report unwritable so the state-writing
+    # hooks skip rather than mint a phantom root lane (they must never exit —
+    # that would take the session down over a log file).
+    [ -n "$(lanes_without_marker "$1")" ] && return 1
     agent_dir=$(resolve_agent_dir "$1")
     [ -d "$agent_dir" ] && [ -w "$agent_dir" ]
 }

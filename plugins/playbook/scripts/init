@@ -1,7 +1,8 @@
 #!/bin/bash
 # scripts/init — mechanical project setup for playbook plugin
 #
-# Creates .agent/tasks/, .claude/bin/ wrappers, settings.json permissions,
+# Creates the agent state dirs (.agent/, or .agent/<user>/ in a multi-user
+# repo), .claude/bin/ wrappers, settings.json permissions,
 # and MIND_MAP.md stub. Safe to re-run (idempotent).
 #
 # Usage: scripts/init [project-display-name]
@@ -17,20 +18,31 @@ source "$SCRIPT_DIR/gate-echo-lib.sh"
 PROJECT_DIR="$PWD"
 PROJECT_NAME="${1:-$(basename "$PWD")}"
 
+# Everything init provisions is per-user runtime state, so it belongs in the
+# lane this clone has selected — `.agent/` on a single-user repo (unchanged),
+# `.agent/<user>/` where a marker exists. require_lane_marker stops us from
+# creating a phantom root lane on a fresh clone of a multi-user repo, where the
+# lanes are present but the gitignored marker is not.
+require_lane_marker "$PROJECT_DIR" "playbook init"
+AGENT_DIR="$(resolve_agent_dir "$PROJECT_DIR")"
+# Label paths relative to the project in the created/skipped summary.
+AGENT_REL="${AGENT_DIR#"$PROJECT_DIR"/}"
+
 CREATED=()
 SKIPPED=()
 FAILED=()
 
-# --- (a) .agent/tasks/ ---
-if [ ! -d "$PROJECT_DIR/.agent/tasks" ]; then
-    mkdir -p "$PROJECT_DIR/.agent/tasks"
-    CREATED+=(".agent/tasks/")
+# --- (a) <agent-dir>/tasks/ ---
+if [ ! -d "$AGENT_DIR/tasks" ]; then
+    mkdir -p "$AGENT_DIR/tasks"
+    CREATED+=("$AGENT_REL/tasks/")
 else
-    SKIPPED+=(".agent/tasks/ (exists)")
+    SKIPPED+=("$AGENT_REL/tasks/ (exists)")
 fi
 
-# --- (a2) .agent/playbooks/ + README ---
-PLAYBOOKS_DIR="$PROJECT_DIR/.agent/playbooks"
+# --- (a2) <agent-dir>/playbooks/ + README ---
+# Lane-scoped: tasks/core.py reads playbooks via resolve_agent_dir().
+PLAYBOOKS_DIR="$AGENT_DIR/playbooks"
 if [ ! -d "$PLAYBOOKS_DIR" ]; then
     mkdir -p "$PLAYBOOKS_DIR"
     # Copy README from the SAME plugin copy this script runs from (a global
@@ -43,12 +55,15 @@ if [ ! -d "$PLAYBOOKS_DIR" ]; then
             cp "$PLUGIN_README" "$PLAYBOOKS_DIR/README.md"
         fi
     fi
-    CREATED+=(".agent/playbooks/")
+    CREATED+=("$AGENT_REL/playbooks/")
 else
-    SKIPPED+=(".agent/playbooks/ (exists)")
+    SKIPPED+=("$AGENT_REL/playbooks/ (exists)")
 fi
 
 # --- (a3) .agent/config.json — review knobs + project policy ---
+# ROOT, never a lane: config.json is shared repo policy (merge_verify must be
+# identical for every clone) and models.json is per-clone judge pins. Both are
+# read at the .agent/ root by design — see tasks/core.py.
 # Hand-editable. Precedence for each setting: CLI flag > env var > this file >
 # built-in default. Only written when absent — never clobbers a user-tuned file.
 # (Values here are the built-in defaults, spelled out so the knobs are
@@ -254,7 +269,7 @@ fi
 # END:bash-log
 
 # --- (g) Monitor scaffolding ---
-# Scaffolds .agent/monitor/ (per-project state dir) + .claude/hooks/monitor-nudge.sh
+# Scaffolds <agent-dir>/monitor/ (per-user state dir) + .claude/hooks/monitor-nudge.sh
 # (non-plugin hook for nudge injection) + .claude/bin/monitor wrapper + registers
 # PostToolUse hook in .claude/settings.json. Idempotent.
 
@@ -275,7 +290,7 @@ else
 fi
 
 if [ -n "$MONITOR_LIB_DIR" ] && [ -d "$MONITOR_LIB_DIR" ]; then
-    MON_DIR="$PROJECT_DIR/.agent/monitor"
+    MON_DIR="$AGENT_DIR/monitor"
     MON_STATE_CREATED=0
     mkdir -p "$MON_DIR"
 
@@ -297,9 +312,9 @@ if [ -n "$MONITOR_LIB_DIR" ] && [ -d "$MONITOR_LIB_DIR" ]; then
     done
 
     if [ "$MON_STATE_CREATED" = "1" ]; then
-        CREATED+=(".agent/monitor/ (scaffolded)")
+        CREATED+=("$AGENT_REL/monitor/ (scaffolded)")
     else
-        SKIPPED+=(".agent/monitor/ (state files exist)")
+        SKIPPED+=("$AGENT_REL/monitor/ (state files exist)")
     fi
 
     # Copy monitor-nudge.sh into target's .claude/hooks/
@@ -347,7 +362,7 @@ except Exception as e:
         ERROR:*)  FAILED+=("settings.json monitor hook: ${HOOK_RESULT#ERROR:}") ;;
     esac
 else
-    SKIPPED+=(".agent/monitor/ (monitor-lib not found in plugin)")
+    SKIPPED+=("$AGENT_REL/monitor/ (monitor-lib not found in plugin)")
 fi
 
 # --- (f) Summary ---

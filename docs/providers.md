@@ -10,11 +10,9 @@ The playbook workflow runs on five agent CLIs — each can be the **main agent**
 | Grok | `grok` | `playbook-grok` | ✔ | ✔ | **Always-trusted global hooks:** `tasks init --provider grok` writes `~/.grok/hooks/playbook-enforcement.json` (task-gate + state-echo + chat-log) — required on spaced project paths (iCloud) where project/plugin hooks never schedule. Restart Grok after install/upgrade. Project hooks still need `/hooks-trust` once. Payloads normalized by shared shim: camelCase keys, `Shell`→Bash, `StrReplace`→Edit, plus `write`→Write, `search_replace`→Edit, `run_terminal_command`→Bash. `grok models` is an account-entitlement list. Web search on by default (judges pass `--disable-web-search` when off). |
 | Pi | `pi` | `playbook-pi` | ✔ | ✔ | Ships a hook adapter (`playbook-pi-hook-adapter.ts`) and a local models file (`playbook-pi-omlx-models.json`). Windows argv-length guard for big judge prompts. |
 
-`playbook-gemini` is the pre-rename wrapper for the sunset `gemini` CLI — it still execs `gemini`, not `agy`, so it only works where that binary survives. Superseded by `playbook-agy`.
-
 ## Launchers
 
-The `playbook-*` wrappers (installed to `.claude/bin/` by `/playbook:init`) start each CLI with a unique per-session Playbook session ID (PID-based, provider-agnostic), so gate state, chat-log attribution (`claude`/`codex`/`agy`/`grok`/`pi` tags), and multi-agent handoffs work identically everywhere.
+The `playbook-*` wrappers (installed to `.claude/bin/` by `/playbook:init`) start each CLI with a unique per-session Playbook session ID (PID-based, provider-agnostic), so gate state, chat-log attribution (`claude`/`codex`/`agy`/`grok`/`pi` tags), and multi-agent handoffs work identically everywhere. Each wrapper provisions its session directory in the [per-user lane](architecture.md#per-user-lanes) — the same one the hooks and the `tasks` CLI read — and refuses to launch rather than guess when a repo has lanes but no `.agent/current_user` marker.
 
 ## How the same hooks run everywhere
 

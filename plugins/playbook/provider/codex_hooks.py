@@ -17,6 +17,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from .paths import lanes_without_marker, resolve_agent_dir
 from .policy import _is_code_file_path, _is_management_path
 
 HOOK_TIMEOUT_MS = 5000
@@ -375,7 +376,12 @@ def install_project_hooks(project_root: Path) -> Path:
 
 
 def current_state_file(project_root: Path, session_id: str) -> Path:
-    return project_root / ".agent" / "sessions" / session_id / "current_state"
+    # Every path below resolves the per-user lane (`.agent/<user>/`) when the
+    # repo declares one. A malformed marker raises InvalidUserMarkerError — a
+    # plain ValueError, deliberately catchable, so each hook's existing
+    # per-event policy decides (PreToolUse fail-closed, others fail-open)
+    # instead of a SystemExit sailing past those handlers.
+    return resolve_agent_dir(project_root) / "sessions" / session_id / "current_state"
 
 
 def has_active_task(project_root: Path, session_id: str) -> bool:
@@ -503,8 +509,8 @@ def _read_active_task_number(project_root: Path, session_id: str) -> str | None:
 
 
 def _find_task_file(project_root: Path, task_num: str) -> Path | None:
-    """Locate `.agent/tasks/<task_num>-*/task.md` for the given task number."""
-    tasks_dir = project_root / ".agent" / "tasks"
+    """Locate `<agent-dir>/tasks/<task_num>-*/task.md` for the given task number."""
+    tasks_dir = resolve_agent_dir(project_root) / "tasks"
     if not tasks_dir.exists():
         return None
     prefix = f"{task_num}-"
@@ -611,10 +617,25 @@ def _baseline_key(turn_id: str | None) -> str:
 
 
 def _turn_baseline_file(project_root: Path, session_id: str, turn_id: str | None) -> Path:
+    """Pure path computation — deliberately does NOT create the directory.
+
+    It used to mkdir, which meant a read path (load_turn_baseline, the stop
+    marker check) conjured the session dir into existence; on a fresh clone
+    that is a phantom root lane created by a function that only meant to look.
+    Writers call _ensure_session_dir() instead.
+    """
     safe_turn_id = _baseline_key(turn_id)
-    session_dir = project_root / ".agent" / "sessions" / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
+    session_dir = resolve_agent_dir(project_root) / "sessions" / session_id
     return session_dir / f"codex-dirty-baseline-{safe_turn_id}.json"
+
+
+def _ensure_session_dir(path: Path) -> bool:
+    """Create the parent dir for a state file about to be written."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def _stop_block_marker_file(project_root: Path, session_id: str, turn_id: str | None) -> Path:
@@ -629,26 +650,37 @@ def _stop_block_marker_file(project_root: Path, session_id: str, turn_id: str | 
     baseline so a genuinely new edit still gets nudged once.
     """
     safe_turn_id = _baseline_key(turn_id)
-    session_dir = project_root / ".agent" / "sessions" / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
+    session_dir = resolve_agent_dir(project_root) / "sessions" / session_id
     return session_dir / f"codex-stop-blocked-{safe_turn_id}.flag"
 
 
 def _chat_log_path(project_root: Path) -> Path:
-    return project_root / ".agent" / "chat_log.md"
+    return resolve_agent_dir(project_root) / "chat_log.md"
 
 
 def _chat_counter_path(project_root: Path) -> Path:
-    return project_root / ".agent" / "chat_log_counter"
+    return resolve_agent_dir(project_root) / "chat_log_counter"
 
 
 def _session_counter_path(project_root: Path, session_id: str) -> Path:
-    return project_root / ".agent" / "sessions" / session_id / "counters"
+    return resolve_agent_dir(project_root) / "sessions" / session_id / "counters"
 
 
 def _agent_dir_writable(project_root: Path) -> bool:
-    agent_dir = project_root / ".agent"
-    return agent_dir.is_dir() and agent_dir.exists() and os.access(agent_dir, os.W_OK)
+    """True iff THIS session's lane is writable.
+
+    Judges run with the project read-only (task 018 #1), so every write path
+    checks this first. It must test the resolved lane, not the root: in a
+    multi-user repo the root `.agent/` can be writable while the lane is not
+    (and vice versa).
+    """
+    # Fresh-clone shape (lanes present, gitignored marker absent): there is no
+    # knowable lane, and resolve_agent_dir would answer the shared root. Report
+    # "not writable" so every caller skips instead of minting a phantom lane.
+    if lanes_without_marker(project_root):
+        return False
+    agent_dir = resolve_agent_dir(project_root)
+    return agent_dir.is_dir() and os.access(agent_dir, os.W_OK)
 
 
 def _normalize_prompt(prompt: str) -> str:
@@ -731,7 +763,7 @@ def append_prompt_to_chat_log(
     *,
     timestamp: dt.datetime | None = None,
 ) -> bool:
-    """Append a Codex UserPromptSubmit prompt to .agent/chat_log.md.
+    """Append a Codex UserPromptSubmit prompt to the lane's chat_log.md.
 
     Returns True when a non-empty prompt was logged, False when logging was
     intentionally skipped (e.g. empty prompt or non-writable .agent/).
@@ -840,12 +872,20 @@ def code_state(project_root: Path) -> dict[str, str]:
     return state
 
 
-def save_turn_baseline(project_root: Path, session_id: str, turn_id: str | None) -> Path:
+def save_turn_baseline(project_root: Path, session_id: str, turn_id: str | None) -> Path | None:
     """Persist the starting dirty code state for a Codex turn.
 
     If turn_id is unavailable, fall back to a session-scoped baseline key.
+
+    Returns None without writing when the lane is unknowable (fresh clone) or
+    unwritable (read-only judge run) — `_turn_baseline_file` mkdirs, so calling
+    it unguarded is what created phantom root state.
     """
+    if not _agent_dir_writable(project_root):
+        return None
     baseline_file = _turn_baseline_file(project_root, session_id, turn_id)
+    if not _ensure_session_dir(baseline_file):
+        return None
     baseline_file.write_text(
         json.dumps(code_state(project_root), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -932,7 +972,8 @@ def stop_decision_for_no_task_code_changes(
         if marker.exists():
             return {}  # already nudged this turn — let the turn end
         try:
-            marker.write_text("1", encoding="utf-8")
+            if _ensure_session_dir(marker) and _agent_dir_writable(project_root):
+                marker.write_text("1", encoding="utf-8")
         except OSError:
             pass
     return decision

@@ -29,29 +29,53 @@ def _bootstrap_imports() -> None:
 
 
 def _find_project_root() -> Path:
+    """Project root for this hook invocation.
+
+    The wrapper-set env var wins. The fallback walk defers to
+    provider.paths.find_project_root, which matches the multi-user layout
+    (`.agent/<user>/tasks/`) as well as the legacy one — a `.agent/tasks`-only
+    walk lands on cwd in a per-user repo, and every lane-relative path computed
+    from it is then wrong.
+
+    Requires _bootstrap_imports() to have run. If the import is somehow
+    unavailable, degrade to the legacy walk rather than take the hook down.
+    """
     env_root = os.environ.get("PLAYBOOK_PROJECT_ROOT")
     if env_root:
         return Path(env_root)
-    cwd = Path.cwd()
-    for path in [cwd] + list(cwd.parents):
-        if (path / ".agent" / "tasks").exists():
-            return path
-    return cwd
+    try:
+        from provider.paths import find_project_root
+    except ImportError:
+        cwd = Path.cwd()
+        for path in [cwd] + list(cwd.parents):
+            if (path / ".agent" / "tasks").exists():
+                return path
+        return cwd
+    return find_project_root() or Path.cwd()
 
 
 def main() -> int:
-    _bootstrap_imports()
-    from provider.codex_hooks import append_prompt_to_chat_log, save_turn_baseline
+    # FAIL-OPEN. This hook only records state (chat log + turn baseline); it
+    # cannot block a tool call, so no failure here justifies interrupting the
+    # user. Notably `resolve_agent_dir` raises InvalidUserMarkerError on a
+    # malformed `.agent/current_user` — without this handler that escaped as a
+    # traceback and exit 1, contradicting the policy provider/paths.py
+    # documents ("the Codex hooks catch Exception").
+    try:
+        _bootstrap_imports()
+        from provider.codex_hooks import append_prompt_to_chat_log, save_turn_baseline
 
-    payload = json.load(sys.stdin)
-    turn_id = payload.get("turn_id")
-    prompt = payload.get("prompt")
+        payload = json.load(sys.stdin)
+        turn_id = payload.get("turn_id")
+        prompt = payload.get("prompt")
 
-    project_root = _find_project_root()
-    from provider.codex_hooks import resolve_session_id
-    session_id = resolve_session_id()
-    append_prompt_to_chat_log(project_root, session_id, prompt)
-    save_turn_baseline(project_root, session_id, turn_id)
+        project_root = _find_project_root()
+        from provider.codex_hooks import resolve_session_id
+        session_id = resolve_session_id()
+        append_prompt_to_chat_log(project_root, session_id, prompt)
+        save_turn_baseline(project_root, session_id, turn_id)
+    except Exception as exc:
+        print(f"[codex-user-prompt-hook] skipped: {exc}", file=sys.stderr)
     return 0
 
 

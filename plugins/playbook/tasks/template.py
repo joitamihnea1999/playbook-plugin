@@ -181,7 +181,11 @@ def _intent_check(task_path: str) -> str:
     task_number = _tn.group(1) if _tn else None
     if task_number:
         return (
-            f"If .agent/chat_log.md exists, run `tasks context {task_number}` to see the user's original messages. "
+            # Unconditional: the old form said "if .agent/chat_log.md exists",
+            # which is false on a multi-user repo (the log lives in the lane),
+            # so judges were told to skip the user's own words. `tasks context`
+            # resolves the lane itself and is harmless when there is no log.
+            f"Run `tasks context {task_number}` to see the user's original messages. "
             "Check whether the task addresses what the user actually asked for, not just the agent's interpretation. "
         )
     return ""
@@ -433,7 +437,7 @@ Then **ask the user** what they want to work on. Don't autonomously pick a task.
 ## Don't
 
 - Create task directories manually — always `.claude/bin/tasks new`
-- Edit `.agent/sessions/` state files directly — use `.claude/bin/tasks work <N>` / `.claude/bin/tasks work done`
+- Edit session state files directly (under `.agent/`, or `.agent/<user>/` in a multi-user repo) — use `.claude/bin/tasks work <N>` / `.claude/bin/tasks work done`
 - Edit `## Status` in task.md directly — use `.claude/bin/tasks work done`
 - Skip task.md checkboxes — they're your observable progress
 - Start coding without an active task — blocked by hook until `.claude/bin/tasks work <N>`
@@ -548,8 +552,8 @@ checked — not before.
 
 ## Do Not
 
-- Edit `.agent/sessions/` files directly — use `tasks work` / `tasks work done`.
-- Create `.agent/tasks/NNN-name/` directories manually — use `tasks new`.
+- Edit session state files directly (under `.agent/`, or `.agent/<user>/` in a multi-user repo) — use `tasks work` / `tasks work done`.
+- Create task directories manually — use `tasks new`.
 - Close multiple gates in a single edit.
 - Start coding without an active task.
 """.format(cli_ref=cli_reference())
@@ -603,8 +607,8 @@ Never skip.  Never batch.
 
 ## Do Not
 
-- Edit `.agent/sessions/` files directly — use `tasks work` / `tasks work done`.
-- Create `.agent/tasks/NNN-name/` directories manually — use `tasks new`.
+- Edit session state files directly (under `.agent/`, or `.agent/<user>/` in a multi-user repo) — use `tasks work` / `tasks work done`.
+- Create task directories manually — use `tasks new`.
 - Close multiple gates in a single edit.
 - Start coding without an active task.
 """.format(cli_ref=cli_reference())
