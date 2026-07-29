@@ -190,12 +190,76 @@ def find_project_root() -> Path:
     return cwd
 
 
+def _own_session_id() -> str:
+    """The session id to exclude from any sweep or staleness report.
+
+    Prefers PLAYBOOK_SESSION_ID but falls back to resolve_session_id() rather
+    than to "" — the env var does not always propagate (VSCode CLAUDE_ENV_FILE
+    quirks, missing wrappers, subprocess loss), and on Windows resolve_session_id
+    returns the constant `pid-win-fallback`, whose non-numeric suffix makes
+    `int()`/`kill -0` fail. With an empty own-id, every CLI invocation would
+    therefore classify the shared Windows session dir as dead and delete it
+    (task 027).
+    """
+    return os.environ.get("PLAYBOOK_SESSION_ID", "") or resolve_session_id()
+
+
+def _session_is_dead(session_dir: Path, own_session: str, cutoff: float) -> bool:
+    """THE session-liveness policy. One function, so consumers cannot drift.
+
+    Callers: _gc_dead_sessions (deletes) and `tasks doctor` (reports). Its bash
+    twin is the sweep in `scripts/session-start-hook`; parity is asserted by S18
+    in tests/wrapper-multiuser-fixture.sh.
+
+    `pid-*` names are decided by liveness ALONE, never by mtime: `current_state`
+    is written only at activation, so a busy session's pointer can be arbitrarily
+    old while a dead session's can be seconds fresh. Only legacy non-PID names
+    (pre-migration UUIDs, "default") fall back to the 24h mtime rule.
+    """
+    name = session_dir.name
+    if own_session and name == own_session:
+        return False                      # never our own session
+    if name.startswith("pid-"):
+        try:
+            os.kill(int(name[4:]), 0)
+            return False                  # alive — keep
+        except PermissionError:
+            # EPERM: the process EXISTS but belongs to another OS user. Alive, so
+            # keep it — reclaiming it would be cross-user data loss.
+            return False
+        except (ValueError, OverflowError, OSError):
+            # ValueError: not a number. OverflowError: numeric but too large for
+            # C pid_t — NOT an OSError, so leaving it out made one such directory
+            # crash every single `tasks` invocation (this runs at CLI entry).
+            # OSError/ProcessLookupError: genuinely no such process.
+            return True
+    state_file = session_dir / "current_state"
+    try:
+        if state_file.exists() and state_file.stat().st_mtime >= cutoff:
+            return False                  # fresh — keep
+    except OSError:
+        pass
+    return True
+
+
 def _gc_dead_sessions(project_path: Path) -> None:
-    """Remove stale session dirs and legacy flat files.
+    """Remove dead session dirs and legacy flat files.
 
     Called at every tasks invocation. Cheap: O(N sessions × 1 stat).
 
-    Session dirs older than 24h (by current_state mtime) are removed.
+    THIS IS THE CANONICAL SESSION-GC POLICY, AND IT HAS A BASH TWIN:
+    `scripts/session-start-hook` sweeps the same directory at SessionStart and
+    must implement the same rules. Until v1.4.6 it did not — it keyed purely on
+    `current_state` mtime, so it deleted the live session's own pointer for any
+    task active >24h (task 027). Change both or neither; the parity assertion
+    lives in `tests/wrapper-multiuser-fixture.sh` S18.
+
+    Policy: never our own session → `pid-*` kept iff the pid is alive → any
+    other name (legacy UUID, "default") kept iff `current_state` is <24h old.
+    A `pid-*` name that isn't a live pid is removed regardless of mtime: a busy
+    session's pointer can be arbitrarily old (it is written only at activation),
+    and a dead session's can be seconds fresh.
+
     Legacy flat files (.hook_counters.*, current_state*) in .agent/ root
     are always removed — they're pre-migration artifacts.
     """
@@ -211,35 +275,19 @@ def _gc_dead_sessions(project_path: Path) -> None:
                 except OSError:
                     pass
 
-    # Clean stale session dirs
+    # Clean dead session dirs (see _session_is_dead)
     if not sessions_dir.exists():
         return
     cutoff = time.time() - 86400
-    own_session = os.environ.get("PLAYBOOK_SESSION_ID", "")
+    own_session = _own_session_id()
     for session_dir in sessions_dir.iterdir():
-        if not session_dir.is_dir():
+        # Skip symlinks explicitly. rmtree already refuses to follow one, but the
+        # bash twin must skip them too (there, `rm -rf "link/"` destroys the
+        # TARGET), so stating it keeps the two policies visibly identical.
+        if session_dir.is_symlink() or not session_dir.is_dir():
             continue
-        # Never remove our own session
-        if own_session and session_dir.name == own_session:
-            continue
-        name = session_dir.name
-        # PID-based sessions: instant GC via kill -0 liveness check
-        if name.startswith("pid-"):
-            try:
-                pid = int(name[4:])
-                os.kill(pid, 0)  # raises OSError if process is dead
-                continue  # still alive — keep
-            except (ValueError, OSError):
-                pass  # dead or invalid — remove
-        else:
-            # Non-PID sessions (legacy UUIDs, "default"): 24h mtime fallback
-            state_file = session_dir / "current_state"
-            try:
-                if state_file.exists() and state_file.stat().st_mtime >= cutoff:
-                    continue  # fresh — keep
-            except OSError:
-                pass
-        shutil.rmtree(session_dir, ignore_errors=True)
+        if _session_is_dead(session_dir, own_session, cutoff):
+            shutil.rmtree(session_dir, ignore_errors=True)
 
 
 def _panel_triage_frame() -> list[str]:
@@ -1133,7 +1181,11 @@ def main():
             return
 
         # Verify task exists
-        from tasks.core import _find_active_task
+        # _extract_head_position is imported here, not further down where the
+        # auto-close branch uses it: both live in this same function, so a
+        # later function-scope import leaves the name unbound for the
+        # re-adoption arm below (UnboundLocalError, not NameError).
+        from tasks.core import _find_active_task, _extract_head_position
         task_file = _find_active_task(project_path, task_num)
         if not task_file:
             tasks_dir = resolve_agent_dir(project_path) / "tasks"
@@ -1155,6 +1207,23 @@ def main():
                     # Fall through to activation below
                 elif "<!-- stub:" in tf.read_text(encoding="utf-8"):
                     # Stub — allow activation, expansion happens below
+                    task_file = tf
+                elif _extract_head_position(tf) == "(all gates checked)":
+                    # Re-adopt: every gate is checked but the task was never
+                    # closed. Reachable whenever the session pointer is lost
+                    # while a finished-but-open task is active — a lost pointer
+                    # used to make this state UNRECOVERABLE through the CLI:
+                    # `work done` reads the pointer (absent → "No active task",
+                    # never touches ## Status), and this branch refused the task
+                    # because _find_active_task only returns tasks with open
+                    # gates. The only sanctioned writer of ## Status needed a
+                    # pointer, and the only way to get a pointer was refused, so
+                    # the field report's author had to hand-write the file
+                    # (task 027). Status is deliberately NOT rewritten here —
+                    # activation alone restores the pointer, and `work done`
+                    # remains the thing that closes the task.
+                    print(f"Note: task {task_num} has all gates checked but is "
+                          f"not closed — re-adopting; run 'tasks work done' to close it.")
                     task_file = tf
                 else:
                     print(f"Task {task_num} has no open gates.", file=sys.stderr)
@@ -1200,7 +1269,17 @@ def main():
         session_dir.mkdir(parents=True, exist_ok=True)
         session_state.write_text(f"{task_num}\n", encoding="utf-8")
 
-        # Stale session GC handled by _gc_dead_sessions() at CLI entry point
+        # Session GC runs in _gc_dead_sessions() at the CLI entry point — and
+        # ALSO in scripts/session-start-hook, which sweeps the same directory at
+        # every SessionStart (including `compact`). This comment used to name
+        # only the Python one, which is part of how the hook's contradictory
+        # mtime-only policy went unnoticed until task 027.
+        #
+        # NOTE: only ACTIVATION writes `current_state` — this line, the freehand
+        # orchestrator arm, and prepare-merge's pointer rewrite. Nothing refreshes
+        # it while the session works, so its mtime means "when the task was
+        # activated" and is never a liveness signal. Deleting sessions by that
+        # mtime is what task 027 fixed; don't reintroduce it.
 
         # Expand stubs on activation
         task_content = task_file.read_text(encoding="utf-8")
@@ -3220,20 +3299,34 @@ def main():
         stdout_enc = getattr(sys.stdout, "encoding", "unknown") or "unknown"
         check("unicode: stdout encoding", "utf" in stdout_enc.lower(), stdout_enc)
 
-        # 3. Stale session dirs (current_state older than 24h — orphaned from crashed sessions)
+        # 3. Dead session dirs left by crashed sessions.
+        #
+        # Uses _session_is_dead, the same predicate _gc_dead_sessions deletes by,
+        # so doctor cannot report a session the GC would keep (or vice versa).
+        # It used to flag any pointer older than 24h with no liveness check and
+        # no self-exclusion, which after task 027 is exactly the false-positive
+        # class this task removed: a live session on a multi-day task is the
+        # NORMAL case, not a fault to report.
+        #
+        # In practice this now reports only what the GC could NOT reclaim —
+        # _gc_dead_sessions runs at the CLI entry point, so by the time doctor
+        # looks, every deletable dead dir is already gone. A non-empty list
+        # therefore means the sweep is being blocked (permissions, read-only
+        # mount), which is worth surfacing precisely because the sweep itself
+        # is deliberately silent about failures (fail-open).
         agent_dir = resolve_agent_dir(project_path)
         stale = []
         sessions_dir = agent_dir / "sessions"
         if sessions_dir.exists():
             cutoff = time.time() - 86400
-            for sf in sessions_dir.glob("*/current_state"):
-                try:
-                    if sf.stat().st_mtime < cutoff:
-                        stale.append(sf.parent.name)
-                except OSError:
-                    pass
-        check("session: no stale session dirs", len(stale) == 0,
-              f"stale: {', '.join(stale)}" if stale else "clean")
+            own_session = _own_session_id()
+            for session_dir in sorted(sessions_dir.iterdir()):
+                if session_dir.is_symlink() or not session_dir.is_dir():
+                    continue
+                if _session_is_dead(session_dir, own_session, cutoff):
+                    stale.append(session_dir.name)
+        check("session: no dead session dirs", len(stale) == 0,
+              f"dead: {', '.join(stale)}" if stale else "clean")
 
         # 4. Hooks — check .claude/hooks/ (installed) or src/hooks/ (dev repo)
         hooks_dirs = [project_path / "scripts", project_path / ".claude" / "hooks", project_path / "src" / "hooks"]

@@ -30,9 +30,47 @@ if ! agent_dir_writable "$PROJECT_DIR"; then
     exit 0
 fi
 
-# Session ID: pid-$PPID (matches session-start-hook)
+# Session ID: resolve_session_id(), the SAME resolver every other hook uses
+# (session-start-hook, task-gate-hook, state-echo-hook) and the Python CLI.
+# This used to be `${PLAYBOOK_SESSION_ID:-pid-$PPID}` with a comment claiming it
+# matched session-start-hook — it did not. When the env var fails to propagate
+# (VSCode CLAUDE_ENV_FILE quirks, missing wrappers, subprocess loss) the ancestor
+# scan returns pid-<root agent>, not pid-$PPID, and on MSYS the resolver returns
+# the constant pid-win-fallback — so this hook could delete a directory that was
+# never a session while leaving the real one behind (task 027).
 INPUT=$(cat)
-SESSION_ID="${PLAYBOOK_SESSION_ID:-pid-$PPID}"
+SESSION_ID="$(resolve_session_id)"
+
+# SessionEnd is registered with no matcher, so it fires for every reason —
+# including ones where THE SAME PROCESS KEEPS RUNNING and SessionStart fires
+# again with the same pid (`clear` certainly; interactive `/resume` reportedly).
+# Deleting the session dir there silently deactivates the task mid-session: the
+# pointer goes away, the dir is re-created empty, and task-gate-hook starts
+# hard-blocking Edit/Write with "No active task" — the same failure the
+# SessionStart GC used to cause (task 027). `/clear` discards the conversation,
+# not the work; task.md is the source of truth and the on-disk pointer exists
+# precisely to outlive context.
+#
+# DELETE ONLY ON AN EXPLICIT TERMINAL ALLOWLIST. The first version of this fix
+# kept the pointer only for an exact `reason=clear` and fell through to deleting
+# otherwise, reasoning that this preserved existing behaviour and "can only cost
+# cleanup, never a live pointer" — which is backwards, as the review panel
+# pointed out: an unparseable payload, a missing python3, a `Clear` case variant
+# or any future rename lands on the DELETE path, so payload drift costs a live
+# pointer and reintroduces the reported bug. Meanwhile a missed cleanup is now
+# genuinely free: the liveness-based GC in session-start-hook reclaims the
+# directory as soon as the pid is gone. So: unknown reason ⇒ KEEP.
+END_REASON=$(printf '%s' "$INPUT" | python3 -c \
+    "import sys,json; print(json.loads(sys.stdin.read()).get('reason',''))" 2>/dev/null || echo "")
+# Case-fold so `Clear`/`LOGOUT` cannot slip through on either side.
+END_REASON=$(printf '%s' "$END_REASON" | tr '[:upper:]' '[:lower:]')
+
+case "$END_REASON" in
+    logout|prompt_input_exit|other|exit)
+        ;;                      # the process is going away — clean up
+    *)
+        exit 0 ;;               # clear, resume, unknown, unparseable — KEEP
+esac
 
 # Remove entire session directory (state + counters + offset)
 SESSION_DIR="$AGENT_DIR/sessions/$SESSION_ID"

@@ -450,11 +450,15 @@ echo "=== S13: launch-monitor resolves lane + root without hardcoding ==="
 echo "=== S14: init provisions the lane, never a phantom root lane ==="
 {
     INIT="$SCRIPTS/init"
+    # init writes ~/.claude/{bash-log.*,settings.json} and a shell rc line, so it
+    # gets an isolated HOME. These runs used the developer's REAL home until task
+    # 027 — every suite run mutated the machine it was testing on.
+    S14_HOME="$WORK/s14-home"; mkdir -p "$S14_HOME"
 
     # (a) Brand-new project: everything at the root, exactly as before.
     d="$WORK/s14-new"; mkdir -p "$d"
     set +e
-    out="$(cd "$d" && bash "$INIT" 2>&1)"; rc=$?
+    out="$(cd "$d" && HOME="$S14_HOME" bash "$INIT" 2>&1)"; rc=$?
     set -e
     assert_eq "$rc" "0" "S14 new project: init exits 0"
     for sub in tasks playbooks monitor; do
@@ -469,7 +473,7 @@ echo "=== S14: init provisions the lane, never a phantom root lane ==="
     # (b) Multi-user: runtime state in the lane, shared policy still at root.
     d="$WORK/s14-mu"; build_project "$d" multi-user alice
     set +e
-    out="$(cd "$d" && bash "$INIT" 2>&1)"; rc=$?
+    out="$(cd "$d" && HOME="$S14_HOME" bash "$INIT" 2>&1)"; rc=$?
     set -e
     assert_eq "$rc" "0" "S14 multi-user: init exits 0"
     for sub in tasks playbooks monitor; do
@@ -491,7 +495,7 @@ echo "=== S14: init provisions the lane, never a phantom root lane ==="
     # (c) Fresh clone: refuse rather than create a phantom root lane.
     d="$WORK/s14-fresh"; build_project "$d" multi-user   # lanes, no marker
     set +e
-    out="$(cd "$d" && bash "$INIT" 2>&1)"; rc=$?
+    out="$(cd "$d" && HOME="$S14_HOME" bash "$INIT" 2>&1)"; rc=$?
     set -e
     assert_eq "$rc" "1" "S14 fresh clone: init exits 1"
     assert_contains "$out" "no .agent/current_user marker" "S14 fresh clone: explains why"
@@ -505,7 +509,7 @@ echo "=== S14: init provisions the lane, never a phantom root lane ==="
     # (d) Idempotent re-run on the multi-user repo — still no root lane.
     d="$WORK/s14-mu"
     set +e
-    out="$(cd "$d" && bash "$INIT" 2>&1)"; rc=$?
+    out="$(cd "$d" && HOME="$S14_HOME" bash "$INIT" 2>&1)"; rc=$?
     set -e
     assert_eq "$rc" "0" "S14 re-run: init exits 0"
     assert_contains "$out" "exists" "S14 re-run: reports existing state as skipped"
@@ -806,6 +810,295 @@ source /dev/null'
     [ "$(printf '%s' "$out" | grep -ci 'is a directory' || true)" -gt 0 ] \
         && pass "S17 negative control (inline): inline form leaks the open error (proves the braces work)" \
         || fail "S17 negative control (inline) VACUOUS: no leak from the inline form"
+}
+
+echo "=== S18: SessionStart GC must not delete a live session (field report 2026-07-29) ==="
+{
+    # Until v1.4.6 the sweep in session-start-hook keyed ONLY on `current_state`
+    # mtime — no liveness check, no self-exclusion. But `current_state` is
+    # written only by `tasks work <N>`, so its mtime means "when the task was
+    # activated", never "when the session was last alive". Any task active >24h
+    # therefore had its OWN pointer rm -rf'd at the next SessionStart, which
+    # fires on `compact` too — and task-gate-hook then hard-blocks Edit/Write.
+    #
+    # The policy is now `tasks/cli.py::_gc_dead_sessions`' policy, and S18
+    # asserts BOTH sweepers agree on the same tree (A2 below).
+    #
+    # Ages are deliberately far from the 24h boundary (now vs 2020) — `find
+    # -mtime` buckets by whole days while Python compares epoch seconds, so
+    # near-boundary parity is a documented tolerance, not a tested guarantee.
+    HOOK="$SCRIPTS/session-start-hook"
+    # Mutants must live BESIDE gate-echo-lib.sh: the hook sources it from
+    # `dirname $0` under `set -e`, so a mutant dropped in $WORK dies at the
+    # source line and sweeps nothing — every control would then "pass" by
+    # never running. Copy the whole scripts dir once and mutate inside it.
+    MUT="$WORK/s18-mutant-scripts"
+    cp -R "$SCRIPTS" "$MUT"
+
+    # S18 needs three pids: our own, a LIVE foreign one, and a genuinely dead
+    # (and reaped) one. It deliberately uses NO background jobs to get them.
+    #
+    # Why: this fixture runs `trap 'rm -rf "$WORK"' EXIT`, and a backgrounded
+    # simple command runs in a subshell that INHERITS that trap and fires it on
+    # exit. So `sleep 300 & … kill` deletes the fixture's own scratch tree
+    # mid-run — measured: $WORK vanished, later sections silently rebuilt only
+    # the dirs they needed, and the mutant hooks were simply gone. A killed
+    # background job is a booby trap in any fixture that cleans up via EXIT.
+    #
+    # Instead: our own pid, our PARENT's pid (alive for the whole run, foreign
+    # to the sweep, nothing to clean up), and a pid harvested from a process
+    # that has already exited and been reaped by the command substitution.
+    OWN="pid-$$"                       # numeric and demonstrably alive
+    OTHER="$PPID"                      # live, foreign, not a job we manage
+    DEAD="$(bash -c 'echo $$')"        # exited + reaped before we look at it
+    # Guard the pid-reuse window rather than trusting it: a recycled pid would
+    # make the "dead session removed" assertions vacuous.
+    if kill -0 "$DEAD" 2>/dev/null; then
+        fail "S18 setup: harvested pid $DEAD is still alive (pid reuse) — dead-session assertions would be vacuous"
+        DEAD=""
+    fi
+
+    # Populate $1 with one dir per policy case. Pointer ages are chosen so that
+    # mtime and liveness DISAGREE wherever the bug lived:
+    #   pid-own        live, STALE pointer  → the field case (kept: self-exclusion)
+    #   pid-other-live live, STALE pointer  → kept by liveness alone
+    #   pid-dead       dead, FRESH pointer  → removed despite a fresh pointer
+    build_gc_tree() {
+        local sdir="$1" n
+        mkdir -p "$sdir"
+        for n in "$OWN" "pid-$OTHER" "pid-$DEAD" pid-12ab pid-win-fallback uuid-stale uuid-fresh; do
+            mkdir -p "$sdir/$n"
+            printf '001\n' > "$sdir/$n/current_state"
+        done
+        for n in "$OWN" "pid-$OTHER" uuid-stale; do
+            touch -t 202001010000 "$sdir/$n/current_state"
+        done
+        : > "$sdir/stray-file"       # not a dir — must survive untouched
+    }
+    survivors() {   # $1=sessions dir → sorted names, one per line
+        find "$1" -mindepth 1 -maxdepth 1 2>/dev/null | sed 's|.*/||' | LC_ALL=C sort
+    }
+
+    # Project path contains a SPACE on purpose: the old sweep piped
+    # `find -exec dirname` into `xargs rm -rf`, which word-splits — on any
+    # iCloud/"Mobile Documents" checkout it both missed its target and aimed
+    # rm -rf at path fragments.
+    d="$WORK/s18 with space"; build_project "$d" legacy
+    build_gc_tree "$d/.agent/sessions"
+    set +e
+    out="$(cd "$d" && PLAYBOOK_SESSION_ID="$OWN" bash "$HOOK" </dev/null 2>&1)"; rc=$?
+    set -e
+    assert_eq "$rc" "0" "S18 hook exits 0"
+    got="$(survivors "$d/.agent/sessions")"
+    want="$(printf '%s\n' "$OWN" "pid-$OTHER" stray-file uuid-fresh | LC_ALL=C sort)"
+    assert_eq "$got" "$want" "S18 keeps exactly {own(stale), other-live(stale), uuid-fresh, stray file}"
+    # Spelled out individually so a failure names the policy arm that broke.
+    [ -d "$d/.agent/sessions/$OWN" ]           && pass "S18 own session survives a 48h-stale pointer (the field bug)" || fail "S18 own session deleted — the reported bug is back"
+    [ -d "$d/.agent/sessions/pid-$OTHER" ]     && pass "S18 live foreign session survives a stale pointer" || fail "S18 deleted a live foreign session"
+    [ ! -d "$d/.agent/sessions/pid-$DEAD" ]    && pass "S18 dead pid removed despite a fresh pointer" || fail "S18 kept a dead session"
+    [ ! -d "$d/.agent/sessions/pid-12ab" ]     && pass "S18 non-numeric pid- name removed (matches Python's ValueError arm)" || fail "S18 kept pid-12ab"
+    [ ! -d "$d/.agent/sessions/pid-win-fallback" ] && pass "S18 non-own pid-win-fallback removed" || fail "S18 kept a non-own pid-win-fallback"
+    [ ! -d "$d/.agent/sessions/uuid-stale" ]   && pass "S18 legacy stale session removed (mtime fallback)" || fail "S18 kept a stale legacy session"
+    [ -d "$d/.agent/sessions/uuid-fresh" ]     && pass "S18 legacy fresh session kept (mtime fallback)" || fail "S18 removed a fresh legacy session"
+    [ -f "$d/.agent/sessions/stray-file" ]     && pass "S18 stray non-dir untouched" || fail "S18 clobbered a stray file"
+
+    # ── A2: the two sweepers must agree ──────────────────────────────────────
+    # cli.py::_gc_dead_sessions is the canonical policy and runs at every CLI
+    # invocation; the hook's sweep runs first at SessionStart. Before this task
+    # they implemented OPPOSITE policies over the same directory. Same tree,
+    # same own-session id, same PIDs → the keep sets must be identical.
+    d2="$WORK/s18 parity"; build_project "$d2" legacy
+    build_gc_tree "$d2/.agent/sessions"
+    set +e
+    pyout="$(cd "$d2" && PYTHONPATH="$HERE/../plugins/playbook" PLAYBOOK_SESSION_ID="$OWN" \
+        python3 -c 'import sys; from pathlib import Path
+from tasks.cli import _gc_dead_sessions
+_gc_dead_sessions(Path(sys.argv[1]))' "$d2" 2>&1)"; pyrc=$?
+    set -e
+    assert_eq "$pyrc" "0" "S18/A2 python sweeper runs clean${pyout:+ ($pyout)}"
+    assert_eq "$(survivors "$d2/.agent/sessions")" "$got" \
+        "S18/A2 bash and python sweepers keep the SAME set (one policy, not two)"
+
+    # ── Negative control 1: self-exclusion ───────────────────────────────────
+    # For a LIVE NUMERIC own pid, self-exclusion and liveness overlap — deleting
+    # the guard changes nothing, so a numeric victim proves nothing. The only
+    # case where self-exclusion is load-bearing is an own id that fails
+    # `kill -0`: the Windows `pid-win-fallback` constant. That is the victim.
+    d3="$WORK/s18 nc1"; build_project "$d3" legacy
+    build_gc_tree "$d3/.agent/sessions"
+    touch -t 202001010000 "$d3/.agent/sessions/pid-win-fallback/current_state"
+    set +e
+    (cd "$d3" && PLAYBOOK_SESSION_ID=pid-win-fallback bash "$HOOK" </dev/null >/dev/null 2>&1)
+    set -e
+    [ -d "$d3/.agent/sessions/pid-win-fallback" ] \
+        && pass "S18 NC1 baseline: own pid-win-fallback survives a stale pointer" \
+        || fail "S18 NC1 baseline: own pid-win-fallback deleted (Windows loses its session)"
+
+    sed '/SESSION_ID" ] \&\& continue/d' "$HOOK" > "$MUT/session-start-hook"
+    assert_eq "$(grep -c 'SESSION_ID" ] && continue' "$MUT/session-start-hook")" "0" \
+        "S18 NC1: mutant actually removed the self-exclusion line"
+    d4="$WORK/s18 nc1m"; build_project "$d4" legacy
+    build_gc_tree "$d4/.agent/sessions"
+    touch -t 202001010000 "$d4/.agent/sessions/pid-win-fallback/current_state"
+    set +e
+    (cd "$d4" && PLAYBOOK_SESSION_ID=pid-win-fallback bash "$MUT/session-start-hook" </dev/null >/dev/null 2>&1); rc=$?
+    set -e
+    # A mutant that dies BEFORE the sweep (e.g. a failed `source` under set -e)
+    # deletes nothing, and every "mutant kills the victim" assertion below would
+    # pass for the wrong reason. Demand it ran to completion first.
+    assert_eq "$rc" "0" "S18 NC1: mutant hook actually ran to completion (not killed before the sweep)"
+    [ ! -d "$d4/.agent/sessions/pid-win-fallback" ] \
+        && pass "S18 NC1: mutant without self-exclusion DELETES the own session" \
+        || fail "S18 NC1 VACUOUS: own session survived without the self-exclusion guard"
+
+    # ── Negative control 2: liveness ─────────────────────────────────────────
+    # Revert the pid- arm to the pre-1.4.7 mtime rule. This reproduces the
+    # historical bug exactly, and flips TWO observables: a live session with an
+    # old pointer dies (the field report), and a dead session with a fresh
+    # pointer survives. Asserting "own dies" would be unreachable here — NC1's
+    # self-exclusion still stands — which is why the arm needs its own victims.
+    # Swap the liveness test for the pre-027 mtime rule, leaving everything else
+    # intact. The EPERM arm below it then never matches (kill_err stays unset),
+    # so the pid- branch becomes purely mtime-driven — exactly the old policy.
+    sed 's|if kill_err="$(kill -0 "${name#pid-}" 2>&1)"; then|if [ -n "$(find "$d" -maxdepth 1 -name current_state -mtime -1 2>/dev/null)" ]; then|' \
+        "$HOOK" > "$MUT/session-start-hook"
+    # Count the CODE line, not the policy comment that also says "kill -0".
+    assert_eq "$(grep -c 'kill -0 "${name#pid-}" 2>&1' "$MUT/session-start-hook")" "0" \
+        "S18 NC2: mutant actually removed the liveness check"
+    d5="$WORK/s18 nc2m"; build_project "$d5" legacy
+    build_gc_tree "$d5/.agent/sessions"
+    set +e
+    (cd "$d5" && PLAYBOOK_SESSION_ID="$OWN" bash "$MUT/session-start-hook" </dev/null >/dev/null 2>&1); rc=$?
+    set -e
+    assert_eq "$rc" "0" "S18 NC2: mutant hook actually ran to completion (not killed before the sweep)"
+    [ ! -d "$d5/.agent/sessions/pid-$OTHER" ] \
+        && pass "S18 NC2: mtime-only mutant DELETES a live session with an old pointer (the field bug)" \
+        || fail "S18 NC2 VACUOUS: live-stale session survived the mtime-only mutant"
+    [ -d "$d5/.agent/sessions/pid-$DEAD" ] \
+        && pass "S18 NC2: mtime-only mutant KEEPS a dead session with a fresh pointer" \
+        || fail "S18 NC2 VACUOUS: dead-fresh session removed by the mtime-only mutant"
+
+    # ── Negative control 3: fail-open removal ────────────────────────────────
+    # The hook runs under `set -e`, so an undeletable session dir must not abort
+    # session start — losing the wrapper provisioning and env export with it.
+    if [ "$(id -u)" != 0 ]; then
+        d6="$WORK/s18 ro"; build_project "$d6" legacy
+        build_gc_tree "$d6/.agent/sessions"
+        chmod 500 "$d6/.agent/sessions/uuid-stale"     # non-writable → rm -rf of its child fails
+        set +e
+        (cd "$d6" && PLAYBOOK_SESSION_ID="$OWN" bash "$HOOK" </dev/null >/dev/null 2>&1); rc=$?
+        set -e
+        chmod 700 "$d6/.agent/sessions/uuid-stale" 2>/dev/null || true
+        assert_eq "$rc" "0" "S18 NC3: undeletable session dir does not abort SessionStart (set -e fail-open)"
+    else
+        pass "S18 NC3 skipped (running as root — chmod cannot block rm)"
+    fi
+
+    # ── Symlink safety (impl panel, Critical) ────────────────────────────────
+    # `for d in "$SESSIONS_DIR"/*/` matched a symlink-to-dir WITH a trailing
+    # slash, and `rm -rf "link/"` follows it: measured on macOS, the TARGET
+    # directory was deleted and the symlink left behind. Python's rmtree refuses,
+    # so this was also a bash/python parity hole the A2 parity test could not see.
+    d8="$WORK/s18 symlink"; build_project "$d8" legacy
+    mkdir -p "$d8/.agent/sessions" "$d8/precious"
+    echo PRECIOUS > "$d8/precious/keepme.txt"
+    ln -s "$d8/precious" "$d8/.agent/sessions/pid-12ab"   # named so policy calls it dead
+    set +e
+    (cd "$d8" && PLAYBOOK_SESSION_ID="$OWN" bash "$HOOK" </dev/null >/dev/null 2>&1); rc=$?
+    set -e
+    assert_eq "$rc" "0" "S18 symlink: hook exits 0"
+    [ -f "$d8/precious/keepme.txt" ] \
+        && pass "S18 symlink: rm -rf did NOT follow the link into the target" \
+        || fail "S18 symlink: DESTROYED the symlink target — rm -rf followed the link"
+
+    # Negative control: restore the trailing-slash glob and the target dies.
+    sed 's|for d in "$SESSIONS_DIR"/\*; do|for d in "$SESSIONS_DIR"/*/; do|' \
+        "$HOOK" > "$MUT/session-start-hook"
+    assert_eq "$(grep -c 'SESSIONS_DIR"/\*/; do' "$MUT/session-start-hook")" "1" \
+        "S18 symlink NC: mutant restored the trailing-slash glob"
+    d9="$WORK/s18 symlink nc"; build_project "$d9" legacy
+    mkdir -p "$d9/.agent/sessions" "$d9/precious"
+    echo PRECIOUS > "$d9/precious/keepme.txt"
+    ln -s "$d9/precious" "$d9/.agent/sessions/pid-12ab"
+    set +e
+    (cd "$d9" && PLAYBOOK_SESSION_ID="$OWN" bash "$MUT/session-start-hook" </dev/null >/dev/null 2>&1); rc=$?
+    set -e
+    assert_eq "$rc" "0" "S18 symlink NC: mutant hook ran to completion"
+    [ ! -f "$d9/precious/keepme.txt" ] \
+        && pass "S18 symlink NC: trailing-slash glob DOES destroy the target (control is live)" \
+        || fail "S18 symlink NC VACUOUS: target survived the buggy glob"
+
+    # ── EPERM means alive, not dead (impl panel) ─────────────────────────────
+    # kill -0 on another user's live process fails with EPERM. Treating that as
+    # dead would delete a live session — and the old mtime-only sweep kept it.
+    if [ "$(id -u)" != 0 ]; then
+        d10="$WORK/s18 eperm"; build_project "$d10" legacy
+        mkdir -p "$d10/.agent/sessions/pid-1"          # launchd/init: alive, root-owned
+        printf '001\n' > "$d10/.agent/sessions/pid-1/current_state"
+        touch -t 202001010000 "$d10/.agent/sessions/pid-1/current_state"
+        set +e
+        (cd "$d10" && PLAYBOOK_SESSION_ID="$OWN" bash "$HOOK" </dev/null >/dev/null 2>&1)
+        set -e
+        [ -d "$d10/.agent/sessions/pid-1" ] \
+            && pass "S18 EPERM: another user's LIVE session is kept (not cross-user deleted)" \
+            || fail "S18 EPERM: deleted a live session owned by another OS user"
+    else
+        pass "S18 EPERM skipped (running as root — no EPERM)"
+    fi
+
+    # ── A2: SessionEnd must not deactivate a task on /clear ──────────────────
+    # `clear` ends the *conversation*, not the process: the same pid continues
+    # and SessionStart fires again immediately. Deleting the session dir there
+    # drops the active-task pointer mid-session — the same observable failure as
+    # the GC bug above, reached by a different path.
+    END_HOOK="$SCRIPTS/session-end-hook"
+    # Unknown/unparseable/case-variant reasons must KEEP: the delete path is an
+    # explicit terminal allowlist, because payload drift landing on "delete"
+    # costs a LIVE pointer, while a missed cleanup is free (the liveness GC
+    # reclaims it). `resume` is here because SessionEnd reportedly fires on an
+    # interactive /resume while the same process continues.
+    for reason in clear resume Clear "" bogus_future_reason logout prompt_input_exit other; do
+        d7="$WORK/s18 end-${reason:-empty}"; build_project "$d7" legacy
+        mkdir -p "$d7/.agent/sessions/$OWN"
+        printf '042\n' > "$d7/.agent/sessions/$OWN/current_state"
+        set +e
+        (cd "$d7" && printf '{"reason":"%s"}' "$reason" \
+            | PLAYBOOK_SESSION_ID="$OWN" bash "$END_HOOK" >/dev/null 2>&1); rc=$?
+        set -e
+        assert_eq "$rc" "0" "S18/A2end[$reason] hook exits 0"
+        case "$reason" in
+            logout|prompt_input_exit|other) expect=delete ;;
+            *)                              expect=keep ;;
+        esac
+        if [ "$expect" = keep ]; then
+            [ -f "$d7/.agent/sessions/$OWN/current_state" ] \
+                && pass "S18/A2end[${reason:-<empty>}] KEEPS the active-task pointer" \
+                || fail "S18/A2end[${reason:-<empty>}] deleted a live pointer (fail-open is inverted)"
+        else
+            [ ! -d "$d7/.agent/sessions/$OWN" ] \
+                && pass "S18/A2end[$reason] still cleans up the session dir (process is going away)" \
+                || fail "S18/A2end[$reason] left a session dir behind"
+        fi
+    done
+
+    # SessionEnd must use the SHARED session-id resolver. It used to compute
+    # `${PLAYBOOK_SESSION_ID:-pid-$PPID}` under a comment claiming that matched
+    # session-start-hook — it did not: the ancestor scan returns the ROOT agent
+    # pid, and MSYS returns the constant pid-win-fallback, so with the env var
+    # absent this hook could delete a directory that was never a session while
+    # leaving the real one behind. Asserted structurally: reproducing an
+    # env-less ancestor walk inside a fixture subshell resolves against the
+    # FIXTURE's process tree, not a real agent's, so a behavioural assertion here
+    # would pin the harness rather than the hook.
+    grep -q 'SESSION_ID="$(resolve_session_id)"' "$END_HOOK" \
+        && pass "S18/A2end session-end-hook uses the shared resolve_session_id" \
+        || fail "S18/A2end session-end-hook computes its own session id again"
+    # Match the ASSIGNMENT, not the word: the hook's comment names the old
+    # `pid-$PPID` shape on purpose, to explain why it was wrong.
+    assert_eq "$(grep -c 'SESSION_ID="${PLAYBOOK_SESSION_ID:-pid-\$PPID}"' "$END_HOOK")" "0" \
+        "S18/A2end no ad-hoc pid-\$PPID fallback remains in code"
+
+    # Nothing to tear down: S18 spawned no background jobs (see the note above).
 }
 
 echo

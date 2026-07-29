@@ -2,6 +2,33 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.4.7] — 2026-07-29
+
+A field-reported bug that silently revoked the agent's permission to edit code mid-task, the recovery dead-end it led to, and task 023's two deferred `init` fixes (task 027).
+
+### Fixed (session pointer loss — the headline)
+
+- **`SessionStart` no longer deletes the live session's own state directory.** The GC sweep in `scripts/session-start-hook` decided whether a session was dead purely from the mtime of its `current_state` file — with no liveness check and no self-exclusion, so it could (and did) `rm -rf` the directory it had created twelve lines earlier. That mtime was never a liveness signal: `current_state` is written **only** by `tasks work <N>`, so it records when the task was *activated* and is never refreshed by activity. Any task active for more than 24 hours was therefore **guaranteed** to lose its pointer at the next `SessionStart` — and because the hook is registered with no matcher, that fires on `compact` too, so the longest, busiest sessions re-rolled the dice at every compaction. The consequence was not cosmetic: with the pointer gone, `task-gate-hook` hard-blocks `Edit`/`Write` with "BLOCKED: No active task", so a live mid-task session loses the ability to edit source with nothing connecting it to a GC sweep. The sweep now mirrors `tasks/cli.py::_gc_dead_sessions` exactly — never its own session, `pid-*` kept by `kill -0` liveness alone, 24h mtime only for legacy non-PID names — with every path quoted (the old `find -exec dirname | xargs rm -rf` also word-split on spaces, so on any `Mobile Documents`-style path it both missed its target and aimed `rm -rf` at path fragments) and every removal fail-open, so an undeletable directory cannot abort session start.
+- **One policy, not two.** The Python GC had always done this correctly, so the two implementations enforced contradictory policies over the same directory — and the bash one ran first. The policy now lives in a single predicate, `_session_is_dead`, shared by `_gc_dead_sessions` (which deletes) and `tasks doctor` (which reports), with the bash sweep as its documented twin and a test that runs one synthetic tree through both sweepers and compares the results.
+- **`/clear` no longer deactivates the active task.** `SessionEnd` is also registered with no matcher, and on `clear` the same process keeps running — so its unconditional `rm -rf` of the session directory dropped the pointer mid-session, reaching the same "No active task" failure by a second path. Cleanup now skips `reason=clear`, and still runs for every reason that means the process is going away.
+- **`tasks doctor` stopped reporting healthy sessions as stale.** It applied the same mtime-only rule with no liveness check and no self-exclusion, so after the fixes above its entire output would have been the false-positive class this release removes: a live session on a multi-day task is the normal case, not a fault.
+- **Self-exclusion no longer depends on env propagation.** It read `PLAYBOOK_SESSION_ID` and fell back to `""` when unset; on Windows, where `resolve_session_id()` returns the constant `pid-win-fallback`, `int("win-fallback")` then raised and the shared session directory was deleted at *every* CLI invocation. It now falls back to `resolve_session_id()`.
+
+### Fixed (recovery)
+
+- **`tasks work <N>` can now re-adopt a finished-but-unclosed task.** The state the field report ended in — all gates checked, `## Status` still `pending`, no session pointer — was unreachable through the CLI: `work done` reads the pointer (absent → "No active task", and it never touches `## Status`), while `work <N>` refused the task because `_find_active_task` only returns tasks with open gates and the fallback only re-activated a `done` task or a stub. The only sanctioned writer of `## Status` needed a pointer, and the only way to get a pointer was refused, so the pointer had to be hand-written. A third fallback arm now re-adopts such a task and points you at `tasks work done`; it deliberately does **not** rewrite `## Status`, keeping `work done` the only thing that closes a task.
+
+### Fixed (task 023's deferred `init` items)
+
+- **`bash-log.sh` is now deployed on every host, so `BASH_ENV` stops dangling.** `init`'s `$SHELL` branch deployed only `bash-log.zsh` on zsh hosts, while the `settings.json` injection always set `BASH_ENV=~/.claude/bash-log.sh` — so on every macOS/zsh install that variable pointed at a file that was never written, and Claude Code's bash-side command logging was silently dead. The `$SHELL` branch now decides only the *extra* host-shell integration (zsh additionally gets `bash-log.zsh` and a `.zshenv` source line, since zsh ignores `BASH_ENV`). Task 023 found this and deferred it deliberately, because fixing it arms bash-log's `DEBUG` trap on every zsh host — unsafe until the trap's `set -e` kill path was fixed, which shipped in 1.4.6. Existing broken installs heal on the next `/playbook:init` or `/playbook:upgrade`.
+- **Deployed `bash-log` copies are CRLF-normalized.** They are sourced into every hook shell, so a CRLF copy from a Windows checkout breaks them — and byte-comparing a CRLF source against an LF destination never matched, so `init` re-copied on every run and never reported "unchanged". Deployment now normalizes through a temp file and an atomic rename, and compares against the normalized bytes.
+
+### Tests
+
+- New `tests/init-bash-log-fixture.sh` (27 assertions): both host types, `BASH_ENV` asserted to name a file that *exists*, idempotency across two runs, CRLF normalization, and a negative control that rebuilds the pre-fix either/or deployment and confirms it dangles.
+- New `tests/test_session_gc_policy.py` (11) and `tests/test_work_readopt.py` (13); new `S18` in `tests/wrapper-multiuser-fixture.sh` (27) covering the sweep, bash/python parity, `SessionEnd` reasons, and three negative controls.
+- Fixture-hygiene fix: `S14`'s `init` runs used the developer's **real** `$HOME`, so every suite run mutated `~/.claude/`, `~/.claude/settings.json` and a shell rc file on the machine under test. They now run under an isolated temporary `HOME`.
+
 ## [1.4.6] — 2026-07-29
 
 Two field-reported bugs and the workflow improvements that came with them, all from Cristi (ai-ring-vet) on Windows 11 / Git Bash MSYS: gate logging had stopped silently (task 023) and wrapper regeneration was truncating (task 024).

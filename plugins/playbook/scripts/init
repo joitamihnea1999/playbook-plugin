@@ -193,13 +193,51 @@ done
 
 # --- (e) bash history logging ---
 # BEGIN:bash-log
+#
+# `bash-log.sh` is deployed on EVERY host, regardless of login shell, because
+# Claude Code's Bash tool is /bin/bash no matter what $SHELL says — and the
+# settings.json injection below always points BASH_ENV at it. Before task 027
+# the $SHELL branch deployed ONLY bash-log.zsh on zsh hosts while still setting
+# BASH_ENV=~/.claude/bash-log.sh, so on every macOS/zsh install that variable
+# dangled at a nonexistent file and CC-side command logging was silently dead.
+# (Task 023 found this but deferred it deliberately: fixing it ARMS bash-log's
+# DEBUG trap on every zsh host, which was unsafe until the trap's set -e kill
+# path was fixed. That shipped in v1.4.6, so it is safe now — this change must
+# never be cherry-picked back before it.)
+#
+# The $SHELL branch now decides only the EXTRA host-shell integration: an
+# interactive zsh needs bash-log.zsh + a .zshenv source line, since zsh ignores
+# BASH_ENV.
+deploy_bash_log() {   # $1 = filename under $SCRIPT_DIR; deploys to ~/.claude/
+    local file="$1" src="$SCRIPT_DIR/$1" dest="$HOME/.claude/$1" tmp
+    [ -f "$src" ] || return 0
+    mkdir -p "$HOME/.claude"
+    # Normalize CRLF→LF on the way out. These files are SOURCED by every hook
+    # shell, and a CRLF copy from a Windows checkout breaks that; normalizing at
+    # deploy time also makes the up-to-date comparison meaningful, since
+    # comparing a CRLF source against an LF destination never matches and would
+    # re-copy on every single init run. Written through a temp + atomic mv, the
+    # same shape the rest of init uses (and no process substitution, which needs
+    # /dev/fd and is shakier inside the sandboxes we run under).
+    tmp="$dest.tmp.$$"
+    tr -d '\r' < "$src" > "$tmp" || { rm -f "$tmp"; FAILED+=("~/.claude/$file (normalize failed)"); return 0; }
+    if [ ! -f "$dest" ]; then
+        mv "$tmp" "$dest"
+        CREATED+=("~/.claude/$file")
+    elif cmp -s "$tmp" "$dest"; then
+        rm -f "$tmp"
+        SKIPPED+=("~/.claude/$file (unchanged)")
+    else
+        mv "$tmp" "$dest"
+        CREATED+=("~/.claude/$file (updated)")
+    fi
+}
+
 SHELL_NAME="$(basename "$SHELL" 2>/dev/null)"
 if [ "$SHELL_NAME" = "zsh" ]; then
-    BASH_LOG_FILE="bash-log.zsh"
     RC_FILE="$HOME/.zshenv"
     SOURCE_LINE='[ -f ~/.claude/bash-log.zsh ] && source ~/.claude/bash-log.zsh'
 else
-    BASH_LOG_FILE="bash-log.sh"
     # ~/.bashrc is interactive-only; CC runs non-interactive bash.
     # BASH_ENV is sourced by bash for every non-interactive shell — the right hook.
     # Prefer ~/.bash_profile (login shell sets env for all children); fall back to ~/.profile.
@@ -211,19 +249,14 @@ else
     SOURCE_LINE='export BASH_ENV=~/.claude/bash-log.sh'
 fi
 
-BASH_LOG_SRC="$SCRIPT_DIR/$BASH_LOG_FILE"
-BASH_LOG_DEST="$HOME/.claude/$BASH_LOG_FILE"
+# The bash variant is what BASH_ENV names, so it is unconditional.
+BASH_LOG_SRC="$SCRIPT_DIR/bash-log.sh"
 
 if [ -f "$BASH_LOG_SRC" ]; then
-    mkdir -p "$HOME/.claude"
-    if [ ! -f "$BASH_LOG_DEST" ]; then
-        cp "$BASH_LOG_SRC" "$BASH_LOG_DEST"
-        CREATED+=("~/.claude/$BASH_LOG_FILE")
-    elif diff -q "$BASH_LOG_SRC" "$BASH_LOG_DEST" > /dev/null 2>&1; then
-        SKIPPED+=("~/.claude/$BASH_LOG_FILE (unchanged)")
-    else
-        cp "$BASH_LOG_SRC" "$BASH_LOG_DEST"
-        CREATED+=("~/.claude/$BASH_LOG_FILE (updated)")
+    deploy_bash_log "bash-log.sh"
+    # zsh hosts additionally get the zsh variant for their interactive shells.
+    if [ "$SHELL_NAME" = "zsh" ]; then
+        deploy_bash_log "bash-log.zsh"
     fi
 
     if grep -qF 'claude/bash-log' "$RC_FILE" 2>/dev/null; then

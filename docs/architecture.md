@@ -49,6 +49,8 @@ Every surface that reads or writes runtime state resolves the lane — hooks, th
 
 **Upgrading an existing install:** two files are *copies* that live outside the plugin — `.claude/hooks/monitor-nudge.sh` (per project) and `~/.claude/bash-log.{sh,zsh}` (per machine). They keep their old contents until you re-run `/playbook:init`. A `bash-log.sh` from before v1.4.6 **silently disables gate logging entirely** (it could kill any `set -e` hook); an install predating lane support logs shell history to the root instead of your lane and doesn't deliver monitor nudges on a multi-user repo. If your gate log stopped for no apparent reason, re-run `/playbook:init`.
 
+**On zsh hosts specifically:** installs initialised before v1.4.7 never received `~/.claude/bash-log.sh` at all — `init` deployed only the zsh variant while still pointing `BASH_ENV` at the bash one, so Claude Code's own Bash tool (always `/bin/bash`, whatever your `$SHELL` is) sourced a file that did not exist and logged nothing. Re-running `/playbook:init` deploys it and heals the dangling reference.
+
 ## Task system
 
 A task is a directory under `.agent/tasks/<N>-<type>-<name>/` (or `.agent/<user>/tasks/…`) whose `task.md` is both the plan and the execution trace: Design Phase gates (understand → structure → reflect → verify) → judge review → Work Plan gates → implementation review → pre-review. State lives on disk, keyed by a PID-based session ID that works across providers — which is why tasks survive context compaction and session restarts, and why two agents can hand a task off through the file alone.
