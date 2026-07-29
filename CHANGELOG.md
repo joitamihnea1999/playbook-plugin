@@ -6,7 +6,7 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 Two field-reported bugs and the workflow improvements that came with them, all from Cristi (ai-ring-vet) on Windows 11 / Git Bash MSYS: gate logging had stopped silently (task 023) and wrapper regeneration was truncating (task 024).
 
-**Why this is 1.4.6 and not part of 1.4.5:** 1.4.5 was never tagged, so these fixes were originally folded into it. That was wrong — the marketplace serves `main`, and 1.4.5 had already been on `main` for the tasks 021+022 work, so one version number would have labelled two materially different code states. Anyone who installed 1.4.5 before this would have had a plugin reporting a version that matched the source while missing the gate-logging fix, with `tasks doctor` confirming the false match. If you are on 1.4.5, upgrade.
+**Why this is 1.4.6 and not part of 1.4.5:** 1.4.5 was never tagged, so these fixes were originally folded into it. That was wrong — the marketplace serves `main`, and 1.4.5 had already been on `main` for the tasks 021+022 work, so one version number would have labelled two materially different code states. Anyone who installed 1.4.5 before this has a plugin whose version matches what the repository says while missing the gate-logging fix, and nothing can tell them: `tasks doctor`'s version check compares the manifest and the source *inside one tree*, so it reports a match either way and never looks at what `main` now holds. The version number is the only signal that reaches you. If you are on 1.4.5, upgrade.
 
 ### Fixed (task 024 — Windows wrapper generation)
 
