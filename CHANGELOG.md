@@ -2,9 +2,11 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.4.5] — 2026-07-27
+## [1.4.6] — 2026-07-29
 
-Four efforts ship together in this release: the merge skill's genericization (task 021), the completion of per-user lane support across every plugin surface (task 022), the DEBUG-trap fix that restored gate logging (task 023), and a contributed set of Windows and workflow fixes (task 024).
+Two field-reported bugs and the workflow improvements that came with them, all from Cristi (ai-ring-vet) on Windows 11 / Git Bash MSYS: gate logging had stopped silently (task 023) and wrapper regeneration was truncating (task 024).
+
+**Why this is 1.4.6 and not part of 1.4.5:** 1.4.5 was never tagged, so these fixes were originally folded into it. That was wrong — the marketplace serves `main`, and 1.4.5 had already been on `main` for the tasks 021+022 work, so one version number would have labelled two materially different code states. Anyone who installed 1.4.5 before this has a plugin whose version matches what the repository says while missing the gate-logging fix, and nothing can tell them: `tasks doctor`'s version check compares the manifest and the source *inside one tree*, so it reports a match either way and never looks at what `main` now holds. The version number is the only signal that reaches you. If you are on 1.4.5, upgrade.
 
 ### Fixed (task 024 — Windows wrapper generation)
 
@@ -25,6 +27,14 @@ Four efforts ship together in this release: the merge skill's genericization (ta
 
   Reported from the field with the root cause already isolated and the fix proven (Cristi / ai-ring-vet, 2026-07-21; gate logging dead on that install since 2026-07-01, the day a `playbook init` first deployed the logger). Reproduced here on bash 3.2 and 5.2 — it is not shell-version specific.
 - **An unwritable `bash_history` no longer takes the shell down with it, or floods hook output.** A failing append is itself a failing command inside the trap, so it killed `set -e` hosts by the same mechanism; it is now guarded. The guard uses a brace group (`{ echo …; } 2>/dev/null || return 0`) because `echo … >> file 2>/dev/null` does **not** suppress a failure to *open* the file — bash reports that before applying the redirect — which, once per command, meant one error line per command in every hook's output.
+
+### Documentation
+
+- The upgrade caveat in `docs/architecture.md` under-warned: it said a stale `~/.claude/bash-log.{sh,zsh}` copy costs you monitor nudges and lane-correct shell history, omitting that a copy from before this release silently disables gate logging entirely. `docs/cli.md` documented the review commands without saying what a review checks, which left the new hostile-sequence lens invisible. Both fixed, and the README now names the shell on Windows (Git Bash / MSYS).
+
+## [1.4.5] — 2026-07-27
+
+Two efforts ship together in this release: the merge skill's genericization (task 021) and the completion of per-user lane support across every plugin surface (task 022).
 
 ### Changed
 - **The merge skill no longer hardcodes one project's layout or test runner** (field report, AloVet 2026-07-24; task 021). Step 7's verification bundle assumed a `backend/` directory and a `run-backend-tests` command, which contradicted the skill's own claim to need only `.agent/` and the two mind-map files. On a repo without them the code-identity check diffed a directory that didn't exist — reporting green for having examined nothing — and the test step errored outright. Both are now repo-agnostic:
