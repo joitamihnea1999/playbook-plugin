@@ -25,7 +25,7 @@ Six hooks enforce the structure at the OS level, because warnings don't stick �
 | `PreToolUse` (matcher `Edit\|Write\|search_replace\|write\|Bash\|Shell\|StrReplace\|run_terminal_command`) | The **task gate**: BLOCKS code edits when no task is active. Grok names (`write`, `search_replace`, `run_terminal_command`, `Shell`, `StrReplace`) map to Claude Edit/Write/Bash via the normalizer — same gate, every provider. |
 | `UserPromptSubmit` | Appends every user message to `.agent/chat_log.md` (timestamped, agent-tagged — feeds task attribution and `tasks log`). |
 | `PostToolUse` | Echoes gate state after every tool call, keeping the current gate in the agent's face. |
-| `Stop` / `SessionEnd` | Finalize session state. |
+| `Stop` / `SessionEnd` | Finalize session state. SessionEnd removes the session directory only when the process is really exiting — `/clear` keeps it, because the same process continues and the active task has to survive it. |
 
 `/playbook:init` additionally writes a **deny-list** into the project's `.claude/settings.json` blocking `TodoWrite`, `Task`, and `EnterPlanMode` — those would compete with task.md as the source of truth. If those tools suddenly error in a playbook project, that's why.
 
@@ -39,6 +39,8 @@ On a repo shared by several people (or several workstations), agent runtime stat
 - **Multi-user** — `.agent/current_user` names the lane, and runtime state lives under `.agent/<user>/`: `tasks/`, `sessions/`, `playbooks/`, `monitor/`, `chat_log.md`, `bash_history`.
 
 Two files stay at the `.agent/` root by design and are **not** lane-scoped: `config.json` (shared repo policy — `merge_verify` only works if every clone sees the same declaration) and `models.json` (per-clone judge pins).
+
+**Session directories.** Each session gets `.agent/<lane>/sessions/pid-<PID>/`, holding `current_state` (which task is active) and `counters`. Dead ones are reclaimed by process liveness (`kill -0`), never by the age of `current_state`: that file is written once at activation, so its timestamp records when the task started, not whether the session still lives. Until v1.4.7 the SessionStart sweep used that timestamp and deleted the pointer of any session more than 24h into a task — surfacing as a sudden `No active task` and blocked edits mid-task.
 
 Every surface that reads or writes runtime state resolves the lane — hooks, the `tasks` CLI, the `playbook-*` launchers, the codex hooks, the monitor and its nudge hook, and the shell command loggers. Four rules keep that consistent:
 
