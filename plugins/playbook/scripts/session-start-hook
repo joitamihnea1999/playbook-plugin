@@ -69,11 +69,76 @@ if [ -n "$PROJECT_DIR" ]; then
         mkdir -p "$SESSION_DIR"
     fi
 
-    # GC: sweep stale session dirs from crashed/killed sessions (current_state >24h old)
+    # GC: sweep session dirs from crashed/killed sessions.
+    #
+    # CANONICAL POLICY LIVES IN `tasks/cli.py::_gc_dead_sessions` — this is its
+    # bash twin, and the two MUST agree. Both run against the same directory:
+    # this one at SessionStart, that one at every CLI invocation.
+    #
+    # Until v1.4.6 this swept purely on `current_state` mtime, with no liveness
+    # check and no self-exclusion — and `current_state` is written ONLY by
+    # `tasks work <N>` (activation), never refreshed by activity. So its mtime
+    # means "when the task was activated", which the sweep misread as "when the
+    # session was last alive": any task active >24h had its own pointer deleted
+    # at the next SessionStart, silently revoking code-edit permission mid-task
+    # (task-gate-hook then hard-blocks Edit/Write). SessionStart is registered
+    # with no matcher, so it also fires on `compact` — long sessions re-rolled
+    # the dice at every compaction. Field-reported 2026-07-29; task 027.
+    #
+    # Policy, in order (mirrors _gc_dead_sessions exactly):
+    #   1. never our own session — mtime is irrelevant, we are demonstrably alive
+    #   2. `pid-*` (ALL of them, numeric or not): keep iff `kill -0` succeeds.
+    #      A non-numeric suffix (e.g. a non-own `pid-win-fallback`) fails kill
+    #      and is removed — matching Python's ValueError→remove arm.
+    #   3. anything else (legacy UUIDs, "default"): 24h `current_state` mtime.
     SESSIONS_DIR="$AGENT_DIR/sessions"
     if [ -d "$SESSIONS_DIR" ]; then
-        find "$SESSIONS_DIR" -maxdepth 2 -name 'current_state' -mtime +0 \
-            -exec dirname {} \; 2>/dev/null | xargs rm -rf 2>/dev/null || true
+        for d in "$SESSIONS_DIR"/*; do
+            # NO trailing slash in the glob, and symlinks are skipped outright:
+            # `rm -rf "link/"` follows the link and destroys the TARGET (measured
+            # on macOS: the target directory itself was removed and the symlink
+            # left behind). Python's shutil.rmtree refuses a symlink, so skipping
+            # also keeps the two sweepers in agreement. Nothing legitimately
+            # creates symlinks in here.
+            [ -L "$d" ] && continue
+            [ -d "$d" ] || continue      # stray files, and the unmatched-glob literal
+            name="${d##*/}"              # no basename fork — runs at every session start
+
+            # (1) Never sweep our own session.
+            [ "$name" = "$SESSION_ID" ] && continue
+
+            case "$name" in
+                pid-*)
+                    # (2) Liveness, not mtime. A busy session's pointer can be
+                    # arbitrarily old; a dead session's can be seconds fresh.
+                    #
+                    # EPERM means the process EXISTS but belongs to another OS
+                    # user — alive, so keep it. Treating that as dead would be a
+                    # cross-user regression: the old mtime-only sweep kept such a
+                    # session, and this sweep also runs in the no-lane-marker
+                    # branch above, where AGENT_DIR can be a shared root rather
+                    # than a per-user lane. Only "no such process" is dead.
+                    if kill_err="$(kill -0 "${name#pid-}" 2>&1)"; then
+                        continue                     # alive — keep
+                    fi
+                    case "$kill_err" in
+                        *"not permitted"*|*"Not permitted"*|*"Operation not permitted"*)
+                            continue ;;              # alive, other user — keep
+                    esac
+                    ;;
+                *)
+                    # (3) Legacy non-PID names: 24h mtime fallback. `-mtime -1`
+                    # = modified within 24h (BSD and GNU agree). Exact-boundary
+                    # rounding differs slightly from Python's epoch cutoff —
+                    # documented tolerance, legacy-only (task 027 Parked).
+                    [ -n "$(find "$d" -maxdepth 1 -name current_state -mtime -1 2>/dev/null)" ] && continue
+                    ;;
+            esac
+
+            # Fail-open: this hook runs under `set -e`, so an undeletable dir
+            # (perms, read-only mount) must not abort session start.
+            rm -rf "$d" 2>/dev/null || true
+        done
     fi
 
     # GC: sweep aged wrapper temps left by a create_wrapper killed between its

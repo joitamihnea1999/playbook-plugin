@@ -4,7 +4,7 @@ Everything the `tasks` CLI does. In a playbook-managed project the agent calls i
 
 ## Workflow
 
-**`tasks work <N>`** — activate task N. Writes the per-session state that the hooks read, which arms the edit gate: from this moment the agent may touch code, and every tool call gets the current gate echoed back at it. Activation is deliberately separate from creation — a task that was merely created enforces nothing.
+**`tasks work <N>`** — activate task N. Writes the per-session state that the hooks read, which arms the edit gate: from this moment the agent may touch code, and every tool call gets the current gate echoed back at it. Activation is deliberately separate from creation — a task that was merely created enforces nothing. If task N has every gate checked but was never closed, `work <N>` re-adopts it instead of refusing.
 
 **`tasks work done`** — deactivate the current task and mark its status done. This is the only sanctioned way to close a task; editing `## Status` by hand leaves the session state and the document disagreeing.
 

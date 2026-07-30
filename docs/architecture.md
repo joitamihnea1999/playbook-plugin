@@ -25,7 +25,7 @@ Six hooks enforce the structure at the OS level, because warnings don't stick �
 | `PreToolUse` (matcher `Edit\|Write\|search_replace\|write\|Bash\|Shell\|StrReplace\|run_terminal_command`) | The **task gate**: BLOCKS code edits when no task is active. Grok names (`write`, `search_replace`, `run_terminal_command`, `Shell`, `StrReplace`) map to Claude Edit/Write/Bash via the normalizer — same gate, every provider. |
 | `UserPromptSubmit` | Appends every user message to `.agent/chat_log.md` (timestamped, agent-tagged — feeds task attribution and `tasks log`). |
 | `PostToolUse` | Echoes gate state after every tool call, keeping the current gate in the agent's face. |
-| `Stop` / `SessionEnd` | Finalize session state. |
+| `Stop` / `SessionEnd` | Finalize session state. SessionEnd removes the session directory only when the process is really exiting — `/clear` keeps it, because the same process continues and the active task has to survive it. |
 
 `/playbook:init` additionally writes a **deny-list** into the project's `.claude/settings.json` blocking `TodoWrite`, `Task`, and `EnterPlanMode` — those would compete with task.md as the source of truth. If those tools suddenly error in a playbook project, that's why.
 
@@ -40,6 +40,8 @@ On a repo shared by several people (or several workstations), agent runtime stat
 
 Two files stay at the `.agent/` root by design and are **not** lane-scoped: `config.json` (shared repo policy — `merge_verify` only works if every clone sees the same declaration) and `models.json` (per-clone judge pins).
 
+**Session directories.** Each session gets `.agent/<lane>/sessions/pid-<PID>/`, holding `current_state` (which task is active) and `counters`. Dead ones are reclaimed by process liveness (`kill -0`), never by the age of `current_state`: that file is written once at activation, so its timestamp records when the task started, not whether the session still lives. Until v1.4.7 the SessionStart sweep used that timestamp and deleted the pointer of any session more than 24h into a task — surfacing as a sudden `No active task` and blocked edits mid-task.
+
 Every surface that reads or writes runtime state resolves the lane — hooks, the `tasks` CLI, the `playbook-*` launchers, the codex hooks, the monitor and its nudge hook, and the shell command loggers. Four rules keep that consistent:
 
 - **The marker is exactly one line.** A trailing CR is stripped (CRLF markers work), surrounding whitespace is ignored, and a missing final newline is fine — but a *second* content line is invalid, not "use the first one". Otherwise `alice\n../evil` would resolve to lane `alice` in the shell readers while Python rejected the same file.
@@ -48,6 +50,8 @@ Every surface that reads or writes runtime state resolves the lane — hooks, th
 - A repo that has *both* root `.agent/tasks/` and per-user lanes is a legitimate mixed layout — root is itself a lane — and is left alone.
 
 **Upgrading an existing install:** two files are *copies* that live outside the plugin — `.claude/hooks/monitor-nudge.sh` (per project) and `~/.claude/bash-log.{sh,zsh}` (per machine). They keep their old contents until you re-run `/playbook:init`. A `bash-log.sh` from before v1.4.6 **silently disables gate logging entirely** (it could kill any `set -e` hook); an install predating lane support logs shell history to the root instead of your lane and doesn't deliver monitor nudges on a multi-user repo. If your gate log stopped for no apparent reason, re-run `/playbook:init`.
+
+**On zsh hosts specifically:** installs initialised before v1.4.7 never received `~/.claude/bash-log.sh` at all — `init` deployed only the zsh variant while still pointing `BASH_ENV` at the bash one, so Claude Code's own Bash tool (always `/bin/bash`, whatever your `$SHELL` is) sourced a file that did not exist and logged nothing. Re-running `/playbook:init` deploys it and heals the dangling reference.
 
 ## Task system
 
