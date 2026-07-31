@@ -492,22 +492,37 @@ def _write_review_findings(task_file: Path, review_mode: str, findings: str) -> 
     except OSError as e:
         return f"could not read {task_file.name}: {e}"
 
-    n_open, n_close = text.count(open_m), text.count(close_m)
+    # Operate ONLY inside the named section. Searching the whole file would let a
+    # placeholder or marker quoted anywhere else — prose, a nested example, the
+    # other review section's text — capture the write and land findings in the
+    # wrong place, or silently target text that is not a section at all.
+    sec_start = text.find(f"\n{heading}\n")
+    if sec_start == -1:
+        sec_start = 0 if text.startswith(f"{heading}\n") else -1
+    if sec_start == -1:
+        return f"{heading} section not found"
+    body_start = text.index("\n", sec_start + 1) + 1 if sec_start else len(heading) + 1
+    next_heading = text.find("\n## ", body_start)
+    sec_end = len(text) if next_heading == -1 else next_heading + 1
+    section, before, after = text[body_start:sec_end], text[:body_start], text[sec_end:]
+
+    n_open, n_close = section.count(open_m), section.count(close_m)
     if n_open or n_close:
         if n_open != 1 or n_close != 1:
             return (f"{heading} has {n_open} opening and {n_close} closing "
                     f"findings markers — expected exactly one of each")
-        start, end = text.index(open_m), text.index(close_m)
+        start, end = section.index(open_m), section.index(close_m)
         if end < start:
             return f"{heading} findings markers are out of order"
-        new_text = text[:start] + block + text[end + len(close_m):]
-    elif text.count(placeholder) == 1:
-        new_text = text.replace(placeholder, block, 1)
-    elif placeholder in text:
+        section = section[:start] + block + section[end + len(close_m):]
+    elif section.count(placeholder) == 1:
+        section = section.replace(placeholder, block, 1)
+    elif placeholder in section:
         return f"{heading} placeholder appears more than once"
     else:
         return (f"{heading} has neither its placeholder nor findings markers "
                 f"(hand-edited?)")
+    new_text = before + section + after
 
     # Atomic: task.md IS the execution trace, so an interrupt must not truncate
     # it. Same-directory temp + os.replace, mirroring models_check.py.
@@ -2545,10 +2560,14 @@ def main():
                       f"(## {'Plan' if review_mode == 'plan' else 'Implementation'} Review)",
                       flush=True)
             else:
+                # Exit non-zero: the review itself succeeded but its findings
+                # were NOT delivered, and a caller that only checks the status
+                # would otherwise treat an undelivered review as a clean one.
                 print(f"\nCould not write findings into "
                       f"{task_file.relative_to(project_path)}: {refusal}\n"
                       f"They are saved in {judge_log.relative_to(project_path)} — "
                       f"paste them in by hand.", file=sys.stderr, flush=True)
+                sys.exit(1)
 
         sys.exit(result.returncode)
 

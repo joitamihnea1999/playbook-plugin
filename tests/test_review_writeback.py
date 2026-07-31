@@ -220,17 +220,34 @@ class RefusalTest(unittest.TestCase):
         self.assertIn("neither its placeholder nor findings markers", reason)
         self.assertEqual(before, f.read_bytes())
 
-    def test_refuses_on_duplicate_marker_pairs(self):
-        f = fresh_task()
-        _write_review_findings(f, "plan", "one")
-        text = f.read_text(encoding="utf-8")
-        open_m, _ = _findings_markers("plan")
-        f.write_text(text + text[text.index(open_m):], encoding="utf-8")
+    def test_refuses_on_duplicate_marker_pairs_inside_the_section(self):
+        """Duplicates must be judged within the section, which is where they
+        would actually make the replace ambiguous."""
+        open_m, close_m = _findings_markers("plan")
+        dup = f"{open_m}\nstale\n{close_m}"
+        f = fresh_task(TASK_MD.replace(
+            "(plan review findings appear here)", f"{dup}\n\n{dup}"))
         before = f.read_bytes()
         reason = _write_review_findings(f, "plan", "two")
         self.assertIsNotNone(reason)
         self.assertIn("expected exactly one of each", reason)
         self.assertEqual(before, f.read_bytes())
+
+    def test_markers_outside_the_section_are_ignored(self):
+        """A marker quoted elsewhere in the file (prose, an example, another
+        section) must not capture the write — that was a real defect: the search
+        used to span the whole file."""
+        open_m, close_m = _findings_markers("plan")
+        f = fresh_task(TASK_MD.replace(
+            "## Work Plan",
+            f"## Work Plan\n\nDocs example: {open_m} sample {close_m}\n"))
+        self.assertIsNone(_write_review_findings(f, "plan", "real findings"))
+        text = f.read_text(encoding="utf-8")
+        # Landed in the Plan Review section, not at the quoted example.
+        plan_sec = text[text.index("## Plan Review"):text.index("## Work Plan")]
+        self.assertIn("real findings", plan_sec)
+        self.assertIn("Docs example:", text)
+        self.assertIn("- [ ] gate that must survive", text)
 
     def test_refuses_on_reversed_markers(self):
         open_m, close_m = _findings_markers("plan")
