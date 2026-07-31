@@ -102,7 +102,7 @@ class AntigravityAdapter(ProviderAdapter):
         *,
         web_search: bool,
         timeout_secs: "int | None",
-        budget_usd: str = "2",
+        budget_usd: str,
     ) -> str:
         import shutil
         if not shutil.which(self.binary_name()):

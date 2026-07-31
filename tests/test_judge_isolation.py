@@ -62,7 +62,7 @@ class AdapterContainmentTest(unittest.TestCase):
              mock.patch("provider.sandbox.format_judge_output", side_effect=lambda r: r.stdout):
             a.run_headless_judge(
                 prompt="review this", model=None, system_context="CTX",
-                web_search=False, timeout_secs=60,
+                web_search=False, timeout_secs=60, budget_usd="10",
             )
         return captured
 

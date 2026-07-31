@@ -51,8 +51,8 @@ class ConfigResolveTest(unittest.TestCase):
 
     # ── defaults ──────────────────────────────────────────────────────────
     def test_defaults_when_no_config(self):
-        self.assertEqual(core.resolve_judge_budget(self.project), "2")
-        self.assertEqual(core.resolve_review_timeout(self.project), 300)
+        self.assertEqual(core.resolve_judge_budget(self.project), core.DEFAULT_JUDGE_BUDGET_USD)
+        self.assertEqual(core.resolve_review_timeout(self.project), core.DEFAULT_REVIEW_TIMEOUT_SECS)
 
     # ── config file ───────────────────────────────────────────────────────
     def test_config_file_values(self):
@@ -86,11 +86,11 @@ class ConfigResolveTest(unittest.TestCase):
     # ── malformed fallbacks (never crash) ───────────────────────────────────
     def test_non_numeric_timeout_falls_back(self):
         self._write_config({"review_timeout_secs": "banana"})
-        self.assertEqual(core.resolve_review_timeout(self.project), 300)
+        self.assertEqual(core.resolve_review_timeout(self.project), core.DEFAULT_REVIEW_TIMEOUT_SECS)
 
     def test_negative_budget_falls_back(self):
         self._write_config({"judge_budget_usd": -3})
-        self.assertEqual(core.resolve_judge_budget(self.project), "2")
+        self.assertEqual(core.resolve_judge_budget(self.project), core.DEFAULT_JUDGE_BUDGET_USD)
 
     def test_zero_timeout_means_unlimited(self):
         """0 is no longer "malformed, use the default" — it means no hard kill.
@@ -104,17 +104,17 @@ class ConfigResolveTest(unittest.TestCase):
 
     def test_negative_timeout_still_falls_back(self):
         self._write_config({"review_timeout_secs": -5})
-        self.assertEqual(core.resolve_review_timeout(self.project), 300)
+        self.assertEqual(core.resolve_review_timeout(self.project), core.DEFAULT_REVIEW_TIMEOUT_SECS)
 
     def test_malformed_json_falls_back(self):
         self._write_config("{ not valid json")
-        self.assertEqual(core.resolve_review_timeout(self.project), 300)
-        self.assertEqual(core.resolve_judge_budget(self.project), "2")
+        self.assertEqual(core.resolve_review_timeout(self.project), core.DEFAULT_REVIEW_TIMEOUT_SECS)
+        self.assertEqual(core.resolve_judge_budget(self.project), core.DEFAULT_JUDGE_BUDGET_USD)
 
     def test_non_object_json_ignored(self):
         self._write_config("[1, 2, 3]")
         self.assertEqual(core.load_config(self.project), {})
-        self.assertEqual(core.resolve_review_timeout(self.project), 300)
+        self.assertEqual(core.resolve_review_timeout(self.project), core.DEFAULT_REVIEW_TIMEOUT_SECS)
 
     # ── CLI flag tier (highest precedence) ──────────────────────────────────
     def test_flag_beats_env_and_file(self):
@@ -134,8 +134,8 @@ class ConfigResolveTest(unittest.TestCase):
         self.assertEqual(core.resolve_review_timeout(self.project, "foo"), 10)
 
     def test_bad_flag_no_lower_tier_falls_to_default(self):
-        self.assertEqual(core.resolve_judge_budget(self.project, "foo"), "2")
-        self.assertEqual(core.resolve_review_timeout(self.project, "foo"), 300)
+        self.assertEqual(core.resolve_judge_budget(self.project, "foo"), core.DEFAULT_JUDGE_BUDGET_USD)
+        self.assertEqual(core.resolve_review_timeout(self.project, "foo"), core.DEFAULT_REVIEW_TIMEOUT_SECS)
 
     def test_flag_zero_means_unlimited(self):
         self.assertIsNone(core.resolve_review_timeout(self.project, "0"))
@@ -144,15 +144,74 @@ class ConfigResolveTest(unittest.TestCase):
     def test_nonfinite_budget_falls_back(self):
         for bad in ("nan", "inf", "-inf"):
             self._write_config({"judge_budget_usd": bad})
-            self.assertEqual(core.resolve_judge_budget(self.project), "2")
+            self.assertEqual(core.resolve_judge_budget(self.project), core.DEFAULT_JUDGE_BUDGET_USD)
 
     def test_env_negative_budget_falls_back(self):
         os.environ["PLAYBOOK_JUDGE_BUDGET_USD"] = "-3"
-        self.assertEqual(core.resolve_judge_budget(self.project), "2")
+        self.assertEqual(core.resolve_judge_budget(self.project), core.DEFAULT_JUDGE_BUDGET_USD)
 
     def test_env_nonnumeric_timeout_falls_back(self):
         os.environ["PLAYBOOK_REVIEW_TIMEOUT_SECS"] = "banana"
-        self.assertEqual(core.resolve_review_timeout(self.project), 300)
+        self.assertEqual(core.resolve_review_timeout(self.project), core.DEFAULT_REVIEW_TIMEOUT_SECS)
+
+
+class ShippedDefaultsTest(unittest.TestCase):
+    """The built-in review knobs, pinned exactly and checked for coherence.
+
+    Exact values are asserted deliberately. Everywhere else in this file the
+    fallback assertions reference the constants, so they survive a change to
+    them — which means without one exact pin here, all three could be edited and
+    the suite would stay green. This is that pin: changing the shipped defaults
+    is a decision, and it should require editing a test that says so.
+    """
+
+    def test_shipped_defaults_are_exactly_this_triple(self):
+        self.assertEqual(core.DEFAULT_JUDGE_BUDGET_USD, "10")
+        self.assertEqual(core.DEFAULT_REVIEW_SOFT_TIMEOUT_SECS, 900)
+        self.assertEqual(core.DEFAULT_REVIEW_TIMEOUT_SECS, 1200)
+
+    def test_soft_default_is_below_hard_default(self):
+        """The invariant the old 900/300 pair violated.
+
+        With soft above hard, resolve_review_soft_timeout clamps soft down and
+        prints a warning on EVERY review — a wind-down deadline with no room to
+        wind down in. The grace between them is what makes the soft deadline
+        mean anything.
+        """
+        self.assertLess(
+            core.DEFAULT_REVIEW_SOFT_TIMEOUT_SECS,
+            core.DEFAULT_REVIEW_TIMEOUT_SECS,
+            "soft default must leave grace below the hard kill",
+        )
+
+    def test_zero_config_project_gets_the_defaults_unclamped(self):
+        """End-to-end on a project with no .agent/config.json at all."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        project = Path(tmp.name)
+        saved = {k: os.environ.pop(k, None)
+                 for k in _ENV_VARS + ("PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS",)}
+        self.addCleanup(lambda: [os.environ.__setitem__(k, v)
+                                 for k, v in saved.items() if v is not None])
+        core._warn_bad_config_value_once.cache_clear()
+
+        hard = core.resolve_review_timeout(project)
+        soft = core.resolve_review_soft_timeout(project, hard_timeout_secs=hard)
+        self.assertEqual(hard, 1200)
+        self.assertEqual(soft, 900)          # NOT clamped down to hard
+        self.assertEqual(core.resolve_judge_budget(project), "10")
+
+    def test_raised_hard_default_is_not_a_floor(self):
+        """A bigger default must not become a floor on config-less installs.
+
+        The floor is opt-in via config.json; if the built-in default acted as
+        one, raising it to 1200 would silently forbid `--timeout 60` everywhere.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        project = Path(tmp.name)
+        core._warn_bad_config_value_once.cache_clear()
+        self.assertEqual(core.resolve_review_timeout(project, "60"), 60)
 
 
 class ParseTimeoutTest(unittest.TestCase):
@@ -280,7 +339,7 @@ class ReviewTimeoutFloorTest(unittest.TestCase):
         so explicitly.
         """
         self._write_config({"review_timeout_secs": None})
-        self.assertEqual(core.resolve_review_timeout(self.project), 300)
+        self.assertEqual(core.resolve_review_timeout(self.project), core.DEFAULT_REVIEW_TIMEOUT_SECS)
         self.assertIsNone(core._parse_timeout("null"))
 
     def test_malformed_config_imposes_no_floor(self):
@@ -319,7 +378,8 @@ class ReviewSoftTimeoutTest(unittest.TestCase):
 
     def test_default_is_900(self):
         self.assertEqual(
-            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=None), 900)
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=None),
+            core.DEFAULT_REVIEW_SOFT_TIMEOUT_SECS)
 
     def test_config_then_env_then_flag(self):
         self._write_config({"review_soft_timeout_secs": 600})
@@ -363,7 +423,8 @@ class ReviewSoftTimeoutTest(unittest.TestCase):
     def test_malformed_soft_falls_back_to_default(self):
         self._write_config({"review_soft_timeout_secs": "banana"})
         self.assertEqual(
-            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=None), 900)
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=None),
+            core.DEFAULT_REVIEW_SOFT_TIMEOUT_SECS)
 
 
 class TimeoutLabelTest(unittest.TestCase):
@@ -425,6 +486,11 @@ class PanelBudgetThreadingTest(unittest.TestCase):
         shutil.which = lambda name: "/usr/bin/" + name  # pretend claude is installed
         try:
             a = ClaudeAdapter(session_id="judge", project_root=Path("/tmp"))
+            # budget_usd is required on the adapter now (no stale "2" default
+            # there), so the helper supplies core's default unless a test
+            # overrides it — keeping "the default budget reaches the argv" as a
+            # statement about the resolved default, which is where it now lives.
+            judge_kwargs.setdefault("budget_usd", core.DEFAULT_JUDGE_BUDGET_USD)
             a.run_headless_judge(prompt="p", model=None, system_context="c",
                                  web_search=False, timeout_secs=5, **judge_kwargs)
         finally:
@@ -437,7 +503,7 @@ class PanelBudgetThreadingTest(unittest.TestCase):
         return args[args.index("--max-budget-usd") + 1]
 
     def test_default_budget_on_argv(self):
-        self.assertEqual(self._capture_budget(), "2")
+        self.assertEqual(self._capture_budget(), core.DEFAULT_JUDGE_BUDGET_USD)
 
     def test_configured_budget_reaches_argv(self):
         self.assertEqual(self._capture_budget(budget_usd="7"), "7")

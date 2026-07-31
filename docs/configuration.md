@@ -11,15 +11,17 @@ Two JSON files, both under `.agent/` in your project and hand-editable: `config.
 
 ```json
 {
-  "judge_budget_usd": 2,
-  "review_timeout_secs": 1800,
+  "judge_budget_usd": 10,
+  "review_timeout_secs": 1200,
   "review_soft_timeout_secs": 900
 }
 ```
 
-- `judge_budget_usd` — spend cap for the **claude** judge (`--max-budget-usd`). Claude-only; codex/agy/grok/pi have no budget knob.
-- `review_timeout_secs` — the **hard** timeout for every review agent (plan / impl / panel): hang safety only. On expiry the whole process tree is terminated and the prior review log is left untouched. Default 300. Set it to `0` or `"unlimited"` for **no wall-clock kill at all** — a judge that is still writing is then never cut off mid-response. (Other accepted unlimited spellings, as JSON *strings*: `"none"`, `"null"`, `"inf"`, `"infinite"`. A bare JSON `null` means "not set" and falls through to the default, as it does for every other key — use `0` if you mean unlimited.)
-- `review_soft_timeout_secs` — the **soft** deadline, default 900. This is not a kill; it is the number the judge is *told* about, instructing it to finish the thought it is in, then write its findings, and not open a new investigation branch. Set it to `0`/`"unlimited"` to drop the time paragraph from judge prompts entirely. If soft would exceed a finite hard, it is clamped down to hard so the prompt never promises more time than the process gets.
+- `judge_budget_usd` — spend cap for the **claude** judge (`--max-budget-usd`). Default 10. Claude-only; codex/agy/grok/pi have no budget knob.
+- `review_timeout_secs` — the **hard** timeout for every review agent (plan / impl / panel): hang safety only. On expiry the whole process tree is terminated, the judge's partial output is salvaged to `judge-*.partial.log`, and the prior review log is left untouched. Default 1200 — the 900s soft deadline plus five minutes of grace, so a judge winding down on schedule is never cut off mid-sentence. Set it to `0` or `"unlimited"` for **no wall-clock kill at all** — a judge that is still writing is then never cut off mid-response. (Other accepted unlimited spellings, as JSON *strings*: `"none"`, `"null"`, `"inf"`, `"infinite"`. A bare JSON `null` means "not set" and falls through to the default, as it does for every other key — use `0` if you mean unlimited.)
+- `review_soft_timeout_secs` — the **soft** deadline, default 900. Keep it below the hard timeout; if it is higher it gets clamped down and warns on every review. This is not a kill; it is the number the judge is *told* about, instructing it to finish the thought it is in, then write its findings, and not open a new investigation branch. Set it to `0`/`"unlimited"` to drop the time paragraph from judge prompts entirely. If soft would exceed a finite hard, it is clamped down to hard so the prompt never promises more time than the process gets.
+
+The hard number is a ceiling on the **judge subprocess**, not a guarantee about the whole command: after a kill the runner spends up to 5s reaping, and the antigravity panel seat is deliberately given `timeout_secs + 30` so agy reports its own expiry instead of being SIGKILLed. Budget ~1230s worst case rather than exactly 1200.
 
 Two numbers rather than one because they answer different questions: soft is *when should the judge wrap up*, hard is *when is it obviously stuck*. Leaving only a hard kill means a judge doing good work gets truncated mid-sentence; leaving only a soft target means a genuinely hung process runs forever.
 

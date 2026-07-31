@@ -333,6 +333,11 @@ def make_default_runner(project_path: Path, *, timeout_secs: int = 300):
 
     adapters = {"claude": ClaudeAdapter, "codex": CodexAdapter,
                 "agy": AntigravityAdapter, "pi": PiAdapter, "grok": GrokAdapter}
+    # Resolve the install's configured judge budget instead of relying on an
+    # adapter-side default (there no longer is one — see adapter.py). Without
+    # this, `tasks intent` would silently ignore judge_budget_usd.
+    from tasks.core import resolve_judge_budget
+    budget_usd = resolve_judge_budget(project_path)
     cfg = load_judge_config()
     provider, variant = resolve_judge_spec(cfg.get("default_judge") or "codex")
     adapter_cls = adapters.get(provider, CodexAdapter)
@@ -345,6 +350,7 @@ def make_default_runner(project_path: Path, *, timeout_secs: int = 300):
             return adapter.run_headless_judge(
                 prompt=prompt, model=variant, system_context="",
                 web_search=False, timeout_secs=timeout_secs,
+                budget_usd=budget_usd,
             )
 
     return run

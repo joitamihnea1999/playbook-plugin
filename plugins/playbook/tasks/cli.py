@@ -3308,6 +3308,14 @@ def main():
                      f"invalid JSON ({e}); defaults used{_extra}")
                 _cfg = None
             if isinstance(_cfg, dict):
+                # Validate through the runtime's own parser and report the
+                # runtime's own defaults, so doctor can never call a value
+                # clean that the runtime ignores, nor name a fallback that
+                # is no longer the fallback.
+                from tasks.core import DEFAULT_JUDGE_BUDGET_USD as _DEF_BUDGET
+                from tasks.core import DEFAULT_REVIEW_SOFT_TIMEOUT_SECS as _DEF_SOFT
+                from tasks.core import DEFAULT_REVIEW_TIMEOUT_SECS as _DEF_HARD
+                from tasks.core import _parse_timeout as _pt
                 _jb = _cfg.get("judge_budget_usd")
                 if _jb is not None:
                     try:
@@ -3315,10 +3323,7 @@ def main():
                     except (TypeError, ValueError):
                         _ok = False
                     if not _ok:
-                        warn("config: judge_budget_usd", f"{_jb!r} not a non-negative number; default $2 used")
-                # Validate the timeouts through the runtime's own parser, so doctor
-                # can never call a value clean that the runtime then ignores.
-                from tasks.core import _parse_timeout as _pt
+                        warn("config: judge_budget_usd", f"{_jb!r} not a non-negative number; default ${_DEF_BUDGET} used")
                 _rt = _cfg.get("review_timeout_secs")
                 if _rt is not None:
                     # 0 / "unlimited" = no hard kill; a positive int = hang safety.
@@ -3330,7 +3335,7 @@ def main():
                     if not _ok:
                         warn("config: review_timeout_secs",
                              f'{_rt!r} not a positive integer or an unlimited form '
-                             f'(0/"unlimited"); default 300s used')
+                             f'(0/"unlimited"); default {_DEF_HARD}s used')
                 _st = _cfg.get("review_soft_timeout_secs")
                 if _st is not None:
                     try:
@@ -3341,7 +3346,7 @@ def main():
                     if not _ok:
                         warn("config: review_soft_timeout_secs",
                              f'{_st!r} not a positive integer or an unlimited form '
-                             f'(0/"unlimited"); default 900s used')
+                             f'(0/"unlimited"); default {_DEF_SOFT}s used')
                 # merge_verify — the post-merge soundness command the merge skill
                 # runs (skills/merge/merge-verify.py). Advisory here, but worth
                 # surfacing early: at merge time an unusable declaration BLOCKS

@@ -205,10 +205,18 @@ def resolve_agent_dir(project_path: Path) -> Path:
 # Hence the file is committable, and merge-doctor treats a tracked copy as
 # correct rather than legacy detritus (SHARED_POLICY_PATHS below).
 
-DEFAULT_JUDGE_BUDGET_USD = "2"
-DEFAULT_REVIEW_TIMEOUT_SECS = 300
+DEFAULT_JUDGE_BUDGET_USD = "10"
+# The HARD kill: hang safety only, and the ceiling on a judge subprocess. Sized
+# as the soft deadline plus ~5 minutes of grace, so a judge that is winding down
+# on schedule is never cut off mid-sentence. Raised from upstream's 300s, which
+# was smaller than the soft default below and so guaranteed a clamp on every
+# review — a wind-down deadline with no room to wind down in.
+DEFAULT_REVIEW_TIMEOUT_SECS = 1200
 # Soft target the judge self-regulates against. The hard kill is separate — see
 # resolve_review_soft_timeout for why the two are not one number.
+# INVARIANT: keep this BELOW DEFAULT_REVIEW_TIMEOUT_SECS. If it is ever raised
+# above, resolve_review_soft_timeout clamps it down and warns on every single
+# review. tests/test_config_resolve.py asserts the ordering.
 DEFAULT_REVIEW_SOFT_TIMEOUT_SECS = 900
 # Sentinel printed in banners / judge.md when a timeout is unlimited.
 UNLIMITED_TIMEOUT_LABEL = "unlimited"
@@ -338,7 +346,8 @@ def human_duration(secs: int) -> str:
 def resolve_judge_budget(project_path: Path, cli_value: str | None = None) -> str:
     """Resolve the claude judge --max-budget-usd value (USD). Precedence:
     cli_value (`--budget`) > PLAYBOOK_JUDGE_BUDGET_USD env > config.json
-    judge_budget_usd > "2". Returned as a str for direct argv use. A negative,
+    judge_budget_usd > DEFAULT_JUDGE_BUDGET_USD. Returned as a str for direct
+    argv use. A negative,
     non-finite, or non-numeric value at ANY tier warns and falls through.
     (claude-only; codex/agy/pi have no budget knob.)"""
     return _first_valid(
@@ -357,7 +366,8 @@ def resolve_review_timeout(
 ) -> "int | None":
     """Resolve the HARD review subprocess timeout in seconds, or None for
     unlimited (no wall-clock kill). Precedence: cli_value (`--timeout`) >
-    PLAYBOOK_REVIEW_TIMEOUT_SECS env > config.json review_timeout_secs > 300.
+    PLAYBOOK_REVIEW_TIMEOUT_SECS env > config.json review_timeout_secs >
+    DEFAULT_REVIEW_TIMEOUT_SECS.
     A malformed value at ANY tier warns and falls through.
 
     This is the hang-safety kill only. The soft deadline a judge self-regulates
@@ -456,7 +466,7 @@ def resolve_review_soft_timeout(
     """Resolve the SOFT review deadline in seconds — the number the judge is
     told to self-regulate against. Precedence: cli_value (`--soft-timeout`) >
     PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS env > config.json review_soft_timeout_secs
-    > 900.
+    > DEFAULT_REVIEW_SOFT_TIMEOUT_SECS.
 
     None (0/unlimited) means "no soft instruction" — judges get no wind-down
     paragraph at all. When both soft and hard are finite and soft > hard, soft is

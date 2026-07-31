@@ -51,7 +51,7 @@ class AgyInvocationTest(unittest.TestCase):
         with mock.patch("shutil.which", return_value="/usr/bin/agy"), \
                 mock.patch("provider.sandbox.run", side_effect=fake_run), \
                 mock.patch("provider.sandbox.format_judge_output", side_effect=lambda r: r.stdout):
-            self.a.run_headless_judge("REVIEW", None, "CTX", web_search=False, timeout_secs=90)
+            self.a.run_headless_judge("REVIEW", None, "CTX", web_search=False, timeout_secs=90, budget_usd="10")
 
         args = captured["args"]
         i = args.index("--print")
@@ -66,7 +66,7 @@ class AgyInvocationTest(unittest.TestCase):
         with mock.patch("shutil.which", return_value="/usr/bin/agy"), \
                 mock.patch.object(os, "name", "nt"):
             out = self.a.run_headless_judge(
-                "P", None, "X" * 40000, web_search=False, timeout_secs=60)
+                "P", None, "X" * 40000, web_search=False, timeout_secs=60, budget_usd="10")
         self.assertTrue(out.startswith("(error: agy judge prompt+context is ~"))
         self.assertIn("Windows caps the command line", out)
 
@@ -80,7 +80,7 @@ class AgyInvocationTest(unittest.TestCase):
                 mock.patch.object(os, "name", "nt"), \
                 mock.patch("provider.sandbox.run", side_effect=fake_run), \
                 mock.patch("provider.sandbox.format_judge_output", side_effect=lambda r: r.stdout):
-            out = self.a.run_headless_judge("P", None, "small", web_search=False, timeout_secs=60)
+            out = self.a.run_headless_judge("P", None, "small", web_search=False, timeout_secs=60, budget_usd="10")
         self.assertEqual(out, "OK")
 
 

@@ -118,15 +118,19 @@ class ProviderAdapter(ABC):
         *,
         web_search: bool,
         timeout_secs: "int | None",
-        budget_usd: str = "2",
+        budget_usd: str,
     ) -> str:
         """Single non-interactive judge invocation; returns stdout text.
 
         Used by panel-review; each adapter assembles its own command line
         (provider-specific flags, prompt composition, sandbox controls).
-        `budget_usd` caps spend on metered backends — claude only
-        (--max-budget-usd); codex/agy/pi accept it for a uniform signature but
-        have no budget knob.
+        `budget_usd` is required, deliberately not defaulted: it used to default
+        to "2" here and in all five adapters, so a caller that omitted it would
+        silently ignore the install's configured budget and hardcode a stale
+        number. Callers pass the value from `tasks.core.resolve_judge_budget`,
+        which is the single source of truth. It caps spend on metered backends —
+        claude only (--max-budget-usd); codex/agy/grok/pi accept it for a uniform
+        signature but have no budget knob.
         `timeout_secs` is seconds, or None for unlimited — a judge should not be
         killed mid-response. Implementations must therefore pass None straight
         through to sandbox.run (which only arms its process-group killer when a
