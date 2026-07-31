@@ -2141,7 +2141,12 @@ def main():
             # The judge is a read-only evaluator sandboxed via provider.sandbox
             # (write containment via seatbelt/bwrap). PLAYBOOK_SESSION_ID=judge
             # above lets hooks identify judge sessions if needed.
-            claude_args = ["-p", "--max-budget-usd", review_budget]
+            # --effort high for the same reason as the panel adapter (see
+            # ClaudeAdapter.run_headless_judge): a judge is bought for its
+            # reasoning. 'high' not 'max' — this bills the owner's own Claude
+            # quota. Kept in step with the adapter so `--backend claude` and a
+            # claude panel seat review at the same depth.
+            claude_args = ["-p", "--effort", "high", "--max-budget-usd", review_budget]
             if model:
                 from provider.adapters.claude import ClaudeAdapter
                 claude_args += ["--model", ClaudeAdapter._MODEL_MAP.get(model, model)]

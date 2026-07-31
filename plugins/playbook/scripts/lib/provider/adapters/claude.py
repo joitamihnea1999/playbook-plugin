@@ -117,6 +117,14 @@ class ClaudeAdapter(ProviderAdapter):
         inv = self.headless_argv(prompt, model, context=system_context)
         # Judge-only extras layered on the core invocation.
         agent_args = inv.argv + [
+            # A judge's whole job is the quality of its reasoning, so it gets
+            # more of it than a default session would. 'high', NOT 'max':
+            # claude judges bill against the owner's own Claude subscription
+            # quota, and 'max' on every panel seat would drain the quota the
+            # owner needs for actual work. codex (:max) and grok
+            # (--reasoning-effort high) run on separate subscriptions, so they
+            # are free to go higher.
+            "--effort", "high",
             "--max-budget-usd", budget_usd,
             "--tools", tools,
             "--allowedTools", tools,

@@ -417,14 +417,56 @@ class PanelBudgetThreadingTest(unittest.TestCase):
         finally:
             sandbox.run, sandbox.format_judge_output = orig_run, orig_fmt
             shutil.which = orig_which
-        args = captured["args"]
+        return captured["args"]
+
+    def _capture_budget(self, **judge_kwargs):
+        args = self._capture_claude_argv(**judge_kwargs)
         return args[args.index("--max-budget-usd") + 1]
 
     def test_default_budget_on_argv(self):
-        self.assertEqual(self._capture_claude_argv(), "2")
+        self.assertEqual(self._capture_budget(), "2")
 
     def test_configured_budget_reaches_argv(self):
-        self.assertEqual(self._capture_claude_argv(budget_usd="7"), "7")
+        self.assertEqual(self._capture_budget(budget_usd="7"), "7")
+
+    def test_claude_judge_runs_at_high_effort(self):
+        """A judge is bought for its reasoning, so it does not inherit the
+        session default. 'high' rather than 'max' is deliberate: this bills the
+        owner's own Claude subscription quota, and max on every panel seat would
+        drain the quota they need for their own work."""
+        args = self._capture_claude_argv()
+        self.assertIn("--effort", args)
+        self.assertEqual(args[args.index("--effort") + 1], "high")
+
+
+class EffortFlagScopeTest(unittest.TestCase):
+    """--effort is a claude flag. It must reach BOTH claude judge launch paths
+    and no other provider's argv.
+
+    Two paths exist and are easy to forget: the panel seat goes through
+    ClaudeAdapter.run_headless_judge, while `plan-review --backend claude`
+    assembles its own argv in tasks/cli.py. A depth setting on one and not the
+    other means the same judge reviews differently depending on how it was
+    invoked.
+    """
+
+    PLAYBOOK = Path(__file__).resolve().parent.parent / "plugins" / "playbook"
+
+    def test_both_claude_launch_paths_pass_effort_high(self):
+        adapter = (self.PLAYBOOK / "provider" / "adapters" / "claude.py").read_text(
+            encoding="utf-8")
+        cli = (self.PLAYBOOK / "tasks" / "cli.py").read_text(encoding="utf-8")
+        self.assertIn('"--effort", "high"', adapter)
+        self.assertIn('"--effort", "high"', cli)
+
+    def test_no_other_adapter_gained_the_flag(self):
+        for name in ("codex", "antigravity", "pi", "grok"):
+            path = self.PLAYBOOK / "provider" / "adapters" / f"{name}.py"
+            with self.subTest(adapter=name):
+                self.assertNotIn(
+                    '"--effort"', path.read_text(encoding="utf-8"),
+                    f"{name} is not claude — it has no --effort flag",
+                )
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process-group termination path")
