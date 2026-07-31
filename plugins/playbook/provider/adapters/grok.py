@@ -234,7 +234,7 @@ class GrokAdapter(ProviderAdapter):
         system_context: str,
         *,
         web_search: bool,
-        timeout_secs: int,
+        timeout_secs: "int | None",
         budget_usd: str = "2",
     ) -> str:
         import shutil
@@ -262,6 +262,8 @@ class GrokAdapter(ProviderAdapter):
         from provider import sandbox as _sandbox
         # encoding="utf-8" guards the stdout decode against the Windows cp1252
         # locale default. No stdin (prompt is on argv — see headless_argv).
+        # timeout_secs=None → unlimited: sandbox.run only arms its process-group
+        # killer when a timeout is set.
         result = _sandbox.run(
             "grok", agent_args,
             project_root=self._project_root,

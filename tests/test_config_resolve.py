@@ -9,6 +9,8 @@ path that the plan-review panel flagged as initially mis-wired).
 Pure stdlib unittest (no hypothesis — honors the stdlib-only runtime invariant).
 Run: python3 tests/test_config_resolve.py   (or: python3 -m unittest ...)
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -68,9 +70,20 @@ class ConfigResolveTest(unittest.TestCase):
     def test_env_overrides_file(self):
         self._write_config({"judge_budget_usd": 5, "review_timeout_secs": 120})
         os.environ["PLAYBOOK_JUDGE_BUDGET_USD"] = "9"
-        os.environ["PLAYBOOK_REVIEW_TIMEOUT_SECS"] = "10"
+        os.environ["PLAYBOOK_REVIEW_TIMEOUT_SECS"] = "600"
         self.assertEqual(core.resolve_judge_budget(self.project), "9")
-        self.assertEqual(core.resolve_review_timeout(self.project), 10)
+        # env may RAISE the hard timeout above the configured floor.
+        self.assertEqual(core.resolve_review_timeout(self.project), 600)
+
+    def test_env_cannot_undercut_the_config_floor(self):
+        """config is a reliability floor, not merely a lower-precedence tier.
+
+        An env var (or an agent's --timeout) that would re-introduce a shorter
+        kill window than the install chose is clamped up to the configured value.
+        """
+        self._write_config({"review_timeout_secs": 120})
+        os.environ["PLAYBOOK_REVIEW_TIMEOUT_SECS"] = "10"
+        self.assertEqual(core.resolve_review_timeout(self.project), 120)
 
     # ── malformed fallbacks (never crash) ───────────────────────────────────
     def test_non_numeric_timeout_falls_back(self):
@@ -81,8 +94,18 @@ class ConfigResolveTest(unittest.TestCase):
         self._write_config({"judge_budget_usd": -3})
         self.assertEqual(core.resolve_judge_budget(self.project), "2")
 
-    def test_nonpositive_timeout_falls_back(self):
+    def test_zero_timeout_means_unlimited(self):
+        """0 is no longer "malformed, use the default" — it means no hard kill.
+
+        A judge that is still writing must not be killed mid-response, so the
+        config gained an explicit unlimited form. This inverts the pre-1.4.7
+        behaviour where 0 fell through to 300s.
+        """
         self._write_config({"review_timeout_secs": 0})
+        self.assertIsNone(core.resolve_review_timeout(self.project))
+
+    def test_negative_timeout_still_falls_back(self):
+        self._write_config({"review_timeout_secs": -5})
         self.assertEqual(core.resolve_review_timeout(self.project), 300)
 
     def test_malformed_json_falls_back(self):
@@ -101,7 +124,10 @@ class ConfigResolveTest(unittest.TestCase):
         os.environ["PLAYBOOK_JUDGE_BUDGET_USD"] = "9"
         os.environ["PLAYBOOK_REVIEW_TIMEOUT_SECS"] = "10"
         self.assertEqual(core.resolve_judge_budget(self.project, "7"), "7")
-        self.assertEqual(core.resolve_review_timeout(self.project, "3"), 3)
+        # The flag wins over env and file, but only upward — 3s is under the
+        # configured 120s floor, so the floor holds. See the floor tests below.
+        self.assertEqual(core.resolve_review_timeout(self.project, "3"), 120)
+        self.assertEqual(core.resolve_review_timeout(self.project, "900"), 900)
 
     def test_bad_flag_falls_through_to_env(self):
         os.environ["PLAYBOOK_JUDGE_BUDGET_USD"] = "9"
@@ -111,7 +137,10 @@ class ConfigResolveTest(unittest.TestCase):
 
     def test_bad_flag_no_lower_tier_falls_to_default(self):
         self.assertEqual(core.resolve_judge_budget(self.project, "foo"), "2")
-        self.assertEqual(core.resolve_review_timeout(self.project, "0"), 300)
+        self.assertEqual(core.resolve_review_timeout(self.project, "foo"), 300)
+
+    def test_flag_zero_means_unlimited(self):
+        self.assertIsNone(core.resolve_review_timeout(self.project, "0"))
 
     # ── non-finite + env-tier malformed ─────────────────────────────────────
     def test_nonfinite_budget_falls_back(self):
@@ -126,6 +155,306 @@ class ConfigResolveTest(unittest.TestCase):
     def test_env_nonnumeric_timeout_falls_back(self):
         os.environ["PLAYBOOK_REVIEW_TIMEOUT_SECS"] = "banana"
         self.assertEqual(core.resolve_review_timeout(self.project), 300)
+
+
+class ParseTimeoutTest(unittest.TestCase):
+    """The timeout parser: unlimited forms, rejections, and doctor/runtime parity.
+
+    `tasks doctor` validates the raw JSON value while `_first_valid` stringifies
+    before parsing, so the two entry points must agree on every input or doctor
+    reports a config clean that the runtime silently ignores.
+    """
+
+    UNLIMITED = (0, "0", "none", "null", "unlimited", "inf", "infinite",
+                 "UNLIMITED", "  Unlimited  ", float("inf"))
+    FINITE = ((300, 300), ("300", 300), (1, 1), ("  600 ", 600))
+    REJECTED = (-1, "-5", True, False, 1.5, "1.5", 600.0, float("nan"),
+                float("-inf"), "banana", "", None, "3s")
+
+    def test_unlimited_forms_parse_to_none(self):
+        for raw in self.UNLIMITED:
+            with self.subTest(raw=raw):
+                self.assertIsNone(core._parse_timeout(raw))
+
+    def test_finite_forms(self):
+        for raw, expected in self.FINITE:
+            with self.subTest(raw=raw):
+                self.assertEqual(core._parse_timeout(raw), expected)
+
+    def test_rejected_forms_raise(self):
+        for raw in self.REJECTED:
+            with self.subTest(raw=raw):
+                with self.assertRaises((TypeError, ValueError)):
+                    core._parse_timeout(raw)
+
+    def test_bool_is_not_a_timeout(self):
+        """bool subclasses int — True must not silently mean 1 second."""
+        with self.assertRaises(ValueError):
+            core._parse_timeout(True)
+
+    def test_doctor_and_runtime_agree_on_every_value(self):
+        """The regression this guards: int(1.5) == 1 would make doctor call a
+        fractional config clean while the runtime rejected "1.5" and used 300."""
+        def outcome(value):
+            try:
+                return core._parse_timeout(value)
+            except (TypeError, ValueError):
+                return "INVALID"
+
+        # None is excluded deliberately: neither entry point ever sees it.
+        # `_first_valid` skips a tier whose raw value is None, and doctor guards
+        # with `if _rt is not None`. Including it would only assert that
+        # str(None) == "None" lowercases into the "none" unlimited word — an
+        # artifact of this table, not a reachable disagreement.
+        table = tuple(
+            v for v in self.UNLIMITED + tuple(v for v, _ in self.FINITE) + self.REJECTED
+            if v is not None
+        )
+        for raw in table:
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    outcome(raw), outcome(str(raw)),
+                    f"doctor (raw {raw!r}) and runtime (str) disagree",
+                )
+
+
+class ReviewTimeoutFloorTest(unittest.TestCase):
+    """config.json is a floor on the hard timeout, not just a precedence tier.
+
+    Without this, an agent passing `--timeout 600` could re-introduce a kill
+    window that the install had deliberately removed.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self._tmp.name)
+        (self.project / ".agent").mkdir()
+        self._saved_env = {k: os.environ.pop(k, None) for k in _ENV_VARS}
+        core._warn_bad_config_value_once.cache_clear()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _write_config(self, obj):
+        (self.project / ".agent" / "config.json").write_text(
+            json.dumps(obj), encoding="utf-8")
+
+    def test_unlimited_config_ignores_a_finite_flag(self):
+        self._write_config({"review_timeout_secs": "unlimited"})
+        self.assertIsNone(core.resolve_review_timeout(self.project, "600"))
+
+    def test_unlimited_config_ignores_a_finite_env(self):
+        self._write_config({"review_timeout_secs": 0})
+        os.environ["PLAYBOOK_REVIEW_TIMEOUT_SECS"] = "600"
+        self.assertIsNone(core.resolve_review_timeout(self.project))
+
+    def test_finite_config_floors_a_lower_flag(self):
+        self._write_config({"review_timeout_secs": 1800})
+        self.assertEqual(core.resolve_review_timeout(self.project, "600"), 1800)
+
+    def test_finite_config_allows_a_higher_flag(self):
+        self._write_config({"review_timeout_secs": 1800})
+        self.assertEqual(core.resolve_review_timeout(self.project, "3600"), 3600)
+
+    def test_flag_unlimited_beats_a_finite_config(self):
+        """Unlimited is always "above" a floor — raising is always allowed."""
+        self._write_config({"review_timeout_secs": 1800})
+        self.assertIsNone(core.resolve_review_timeout(self.project, "unlimited"))
+
+    def test_absent_config_imposes_no_floor(self):
+        """A floor is opted into. With no config, the built-in 300s default must
+        NOT clamp a deliberate `--timeout 60`, or ordinary precedence breaks on
+        every install that never wrote a config file."""
+        self.assertEqual(core.resolve_review_timeout(self.project, "60"), 60)
+
+    def test_malformed_config_imposes_no_floor(self):
+        self._write_config({"review_timeout_secs": "banana"})
+        self.assertEqual(core.resolve_review_timeout(self.project, "60"), 60)
+
+
+class ReviewSoftTimeoutTest(unittest.TestCase):
+    """The soft deadline: what the judge is told to wind down against.
+
+    Soft is the steering signal; hard is hang safety. They resolve independently
+    so an install can say "wind down at 15 minutes, but never be killed".
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self._tmp.name)
+        (self.project / ".agent").mkdir()
+        self._saved_env = {
+            k: os.environ.pop(k, None)
+            for k in _ENV_VARS + ("PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS",)
+        }
+        core._warn_bad_config_value_once.cache_clear()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _write_config(self, obj):
+        (self.project / ".agent" / "config.json").write_text(
+            json.dumps(obj), encoding="utf-8")
+
+    def test_default_is_a_ratio_of_hard_not_an_absolute(self):
+        """The default tracks hard, so it is sane at every install's hard timeout.
+
+        An absolute default cannot be: 900 is a good wind-down against a 1200s
+        kill and nonsense against the built-in 300s, where soft > hard means the
+        clamp fires and the "default" is both inert and noisy on every review.
+        """
+        ratio = core.DEFAULT_REVIEW_SOFT_TIMEOUT_RATIO
+        for hard in (300, 600, 1200, 1800):
+            with self.subTest(hard=hard):
+                self.assertEqual(
+                    core.resolve_review_soft_timeout(
+                        self.project, hard_timeout_secs=hard),
+                    int(hard * ratio))
+
+    def test_derived_default_at_the_builtin_hard_timeout(self):
+        """Stock install, no config: 225 against the built-in 300s hard."""
+        self.assertEqual(
+            core.resolve_review_soft_timeout(
+                self.project, hard_timeout_secs=core.DEFAULT_REVIEW_TIMEOUT_SECS),
+            225)
+
+    def test_derived_default_never_clamps_and_never_warns(self):
+        """0 < ratio <= 1, so a derived soft is always <= hard by construction.
+
+        The clamp warning therefore belongs exclusively to an explicitly
+        configured soft — a default that trips its own guard is a bug, and that
+        is precisely what an absolute 900 did against a 300s hard.
+        """
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            soft = core.resolve_review_soft_timeout(self.project, hard_timeout_secs=300)
+        self.assertLessEqual(soft, 300)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_derived_default_is_at_least_one_second(self):
+        """A hard timeout small enough to floor the ratio must not yield 0.
+
+        0 is the sentinel for "unlimited / no wind-down instruction", so rounding
+        into it would silently flip the meaning rather than shorten the deadline.
+        """
+        self.assertEqual(
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=1), 1)
+
+    def test_unlimited_hard_with_no_soft_configured_has_no_soft(self):
+        """A fraction of unlimited is not a number.
+
+        Removing the kill window is an opt-out of time pressure, so inventing an
+        absolute here would reintroduce it. Explicit config still works — see
+        test_explicit_soft_is_honoured_under_unlimited_hard.
+        """
+        self.assertIsNone(
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=None))
+
+    def test_explicit_soft_is_honoured_under_unlimited_hard(self):
+        self._write_config({"review_soft_timeout_secs": 600})
+        self.assertEqual(
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=None), 600)
+
+    def test_config_then_env_then_flag(self):
+        self._write_config({"review_soft_timeout_secs": 600})
+        self.assertEqual(
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=None), 600)
+        os.environ["PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS"] = "700"
+        self.assertEqual(
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=None), 700)
+        self.assertEqual(
+            core.resolve_review_soft_timeout(
+                self.project, hard_timeout_secs=None, cli_value="800"), 800)
+
+    def test_explicit_soft_is_clamped_to_a_finite_hard(self):
+        """The prompt must never promise more time than the process will live.
+
+        Only an EXPLICIT soft can reach this path now — the derived default is a
+        fraction of hard, so it cannot exceed it.
+        """
+        self._write_config({"review_soft_timeout_secs": 900})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            soft = core.resolve_review_soft_timeout(self.project, hard_timeout_secs=300)
+        self.assertEqual(soft, 300)
+        self.assertIn("clamping soft to hard", err.getvalue())
+
+    def test_explicit_soft_is_not_clamped_when_hard_is_unlimited(self):
+        """Regression guard: `None` means two different things here.
+
+        With config hard=300 and `--timeout unlimited`, hard resolves to None (no
+        kill). Treating that None as "caller passed nothing" made the resolver
+        re-read config and clamp soft to 300 — telling the judge to wind down at
+        5 minutes when nothing was going to kill it. Soft is configured explicitly
+        so there is a number to leave un-clamped; unconfigured under an unlimited
+        hard is the separate no-soft-at-all case.
+        """
+        self._write_config({"review_timeout_secs": 300, "review_soft_timeout_secs": 900})
+        hard = core.resolve_review_timeout(self.project, "unlimited")
+        self.assertIsNone(hard)
+        self.assertEqual(
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=hard), 900)
+
+    def test_omitted_hard_resolves_against_config_not_the_builtin(self):
+        """Derivation must use the install's hard timeout, not the built-in.
+
+        1350 is 75% of the configured 1800; 225 would mean it derived from the
+        built-in 300 and ignored config.
+        """
+        self._write_config({"review_timeout_secs": 1800})
+        self.assertEqual(core.resolve_review_soft_timeout(self.project), 1350)
+
+    def test_zero_soft_means_no_wind_down_instruction(self):
+        """The _SOFT_NOT_CONFIGURED sentinel exists for exactly this case.
+
+        If "unconfigured" and "explicitly unlimited" both arrived as None, a
+        configured 0 would silently re-acquire a derived deadline.
+        """
+        self._write_config({"review_soft_timeout_secs": 0})
+        self.assertIsNone(
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=300))
+
+    def test_malformed_soft_falls_back_to_the_derived_default(self):
+        self._write_config({"review_soft_timeout_secs": "banana"})
+        self.assertEqual(
+            core.resolve_review_soft_timeout(self.project, hard_timeout_secs=1200), 900)
+
+
+class TimeoutLabelTest(unittest.TestCase):
+    """Banner / judge.md labels — a killed-at-unlimited banner reading "None s"
+    was the original reason these exist."""
+
+    def test_format_timeout_label(self):
+        self.assertEqual(core.format_timeout_label(None), "unlimited")
+        self.assertEqual(core.format_timeout_label(1800), "1800s")
+
+    def test_format_soft_hard_label(self):
+        self.assertEqual(
+            core.format_soft_hard_timeout_label(900, 1200),
+            "soft 900s / hard 1200s")
+        self.assertEqual(
+            core.format_soft_hard_timeout_label(900, None),
+            "soft 900s / hard unlimited")
+        self.assertEqual(
+            core.format_soft_hard_timeout_label(None, None),
+            "soft unlimited / hard unlimited")
+
+    def test_human_duration(self):
+        self.assertEqual(core.human_duration(900), "15 minutes")
+        self.assertEqual(core.human_duration(60), "1 minute")
+        self.assertEqual(core.human_duration(1200), "20 minutes")
+        self.assertEqual(core.human_duration(90), "90s")
+        self.assertEqual(core.human_duration(30), "30s")
 
 
 class PanelBudgetThreadingTest(unittest.TestCase):
