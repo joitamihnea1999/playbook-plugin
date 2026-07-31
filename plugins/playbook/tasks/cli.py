@@ -2646,7 +2646,10 @@ def main():
             task_num = task_num.zfill(3)
         chat_file = base = head = None
         collect_only = False
-        timeout_secs = 300
+        # None = not yet resolved; the real default comes from tasks.core so
+        # `tasks intent` honours the same review knobs as plan/impl review
+        # instead of pinning its own 300s. --timeout still overrides.
+        timeout_secs = None
         i = 1
         while i < len(cmd_args):
             a = cmd_args[i]
@@ -2674,6 +2677,10 @@ def main():
             write_run, find_task_dir, new_run_id, last_intent_entry, LAYERS,
         )
         project_path = find_project_root()
+        from tasks.core import format_timeout_label
+        if timeout_secs is None:
+            from tasks.core import resolve_review_timeout
+            timeout_secs = resolve_review_timeout(project_path)
         agent_dir = resolve_agent_dir(project_path)
         task_dir = find_task_dir(agent_dir / "tasks", task_num)
         if task_dir is None:
@@ -2701,7 +2708,7 @@ def main():
             print("\n(--collect-only: wrote prompts, skipped model calls)")
         else:
             print(f"\nRunning {len(avail)} blind extraction(s) "
-                  f"(default judge, {timeout_secs}s each)...", flush=True)
+                  f"(default judge, {format_timeout_label(timeout_secs)} each)...", flush=True)
             reports = run_extractions(slices, make_default_runner(
                 project_path, timeout_secs=timeout_secs))
 

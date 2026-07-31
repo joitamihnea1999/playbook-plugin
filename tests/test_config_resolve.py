@@ -214,6 +214,46 @@ class ShippedDefaultsTest(unittest.TestCase):
         self.assertEqual(core.resolve_review_timeout(project, "60"), 60)
 
 
+class IntentRunnerHonoursConfigTest(unittest.TestCase):
+    """`tasks intent` must use the same review knobs as plan/impl review.
+
+    It used to hardcode its own `timeout_secs = 300` and never pass a budget at
+    all, so it silently ignored both judge_budget_usd and review_timeout_secs —
+    a whole command running on numbers the install had overridden.
+    """
+
+    def test_default_runner_passes_the_resolved_budget(self):
+        import types
+        from provider.adapters import codex as codex_mod
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        project = Path(tmp.name)
+        (project / ".agent").mkdir()
+        (project / ".agent" / "config.json").write_text(
+            json.dumps({"judge_budget_usd": 7}), encoding="utf-8")
+        core._warn_bad_config_value_once.cache_clear()
+
+        seen = {}
+
+        def fake_judge(self, prompt, model, system_context, *, web_search,
+                       timeout_secs, budget_usd):
+            seen["budget_usd"] = budget_usd
+            seen["timeout_secs"] = timeout_secs
+            return "report"
+
+        from tasks import intent as intent_mod
+        orig = codex_mod.CodexAdapter.run_headless_judge
+        codex_mod.CodexAdapter.run_headless_judge = fake_judge
+        self.addCleanup(lambda: setattr(
+            codex_mod.CodexAdapter, "run_headless_judge", orig))
+
+        runner = intent_mod.make_default_runner(project, timeout_secs=1200)
+        runner("chat", "prompt --- EVIDENCE\nstuff")
+        self.assertEqual(seen["budget_usd"], "7")
+        self.assertEqual(seen["timeout_secs"], 1200)
+
+
 class ParseTimeoutTest(unittest.TestCase):
     """The timeout parser: unlimited forms, rejections, and doctor/runtime parity.
 
