@@ -117,7 +117,7 @@ class ProviderAdapter(ABC):
         system_context: str,
         *,
         web_search: bool,
-        timeout_secs: int,
+        timeout_secs: "int | None",
         budget_usd: str = "2",
     ) -> str:
         """Single non-interactive judge invocation; returns stdout text.
@@ -127,7 +127,12 @@ class ProviderAdapter(ABC):
         `budget_usd` caps spend on metered backends — claude only
         (--max-budget-usd); codex/agy/pi accept it for a uniform signature but
         have no budget knob.
-        Raises subprocess.TimeoutExpired on hang; returns "(no output)" if empty.
+        `timeout_secs` is seconds, or None for unlimited — a judge should not be
+        killed mid-response. Implementations must therefore pass None straight
+        through to sandbox.run (which only arms its process-group killer when a
+        timeout is set) and must not do arithmetic on it unguarded.
+        Raises subprocess.TimeoutExpired only when a finite timeout is set and
+        expires; returns "(no output)" if empty.
         """
 
     # ── 1. Identity ──────────────────────────────────────────────────────────

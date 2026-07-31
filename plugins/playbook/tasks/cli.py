@@ -1607,7 +1607,8 @@ def main():
         # Parse flags
         review_mode = "plan"
         web_search = False
-        timeout_flag = None  # --timeout override (raw str); resolved from config below
+        timeout_flag = None  # --timeout HARD override (raw str); resolved from config below
+        soft_timeout_flag = None  # --soft-timeout SOFT override (prompt wind-down)
         budget_flag = None   # --budget override (claude judges only)
         extra_prompt = ""
         no_mind_map = False
@@ -1627,6 +1628,9 @@ def main():
                 i += 1
             elif cmd_args[i] == "--timeout" and i + 1 < len(cmd_args):
                 timeout_flag = cmd_args[i + 1]
+                i += 2
+            elif cmd_args[i] == "--soft-timeout" and i + 1 < len(cmd_args):
+                soft_timeout_flag = cmd_args[i + 1]
                 i += 2
             elif cmd_args[i] == "--budget" and i + 1 < len(cmd_args):
                 budget_flag = cmd_args[i + 1]
@@ -1655,13 +1659,24 @@ def main():
         # Task number is optional; --prompt required when omitted
         if not task_num and not extra_prompt:
             print("Error: 'panel-review' requires a task number or --prompt", file=sys.stderr)
-            print("Usage: tasks panel-review [<number>] [--mode plan|impl] [--models codex:gpt-5.5,agy,...] [--prompt \"...\"] [--no-mind-map] [--bare] [--web-search] [--timeout SECONDS] [--budget USD]", file=sys.stderr)
+            print("Usage: tasks panel-review [<number>] [--mode plan|impl] [--models codex:gpt-5.5,agy,...] [--prompt \"...\"] [--no-mind-map] [--bare] [--web-search] [--timeout SECONDS] [--soft-timeout SECONDS] [--budget USD]", file=sys.stderr)
             sys.exit(1)
 
         project_path = find_project_root()
-        # Review knobs — precedence: --flag > env var > .agent/config.json > default.
-        from tasks.core import resolve_judge_budget, resolve_review_timeout
+        # Review knobs — precedence: --flag > env var > .agent/config.json > default,
+        # with config acting as a FLOOR on the hard timeout. Hard = hang-safety
+        # kill; soft = the deadline the judge is told to self-regulate against.
+        from tasks.core import (
+            format_soft_hard_timeout_label,
+            format_timeout_label,
+            resolve_judge_budget,
+            resolve_review_soft_timeout,
+            resolve_review_timeout,
+        )
         timeout_secs = resolve_review_timeout(project_path, timeout_flag)
+        soft_timeout_secs = resolve_review_soft_timeout(
+            project_path, hard_timeout_secs=timeout_secs, cli_value=soft_timeout_flag,
+        )
         panel_budget = resolve_judge_budget(project_path, budget_flag)
 
         # Resolve task file if task number given
@@ -1776,19 +1791,36 @@ def main():
             sys.exit(1)
 
         display_target = task_path or "(promptless)"
-        print(f"Running panel {review_label} on {display_target} ({len(judges)} judges, {timeout_secs}s timeout)...", flush=True)
+        timeout_label = format_soft_hard_timeout_label(soft_timeout_secs, timeout_secs)
+        hard_timeout_label = format_timeout_label(timeout_secs)
+        print(
+            f"Running panel {review_label} on {display_target} "
+            f"({len(judges)} judges, timeout {timeout_label})...",
+            flush=True,
+        )
 
         def run_judge(judge_spec):
             adapter_cls, variant = judge_spec
             provider_name = adapter_cls.binary_name()
             label = f"{provider_name}:{variant}" if variant else provider_name
             if prompt_fn:
-                prompt = prompt_fn(task_path, inline_context=(provider_name != "claude"))
+                prompt = prompt_fn(
+                    task_path,
+                    inline_context=(provider_name != "claude"),
+                    soft_timeout_secs=soft_timeout_secs,
+                    hard_timeout_secs=timeout_secs,
+                )
                 if extra_prompt:
                     prompt += f"\n\nAdditional steering from the user:\n{extra_prompt}"
             else:
-                prompt = extra_prompt
+                # Taskless / --bare: still prepend the soft-deadline steering when
+                # there is a soft budget, so free-form panel prompts self-regulate too.
+                from tasks.template import time_budget_instruction
+                steer = time_budget_instruction(soft_timeout_secs, timeout_secs)
+                prompt = (steer + "\n\n" + extra_prompt) if steer else extra_prompt
 
+            # Single attempt only — never restart a long-running judge. The
+            # hard timeout is hang safety alone (None = no kill at all).
             try:
                 adapter = adapter_cls(session_id="judge", project_root=project_path)
                 output = adapter.run_headless_judge(
@@ -1801,7 +1833,7 @@ def main():
                 )
                 return label, output
             except subprocess.TimeoutExpired:
-                return label, f"(timed out after {timeout_secs}s)"
+                return label, f"(timed out after hard {hard_timeout_label})"
             except Exception as e:
                 return label, f"(error: {e})"
 
@@ -1847,7 +1879,7 @@ def main():
         # verdicts are never discarded), but the run exits non-zero below.
         if _tamper_changes:
             lines = [_tamper_banner(_tamper_changes) + "\n\n"] + lines
-        lines.append(f"**Judges:** {succeeded}/{len(results)} succeeded | **Web search:** {'yes' if web_search else 'no'} | **Timeout:** {timeout_secs}s\n")
+        lines.append(f"**Judges:** {succeeded}/{len(results)} succeeded | **Web search:** {'yes' if web_search else 'no'} | **Timeout:** {timeout_label}\n")
         if failed:
             lines.append(f"**⚠ Failed judges:** {', '.join(sorted(failed))} — see their blocks below for the exit code / stderr. NOT a clean empty review.\n")
         if over_budget:
@@ -1942,7 +1974,8 @@ def main():
         backend = None   # explicit --backend; else from models.json default_judge
         model = None     # explicit --model (variant within the backend)
         extra_prompt = ""
-        timeout_flag = None   # --timeout N  (overrides env / config / default)
+        timeout_flag = None   # --timeout N  HARD (overrides env / config / default)
+        soft_timeout_flag = None  # --soft-timeout N  SOFT (prompt wind-down)
         budget_flag = None    # --budget N   (claude only; overrides env / config / default)
         remaining_args = []
         i = 0
@@ -1958,6 +1991,9 @@ def main():
                 i += 2
             elif cmd_args[i] == "--timeout" and i + 1 < len(cmd_args):
                 timeout_flag = cmd_args[i + 1]
+                i += 2
+            elif cmd_args[i] == "--soft-timeout" and i + 1 < len(cmd_args):
+                soft_timeout_flag = cmd_args[i + 1]
                 i += 2
             elif cmd_args[i] == "--budget" and i + 1 < len(cmd_args):
                 budget_flag = cmd_args[i + 1]
@@ -1998,10 +2034,25 @@ def main():
             task_num = task_num.zfill(3)
         project_path = find_project_root()
         # Review knobs — precedence: --flag > env var > .agent/config.json >
-        # built-in default (resolvers live in tasks.core).
-        from tasks.core import resolve_judge_budget, resolve_review_timeout
+        # built-in default (resolvers live in tasks.core), with config as a
+        # FLOOR on the hard timeout. Hard = hang-safety kill; soft = the
+        # deadline the judge is told to wind down against.
+        from tasks.core import (
+            format_soft_hard_timeout_label,
+            format_timeout_label,
+            resolve_judge_budget,
+            resolve_review_soft_timeout,
+            resolve_review_timeout,
+        )
         review_timeout = resolve_review_timeout(project_path, timeout_flag)
+        review_soft_timeout = resolve_review_soft_timeout(
+            project_path, hard_timeout_secs=review_timeout, cli_value=soft_timeout_flag,
+        )
         review_budget = resolve_judge_budget(project_path, budget_flag)
+        review_timeout_label = format_timeout_label(review_timeout)
+        review_soft_hard_label = format_soft_hard_timeout_label(
+            review_soft_timeout, review_timeout,
+        )
         tasks_dir = resolve_agent_dir(project_path) / "tasks"
         matches = list(tasks_dir.glob(f"{task_num}-*/task.md"))
         if not matches:
@@ -2036,17 +2087,28 @@ def main():
             from tasks.core import _extract_status
             review_mode = "impl" if _extract_status(task_file).startswith("done") else "plan"
 
-        prompt_fn = plan_review_prompt if review_mode == "plan" else impl_review_prompt
+        _base_prompt_fn = plan_review_prompt if review_mode == "plan" else impl_review_prompt
+
+        def prompt_fn(task_path_arg, inline_context=False):
+            return _base_prompt_fn(
+                task_path_arg,
+                inline_context=inline_context,
+                soft_timeout_secs=review_soft_timeout,
+                hard_timeout_secs=review_timeout,
+            )
+
         review_label = "plan review" if review_mode == "plan" else "impl review"
 
         def _bail_review_timeout():
             # A timed-out review exits BEFORE the log-save below, so any previous
             # review log is left untouched (never overwritten with a partial run).
+            # Only reachable when a finite HARD timeout is in force.
             print(
-                f"\n{review_label} timed out after {review_timeout}s "
-                "(raise it with --timeout, PLAYBOOK_REVIEW_TIMEOUT_SECS, or "
-                ".agent/config.json review_timeout_secs). Previous review log "
-                "left untouched.",
+                f"\n{review_label} hit hard timeout after {review_timeout_label} "
+                f"({review_soft_hard_label}). Raise the hard kill with --timeout, "
+                "PLAYBOOK_REVIEW_TIMEOUT_SECS, or .agent/config.json "
+                "review_timeout_secs; move the soft deadline with --soft-timeout "
+                "or review_soft_timeout_secs. Previous review log left untouched.",
                 file=sys.stderr, flush=True,
             )
             sys.exit(1)
@@ -2188,10 +2250,12 @@ def main():
             agy_args = [
                 "--add-dir", str(project_path),
                 "--print",
-                # agy's own internal wait — keep it in step with the subprocess
-                # timeout so the two limits never disagree.
-                "--print-timeout", f"{review_timeout}s",
             ]
+            # agy's own internal wait — keep it in step with the subprocess
+            # timeout when finite; omit it entirely when unlimited so agy does
+            # not kill a judge that is still writing.
+            if review_timeout is not None:
+                agy_args += ["--print-timeout", f"{review_timeout}s"]
 
             agy_env = os.environ.copy()
             agy_env["PLAYBOOK_SESSION_ID"] = "judge"
@@ -3196,14 +3260,32 @@ def main():
                         _ok = False
                     if not _ok:
                         warn("config: judge_budget_usd", f"{_jb!r} not a non-negative number; default $2 used")
+                # Validate the timeouts through the runtime's own parser, so doctor
+                # can never call a value clean that the runtime then ignores.
+                from tasks.core import _parse_timeout as _pt
                 _rt = _cfg.get("review_timeout_secs")
                 if _rt is not None:
+                    # 0 / "unlimited" = no hard kill; a positive int = hang safety.
                     try:
-                        _ok = int(_rt) > 0
+                        _pt(_rt)
+                        _ok = True
                     except (TypeError, ValueError):
                         _ok = False
                     if not _ok:
-                        warn("config: review_timeout_secs", f"{_rt!r} not a positive integer; default 300s used")
+                        warn("config: review_timeout_secs",
+                             f'{_rt!r} not a positive integer or an unlimited form '
+                             f'(0/"unlimited"); default 300s used')
+                _st = _cfg.get("review_soft_timeout_secs")
+                if _st is not None:
+                    try:
+                        _pt(_st)
+                        _ok = True
+                    except (TypeError, ValueError):
+                        _ok = False
+                    if not _ok:
+                        warn("config: review_soft_timeout_secs",
+                             f'{_st!r} not a positive integer or an unlimited form '
+                             f'(0/"unlimited"); default 900s used')
                 # merge_verify — the post-merge soundness command the merge skill
                 # runs (skills/merge/merge-verify.py). Advisory here, but worth
                 # surfacing early: at merge time an unusable declaration BLOCKS

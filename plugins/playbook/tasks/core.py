@@ -207,6 +207,11 @@ def resolve_agent_dir(project_path: Path) -> Path:
 
 DEFAULT_JUDGE_BUDGET_USD = "2"
 DEFAULT_REVIEW_TIMEOUT_SECS = 300
+# Soft target the judge self-regulates against. The hard kill is separate — see
+# resolve_review_soft_timeout for why the two are not one number.
+DEFAULT_REVIEW_SOFT_TIMEOUT_SECS = 900
+# Sentinel printed in banners / judge.md when a timeout is unlimited.
+UNLIMITED_TIMEOUT_LABEL = "unlimited"
 
 # Paths under .agent/ that are legitimately tracked in git — repo-level policy
 # rather than per-install state. Everything else at the .agent/ root that is
@@ -262,11 +267,72 @@ def _parse_budget(raw: str) -> str:
     return raw
 
 
-def _parse_timeout(raw: str) -> int:
-    secs = int(raw)
-    if secs <= 0:
+def _parse_timeout(raw) -> "int | None":
+    """Parse a timeout value. Returns seconds, or None for unlimited.
+
+    Unlimited forms — a judge must be able to finish a full response rather than
+    be killed mid-sentence: 0, "0", "none", "null", "unlimited", "inf",
+    "infinite". Positive integers are finite seconds. Everything else raises.
+
+    Accepts non-str input because `tasks doctor` validates the raw JSON value
+    while `_first_valid` stringifies before parsing. The two MUST agree on what
+    is valid, so floats are rejected outright rather than truncated: the runtime
+    sees `str(1.5)` / `str(600.0)` and `int()` raises, so doctor must reject
+    `review_timeout_secs: 1.5` and `600.0` too. Truncating instead would have
+    doctor report 1.5 as a clean 1s while the runtime silently used the default.
+    """
+    if raw is None:
         raise ValueError(raw)
+    if isinstance(raw, bool):
+        # bool subclasses int — True as a timeout is a config mistake, not 1s.
+        raise ValueError(raw)
+    if isinstance(raw, float):
+        # +inf is the numeric spelling of "unlimited" (json.loads parses a bare
+        # Infinity), and str(inf) == "inf" already means unlimited below — so
+        # accept it here or doctor and runtime disagree. Every other float is
+        # rejected; see docstring.
+        if math.isinf(raw) and raw > 0:
+            return None
+        raise ValueError(raw)
+    if isinstance(raw, int):
+        if raw == 0:
+            return None
+        if raw < 0:
+            raise ValueError(raw)
+        return raw
+    s = str(raw).strip().lower()
+    if s in ("none", "null", "unlimited", "inf", "infinite"):
+        return None
+    secs = int(s)   # raises on "1.5", "banana", "" — falls through to default
+    if secs < 0:
+        raise ValueError(raw)
+    if secs == 0:
+        return None
     return secs
+
+
+def format_timeout_label(timeout_secs: "int | None") -> str:
+    """Human label for banners / judge.md (`1800s` or `unlimited`)."""
+    return UNLIMITED_TIMEOUT_LABEL if timeout_secs is None else f"{timeout_secs}s"
+
+
+def format_soft_hard_timeout_label(
+    soft_secs: "int | None", hard_secs: "int | None"
+) -> str:
+    """Banner / judge.md label: `soft 900s / hard 1200s` (or unlimited)."""
+    return (
+        f"soft {format_timeout_label(soft_secs)} / "
+        f"hard {format_timeout_label(hard_secs)}"
+    )
+
+
+def human_duration(secs: int) -> str:
+    """Readable duration for judge prompts (`15 minutes`, `90s`)."""
+    if secs >= 60 and secs % 60 == 0:
+        minutes = secs // 60
+        unit = "minute" if minutes == 1 else "minutes"
+        return f"{minutes} {unit}"
+    return f"{secs}s"
 
 
 def resolve_judge_budget(project_path: Path, cli_value: str | None = None) -> str:
@@ -286,12 +352,18 @@ def resolve_judge_budget(project_path: Path, cli_value: str | None = None) -> st
     )
 
 
-def resolve_review_timeout(project_path: Path, cli_value: "str | int | None" = None) -> int:
-    """Resolve the review-agent subprocess timeout in seconds. Precedence:
-    cli_value (`--timeout`) > PLAYBOOK_REVIEW_TIMEOUT_SECS env > config.json
-    review_timeout_secs > 300. A non-integer or non-positive value at ANY tier
-    warns and falls through."""
-    return _first_valid(
+def resolve_review_timeout(
+    project_path: Path, cli_value: "str | int | None" = None
+) -> "int | None":
+    """Resolve the HARD review subprocess timeout in seconds, or None for
+    unlimited (no wall-clock kill). Precedence: cli_value (`--timeout`) >
+    PLAYBOOK_REVIEW_TIMEOUT_SECS env > config.json review_timeout_secs > 300.
+    A malformed value at ANY tier warns and falls through.
+
+    This is the hang-safety kill only. The soft deadline a judge self-regulates
+    against is `resolve_review_soft_timeout`. After resolution the config floor
+    applies — see `floor_review_timeout`."""
+    resolved = _first_valid(
         (
             (cli_value, "--timeout"),
             (os.environ.get("PLAYBOOK_REVIEW_TIMEOUT_SECS"), "PLAYBOOK_REVIEW_TIMEOUT_SECS"),
@@ -300,6 +372,126 @@ def resolve_review_timeout(project_path: Path, cli_value: "str | int | None" = N
         _parse_timeout,
         DEFAULT_REVIEW_TIMEOUT_SECS,
     )
+    return floor_review_timeout(project_path, resolved)
+
+
+# Returned by config_review_timeout_floor when config sets no timeout at all —
+# distinct from None, which means "config set it to unlimited". Without this the
+# built-in 300s default would act as a floor on installs that never opted into
+# one, making `--timeout 60` impossible and silently contradicting the documented
+# "--flag > env > config" precedence.
+_NO_FLOOR = object()
+
+
+def config_review_timeout_floor(project_path: Path):
+    """Config-only hard-timeout floor, ignoring the CLI and env tiers.
+
+    Returns seconds (finite floor), None (config says unlimited), or `_NO_FLOOR`
+    when config does not set `review_timeout_secs` — a floor is something an
+    install opts into, so an absent setting must not impose one."""
+    raw = load_config(project_path).get("review_timeout_secs")
+    if raw is None:
+        return _NO_FLOOR
+    try:
+        return _parse_timeout(str(raw))
+    except (TypeError, ValueError):
+        # Malformed config can't define a floor; the warning already came from
+        # the resolve path's _first_valid walk.
+        return _NO_FLOOR
+
+
+def floor_review_timeout(
+    project_path: Path, resolved: "int | None"
+) -> "int | None":
+    """Apply the config reliability floor to an already-resolved HARD timeout.
+
+    The point: an agent passing `--timeout 600` must not be able to re-introduce
+    a kill window that the install's config deliberately removed. So config is a
+    floor, not just another tier — CLI and env may raise the ceiling, never lower
+    it.
+
+    - Config sets no timeout: no floor at all, ordinary precedence applies.
+    - Config unlimited (None): always unlimited.
+    - Resolved unlimited (None): stays unlimited — always "above" any floor.
+    - Finite resolved below a finite floor: raised to the floor, with a warning.
+    """
+    floor = config_review_timeout_floor(project_path)
+    if floor is _NO_FLOOR:
+        return resolved
+    if floor is None:
+        if resolved is not None:
+            print(
+                f"[playbook] hard review timeout is unlimited by config — "
+                f"ignoring the finite {resolved}s from --timeout/env.",
+                file=sys.stderr,
+                flush=True,
+            )
+        return None
+    if resolved is None:
+        return None
+    if resolved < floor:
+        print(
+            f"[playbook] hard review timeout {resolved}s is below config floor "
+            f"{floor}s — using {floor}s (pass --timeout only to go ABOVE the "
+            f"floor; the soft deadline is separate: review_soft_timeout_secs).",
+            file=sys.stderr,
+            flush=True,
+        )
+        return floor
+    return resolved
+
+
+# Distinguishes "caller did not pass a hard timeout" from "hard timeout is
+# unlimited" — both of which would otherwise be None. Without it, resolving soft
+# against an unlimited hard would silently re-resolve hard from config and clamp
+# the soft deadline to a kill window that is not in force.
+_HARD_NOT_GIVEN = object()
+
+
+def resolve_review_soft_timeout(
+    project_path: Path,
+    hard_timeout_secs: "int | None" = _HARD_NOT_GIVEN,
+    cli_value: "str | int | None" = None,
+) -> "int | None":
+    """Resolve the SOFT review deadline in seconds — the number the judge is
+    told to self-regulate against. Precedence: cli_value (`--soft-timeout`) >
+    PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS env > config.json review_soft_timeout_secs
+    > 900.
+
+    None (0/unlimited) means "no soft instruction" — judges get no wind-down
+    paragraph at all. When both soft and hard are finite and soft > hard, soft is
+    clamped to hard with a warning, so the prompt never promises a judge more
+    time than its process will live.
+
+    Soft = when to finish the current thought and write findings. Hard = process
+    kill, hang safety only.
+    """
+    soft = _first_valid(
+        (
+            (cli_value, "--soft-timeout"),
+            (os.environ.get("PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS"),
+             "PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS"),
+            (load_config(project_path).get("review_soft_timeout_secs"),
+             "config.json review_soft_timeout_secs"),
+        ),
+        _parse_timeout,
+        DEFAULT_REVIEW_SOFT_TIMEOUT_SECS,
+    )
+    if soft is None:
+        return None
+    if hard_timeout_secs is _HARD_NOT_GIVEN:
+        # Caller didn't resolve hard yet. Resolve it without CLI so soft clamps
+        # against the install floor rather than a transient undercut.
+        hard_timeout_secs = resolve_review_timeout(project_path, None)
+    if hard_timeout_secs is not None and soft > hard_timeout_secs:
+        print(
+            f"[playbook] soft timeout {soft}s exceeds hard {hard_timeout_secs}s "
+            f"— clamping soft to hard so the prompt matches process life.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return hard_timeout_secs
+    return soft
 
 
 # Task type → pattern name in playbook skill

@@ -104,7 +104,7 @@ class CodexAdapter(ProviderAdapter):
         system_context: str,
         *,
         web_search: bool,
-        timeout_secs: int,
+        timeout_secs: "int | None",
         budget_usd: str = "2",
     ) -> str:
         import shutil
@@ -116,6 +116,8 @@ class CodexAdapter(ProviderAdapter):
         env = os.environ.copy()
         env["PLAYBOOK_SESSION_ID"] = self._session_id or "judge"
         from provider import sandbox as _sandbox
+        # timeout_secs=None → unlimited: sandbox.run only arms its
+        # process-group killer when a timeout is set.
         result = _sandbox.run(
             "codex", agent_args,
             project_root=self._project_root,

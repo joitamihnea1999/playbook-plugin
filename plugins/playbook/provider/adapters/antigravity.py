@@ -101,17 +101,21 @@ class AntigravityAdapter(ProviderAdapter):
         system_context: str,
         *,
         web_search: bool,
-        timeout_secs: int,
+        timeout_secs: "int | None",
         budget_usd: str = "2",
     ) -> str:
         import shutil
         if not shutil.which(self.binary_name()):
             return f"(error: {self.binary_name()} not found on PATH)"
         inv = self.headless_argv(prompt, model, context=system_context)
-        # Judge-only extra: --print-timeout (Go-style duration). Safe to append
-        # after headless_argv's prompt value — `--print` already has its value,
-        # so this is parsed as its own flag (not swallowed as the prompt).
-        agent_args = inv.argv + ["--print-timeout", f"{timeout_secs}s"]
+        # Judge-only extra: --print-timeout (Go-style duration), but only when
+        # the timeout is finite — with an unlimited timeout the flag is omitted
+        # entirely, or agy would kill a judge that is still writing. Safe to
+        # append after headless_argv's prompt value — `--print` already has its
+        # value, so this is parsed as its own flag (not swallowed as the prompt).
+        agent_args = list(inv.argv)
+        if timeout_secs is not None:
+            agent_args += ["--print-timeout", f"{timeout_secs}s"]
         # agy 1.1.1 has no stdin prompt path, so prompt+context ride on argv.
         # Windows caps the whole command line at 32,767 chars (WinError 206) —
         # fail fast with a clear error instead of a cryptic spawn failure when
@@ -127,13 +131,17 @@ class AntigravityAdapter(ProviderAdapter):
         from provider import sandbox as _sandbox
         # encoding="utf-8" guards the stdout decode against the Windows cp1252
         # locale default. No stdin (prompt is on argv — see headless_argv).
+        # The subprocess timeout sits 30s above agy's own --print-timeout so agy
+        # reports its own expiry first; unlimited stays unlimited (no arithmetic
+        # on None), and sandbox.run then skips its process-group killer.
+        run_timeout = None if timeout_secs is None else timeout_secs + 30
         result = _sandbox.run(
             "agy", agent_args,
             project_root=self._project_root,
             project_writable=False,   # judge is read-only — cannot mutate repo/task.md
             env=env,
             input=None,
-            capture_output=True, text=True, timeout=timeout_secs + 30, encoding="utf-8",
+            capture_output=True, text=True, timeout=run_timeout, encoding="utf-8",
         )
         return _sandbox.format_judge_output(result)
 

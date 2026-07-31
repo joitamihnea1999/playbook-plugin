@@ -191,16 +191,69 @@ def _intent_check(task_path: str) -> str:
     return ""
 
 
-def plan_review_prompt(task_path: str, inline_context: bool = False) -> str:
+def time_budget_instruction(
+    soft_timeout_secs: "int | None" = None,
+    hard_timeout_secs: "int | None" = None,
+) -> str:
+    """Prompt paragraph: soft wind-down + hard hang-safety.
+
+    Soft = finish the current thought, then answer; do not open a new trail.
+    Hard = process kill, only if truly stuck. Returns "" when no soft budget is
+    configured — soft is the steering signal, so with no soft deadline the judge
+    gets no time paragraph at all rather than a paragraph about a kill it should
+    never be planning around.
+    """
+    if soft_timeout_secs is None:
+        return ""
+    from tasks.core import human_duration
+
+    soft = human_duration(soft_timeout_secs)
+    if hard_timeout_secs is None:
+        hard_clause = (
+            "There is no hard process kill configured — still honor the soft "
+            "deadline so you do not burn unbounded tokens."
+        )
+    else:
+        hard = human_duration(hard_timeout_secs)
+        hard_clause = (
+            f"A hard process kill exists only as hang safety at ~{hard} — "
+            f"never plan to use it; it is not a target."
+        )
+    return (
+        f"TIME BUDGET — soft deadline ~{soft}. {hard_clause} "
+        "Self-regulate so you always produce a complete written findings response: "
+        "(1) Prefer fewer deep, high-value probes over exhaustive exploration — "
+        "do not pad reasoning for its own sake or open low-value side trails. "
+        "(2) When you approach the soft deadline (or have used most of it): "
+        "finish the SINGLE thought process you are currently in — the current "
+        "hypothesis, file trail, or scenario only. Do not abandon mid-idea if "
+        "finishing that one thought is what makes the finding sound. "
+        "(3) After that current thought is finished, write your final findings "
+        "from everything you have already grounded. "
+        "(4) Do NOT start a new hypothesis, new file trail, or new investigation "
+        "branch after the soft deadline. "
+        "(5) A shorter fully-grounded report beats a longer incomplete one. "
+    )
+
+
+def plan_review_prompt(
+    task_path: str,
+    inline_context: bool = False,
+    *,
+    soft_timeout_secs: "int | None" = None,
+    hard_timeout_secs: "int | None" = None,
+) -> str:
     """Return the blind judge prompt for plan review (before implementation)."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
     intent_check = _intent_check(task_path)
+    time_budget = time_budget_instruction(soft_timeout_secs, hard_timeout_secs)
 
     return (
         "You are a senior engineer reviewing a PLAN — no code has been written yet. "
         f"The MIND_MAP.md and task.md are {context_location}. "
         "Read the source files referenced in the plan to understand existing patterns. "
         f"{intent_check}"
+        f"{time_budget}"
         "Then critique the plan through six lenses: "
         "(1) Intent alignment — will this approach actually fulfill the stated Intent? What's missing or underspecified? "
         "(2) Failure modes — what will go wrong that isn't addressed? Construct a concrete failing scenario. "
@@ -221,16 +274,24 @@ def plan_review_prompt(task_path: str, inline_context: bool = False) -> str:
     )
 
 
-def impl_review_prompt(task_path: str, inline_context: bool = False) -> str:
+def impl_review_prompt(
+    task_path: str,
+    inline_context: bool = False,
+    *,
+    soft_timeout_secs: "int | None" = None,
+    hard_timeout_secs: "int | None" = None,
+) -> str:
     """Return the blind judge prompt for implementation review (after code is written)."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
     intent_check = _intent_check(task_path)
+    time_budget = time_budget_instruction(soft_timeout_secs, hard_timeout_secs)
 
     return (
         "You are a senior engineer reviewing a COMPLETED implementation. "
         f"The MIND_MAP.md and task.md are {context_location}. "
         "Read the source files changed by this task (look at the Work Plan gates for paths). "
         f"{intent_check}"
+        f"{time_budget}"
         "Review through six lenses: "
         "(1) Simplify — what's unnecessary or over-engineered? What can be removed? "
         "(2) Self-critique — does the code actually fulfill the stated Intent? What would a skeptic say? "
@@ -250,16 +311,24 @@ def impl_review_prompt(task_path: str, inline_context: bool = False) -> str:
     )
 
 
-def panel_plan_review_prompt(task_path: str, inline_context: bool = False) -> str:
+def panel_plan_review_prompt(
+    task_path: str,
+    inline_context: bool = False,
+    *,
+    soft_timeout_secs: "int | None" = None,
+    hard_timeout_secs: "int | None" = None,
+) -> str:
     """Panel judge prompt for plan review — writes to stdout, never edits task.md."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
     intent_check = _intent_check(task_path)
+    time_budget = time_budget_instruction(soft_timeout_secs, hard_timeout_secs)
 
     return (
         "You are a senior engineer reviewing a PLAN — no code has been written yet. "
         f"The MIND_MAP.md and task.md are {context_location}. "
         "Read the source files referenced in the plan to understand existing patterns. "
         f"{intent_check}"
+        f"{time_budget}"
         "Then critique the plan through six lenses: "
         "(1) Intent alignment — will this approach actually fulfill the stated Intent? What's missing or underspecified? "
         "(2) Failure modes — what will go wrong that isn't addressed? Construct a concrete failing scenario. "
@@ -279,16 +348,24 @@ def panel_plan_review_prompt(task_path: str, inline_context: bool = False) -> st
     )
 
 
-def panel_impl_review_prompt(task_path: str, inline_context: bool = False) -> str:
+def panel_impl_review_prompt(
+    task_path: str,
+    inline_context: bool = False,
+    *,
+    soft_timeout_secs: "int | None" = None,
+    hard_timeout_secs: "int | None" = None,
+) -> str:
     """Panel judge prompt for impl review — writes to stdout, never edits task.md."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
     intent_check = _intent_check(task_path)
+    time_budget = time_budget_instruction(soft_timeout_secs, hard_timeout_secs)
 
     return (
         "You are a senior engineer reviewing a COMPLETED implementation. "
         f"The MIND_MAP.md and task.md are {context_location}. "
         "Read the source files changed by this task (look at the Work Plan gates for paths). "
         f"{intent_check}"
+        f"{time_budget}"
         "Review through six lenses: "
         "(1) Simplify — what's unnecessary or over-engineered? What can be removed? "
         "(2) Self-critique — does the code actually fulfill the stated Intent? What would a skeptic say? "
@@ -309,12 +386,22 @@ def panel_impl_review_prompt(task_path: str, inline_context: bool = False) -> st
 
 
 # Legacy alias for backward compatibility
-def judge_prompt(task_path: str, inline_context: bool = False,
-                 mode: str = "plan") -> str:
+def judge_prompt(
+    task_path: str,
+    inline_context: bool = False,
+    mode: str = "plan",
+    *,
+    soft_timeout_secs: "int | None" = None,
+    hard_timeout_secs: "int | None" = None,
+) -> str:
     """Deprecated: use plan_review_prompt() or impl_review_prompt() instead."""
+    kwargs = dict(
+        soft_timeout_secs=soft_timeout_secs,
+        hard_timeout_secs=hard_timeout_secs,
+    )
     if mode == "impl":
-        return impl_review_prompt(task_path, inline_context)
-    return plan_review_prompt(task_path, inline_context)
+        return impl_review_prompt(task_path, inline_context, **kwargs)
+    return plan_review_prompt(task_path, inline_context, **kwargs)
 
 
 def design_phase_light() -> str:
