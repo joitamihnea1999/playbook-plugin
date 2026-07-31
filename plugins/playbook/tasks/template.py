@@ -191,6 +191,27 @@ def _intent_check(task_path: str) -> str:
     return ""
 
 
+def _depth_budget_clause(soft_timeout_secs: "int | None") -> str:
+    """The parenthetical inside the depth instruction.
+
+    It has to agree with `time_budget_instruction`: with no soft deadline
+    configured that function emits nothing, so telling the judge to reason
+    "within the soft time budget" would point at a budget the prompt never
+    states. Same instruction either way — reason until the claims are grounded,
+    don't pad — but only the first form names a deadline.
+    """
+    if soft_timeout_secs is None:
+        return (
+            "reason until the claims are code-grounded; depth is how hard you "
+            "think, not how much you write — do not pad"
+        )
+    return (
+        "reason until the claims are code-grounded within the soft time budget; "
+        "don't pad or exhaust the budget for its own sake — the soft deadline is "
+        "the target, the hard kill is hang safety only"
+    )
+
+
 def time_budget_instruction(
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
@@ -247,6 +268,7 @@ def plan_review_prompt(
     context_location = "provided below" if inline_context else "provided in your system prompt"
     intent_check = _intent_check(task_path)
     time_budget = time_budget_instruction(soft_timeout_secs, hard_timeout_secs)
+    depth_budget = _depth_budget_clause(soft_timeout_secs)
 
     return (
         "You are a senior engineer reviewing a PLAN — no code has been written yet. "
@@ -254,7 +276,8 @@ def plan_review_prompt(
         "Read the source files referenced in the plan to understand existing patterns. "
         f"{intent_check}"
         f"{time_budget}"
-        "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report (reason until the claims are code-grounded within the soft time budget; don't pad or exhaust the budget for its own sake — the soft deadline is the target, the hard kill is hang safety only). "
+        "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
+        f"({depth_budget}). "
         "Where you have file access, read the relevant source and its callers/callees (don't judge from names alone) and trace, end-to-end, the data and control flow the plan would touch. "
         "Form several independent hypotheses about where this plan will fail or fall short, and for each, try to construct a concrete scenario that breaks it — keep the ones that hold up, discard the rest. "
         "Where you have file access, verify each claim against the code before committing to it; otherwise ground it in the inline task.md / mind-map context — do not treat lack of file access as a reason to drop everything. Drop only claims you cannot ground either way. "
@@ -290,6 +313,7 @@ def impl_review_prompt(
     context_location = "provided below" if inline_context else "provided in your system prompt"
     intent_check = _intent_check(task_path)
     time_budget = time_budget_instruction(soft_timeout_secs, hard_timeout_secs)
+    depth_budget = _depth_budget_clause(soft_timeout_secs)
 
     return (
         "You are a senior engineer reviewing a COMPLETED implementation. "
@@ -297,7 +321,8 @@ def impl_review_prompt(
         "Read the source files changed by this task (look at the Work Plan gates for paths). "
         f"{intent_check}"
         f"{time_budget}"
-        "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report (reason until the claims are code-grounded within the soft time budget; don't pad or exhaust the budget for its own sake — the soft deadline is the target, the hard kill is hang safety only). "
+        "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
+        f"({depth_budget}). "
         "Where you have file access, read the changed source and its callers/callees (don't judge from names alone) and trace the data and control flow end-to-end. "
         "Form several independent hypotheses about how this code could be wrong — bugs, edge cases, races, security — and for each, try to construct a concrete input or sequence that triggers it; keep the ones that hold up, discard the rest. "
         "For any test claim, check the test would actually fail if the behavior regressed. Where you have file access, verify each claim against the code before committing to it; otherwise ground it in the inline task.md / mind-map context — do not treat lack of file access as a reason to drop everything. Drop only claims you cannot ground either way. "
@@ -332,6 +357,7 @@ def panel_plan_review_prompt(
     context_location = "provided below" if inline_context else "provided in your system prompt"
     intent_check = _intent_check(task_path)
     time_budget = time_budget_instruction(soft_timeout_secs, hard_timeout_secs)
+    depth_budget = _depth_budget_clause(soft_timeout_secs)
 
     return (
         "You are a senior engineer reviewing a PLAN — no code has been written yet. "
@@ -339,7 +365,8 @@ def panel_plan_review_prompt(
         "Read the source files referenced in the plan to understand existing patterns. "
         f"{intent_check}"
         f"{time_budget}"
-        "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report (reason until the claims are code-grounded within the soft time budget; don't pad or exhaust the budget for its own sake — the soft deadline is the target, the hard kill is hang safety only). "
+        "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
+        f"({depth_budget}). "
         "Where you have file access, read the relevant source and its callers/callees (don't judge from names alone) and trace, end-to-end, the data and control flow the plan would touch. "
         "Form several independent hypotheses about where this plan will fail or fall short, and for each, try to construct a concrete scenario that breaks it — keep the ones that hold up, discard the rest. "
         "Where you have file access, verify each claim against the code before committing to it; otherwise ground it in the inline task.md / mind-map context — do not treat lack of file access as a reason to drop everything. Drop only claims you cannot ground either way. "
@@ -374,6 +401,7 @@ def panel_impl_review_prompt(
     context_location = "provided below" if inline_context else "provided in your system prompt"
     intent_check = _intent_check(task_path)
     time_budget = time_budget_instruction(soft_timeout_secs, hard_timeout_secs)
+    depth_budget = _depth_budget_clause(soft_timeout_secs)
 
     return (
         "You are a senior engineer reviewing a COMPLETED implementation. "
@@ -381,7 +409,8 @@ def panel_impl_review_prompt(
         "Read the source files changed by this task (look at the Work Plan gates for paths). "
         f"{intent_check}"
         f"{time_budget}"
-        "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report (reason until the claims are code-grounded within the soft time budget; don't pad or exhaust the budget for its own sake — the soft deadline is the target, the hard kill is hang safety only). "
+        "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
+        f"({depth_budget}). "
         "Where you have file access, read the changed source and its callers/callees (don't judge from names alone) and trace the data and control flow end-to-end. "
         "Form several independent hypotheses about how this code could be wrong — bugs, edge cases, races, security — and for each, try to construct a concrete input or sequence that triggers it; keep the ones that hold up, discard the rest. "
         "For any test claim, check the test would actually fail if the behavior regressed. Where you have file access, verify each claim against the code before committing to it; otherwise ground it in the inline task.md / mind-map context — do not treat lack of file access as a reason to drop everything. Drop only claims you cannot ground either way. "

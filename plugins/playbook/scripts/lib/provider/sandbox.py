@@ -682,7 +682,12 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
 def _run_with_timeout(wrapped, project, child_env, capture_output, check, kwargs):
     """run() helper: timeout-bounded execution with whole-tree termination.
     Re-raises subprocess.TimeoutExpired on expiry (after killing the tree) so
-    callers can catch it exactly as they would from subprocess.run()."""
+    callers can catch it exactly as they would from subprocess.run().
+
+    The re-raised exception carries whatever the process had already written, on
+    `.stdout` / `.stderr`, so callers can salvage a partial answer instead of
+    reporting a timeout with nothing to show for the time spent.
+    """
     timeout = kwargs.pop("timeout")
     input_data = kwargs.pop("input", None)
     if capture_output:
@@ -699,12 +704,22 @@ def _run_with_timeout(wrapped, project, child_env, capture_output, check, kwargs
     proc = subprocess.Popen(wrapped, cwd=str(project), env=child_env, **kwargs)
     try:
         out, err = proc.communicate(input=input_data, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as expired:
         _kill_process_tree(proc)
+        partial_out = partial_err = None
         try:
-            proc.communicate(timeout=5)  # reap; tree is dead so returns promptly
+            # Reap; the tree is dead so this returns promptly. Keep what it hands
+            # back: a judge killed at its ceiling has usually already written most
+            # of its findings, and dropping them turns the entire wall-clock spend
+            # into nothing at all. Popen.communicate() (unlike subprocess.run)
+            # does not attach output to the exception, so attach it here.
+            partial_out, partial_err = proc.communicate(timeout=5)
         except Exception:
             pass
+        if partial_out:
+            expired.stdout = partial_out
+        if partial_err:
+            expired.stderr = partial_err
         raise
     if check and proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, wrapped, out, err)

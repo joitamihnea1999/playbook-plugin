@@ -131,6 +131,24 @@ class TimeBudgetInstructionTest(unittest.TestCase):
                 self.assertNotIn(
                     "TIME BUDGET", getattr(canonical_template, name)("a/001-x/task.md"))
 
+    def test_no_soft_budget_means_no_soft_reference_anywhere(self):
+        """Not just a missing heading — no dangling mention of a budget either.
+
+        The depth block's parenthetical used to say "reason ... within the soft
+        time budget" unconditionally, so with soft disabled the prompt pointed at
+        a deadline it never stated. Checking only for the TIME BUDGET heading let
+        that through, which is why this asserts on the vocabulary instead.
+        """
+        for name in ALL_BUILDERS:
+            rendered = getattr(canonical_template, name)("a/001-x/task.md")
+            for phrase in ("TIME BUDGET", "soft time budget", "soft deadline",
+                           "hang safety", "hard kill"):
+                with self.subTest(builder=name, phrase=phrase):
+                    self.assertNotIn(phrase, rendered)
+            # The instruction itself must survive — this is not "delete the text".
+            self.assertIn("Work the problem deeply", rendered)
+            self.assertIn("depth is how hard you think", rendered)
+
     def test_present_in_every_builder_with_a_soft_budget(self):
         for name in ALL_BUILDERS:
             rendered = getattr(canonical_template, name)(

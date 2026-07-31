@@ -270,6 +270,19 @@ class ReviewTimeoutFloorTest(unittest.TestCase):
         every install that never wrote a config file."""
         self.assertEqual(core.resolve_review_timeout(self.project, "60"), 60)
 
+    def test_bare_json_null_means_unset_not_unlimited(self):
+        """`"null"` the string is an unlimited spelling; bare JSON `null` is not.
+
+        JSON null idiomatically means "no value", and every other key in this
+        file treats it that way, so making it mean "never kill the judge" would
+        be a surprising reading of an empty setting. Pinned here because the two
+        spellings look alike in a config file and docs/configuration.md now says
+        so explicitly.
+        """
+        self._write_config({"review_timeout_secs": None})
+        self.assertEqual(core.resolve_review_timeout(self.project), 300)
+        self.assertIsNone(core._parse_timeout("null"))
+
     def test_malformed_config_imposes_no_floor(self):
         self._write_config({"review_timeout_secs": "banana"})
         self.assertEqual(core.resolve_review_timeout(self.project, "60"), 60)
@@ -469,6 +482,38 @@ class EffortFlagScopeTest(unittest.TestCase):
                 )
 
 
+class TimedOutSeatStillCountsAsFailedTest(unittest.TestCase):
+    """A salvaged partial must not promote a timed-out panel seat to "succeeded".
+
+    The panel appends the judge's partial output under the `(timed out…)` marker
+    so the seat still contributes what it found. `judge_failed` anchors on the
+    block START, so the marker has to stay first — this pins that contract, since
+    reordering it would silently turn a truncated review into a clean one.
+    """
+
+    def test_marker_first_keeps_the_seat_failed(self):
+        from tasks.models_check import judge_failed
+
+        salvaged = (
+            "(timed out after hard 1200s)\n\n"
+            "**INCOMPLETE** — killed mid-response; the findings below may be cut "
+            "off and reached no conclusion:\n\n"
+            "1. **Important** — line 42 is wrong."
+        )
+        self.assertTrue(judge_failed(salvaged))
+
+    def test_a_finished_review_is_not_flagged(self):
+        from tasks.models_check import judge_failed
+
+        self.assertFalse(judge_failed("1. **Important** — line 42 is wrong."))
+
+    def test_partial_text_alone_would_have_passed(self):
+        """Shows the marker is doing the work, not the INCOMPLETE banner."""
+        from tasks.models_check import judge_failed
+
+        self.assertFalse(judge_failed("**INCOMPLETE** — killed mid-response"))
+
+
 @unittest.skipIf(os.name == "nt", "POSIX process-group termination path")
 class RunWithTimeoutTest(unittest.TestCase):
     """Regression guard for the B8 fix: sandbox.run(timeout=) must terminate the
@@ -500,6 +545,26 @@ class RunWithTimeoutTest(unittest.TestCase):
         pid = int(pidfile.read_text().strip())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+    def test_partial_output_survives_the_kill(self):
+        """A judge killed at its ceiling has usually written most of its findings.
+
+        Popen.communicate() does not attach output to TimeoutExpired the way
+        subprocess.run() does, so the reap-after-kill used to discard it and a
+        20-minute review returned nothing at all. The output must reach the
+        caller so it can be salvaged into the review log.
+        """
+        from provider import sandbox
+
+        d = tempfile.mkdtemp()
+        wrapped = ["sh", "-c", "echo 'PARTIAL FINDING'; echo 'warned' >&2; sleep 60"]
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            sandbox._run_with_timeout(
+                wrapped, Path(d), dict(os.environ),
+                capture_output=True, check=False, kwargs={"timeout": 2, "text": True},
+            )
+        self.assertIn("PARTIAL FINDING", caught.exception.stdout or "")
+        self.assertIn("warned", caught.exception.stderr or "")
 
 
 if __name__ == "__main__":

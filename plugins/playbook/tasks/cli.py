@@ -438,6 +438,19 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     return {"porcelain": porcelain, "task_hash": task_hash}
 
 
+def _judge_log_name(backend: str) -> str:
+    """Review-log filename for a backend. Shared by the save path and the hard
+    timeout path, which writes `<stem>.partial.log` beside it — they must agree
+    on the name or a salvaged partial would not be findable next to its review."""
+    return {
+        "claude": "judge.log",
+        "codex": "judge-codex.log",
+        "antigravity": "judge-agy.log",
+        "grok": "judge-grok.log",
+        "pi": "judge-pi.log",
+    }.get(backend, "judge.log")
+
+
 def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> list[str]:
     """Compare current repo state against a `_snapshot_repo_state` result.
     Returns human-readable change descriptions (empty list = no tamper).
@@ -1832,8 +1845,23 @@ def main():
                     budget_usd=panel_budget,
                 )
                 return label, output
-            except subprocess.TimeoutExpired:
-                return label, f"(timed out after hard {hard_timeout_label})"
+            except subprocess.TimeoutExpired as expired:
+                # Keep whatever this seat had written. The marker stays FIRST so
+                # the seat is still classified as failed and no reader mistakes a
+                # truncated block for a finished review — but a seat that spent
+                # the whole budget should still contribute what it found.
+                raw = getattr(expired, "stdout", None) or getattr(expired, "output", None) or ""
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+                raw = raw.strip()
+                marker = f"(timed out after hard {hard_timeout_label})"
+                if raw:
+                    return label, (
+                        f"{marker}\n\n**INCOMPLETE** — killed mid-response; the "
+                        f"findings below may be cut off and reached no conclusion:"
+                        f"\n\n{raw}"
+                    )
+                return label, marker
             except Exception as e:
                 return label, f"(error: {e})"
 
@@ -2099,16 +2127,46 @@ def main():
 
         review_label = "plan review" if review_mode == "plan" else "impl review"
 
-        def _bail_review_timeout():
-            # A timed-out review exits BEFORE the log-save below, so any previous
-            # review log is left untouched (never overwritten with a partial run).
+        def _bail_review_timeout(expired=None):
             # Only reachable when a finite HARD timeout is in force.
+            #
+            # Whatever the judge had already written is salvaged to a SEPARATE
+            # `*.partial.log` rather than being dropped or overwriting the main
+            # log. Both halves of that matter: a review killed at its ceiling has
+            # usually produced most of its findings, and spending the full budget
+            # to be handed nothing is the worst outcome; but a partial review must
+            # never be mistaken for a complete one, nor replace a previous good
+            # review. So: new file, explicit banner, still exit nonzero.
+            partial = ""
+            if expired is not None:
+                raw = getattr(expired, "stdout", None) or getattr(expired, "output", None) or ""
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+                partial = raw.strip()
+            saved_note = ""
+            if partial:
+                partial_log = task_file.parent / (
+                    _judge_log_name(backend).removesuffix(".log") + ".partial.log")
+                partial_log.write_text(
+                    f"# INCOMPLETE {review_label} — the judge was killed at the hard "
+                    f"timeout ({review_timeout_label}) mid-response.\n"
+                    f"# This is what it had written by then. It is NOT a finished "
+                    f"review: findings may be cut off and it reached no conclusion.\n"
+                    f"# The previous complete review, if any, is untouched in "
+                    f"{_judge_log_name(backend)}.\n\n{partial}\n",
+                    encoding="utf-8",
+                )
+                saved_note = (f" Partial output ({len(partial)} chars) saved to "
+                              f"{partial_log.relative_to(project_path)}.")
+            else:
+                saved_note = " The judge produced no output before the kill."
             print(
                 f"\n{review_label} hit hard timeout after {review_timeout_label} "
                 f"({review_soft_hard_label}). Raise the hard kill with --timeout, "
                 "PLAYBOOK_REVIEW_TIMEOUT_SECS, or .agent/config.json "
                 "review_timeout_secs; move the soft deadline with --soft-timeout "
-                "or review_soft_timeout_secs. Previous review log left untouched.",
+                "or review_soft_timeout_secs. Previous review log left untouched."
+                + saved_note,
                 file=sys.stderr, flush=True,
             )
             sys.exit(1)
@@ -2173,8 +2231,8 @@ def main():
                     errors="replace",
                     timeout=review_timeout,
                 )
-            except subprocess.TimeoutExpired:
-                _bail_review_timeout()
+            except subprocess.TimeoutExpired as _expired:
+                _bail_review_timeout(_expired)
 
         elif backend == "codex":
             if not shutil.which("codex"):
@@ -2230,8 +2288,8 @@ def main():
                     errors="replace",
                     timeout=review_timeout,
                 )
-            except subprocess.TimeoutExpired:
-                _bail_review_timeout()
+            except subprocess.TimeoutExpired as _expired:
+                _bail_review_timeout(_expired)
 
         elif backend == "antigravity":  # agy
             if not shutil.which("agy"):
@@ -2280,8 +2338,8 @@ def main():
                     errors="replace",
                     timeout=review_timeout,
                 )
-            except subprocess.TimeoutExpired:
-                _bail_review_timeout()
+            except subprocess.TimeoutExpired as _expired:
+                _bail_review_timeout(_expired)
 
         elif backend == "grok":
             if not shutil.which("grok"):
@@ -2335,8 +2393,8 @@ def main():
                     errors="replace",
                     timeout=review_timeout,
                 )
-            except subprocess.TimeoutExpired:
-                _bail_review_timeout()
+            except subprocess.TimeoutExpired as _expired:
+                _bail_review_timeout(_expired)
 
         else:  # pi (local Qwen via oMLX)
             if not (shutil.which("pi") or shutil.which("omlx")):
@@ -2389,8 +2447,8 @@ def main():
                     errors="replace",
                     timeout=review_timeout,
                 )
-            except subprocess.TimeoutExpired:
-                _bail_review_timeout()
+            except subprocess.TimeoutExpired as _expired:
+                _bail_review_timeout(_expired)
 
         if result.stdout:
             print(result.stdout, end="", flush=True)
@@ -2403,14 +2461,7 @@ def main():
         _tamper_changes = _detect_tamper(project_path, task_file, _tamper_before)
 
         # Save output — backend-specific log files
-        log_name = {
-            "claude": "judge.log",
-            "codex": "judge-codex.log",
-            "antigravity": "judge-agy.log",
-            "grok": "judge-grok.log",
-            "pi": "judge-pi.log",
-        }.get(backend, "judge.log")
-        judge_log = task_file.parent / log_name
+        judge_log = task_file.parent / _judge_log_name(backend)
         output = (result.stdout or "").strip()
         # Budget exhaustion arrives as exit-0 stdout (task 012 L3): detect it
         # BEFORE saving so it never overwrites a prior good review, tell the
