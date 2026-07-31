@@ -438,6 +438,92 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     return {"porcelain": porcelain, "task_hash": task_hash}
 
 
+_REVIEW_SECTIONS = {
+    "plan": ("## Plan Review", "(plan review findings appear here)"),
+    "impl": ("## Implementation Review", "(implementation review findings appear here)"),
+}
+
+
+def _findings_markers(review_mode: str) -> tuple[str, str]:
+    """Open/close sentinels delimiting parent-written findings in task.md."""
+    return (f"<!-- playbook:{review_mode}-review-findings -->",
+            f"<!-- /playbook:{review_mode}-review-findings -->")
+
+
+def _neutralise_markers(findings: str, review_mode: str) -> str:
+    """Defang sentinel tokens inside judge output.
+
+    Findings are UNTRUSTED text. If they contained our own markers, the next
+    rerun's replace would bind to the wrong span and could eat the surrounding
+    gates — the same class of damage the tamper guard exists to prevent. Break
+    the tokens so they can never be mistaken for delimiters.
+    """
+    out = findings
+    for marker in _findings_markers(review_mode):
+        out = out.replace(marker, marker.replace("<!--", "<!_-").replace("-->", "-_>"))
+    return out
+
+
+def _write_review_findings(task_file: Path, review_mode: str, findings: str) -> str | None:
+    """Write a single judge's findings into task.md. Returns None on success,
+    else a human-readable reason it refused.
+
+    The judge is sandboxed read-only (`project_writable=False`) and must stay
+    that way, so the trusted parent performs this write — the same division the
+    panel path already uses. Idempotent across reruns: findings live between
+    explicit sentinels, so a re-review replaces a delimited region instead of
+    guessing where the previous findings ended.
+
+    Refuses rather than guesses. If the section has neither its placeholder nor
+    exactly one well-ordered sentinel pair, nothing is written and the caller
+    reports it — the findings still exist in the judge log, so refusing costs
+    the operator nothing, while a wrong insertion could destroy work-plan gates.
+    """
+    section = _REVIEW_SECTIONS.get(review_mode)
+    if section is None:
+        return f"unknown review mode {review_mode!r}"
+    heading, placeholder = section
+    open_m, close_m = _findings_markers(review_mode)
+    body = _neutralise_markers(findings.strip(), review_mode)
+    block = f"{open_m}\n{body}\n{close_m}"
+
+    try:
+        text = task_file.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"could not read {task_file.name}: {e}"
+
+    n_open, n_close = text.count(open_m), text.count(close_m)
+    if n_open or n_close:
+        if n_open != 1 or n_close != 1:
+            return (f"{heading} has {n_open} opening and {n_close} closing "
+                    f"findings markers — expected exactly one of each")
+        start, end = text.index(open_m), text.index(close_m)
+        if end < start:
+            return f"{heading} findings markers are out of order"
+        new_text = text[:start] + block + text[end + len(close_m):]
+    elif text.count(placeholder) == 1:
+        new_text = text.replace(placeholder, block, 1)
+    elif placeholder in text:
+        return f"{heading} placeholder appears more than once"
+    else:
+        return (f"{heading} has neither its placeholder nor findings markers "
+                f"(hand-edited?)")
+
+    # Atomic: task.md IS the execution trace, so an interrupt must not truncate
+    # it. Same-directory temp + os.replace, mirroring models_check.py.
+    tmp = task_file.with_suffix(f".tmp.{os.getpid()}")
+    try:
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, task_file)
+    except OSError as e:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return f"could not write {task_file.name}: {e}"
+    return None
+
+
 def _judge_log_name(backend: str) -> str:
     """Review-log filename for a backend. Shared by the save path and the hard
     timeout path, which writes `<stem>.partial.log` beside it — they must agree
@@ -2480,6 +2566,9 @@ def main():
         # log (task 012 I1). The formatted string is what classification below
         # sees, so save/keep and hard-stop agree on what counts as a failure.
         _formatted_result = _sandbox.format_judge_output(result)
+        # Set only on the success path below; stays None when the review failed,
+        # so the write-back at the end cannot ingest a rejected run's output.
+        saved_review_text = None
         if result.returncode != 0 and (not output or _judge_failed_str(_formatted_result)):
             if judge_log.exists():
                 print(f"\nReview failed (exit {result.returncode}); kept previous {judge_log.relative_to(project_path)}", flush=True)
@@ -2506,11 +2595,12 @@ def main():
                     codex_log.unlink()
                 except OSError:
                     pass
-                judge_log.write_text(
-                    codex_out if codex_out.strip() else (result.stdout or ""),
-                    encoding="utf-8")
+                saved_review_text = (
+                    codex_out if codex_out.strip() else (result.stdout or ""))
+                judge_log.write_text(saved_review_text, encoding="utf-8")
             else:
-                judge_log.write_text(result.stdout or "", encoding="utf-8")
+                saved_review_text = result.stdout or ""
+                judge_log.write_text(saved_review_text, encoding="utf-8")
             print(f"\nSaved: {judge_log.relative_to(project_path)}", flush=True)
 
         # Model-unavailable hard stop (task 012), same contract as the panel:
@@ -2546,6 +2636,26 @@ def main():
         if _tamper_changes:
             print("\n" + _tamper_banner(_tamper_changes), file=sys.stderr, flush=True)
             sys.exit(1)
+
+        # Write the findings into task.md — LAST, deliberately. The judge is
+        # sandboxed read-only and cannot do it itself (and must not be able to),
+        # so the trusted parent does, exactly as the panel path does. This sits
+        # after the budget, failure, model-unavailable and tamper checks because
+        # every one of them can reject a run whose output still looks like a
+        # review: writing any earlier would ingest findings the very next lines
+        # declare untrustworthy. `saved_review_text` is the same content written
+        # to the backend log, not raw stdout, so log and task.md never diverge.
+        if result.returncode == 0 and saved_review_text and saved_review_text.strip():
+            refusal = _write_review_findings(task_file, review_mode, saved_review_text)
+            if refusal is None:
+                print(f"Findings written to {task_file.relative_to(project_path)} "
+                      f"(## {'Plan' if review_mode == 'plan' else 'Implementation'} Review)",
+                      flush=True)
+            else:
+                print(f"\nCould not write findings into "
+                      f"{task_file.relative_to(project_path)}: {refusal}\n"
+                      f"They are saved in {judge_log.relative_to(project_path)} — "
+                      f"paste them in by hand.", file=sys.stderr, flush=True)
 
         sys.exit(result.returncode)
 

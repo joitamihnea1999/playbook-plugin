@@ -119,7 +119,7 @@ def design_phase() -> str:
 def judge_section() -> str:
     return """\
 ## Plan Review
-- [ ] Run `.claude/bin/tasks plan-review <N>` — wait for it to finish (it edits this file). Re-read this file to see its findings below, then address valid concerns by revising Work Plan gates. **Justify lens:** does every work gate trace up to something in Intent/Design? Are there gates that justify nothing above them (scope creep)? Intent claims with no gate to satisfy them (gaps)?
+- [ ] Run `.claude/bin/tasks plan-review <N>` — wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only and will NOT touch your gates). Re-read this file to see its findings below, then address valid concerns by revising Work Plan gates yourself. **Justify lens:** does every work gate trace up to something in Intent/Design? Are there gates that justify nothing above them (scope creep)? Intent claims with no gate to satisfy them (gaps)?
 - [ ] **Triage plan-review findings: judge = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale). Push back where you have concrete evidence — you live with the outcomes, the reviewer doesn't. Verify file:line claims before applying — single-judge reviews can cite wrong locations.
 - [ ] *(Optional)* Run `.claude/bin/tasks panel-review <N>` for multi-model panel (writes to judge.md, not this file). Add `--prompt "..."` to append extra steering (e.g. focus area, constraint). Read judge.md with user, accept/reject findings, apply selected advice to Work Plan.
 
@@ -143,7 +143,7 @@ def work_plan() -> str:
 def judge_impl_section() -> str:
     return """\
 ## Implementation Review
-- [ ] Run `.claude/bin/tasks impl-review <N>` — wait for it to finish (it edits this file). Re-read findings. **Satisfy lens:** does every Intent claim trace down through code to tests? Where does the chain break?
+- [ ] Run `.claude/bin/tasks impl-review <N>` — wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only). Re-read findings. **Satisfy lens:** does every Intent claim trace down through code to tests? Where does the chain break?
 - [ ] **Triage impl-review findings: judge = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale). Push back where you have concrete evidence — you live with the outcomes, the reviewer doesn't. Verify file:line claims before applying — single-judge reviews can cite wrong locations.
 - [ ] *(Optional)* Run `.claude/bin/tasks panel-review <N> --mode impl` for multi-model panel review. Add `--prompt "..."` to append extra steering.
 
@@ -216,9 +216,10 @@ def plan_review_prompt(task_path: str, inline_context: bool = False) -> str:
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
-        f"Then edit {task_path}: "
-        "(1) in the '## Plan Review' section, replace the '(plan review findings appear here)' placeholder with your findings — this is idempotent on reruns (if the placeholder was already replaced, replace the existing findings), "
-        "(2) revise the ## Work Plan gates to address Critical and Important findings."
+        "DO NOT edit any files — you are sandboxed read-only and the attempt will "
+        "fail. Output your findings to stdout only; the parent process writes them "
+        "into the task's '## Plan Review' section, and the agent that owns the task "
+        "triages them and revises its own Work Plan gates."
     )
 
 
@@ -251,8 +252,9 @@ def impl_review_prompt(task_path: str, inline_context: bool = False) -> str:
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
-        f"Then edit {task_path}: "
-        "(1) in the '## Implementation Review' section, replace the '(implementation review findings appear here)' placeholder with your findings — this is idempotent on reruns (if the placeholder was already replaced, replace the existing findings)."
+        "DO NOT edit any files — you are sandboxed read-only and the attempt will "
+        "fail. Output your findings to stdout only; the parent process writes them "
+        "into the task's '## Implementation Review' section."
     )
 
 
