@@ -117,26 +117,117 @@ def _inject_chat_into_task(task_file: Path, messages: list[str]) -> None:
         task_file.write_text(_utf8_safe(content), encoding="utf-8")
 
 
-def _load_mind_map(project_path: Path, max_chars: int = 25000) -> str | None:
-    """Load MIND_MAP.md content. If over max_chars, keep head + tail, drop middle.
+def _omitted_nodes_notice(omitted_ids: list[int], total: int, *,
+                          first_truncated: bool = False,
+                          preamble_dropped: bool = False) -> str:
+    """The in-band notice that names which mind-map nodes did NOT make the budget.
+
+    Load-bearing, not decoration: every judge prompt asserts "the MIND_MAP.md is
+    provided" (`template.py`), so a silently-trimmed map reads as a complete one
+    and the judge never goes looking for what is missing. Naming the ids — and the
+    grep that fetches them — is what turns a silent loss into a recoverable one.
+    Every kind of loss this trim can inflict has to be speakable here, or it is
+    back to being invisible.
+    """
+    if not omitted_ids and not first_truncated and not preamble_dropped:
+        return ""
+    parts = []
+    if omitted_ids:
+        ids = ", ".join(f"[{n}]" for n in omitted_ids)
+        parts.append(
+            f"[... MIND MAP TRIMMED to fit the context budget: "
+            f"{len(omitted_ids)} of {total} nodes omitted — {ids}. "
+            f"This is NOT the full map. Read any omitted node with: "
+            f"grep '^\\[N\\]' MIND_MAP.md ...]"
+        )
+    if preamble_dropped:
+        parts.append(
+            "[... the map's header (editing rules, ownership map) was dropped to make "
+            "room for the routing node. Read the top of MIND_MAP.md for it ...]"
+        )
+    if first_truncated:
+        parts.append(
+            "[... the node below is itself CUT MID-NODE — the budget could not hold "
+            "even one whole node. Read MIND_MAP.md directly ...]"
+        )
+    return "\n".join(parts) + "\n\n"
+
+
+def _trim_mind_map_by_node(content: str, max_chars: int) -> str | None:
+    """Node-aware trim: drop WHOLE nodes to fit, and name the ones dropped.
+
+    Returns None when `content` has no usable node markers, so the caller can fall
+    back to the line-based trim (a mind map is not required to be node-shaped).
+
+    Why not the line-based trim: mind-map nodes are conventionally ONE long line
+    each (`^[N] **Title** - prose…`), so cutting on a line boundary at 60%/40%
+    does not shed prose evenly — it sheds entire subsystem chapters, and says only
+    "N lines omitted". A 120 KB / 19-node map delivered nodes [0], [17], [18] and
+    nothing else. Whole nodes in, named ids for the rest, is strictly more useful
+    at the same byte cost.
+
+    Selection is file order, first node first. That drops the old trim's 60/40
+    head+tail bias deliberately: its stated reason was "the tail has recent
+    additions and roadmap", which does not hold for the real node order — Status
+    and Roadmap are head nodes ([4], [5]), and the tail is simply the
+    newest-numbered SUBSYSTEMS. File order keeps the routing nodes the map's own
+    header tells readers to start at, and named omissions replace what the tail
+    bias was trying to buy. Every node that fits is taken, so a later short `↗`
+    node still lands even when an earlier fat one did not. The first node is kept
+    unconditionally (truncated only if the budget cannot hold it) because it is the
+    routing/overview node the rest links to.
+    """
+    lines = content.splitlines(keepends=True)
+    starts, in_fence = _node_starts(lines)   # shared fence-aware scan
+    if in_fence or not starts:
+        return None
+
+    preamble = "".join(lines[: starts[0][0]])
+    if preamble and not preamble.endswith("\n"):
+        preamble += "\n"         # before budgeting, so the fix cannot overrun it
+    spans: list[tuple[int, str]] = []
+    for k, (idx, nid) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+        spans.append((nid, "".join(lines[idx:end])))
+    total = len(spans)
+
+    # Reserve the worst-case notice (every id named, plus both extra lines) so the
+    # selection below can never be invalidated by the notice it will grow.
+    reserve = len(_omitted_nodes_notice(
+        [nid for nid, _ in spans], total, first_truncated=True, preamble_dropped=True))
+    budget = max(max_chars - reserve, 0)
+
+    first_text = spans[0][1]
+    preamble_dropped = False
+    if preamble and len(preamble) + len(first_text) > budget:
+        preamble = ""            # the routing node outranks the header prose
+        preamble_dropped = True
+    first_truncated = len(first_text) > budget
+    if first_truncated:
+        first_text = first_text[:budget]
+
+    kept = {0: first_text}
+    used = len(preamble) + len(first_text)
+    if not first_truncated:
+        for i in range(1, total):
+            text = spans[i][1]
+            if used + len(text) <= budget:
+                kept[i] = text
+                used += len(text)
+
+    omitted = [nid for i, (nid, _) in enumerate(spans) if i not in kept]
+    notice = _omitted_nodes_notice(omitted, total, first_truncated=first_truncated,
+                                   preamble_dropped=preamble_dropped)
+    result = preamble + notice + "".join(kept[i] for i in sorted(kept))
+    return result[:max_chars]
+
+
+def _trim_mind_map_by_lines(content: str, max_chars: int) -> str:
+    """Line-based head+tail trim — the fallback for maps with no node markers.
 
     Head has overview nodes [1]-[4]; tail has recent additions and roadmap.
     The middle is the most expendable, so we trim there on a line boundary.
-
-    Set PLAYBOOK_MINDMAP_MAX env var to override max_chars (0 = suppress entirely).
     """
-    env_max = os.environ.get("PLAYBOOK_MINDMAP_MAX")
-    if env_max is not None:
-        max_chars = int(env_max)
-        if max_chars == 0:
-            return None
-    mind_map = project_path / "MIND_MAP.md"
-    if not mind_map.exists():
-        return None
-    content = mind_map.read_text(encoding="utf-8")
-    if len(content) <= max_chars:
-        return content
-
     max_omitted_digits = len(str(content.count("\n")))
     marker_budget = len(f"\n\n[... {'9' * max_omitted_digits} lines omitted ...]\n")
     available = max(max_chars - marker_budget, 0)
@@ -170,6 +261,34 @@ def _load_mind_map(project_path: Path, max_chars: int = 25000) -> str | None:
             tail = ""
         result = f"{head}{marker}{tail}"
     return result[:max_chars]
+
+
+def _load_mind_map(project_path: Path, max_chars: int = 25000) -> str | None:
+    """Load MIND_MAP.md content, trimmed to max_chars if it is over budget.
+
+    Trimming is node-aware (`_trim_mind_map_by_node`): whole `^[N]` nodes are
+    dropped to fit and the dropped ids are NAMED in the returned text, so the
+    reader knows what is missing and can grep for it. A map with no node markers
+    falls back to the older line-based head+tail trim.
+
+    Set PLAYBOOK_MINDMAP_MAX env var to override max_chars (0 or less = suppress
+    entirely).
+    """
+    env_max = os.environ.get("PLAYBOOK_MINDMAP_MAX")
+    if env_max is not None:
+        max_chars = int(env_max)
+        if max_chars <= 0:
+            return None
+    mind_map = project_path / "MIND_MAP.md"
+    if not mind_map.exists():
+        return None
+    content = mind_map.read_text(encoding="utf-8")
+    if len(content) <= max_chars:
+        return content
+    by_node = _trim_mind_map_by_node(content, max_chars)
+    if by_node is not None:
+        return by_node
+    return _trim_mind_map_by_lines(content, max_chars)
 
 
 def find_project_root() -> Path:
