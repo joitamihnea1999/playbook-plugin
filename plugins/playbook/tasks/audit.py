@@ -101,9 +101,14 @@ def classify(rc: int) -> str:
     return "error"
 
 
-def run_sweep(sweep: dict, project_path) -> dict:
+def run_sweep(sweep: dict, project_path, timeout_secs=300) -> dict:
     """Run one sweep and classify it. Returns the sweep dict augmented with rc,
-    status, and captured output. Never raises."""
+    status, and captured output. Never raises.
+
+    `timeout_secs` (None = unlimited) bounds one sweep: greps are fast, but a
+    project-declared sweep can hang, and a hung audit blocks the review it was
+    meant to precede. A timeout is rc 124 → classified ERROR — the sweep did NOT
+    complete its scan, which is never a pass."""
     command = sweep["command"]
     fd, script = tempfile.mkstemp(prefix="audit-sweep-", suffix=".sh")
     try:
@@ -114,9 +119,16 @@ def run_sweep(sweep: dict, project_path) -> dict:
         proc = subprocess.run(
             ["bash", script], cwd=str(project_path),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, errors="replace",
+            text=True, errors="replace", timeout=timeout_secs,
         )
         rc, output = proc.returncode, (proc.stdout or "")
+    except subprocess.TimeoutExpired as e:
+        raw = e.stdout or ""
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        rc = 124
+        output = (f"(sweep timed out after {timeout_secs}s — scan incomplete, "
+                  "NOT a pass)" + ("\n" + raw if raw else ""))
     except OSError as e:
         rc, output = 127, f"(audit runner failed: {e})"
     finally:
@@ -221,8 +233,17 @@ def run_audit(project_path) -> dict:
     """Run every resolved sweep plus the built-in mind-map staleness check.
     Returns {results, passed}. The audit FAILS when any sweep ERRORED (a broken
     instrument can't certify clean) or any error-severity sweep found FINDINGS
-    (unambiguous breakage)."""
-    results = [run_sweep(s, project_path) for s in resolve_sweeps(project_path)]
+    (unambiguous breakage). Per-sweep ceiling from `audit.timeout_secs`
+    (default 300; the review-knob grammar, so 0/none = unlimited)."""
+    from tasks.core import _parse_timeout
+    cfg = load_config(project_path)
+    audit_cfg = cfg.get("audit") if isinstance(cfg.get("audit"), dict) else {}
+    try:
+        timeout = _parse_timeout(audit_cfg["timeout_secs"]) if "timeout_secs" in audit_cfg else 300
+    except (TypeError, ValueError):
+        timeout = 300
+    results = [run_sweep(s, project_path, timeout_secs=timeout)
+               for s in resolve_sweeps(project_path)]
     mm = check_mindmap_staleness(project_path)
     if mm is not None:
         results.append(mm)
@@ -238,13 +259,38 @@ def _finding_lines(output: str, limit: int = 5) -> "list[str]":
     return lines[:limit]
 
 
+# First `###` entry after the heading is the NEWEST (upsert inserts newest-first).
+_AUDIT_ENTRY_SHA_RE = re.compile(r"^### .*·\s*commit\s+([0-9a-fA-F]{7,40})", re.MULTILINE)
+
+
+def audit_freshness_note(task_text: str, head_sha: str) -> "str | None":
+    """None when a current audit receipt exists; else a one-line nudge.
+
+    'Once ever' is not freshness: an audit that ran ten commits ago silently
+    vouches for code it never scanned. The newest entry's recorded commit must
+    match HEAD. With no git HEAD available, stay quiet — there is nothing sound
+    to compare against, and a guess would be noise."""
+    idx = task_text.find("## Pre-Panel Audit")
+    if idx == -1:
+        return ("no pre-panel audit on this task — consider `tasks audit <N>` "
+                "first to clear mechanically-detectable issues before the panel")
+    if not head_sha:
+        return None
+    m = _AUDIT_ENTRY_SHA_RE.search(task_text, idx)
+    if m and (m.group(1) == head_sha or head_sha.startswith(m.group(1))):
+        return None
+    ran_at = m.group(1)[:7] if m else "(unknown commit)"
+    return (f"pre-panel audit is STALE (ran at {ran_at}; HEAD is {head_sha[:7]}) — "
+            "re-run `tasks audit <N>` so the panel reviews audited code")
+
+
 def format_audit_receipt(audit: dict, *, timestamp: str | None = None, head_sha: str = "") -> str:
-    """Render the `## Pre-Panel Audit` receipt appended to task.md — the trace
-    that mechanical checks ran, and what they found, before any judge was paid."""
+    """Render ONE receipt ENTRY for the `## Pre-Panel Audit` section (the heading
+    belongs to core.upsert_task_section, newest entry first). The `commit` field
+    is load-bearing: audit_freshness_note compares it to HEAD to tell a current
+    audit from a stale one."""
     ts = timestamp or datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    out = ["## Pre-Panel Audit", ""]
-    out.append(f"- **When:** {ts}" + (f" · **Commit:** {head_sha}" if head_sha else ""))
-    out.append(f"- **Verdict:** {'PASS' if audit['passed'] else 'FAIL'}")
+    out = [f"### {ts} · {'PASS' if audit['passed'] else 'FAIL'} · commit {head_sha or '(unknown)'}"]
     for r in audit["results"]:
         tag = {"clean": "CLEAN", "findings": f"FINDINGS", "error": "ERROR"}[r["status"]]
         n = len(_finding_lines(r["output"], limit=10_000)) if r["status"] != "clean" else 0

@@ -41,18 +41,35 @@ tasks work <N>                     # activate it — hooks start enforcing
 
 Work through task.md gates: Design Phase (understand, structure, verify) → Work Plan (build/investigate gates) → Pre-review. Check each gate's checkbox as you complete it, appending your observations on the same line.
 
-When done: `tasks work done` — deactivates the task, sets status to done.
+When done: `tasks work done` — runs the project's verify contract, records a receipt, sets status to done.
 
 The task.md **is** the execution trace. Never skip checkboxes. Never backfill. One gate at a time.
+
+## Correctness Contract
+
+The close is **earned, not asserted** — these are enforced by the CLI, not conventions:
+
+- **`## Risk`** — set at the Structure gate: `reversible` (git revert undoes it), `irreversible` (deletes/migrates data, publishes — needs a named rollback plan), or `assertive` (changes a **claim about the world**: docs, a calibration, a "verified accurate"). Assertive/irreversible tasks **cannot close without an implementation review** — a small diff is not a reason to skip review; a docs-only diff can be the most review-worthy thing a task produces.
+- **Verify contract** — declare in `.agent/config.json` what green means for this project, and closes run it:
+  ```json
+  {"verify": {"_always": ["<your test command>"], "assertive": ["<claim checks>"]}}
+  ```
+  A failing verify blocks the close. `--force` requires `--reason "why"` — recorded in the receipt.
+- **`tasks audit`** — run before any review: mechanical sweeps (conflict markers, merge artifacts, stale markers, mind-map drift) so judges spend tokens on hard problems, not greppable ones. Reviews warn when the audit is missing or stale.
+- **Judges are advisors, not oracles.** Triage every finding (accept/park/reject with rationale). A clean panel does NOT clear correspondence (does it match the world? check the real artifact), disclosure (secrets/provenance — a grep's job), or blast radius (the `## Risk` gate's job).
+- **Test claims need executable proof.** A test you haven't watched fail is not evidence; assert against real output, not a mock you wrote.
 
 ## CLI
 
 ```bash
 .claude/bin/tasks work <number>              # activate task, hook starts tracking
-.claude/bin/tasks work done                  # deactivate when finished
+.claude/bin/tasks work done                  # verify + receipt + deactivate (--force needs --reason)
 .claude/bin/tasks new <type> <name>          # create task — does NOT activate
 .claude/bin/tasks list [--pending]           # task overview
 .claude/bin/tasks status                     # current gate position
+.claude/bin/tasks audit [<N>]                # mechanical pre-review sweeps + receipt
+.claude/bin/tasks blocked "<reason>"         # honest pause: awaiting the user's decision
+.claude/bin/tasks parked [--all]             # surface parked items before they rot
 .claude/bin/tasks bootstrap                  # orientation: mind map + skills + pending
 ```
 
@@ -60,6 +77,8 @@ The task.md **is** the execution trace. Never skip checkboxes. Never backfill. O
 
 - Create task directories manually — always `.claude/bin/tasks new`
 - Edit session state files directly (under `.agent/`, or `.agent/<user>/` in a multi-user repo) — use `.claude/bin/tasks work <N>` / `.claude/bin/tasks work done`
-- Edit `## Status` in task.md directly — use `.claude/bin/tasks work done`
+- Edit `## Status` in task.md directly — use `.claude/bin/tasks work done` (or `tasks blocked` for an honest pause)
 - Skip task.md checkboxes — they're your observable progress
 - Start coding without an active task — blocked by hook until `.claude/bin/tasks work <N>`
+- Fake a checkbox to end a turn — if the next gate needs the user's decision, `tasks blocked "<reason>"` is the honest state
+- Leave the mind map describing code that no longer exists — update the owning node in place when you change the architecture

@@ -1446,6 +1446,7 @@ def main():
                     from tasks.core import (
                         close_decision, extract_risk, format_verify_receipt,
                         has_review_evidence, resolve_verify_commands,
+                        resolve_verify_timeout,
                     )
                     risk = extract_risk(task_file)
                     commands = resolve_verify_commands(project_path, risk)
@@ -1457,10 +1458,12 @@ def main():
                             print("Error: cannot load the verify runner "
                                   "(skills/merge/merge-verify.py missing).", file=sys.stderr)
                             sys.exit(1)
+                        _vt = resolve_verify_timeout(project_path)
                         print(f"Verifying close ({len(commands)} declared command(s), risk={risk})...",
                               flush=True)
                         for label, cmd in commands:
-                            rc, output = mv.run_command_capture(cmd, str(project_path))
+                            rc, output = mv.run_command_capture(
+                                cmd, str(project_path), timeout_secs=_vt)
                             entries.append((label, cmd, rc, output))
                             if rc != 0:
                                 verify_failed = True
@@ -1473,7 +1476,9 @@ def main():
                     allowed, block_reason = close_decision(
                         risk=risk, verify_declared=bool(commands),
                         verify_failed=verify_failed,
-                        has_review_evidence=has_review_evidence(task_file),
+                        # impl_only: a plan-phase review cannot vouch for what was
+                        # BUILT — high-consequence closes need impl-grade evidence.
+                        has_review_evidence=has_review_evidence(task_file, impl_only=True),
                         force=force, reason=reason,
                     )
                     if not allowed:
@@ -1481,8 +1486,11 @@ def main():
                               file=sys.stderr, flush=True)
                         sys.exit(1)
 
-                    # Close is earned — append the receipt (the trace), then set done.
+                    # Close is earned — record the receipt (ONE section, newest
+                    # entry first — a reopened task must not accrete duplicate
+                    # headings that section parsers read as current), then set done.
                     import subprocess
+                    from tasks.core import _set_status, upsert_task_section
                     try:
                         _head = subprocess.run(
                             ["git", "rev-parse", "HEAD"], cwd=project_path,
@@ -1491,15 +1499,8 @@ def main():
                         _head = ""
                     receipt = format_verify_receipt(
                         entries, _head, risk, reason=(reason if force else None))
-                    existing = task_file.read_text(encoding="utf-8")
-                    task_file.write_text(
-                        existing.rstrip("\n") + "\n\n" + receipt + "\n", encoding="utf-8")
-                    lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
-                    for i, line in enumerate(lines):
-                        if line.strip() == "## Status" and i + 1 < len(lines):
-                            lines[i + 1] = "done\n"
-                            task_file.write_text("".join(lines), encoding="utf-8")
-                            break
+                    upsert_task_section(task_file, "Verification Receipt", receipt)
+                    _set_status(task_file, "done")
                 # Remove session dirs that reference this task.
                 # PLAYBOOK_SESSION_ID is not set when called from Bash tool, so scan all sessions.
                 # Intentional partial delete: only sessions pointing at prev_task are removed;
@@ -2063,11 +2064,20 @@ def main():
                 sys.exit(1)
             task_file = matches[0]
             task_path = str(task_file.relative_to(project_path))
-            # P6 nudge: mechanically-detectable issues shouldn't cost judge tokens.
-            if "## Pre-Panel Audit" not in task_file.read_text(encoding="utf-8"):
-                print(f"  note: no pre-panel audit on this task — consider "
-                      f"`tasks audit {task_num}` first to clear mechanically-"
-                      f"detectable issues before the panel.", file=sys.stderr, flush=True)
+            # P6 nudge: mechanically-detectable issues shouldn't cost judge
+            # tokens — and 'an audit ran once' is not freshness: the note also
+            # fires when the newest receipt's commit is not HEAD.
+            from tasks.audit import audit_freshness_note
+            try:
+                _panel_head = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=project_path,
+                    capture_output=True, text=True).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                _panel_head = ""
+            _audit_note = audit_freshness_note(
+                task_file.read_text(encoding="utf-8"), _panel_head)
+            if _audit_note:
+                print(f"  note: {_audit_note}", file=sys.stderr, flush=True)
 
         from tasks.template import panel_plan_review_prompt, panel_impl_review_prompt
 
@@ -2312,6 +2322,17 @@ def main():
             lines.append(f"**Context:** {' | '.join(context_receipts)}\n")
         else:
             lines.append("**Context:** full task.md + mind map delivered (no truncation)\n")
+        # Commit stamp: names WHICH code state this panel reviewed, so a later
+        # reader (and the close gate's freshness logic) can tell a current
+        # verdict from one that predates the fixes it triggered.
+        try:
+            _judged_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=project_path,
+                capture_output=True, text=True).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            _judged_head = ""
+        if _judged_head:
+            lines.append(f"**Commit:** {_judged_head}\n")
         if failed:
             lines.append(f"**⚠ Failed judges:** {', '.join(sorted(failed))} — see their blocks below for the exit code / stderr. NOT a clean empty review.\n")
         if over_budget:
@@ -3487,67 +3508,6 @@ def main():
               f"{len(chatlog)} chat messages, {len(mindmap)} mind map nodes")
         print(f"Next: tasks work {task_num}")
 
-    elif cmd == "global-retro-collect":
-        since = None
-        machine = None
-        out_dir = Path.cwd()
-        archive_format = "zip"
-        roots = []
-        i = 0
-        while i < len(cmd_args):
-            arg = cmd_args[i]
-            if arg == "--since" and i + 1 < len(cmd_args):
-                since = cmd_args[i + 1]
-                i += 2
-            elif arg == "--machine" and i + 1 < len(cmd_args):
-                machine = cmd_args[i + 1]
-                i += 2
-            elif arg == "--out" and i + 1 < len(cmd_args):
-                out_dir = Path(cmd_args[i + 1])
-                i += 2
-            elif arg == "--format" and i + 1 < len(cmd_args):
-                archive_format = cmd_args[i + 1]
-                i += 2
-            elif arg.startswith("--"):
-                print(f"Error: unknown option for global-retro-collect: {arg}", file=sys.stderr)
-                print("Usage: tasks global-retro-collect --since DATE [--machine NAME] [--out DIR] [--format zip|tgz] ROOT [ROOT...]", file=sys.stderr)
-                sys.exit(1)
-            else:
-                roots.append(Path(arg))
-                i += 1
-
-        if since is None:
-            print("Error: global-retro-collect requires --since DATE", file=sys.stderr)
-            print("Usage: tasks global-retro-collect --since DATE [--machine NAME] [--out DIR] [--format zip|tgz] ROOT [ROOT...]", file=sys.stderr)
-            sys.exit(1)
-        if not roots:
-            print("Error: global-retro-collect requires at least one root directory", file=sys.stderr)
-            print("Usage: tasks global-retro-collect --since DATE [--machine NAME] [--out DIR] [--format zip|tgz] ROOT [ROOT...]", file=sys.stderr)
-            sys.exit(1)
-
-        try:
-            from tasks.global_retro_collect import collect_global_retro
-            archive_path, manifest = collect_global_retro(
-                roots=roots,
-                since=since,
-                out_dir=out_dir,
-                machine=machine,
-                archive_format=archive_format,
-            )
-        except ValueError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
-
-        kept = sum(1 for project in manifest["projects"] if project["kept"])
-        task_count = sum(len(project["included_tasks"]) for project in manifest["projects"])
-        file_count = sum(len(project["included_files"]) for project in manifest["projects"])
-        print(f"Created: {archive_path}")
-        print(
-            f"Global retro collection: {kept} project(s), "
-            f"{task_count} task(s), {file_count} file(s)"
-        )
-        print("Includes manifest.json and manifest.tsv")
-
     elif cmd == "status":
         project_path = find_project_root()
         task_status(project_path)
@@ -3581,15 +3541,15 @@ def main():
             print(f"  [{tag}] {r['name']} — {r['why']}", flush=True)
         if task_file:
             import subprocess as _sp
+            from tasks.core import upsert_task_section
             try:
                 _head = _sp.run(["git", "rev-parse", "HEAD"], cwd=project_path,
                                 capture_output=True, text=True).stdout.strip()
             except (OSError, _sp.SubprocessError):
                 _head = ""
             receipt = format_audit_receipt(audit, head_sha=_head)
-            existing = task_file.read_text(encoding="utf-8")
-            task_file.write_text(existing.rstrip("\n") + "\n\n" + receipt + "\n", encoding="utf-8")
-            print(f"  Receipt appended to {task_file.relative_to(project_path)}")
+            upsert_task_section(task_file, "Pre-Panel Audit", receipt)
+            print(f"  Receipt recorded in {task_file.relative_to(project_path)}")
         print(f"\nAUDIT {'PASS' if audit['passed'] else 'FAIL'}", flush=True)
         if not audit["passed"]:
             print("  Fix the error-severity findings (or a broken sweep) before "
@@ -3977,7 +3937,7 @@ def main():
         # is the broken one (task 018 panel T7). Advisory; never crashes doctor.
         try:
             from tasks.gate_logging import done_task_numbers, gate_logging_gap
-            from tasks.global_retro_collect import _agent_lanes
+            from tasks.core import _agent_lanes
             for lane_user, lane_rel in _agent_lanes(project_path):
                 chat_log = project_path / lane_rel / "chat_log.md"
                 if not chat_log.is_file():

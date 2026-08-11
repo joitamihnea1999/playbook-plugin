@@ -103,23 +103,41 @@ class ExtractRisk(unittest.TestCase):
 
 
 class ReviewEvidence(unittest.TestCase):
-    def test_judge_md_present(self):
+    def _dir(self, judge_md=None, task_md="# 1 - t\n"):
         d = Path(tempfile.mkdtemp())
-        (d / "judge.md").write_text("# panel\n")
-        (d / "task.md").write_text("# 1 - t\n")
-        self.assertTrue(has_review_evidence(d / "task.md"))
+        if judge_md is not None:
+            (d / "judge.md").write_text(judge_md)
+        (d / "task.md").write_text(task_md)
+        return d / "task.md"
+
+    def test_judge_md_present(self):
+        self.assertTrue(has_review_evidence(self._dir(judge_md="# panel\n")))
 
     def test_checked_impl_review_gate(self):
-        d = Path(tempfile.mkdtemp())
-        (d / "task.md").write_text(
-            "## Implementation Review\n- [x] Run `.claude/bin/tasks impl-review 1`\n")
-        self.assertTrue(has_review_evidence(d / "task.md"))
+        tf = self._dir(task_md="## Implementation Review\n- [x] Run `.claude/bin/tasks impl-review 1`\n")
+        self.assertTrue(has_review_evidence(tf))
+        self.assertTrue(has_review_evidence(tf, impl_only=True))
 
     def test_unchecked_gate_is_no_evidence(self):
-        d = Path(tempfile.mkdtemp())
-        (d / "task.md").write_text(
-            "## Implementation Review\n- [ ] Run `.claude/bin/tasks impl-review 1`\n")
-        self.assertFalse(has_review_evidence(d / "task.md"))
+        tf = self._dir(task_md="## Implementation Review\n- [ ] Run `.claude/bin/tasks impl-review 1`\n")
+        self.assertFalse(has_review_evidence(tf))
+
+    def test_plan_evidence_does_not_satisfy_impl_only(self):
+        """A plan review examines intent before the work exists — it must not
+        satisfy the high-consequence close gate (A4)."""
+        plan_judge = self._dir(judge_md="# Panel Plan Review — task\n")
+        self.assertTrue(has_review_evidence(plan_judge))            # counts as A review
+        self.assertFalse(has_review_evidence(plan_judge, impl_only=True))
+        plan_gate = self._dir(task_md="## Plan Review\n- [x] Run `.claude/bin/tasks plan-review 1`\n")
+        self.assertFalse(has_review_evidence(plan_gate, impl_only=True))
+
+    def test_impl_judge_md_satisfies_impl_only(self):
+        tf = self._dir(judge_md="# Panel Impl Review — task\n\n**PANEL VERDICT: PASS**\n")
+        self.assertTrue(has_review_evidence(tf, impl_only=True))
+
+    def test_panel_gate_with_impl_mode_satisfies_impl_only(self):
+        tf = self._dir(task_md="- [x] Run `.claude/bin/tasks panel-review 1 --mode impl`\n")
+        self.assertTrue(has_review_evidence(tf, impl_only=True))
 
 
 class ResolveVerifyCommands(unittest.TestCase):
@@ -175,6 +193,39 @@ class Receipt(unittest.TestCase):
         r = format_verify_receipt([], head_sha="abc", risk="reversible",
                                   reason="owner override", timestamp="t")
         self.assertIn("owner override", r)
+
+    def test_entry_form_no_own_heading(self):
+        """The heading belongs to upsert_task_section — the entry leads with a
+        `###` stamp so re-closes stack under ONE section, newest first (A3)."""
+        r = format_verify_receipt([], head_sha="abc", risk="reversible", timestamp="t")
+        self.assertTrue(r.startswith("### t · risk reversible · commit abc"), r)
+        self.assertNotIn("## Verification Receipt", r)
+
+
+class UpsertAndAtomicWrite(unittest.TestCase):
+    def test_upsert_keeps_one_heading_newest_first(self):
+        from tasks.core import upsert_task_section
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text("# 1 - t\n\n## Status\ndone\n", encoding="utf-8")
+        upsert_task_section(tf, "Verification Receipt", "### first close\n- a\n")
+        upsert_task_section(tf, "Verification Receipt", "### second close\n- b\n")
+        text = tf.read_text(encoding="utf-8")
+        self.assertEqual(text.count("## Verification Receipt"), 1)
+        self.assertEqual(text.count("### "), 2)
+        self.assertLess(text.index("### second close"), text.index("### first close"),
+                        "newest entry must come first — the first thing under the "
+                        "heading is the truth")
+
+    def test_atomic_write_replaces_and_leaves_no_temp(self):
+        from tasks.core import _atomic_write
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text("old", encoding="utf-8")
+        _atomic_write(tf, "new content")
+        self.assertEqual(tf.read_text(encoding="utf-8"), "new content")
+        self.assertEqual([p.name for p in d.iterdir()], ["task.md"],
+                         "no temp residue may remain next to the task file")
 
 
 if __name__ == "__main__":

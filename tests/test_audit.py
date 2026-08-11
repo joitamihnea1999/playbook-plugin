@@ -22,8 +22,9 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
 from tasks.audit import (  # noqa: E402
-    DEFAULT_SWEEPS, check_mindmap_staleness, classify, format_audit_receipt,
-    resolve_sweeps, run_audit, run_sweep, _extract_mindmap_paths,
+    DEFAULT_SWEEPS, audit_freshness_note, check_mindmap_staleness, classify,
+    format_audit_receipt, resolve_sweeps, run_audit, run_sweep,
+    _extract_mindmap_paths,
 )
 
 
@@ -98,6 +99,24 @@ class ErrorIsNotAPass(unittest.TestCase):
                       "sweeps": [{"name": "b", "command": "exit 3", "severity": "advisory"}]}
         }))
         self.assertFalse(run_audit(p)["passed"])   # even an ADVISORY sweep erroring fails
+
+
+class Timeout(unittest.TestCase):
+    """A hung sweep must not hang the audit, and a killed scan is ERROR — an
+    incomplete scan can certify nothing (A1)."""
+
+    def test_hanging_sweep_is_error_not_pass(self):
+        p = Path(tempfile.mkdtemp())
+        (p / ".agent").mkdir()
+        (p / ".agent" / "config.json").write_text(json.dumps({
+            "audit": {"disable_defaults": True, "timeout_secs": 1,
+                      "sweeps": [{"name": "hang", "command": "sleep 5",
+                                  "severity": "advisory"}]}}))
+        a = run_audit(p)
+        self.assertFalse(a["passed"])
+        (r,) = a["results"]
+        self.assertEqual(r["status"], "error")
+        self.assertIn("timed out", r["output"])
 
 
 class Severity(unittest.TestCase):
@@ -224,12 +243,53 @@ class Receipt(unittest.TestCase):
             {"name": "stale-markers", "severity": "advisory", "why": "todos",
              "status": "clean", "output": "", "rc": 1, "command": "y"},
         ]}
+        # Entry form: the heading belongs to core.upsert_task_section; the entry
+        # leads with `### ts · VERDICT · commit sha` (the sha is what freshness
+        # checks parse).
         r = format_audit_receipt(audit, timestamp="2026-08-11T10:00:00", head_sha="abc1234")
-        self.assertIn("## Pre-Panel Audit", r)
-        self.assertIn("Verdict:** FAIL", r)
+        self.assertTrue(r.startswith("### 2026-08-11T10:00:00 · FAIL · commit abc1234"), r)
+        self.assertNotIn("## Pre-Panel Audit", r)
         self.assertIn("[FINDINGS(1)] conflict-markers", r)
         self.assertIn("[CLEAN] stale-markers", r)
-        self.assertIn("abc1234", r)
+
+
+class Freshness(unittest.TestCase):
+    """'An audit ran once' is not freshness (A4): the newest receipt's commit
+    must match HEAD or the nudge fires."""
+
+    HEAD = "a" * 40
+
+    def _task_text(self, sha):
+        return ("# 1 - t\n\n## Pre-Panel Audit\n\n"
+                f"### 2026-08-11T10:00:00 · PASS · commit {sha}\n"
+                "    - [CLEAN] conflict-markers — broken code\n")
+
+    def test_no_receipt_nudges(self):
+        note = audit_freshness_note("# 1 - t\n\n## Status\npending\n", self.HEAD)
+        self.assertIsNotNone(note)
+        self.assertIn("no pre-panel audit", note)
+
+    def test_stale_receipt_nudges(self):
+        note = audit_freshness_note(self._task_text("b" * 40), self.HEAD)
+        self.assertIsNotNone(note)
+        self.assertIn("STALE", note)
+
+    def test_fresh_receipt_is_quiet(self):
+        self.assertIsNone(audit_freshness_note(self._task_text(self.HEAD), self.HEAD))
+
+    def test_unknown_commit_in_receipt_nudges(self):
+        text = ("## Pre-Panel Audit\n\n### t · PASS · commit (unknown)\n")
+        self.assertIn("STALE", audit_freshness_note(text, self.HEAD))
+
+    def test_no_git_head_stays_quiet(self):
+        self.assertIsNone(audit_freshness_note(self._task_text("b" * 40), ""))
+
+    def test_newest_entry_wins(self):
+        # upsert inserts newest FIRST — a fresh entry above a stale one is fresh.
+        text = ("## Pre-Panel Audit\n\n"
+                f"### new · PASS · commit {self.HEAD}\n"
+                "### old · FAIL · commit " + "b" * 40 + "\n")
+        self.assertIsNone(audit_freshness_note(text, self.HEAD))
 
 
 if __name__ == "__main__":

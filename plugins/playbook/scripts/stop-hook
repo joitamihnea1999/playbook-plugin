@@ -71,7 +71,11 @@ fi
 # on the agent — let the turn end without a fabricated checkbox. Keyed on the
 # status marker (the line after `## Status`), NOT on gate text, so it can't
 # inherit the freehand bypass's first-unchecked-gate fragility.
-STATUS_LINE=$(awk '/^## Status[[:space:]]*$/{getline; print; exit}' "$TASK_FILE" 2>/dev/null | tr -d '[:space:]')
+# LAST `## Status` wins — this must mirror core.py::_extract_status exactly
+# (which reads the line after the last heading). A first-match read here plus a
+# stray duplicate heading in prose would make Python and the enforcing hook
+# disagree about the same file — the #09 disease in a new spot.
+STATUS_LINE=$(awk '/^## Status[[:space:]]*$/{want=NR+1} NR==want{val=$0} END{if (want) print val}' "$TASK_FILE" 2>/dev/null | tr -d '[:space:]')
 if [ "$STATUS_LINE" = "blocked" ]; then
     exit 0
 fi

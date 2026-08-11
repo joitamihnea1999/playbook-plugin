@@ -42,6 +42,8 @@ Because state lives in the file and not in memory, execution survives context co
 
 **Hooks** enforce the structure at the system level. The agent can't edit code without an active task, can't skip gates, can't mark work done with gates still open. Warnings don't stick, so we block instead. ([How enforcement works](docs/architecture.md).)
 
+**The correctness contract** makes a close earned, not asserted. Every task carries a `## Risk` class (`reversible` / `irreversible` / `assertive` — the last for changes to *claims about the world*, which can't skip review for being small diffs); `tasks work done` runs the project's declared verify commands and records a receipt (command, exit code, commit) into task.md, refusing to close on a failure — `--force` requires a recorded `--reason`. `tasks audit` runs mechanical pre-review sweeps (conflict markers, merge artifacts, stale markers, mind-map drift against the real file tree) so judges spend tokens on hard problems; panels return a PASS/FAIL verdict against a configurable quorum instead of a bare count; and a task waiting on the user's decision has an honest `blocked` state instead of a faked checkbox.
+
 **The monitor** is a second agent watching from outside: it reads the session transcript incrementally and nudges the working agent when the trajectory drifts - a separate context window, so it judges without the front agent's anchoring.
 
 **Tests** make the consequences of a wrong change visible immediately - the agent sees the failure and corrects course. The better the tests, the longer it can run unsupervised. Playbook leans heavily on this: the task.md template puts a test gate after each work gate, and we recommend expanding test coverage as part of every task.
@@ -141,4 +143,4 @@ Not everything needs a task. Questions, shell commands, docs, git - just ask. Th
 
 Works on macOS, Linux, and Windows (Git Bash / MSYS).
 
-<!-- readme-audit: v1.4.7 @ 2026-07-29 -->
+<!-- readme-audit: v1.5.0 @ 2026-08-11 -->

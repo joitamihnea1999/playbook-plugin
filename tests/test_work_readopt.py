@@ -342,11 +342,41 @@ class TestEvidenceContract(WorkReadoptBase):
         self.assertEqual(blocked.returncode, 1, blocked.stdout)
         self.assertIn("assertive", blocked.stderr)
         self.assertNotEqual(status_of(tf), "done")
-        # Drop a review artifact next to the task → the gate is satisfied.
-        (tf.parent / "judge.md").write_text("# panel verdict: PASS\n", encoding="utf-8")
+        # A PLAN-phase artifact must NOT satisfy the gate (impl_only, A4)…
+        (tf.parent / "judge.md").write_text("# Panel Plan Review — task\n", encoding="utf-8")
+        still = self.run_tasks("work", "done")
+        self.assertEqual(still.returncode, 1, "plan review must not vouch for what was built")
+        # …an IMPL review does.
+        (tf.parent / "judge.md").write_text("# Panel Impl Review — task\n", encoding="utf-8")
         ok = self.run_tasks("work", "done")
         self.assertEqual(ok.returncode, 0, ok.stderr)
         self.assertEqual(status_of(tf), "done")
+
+    def test_reclose_stacks_entries_under_one_receipt_heading(self):
+        """Close → reopen → close must not accrete duplicate `## Verification
+        Receipt` headings (A3) — one section, newest entry first."""
+        self._config({"verify": "echo checks-green"})
+        tf = write_task(self.project, "076", "pending", gates_checked=True)
+        self.assertEqual(self.run_tasks("work", "076").returncode, 0)
+        self.assertEqual(self.run_tasks("work", "done").returncode, 0)
+        self.assertEqual(self.run_tasks("work", "076").returncode, 0)  # reopen
+        self.assertEqual(self.run_tasks("work", "done").returncode, 0)
+        body = tf.read_text(encoding="utf-8")
+        self.assertEqual(body.count("## Verification Receipt"), 1, body)
+        self.assertEqual(body.count("### "), 2)
+
+    def test_hanging_verify_times_out_and_blocks(self):
+        """A verify command that hangs must not hang the close (A1): the ceiling
+        kills it, the close is BLOCKED (a verify that cannot finish is not a
+        pass), and the output names the timeout."""
+        self._config({"verify": "sleep 5", "verify_timeout_secs": 1})
+        tf = write_task(self.project, "075", "pending", gates_checked=True)
+        self.assertEqual(self.run_tasks("work", "075").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("verification failed", r.stderr)
+        self.assertIn("FAIL", r.stdout)
+        self.assertNotEqual(status_of(tf), "done")
 
     def test_reversible_no_contract_closes_clean(self):
         tf = self._risk_task("074", "reversible")
@@ -374,6 +404,15 @@ class TestAuditCommand(WorkReadoptBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("AUDIT PASS", r.stdout)
         self.assertIn("## Pre-Panel Audit", tf.read_text(encoding="utf-8"))
+
+    def test_reaudit_stacks_entries_under_one_heading(self):
+        tf = self._task("042")
+        (self.project / "src.py").write_text("x = 1\n", encoding="utf-8")
+        self.assertEqual(self.run_tasks("audit", "042").returncode, 0)
+        self.assertEqual(self.run_tasks("audit", "042").returncode, 0)
+        body = tf.read_text(encoding="utf-8")
+        self.assertEqual(body.count("## Pre-Panel Audit"), 1, body)
+        self.assertEqual(body.count("### "), 2)
 
     def test_conflict_marker_fails_the_audit(self):
         self._task("041")

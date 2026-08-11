@@ -673,7 +673,6 @@ Tasks CLI:
     tasks models select        interactively refresh the panel in .agent/models.json
   Analysis:
     tasks retro [--since N]    project retrospective
-    tasks global-retro-collect --since DATE ROOT [ROOT...]   collect cross-VM retro archive
     tasks context <N>          extract chat messages for a task
     tasks doctor               harness health check
   Info:
@@ -831,7 +830,6 @@ Commands:
   models check        Audit models.json judge pins against live availability (--no-probe: skip claude probes)
   models select       Interactively refresh the panel in .agent/models.json
   retro [--since N]   Project retrospective
-  global-retro-collect --since DATE [--machine NAME] [--out DIR] [--format zip|tgz] ROOT [ROOT...]
                       Collect Playbook artifacts for a global retro archive
   context <N>         Extract chat messages for a task
   log [N] [--width W]  Compact one-line-per-message chat log (last N, body cropped to W; default all/500)
@@ -857,7 +855,6 @@ Examples:
   tasks panel-review 001 --prompt "focus on the title-detection approach"
   tasks panel-review --prompt "which of these two designs is simpler?" --no-mind-map
   tasks panel-review --bare --prompt "read ideas.txt and pick the best story idea"
-  tasks global-retro-collect --since 2026-03-14 ~/Code /data --out /tmp
   tasks list --pending"""
 
 

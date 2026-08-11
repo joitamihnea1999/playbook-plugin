@@ -9,9 +9,10 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-VERSION = "1.4.7"
+VERSION = "1.5.0"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -274,6 +275,28 @@ def _parse_budget(raw: str) -> str:
     if not math.isfinite(value) or value < 0:
         raise ValueError(raw)
     return raw
+
+
+# A verify command with no ceiling can hang `tasks work done` forever — in
+# headless use that is a silent deadlock, and a guard that can hang is a guard
+# that gets bypassed. Same _parse_timeout grammar as the review knobs, so
+# 0/"none"/"unlimited" opts back into no ceiling deliberately.
+DEFAULT_VERIFY_TIMEOUT_SECS = 1200
+
+
+def resolve_verify_timeout(project_path: Path, cli_value: "str | None" = None) -> "int | None":
+    """Hard ceiling for ONE declared verify command at close (seconds; None =
+    unlimited). Precedence: cli > PLAYBOOK_VERIFY_TIMEOUT_SECS env > config.json
+    verify_timeout_secs > DEFAULT_VERIFY_TIMEOUT_SECS."""
+    return _first_valid(
+        (
+            (cli_value, "--verify-timeout"),
+            (os.environ.get("PLAYBOOK_VERIFY_TIMEOUT_SECS"), "PLAYBOOK_VERIFY_TIMEOUT_SECS"),
+            (load_config(project_path).get("verify_timeout_secs"), "config.json verify_timeout_secs"),
+        ),
+        _parse_timeout,
+        DEFAULT_VERIFY_TIMEOUT_SECS,
+    )
 
 
 # A panel that reports "N/M succeeded" and exits 0 is a report, not a gate: a
@@ -561,6 +584,38 @@ def resolve_review_soft_timeout(
     return soft
 
 
+# ── Multi-user lane discovery ─────────────────────────────────────────────────
+# Lived in global_retro_collect.py until that command was removed from this fork
+# (projects are islands here — nothing collects across them). doctor still needs
+# lane enumeration, so the helper moved to core rather than dying with its old
+# host.
+
+# Reserved `.agent/` children that are never user lanes.
+_RESERVED_AGENT_DIRS = {"tasks", "sessions", "monitor", "playbooks"}
+
+
+def _agent_lanes(project: Path) -> "list[tuple[str | None, Path]]":
+    """Return the task-bearing lanes of a project, each as (user, agent_reldir).
+
+    A lane is a directory holding a `tasks/` subdir:
+      - the root lane          → (None, Path('.agent'))
+      - a per-user lane [30]   → ('<user>', Path('.agent/<user>'))
+
+    Reserved `.agent/` children (tasks, sessions, monitor, playbooks) are never
+    treated as user lanes. Root single-user repos yield exactly [(None, .agent)].
+    """
+    agent = project / ".agent"
+    lanes: "list[tuple[str | None, Path]]" = []
+    if (agent / "tasks").is_dir():
+        lanes.append((None, Path(".agent")))
+    if agent.is_dir():
+        for child in sorted(agent.iterdir(), key=lambda p: p.name):
+            if (child.is_dir() and child.name not in _RESERVED_AGENT_DIRS
+                    and (child / "tasks").is_dir()):
+                lanes.append((child.name, Path(".agent") / child.name))
+    return lanes
+
+
 # ── Context selection for reviews (structure-aware, receipted) ───────────────
 # A task.md is append-ordered: Intent and Design sit at the top, the CURRENT
 # round's fixes at the very bottom. A naive head-slice (content[:budget]) keeps
@@ -713,20 +768,34 @@ def extract_risk(task_file) -> str:
     return DEFAULT_RISK
 
 
-def has_review_evidence(task_file) -> bool:
+def has_review_evidence(task_file, impl_only: bool = False) -> bool:
     """True when a task carries evidence that a review actually ran: a judge.md
     in its directory, or a checked plan/impl/panel-review gate in task.md. Used
     by the close policy — an assertive/irreversible task with no such evidence
-    cannot light-close (the 056 fix)."""
+    cannot light-close (the 056 fix).
+
+    impl_only=True demands IMPLEMENTATION-grade evidence: a plan review examines
+    intent before the work exists, so it cannot vouch for what was actually
+    built or claimed — a plan-phase judge.md must not satisfy the
+    high-consequence close gate forever after."""
     p = Path(task_file)
     try:
-        if (p.parent / "judge.md").exists():
-            return True
+        jm = p.parent / "judge.md"
+        if jm.exists():
+            if not impl_only:
+                return True
+            if "impl review" in jm.read_text(encoding="utf-8", errors="replace").lower():
+                return True
         for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
             s = ln.strip().lower()
-            if s.startswith("- [x]") and (
-                "impl-review" in s or "panel-review" in s or "plan-review" in s
-            ):
+            if not s.startswith("- [x]"):
+                continue
+            if "impl-review" in s:
+                return True
+            if impl_only:
+                if "panel-review" in s and "impl" in s:
+                    return True
+            elif "panel-review" in s or "plan-review" in s:
                 return True
     except OSError:
         pass
@@ -785,14 +854,12 @@ def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
 
 
 def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=None) -> str:
-    """Render the receipt block appended to task.md at close — the trace that the
-    close was earned. `entries` is a list of (source_label, command, rc, output);
+    """Render ONE receipt ENTRY for the `## Verification Receipt` section (the
+    heading itself belongs to upsert_task_section, which keeps entries
+    newest-first). `entries` is a list of (source_label, command, rc, output);
     an empty list means nothing was declared. Never raises."""
     ts = timestamp or datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    out = ["## Verification Receipt", ""]
-    out.append(f"- **When:** {ts}")
-    out.append(f"- **Commit:** {head_sha or '(unknown)'}")
-    out.append(f"- **Risk:** {risk}")
+    out = [f"### {ts} · risk {risk} · commit {head_sha or '(unknown)'}"]
     if reason:
         out.append(f"- **Forced close, reason:** {reason.strip()}")
     if not entries:
@@ -1201,14 +1268,57 @@ def _is_blocked(task_file: Path) -> bool:
     return _extract_status(task_file).startswith("blocked")
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """All task.md writers route here: write to a same-directory temp file, then
+    os.replace. A concurrent reader never sees a sheared file, and interleaved
+    writers lose whole versions rather than producing half-merged lines —
+    multi-user repos are a supported layout, so this is load-bearing, not
+    ceremony. Same-directory temp keeps the replace on one filesystem."""
+    p = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, str(p))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _set_status(task_file: Path, value: str) -> None:
-    """Rewrite the line after ## Status. The single writer of task status."""
+    """Rewrite the line after the LAST ## Status (matching _extract_status).
+    The single writer of task status."""
     lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    target = None
     for i, line in enumerate(lines):
         if line.strip() == "## Status" and i + 1 < len(lines):
-            lines[i + 1] = value + "\n"
-            task_file.write_text("".join(lines), encoding="utf-8")
+            target = i
+    if target is not None:
+        lines[target + 1] = value + "\n"
+        _atomic_write(task_file, "".join(lines))
+
+
+def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
+    """ONE `## {heading}` per task.md, newest entry FIRST beneath it.
+
+    Receipts used to append a whole new `## …` section per close/audit, so a
+    reopened task accumulated duplicate headings — and section parsers that take
+    the first match then read a STALE receipt as current. One heading with
+    newest-first `###` entries keeps the full history AND makes the first thing
+    under the heading the truth."""
+    p = Path(task_file)
+    text = p.read_text(encoding="utf-8")
+    marker = f"## {heading}"
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.strip() == marker:
+            new = lines[:i + 1] + ["", *entry.rstrip("\n").splitlines()] + lines[i + 1:]
+            _atomic_write(p, "\n".join(new) + "\n")
             return
+    _atomic_write(p, text.rstrip("\n") + f"\n\n{marker}\n\n{entry.rstrip()}\n")
 
 
 def set_task_blocked(task_file: Path, reason: str) -> None:
@@ -1237,7 +1347,7 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     while out and out[-1].strip() == "":
         out.pop()
     out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
-    task_file.write_text("\n".join(out) + "\n", encoding="utf-8")
+    _atomic_write(task_file, "\n".join(out) + "\n")
 
 
 def resume_blocked_task(task_file: Path) -> None:
@@ -1259,7 +1369,7 @@ def resume_blocked_task(task_file: Path) -> None:
             continue
         i += 1
     if stamped:
-        task_file.write_text("\n".join(out) + "\n", encoding="utf-8")
+        _atomic_write(task_file, "\n".join(out) + "\n")
 
 
 def _find_active_task(project_path: Path, name_filter: str = "") -> Path | None:

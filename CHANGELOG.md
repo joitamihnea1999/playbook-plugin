@@ -2,6 +2,31 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.0] — 2026-08-11
+
+The correctness-contract release: a close is now **earned, not asserted**, and the information judges and agents reason over is kept complete, current, and honest. Driven by a 79-task field report (13 design gaps) plus the `upstream-issues/` defect write-ups; every mechanism below ships with tests, including negative controls proving each new detector can report failure (suite 514 → 640).
+
+### Added
+
+- **Evidence contract at close** — `tasks work done` runs the project's declared `verify` commands (`.agent/config.json`, per-risk-class with an `_always` base bar; legacy `merge_verify.command` honored as fallback), records a **Verification Receipt** (command, exit code, output head, commit, timestamp) into task.md, and refuses to close on a failing verify. `--force` now **requires `--reason`**, stored in the receipt. Verify commands run under a hard ceiling (`verify_timeout_secs`, default 1200s) — a hung suite fails the close instead of hanging it.
+- **`## Risk` classification** (`reversible` / `irreversible` / `assertive`), set at the Structure gate. Assertive (changes a claim about the world) and irreversible tasks cannot close without **implementation-grade** review evidence — a plan-phase review does not vouch for what was built, and a small diff is not a review waiver.
+- **`tasks audit [<N>]`** — mechanical pre-review sweeps under the grep exit-code convention (0 findings / 1 clean / ≥2 **error, never a pass**): conflict markers, merge artifacts (`.orig`/`.rej`), stale markers, plus a built-in **mind-map staleness check** (cited paths that no longer exist in the tree; `audit.mindmap_severity: "error"` for zero tolerance). Receipts land in task.md; reviews warn when the audit is missing **or stale** (receipt commit ≠ HEAD). Project sweeps via `audit.sweeps`, per-sweep timeout via `audit.timeout_secs`.
+- **Panel verdict** — panel reviews resolve a quorum (`panel_quorum`: int, fraction, `majority` default, `all`), lead judge.md with **PANEL VERDICT: PASS/FAIL**, stamp the reviewed commit, and exit non-zero below quorum. A 1/7 and a 7/7 panel are no longer the same exit code.
+- **`tasks blocked "<reason>"`** — an honest state for "paused awaiting the user's decision": satisfies the Stop hook without a fabricated checkbox, records the reason, shows as BLOCKED in `list`/`status`, skipped by active-task discovery, resumed by `tasks work <N>`.
+- **`tasks parked [--all]`** + close-time surfacing of open parked items (`[promoted → N]` / `[dismissed: reason]` lifecycle), and a close-time **retro nudge** once 10+ tasks closed since the last retro.
+- **Context fidelity for reviews** — task.md context is selected by structure (Intent/Design/Handoff always, most-recent sections next) and **every truncation is receipted** in judge.md and stderr; the old head-slice silently dropped the newest rounds first. POSIX per-element **argv byte guard** (`MAX_ARG_STRLEN`) for grok/agy/pi seats, refusing loudly pre-dispatch instead of a cryptic `E2BIG`.
+- Review prompts now require a **`CAP:` line** (cap-bound vs exhausted) so "no new findings" is readable as convergence vs saturation, and the panel triage frame names what review **cannot** catch (correspondence, disclosure, irreversibility) with the real check for each.
+
+### Changed
+
+- Gate parsing is line-anchored and shared — a `- [ ]` in prose is no longer a gate, and count, head-position, and Stop-hook verdicts are held equal by a parity test (a task could previously close at 71/74 while `status` said "all gates checked"). `## Status` reads/writes agree on last-heading-wins across Python and the Stop hook.
+- Receipts **upsert** under one heading (newest entry first) instead of appending duplicate sections on re-close/re-audit; task-state writers go through an atomic temp+rename write.
+- `/playbook:init`'s CLAUDE.md template now teaches the correctness contract (risk classes, verify contract, audit, blocked, judge-triage discipline) instead of CLI mechanics alone.
+
+### Removed
+
+- `tasks global-retro-collect` (cross-project retro collection). This fork's model is init-per-project with no cross-project knowledge; the multi-user lane helper it hosted moved to `tasks/core.py` for `tasks doctor`.
+
 ## [1.4.7] — 2026-07-29
 
 A field-reported bug that silently revoked the agent's permission to edit code mid-task, the recovery dead-end it led to, and task 023's two deferred `init` fixes (task 027).

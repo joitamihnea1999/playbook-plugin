@@ -181,6 +181,35 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("reason", r.stderr.lower())
 
+    def test_duplicate_status_headings_hook_agrees_with_python(self):
+        """Parity: core._extract_status reads the line after the LAST `## Status`;
+        the stop-hook's awk must apply the same rule, or a stray duplicate heading
+        makes Python and the enforcing hook disagree about the same file (the #09
+        disease in a new spot)."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+
+        # Decoy heading FIRST says pending, real LAST says blocked →
+        # Python reads blocked, so the hook must allow the turn to end (exit 0).
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n"
+            "- [ ] open gate\n\n## Status\nblocked\n\n## Blocked\n> waiting\n",
+            encoding="utf-8")
+        self.assertEqual(_extract_status(self.task_file), "blocked")
+        self._set_counters()
+        self.assertEqual(self.run_stop_hook().returncode, 0,
+                         "hook must honor the LAST ## Status, as Python does")
+
+        # Reverse: decoy FIRST says blocked, real LAST says pending →
+        # Python reads pending, so the hook must still block on the open gate.
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\nblocked\n\n## Work Plan\n"
+            "- [ ] open gate\n\n## Status\npending\n",
+            encoding="utf-8")
+        self.assertEqual(_extract_status(self.task_file), "pending")
+        self._set_counters()
+        self.assertEqual(self.run_stop_hook().returncode, 2,
+                         "a decoy 'blocked' heading must not release the gate")
+
 
 if __name__ == "__main__":
     unittest.main()
