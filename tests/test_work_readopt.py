@@ -271,12 +271,195 @@ class TestForceInteraction(unittest.TestCase):
                             "--force must not silently close the abandoned task")
         self.assertEqual(status_of(target), "pending")
 
-    def test_force_work_done_closes_a_task_with_open_gates(self):
+    def test_force_work_done_needs_a_reason(self):
+        """A forced close must be self-documenting (the 046 fix): --force alone is
+        refused; --force --reason lands and records the reason in the receipt."""
         tf = write_task(self.project, "082", "pending", gates_checked=False)
         self.assertEqual(self.run_tasks("work", "082").returncode, 0)
-        r = self.run_tasks("work", "done", "--force")
+
+        bare = self.run_tasks("work", "done", "--force")
+        self.assertEqual(bare.returncode, 1, "bare --force must be refused")
+        self.assertIn("--reason", bare.stderr)
+        self.assertNotEqual(status_of(tf), "done")
+
+        ok = self.run_tasks("work", "done", "--force", "--reason", "owner accepts, hotfix")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(status_of(tf), "done")
+        self.assertIn("owner accepts, hotfix", tf.read_text(encoding="utf-8"))
+
+
+class TestEvidenceContract(WorkReadoptBase):
+    """The close is earned, not asserted (P1/P2): a declared verify runs, a
+    failing one blocks, a passing one leaves a receipt, and an assertive task
+    with no review cannot light-close."""
+
+    def _config(self, cfg: dict) -> None:
+        import json
+        p = self.project / ".agent" / "config.json"
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+
+    def _risk_task(self, num: str, risk: str) -> Path:
+        d = self.project / ".agent" / "tasks" / f"{num}-risk"
+        d.mkdir(parents=True, exist_ok=True)
+        tf = d / "task.md"
+        tf.write_text(
+            f"# {num} - Risk Fixture\n\n## Status\npending\n\n## Risk\n{risk}\n\n"
+            "## Work Plan\n- [x] only gate\n", encoding="utf-8")
+        return tf
+
+    def test_failing_verify_blocks_close(self):
+        self._config({"verify": "exit 7"})
+        tf = write_task(self.project, "070", "pending", gates_checked=True)
+        self.assertEqual(self.run_tasks("work", "070").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("verification failed", r.stderr)
+        self.assertNotEqual(status_of(tf), "done")
+
+    def test_failing_verify_overridable_with_reason(self):
+        self._config({"verify": "exit 7"})
+        tf = write_task(self.project, "071", "pending", gates_checked=True)
+        self.assertEqual(self.run_tasks("work", "071").returncode, 0)
+        r = self.run_tasks("work", "done", "--force", "--reason", "known-flaky, tracked")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(status_of(tf), "done")
+
+    def test_passing_verify_writes_receipt(self):
+        self._config({"verify": "echo checks-green"})
+        tf = write_task(self.project, "072", "pending", gates_checked=True)
+        self.assertEqual(self.run_tasks("work", "072").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = tf.read_text(encoding="utf-8")
+        self.assertIn("## Verification Receipt", body)
+        self.assertIn("[PASS]", body)
+        self.assertEqual(status_of(tf), "done")
+
+    def test_assertive_without_review_blocks_then_closes_with_evidence(self):
+        tf = self._risk_task("073", "assertive")
+        self.assertEqual(self.run_tasks("work", "073").returncode, 0)
+        blocked = self.run_tasks("work", "done")
+        self.assertEqual(blocked.returncode, 1, blocked.stdout)
+        self.assertIn("assertive", blocked.stderr)
+        self.assertNotEqual(status_of(tf), "done")
+        # Drop a review artifact next to the task → the gate is satisfied.
+        (tf.parent / "judge.md").write_text("# panel verdict: PASS\n", encoding="utf-8")
+        ok = self.run_tasks("work", "done")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(status_of(tf), "done")
+
+    def test_reversible_no_contract_closes_clean(self):
+        tf = self._risk_task("074", "reversible")
+        self.assertEqual(self.run_tasks("work", "074").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(status_of(tf), "done")
+        self.assertIn("NONE DECLARED", tf.read_text(encoding="utf-8"))
+
+
+class TestAuditCommand(WorkReadoptBase):
+    """`tasks audit` runs sweeps, writes a receipt, and exits non-zero on breakage."""
+
+    def _task(self, num):
+        d = self.project / ".agent" / "tasks" / f"{num}-audit"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "task.md").write_text(
+            f"# {num} - a\n\n## Status\npending\n\n## Work Plan\n- [x] g\n", encoding="utf-8")
+        return d / "task.md"
+
+    def test_clean_repo_passes_and_writes_receipt(self):
+        tf = self._task("040")
+        (self.project / "src.py").write_text("x = 1\n", encoding="utf-8")
+        r = self.run_tasks("audit", "040")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("AUDIT PASS", r.stdout)
+        self.assertIn("## Pre-Panel Audit", tf.read_text(encoding="utf-8"))
+
+    def test_conflict_marker_fails_the_audit(self):
+        self._task("041")
+        (self.project / "broken.py").write_text(
+            "a = 1\n<<<<<<< HEAD\nb = 2\n>>>>>>> feat\n", encoding="utf-8")
+        r = self.run_tasks("audit", "041")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("FINDINGS", r.stdout)
+        self.assertIn("conflict-markers", r.stdout)
+
+
+class TestGateCountGuard(WorkReadoptBase):
+    """Issue #09: a prose `- [ ]` must not inflate the count or block a close, and
+    the line-anchored count is an independent guard against closing with open
+    gates."""
+
+    def _task(self, num, body):
+        d = self.project / ".agent" / "tasks" / f"{num}-gate"
+        d.mkdir(parents=True, exist_ok=True)
+        tf = d / "task.md"
+        tf.write_text(body, encoding="utf-8")
+        return tf
+
+    def test_prose_marker_does_not_block_a_complete_task(self):
+        tf = self._task("085",
+            "# 085 - g\n\n## Status\npending\n\n## Work Plan\n"
+            "- [x] real gate one\n- [x] real gate two\n\n"
+            "The convention is `- [ ]` until the gate's work lands.\n")
+        self.assertEqual(self.run_tasks("work", "085").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 0, r.stderr)   # prose no longer counts as a gate
+        self.assertEqual(status_of(tf), "done")
+
+    def test_real_open_gate_still_blocks_on_the_count(self):
+        self._task("086",
+            "# 086 - g\n\n## Status\npending\n\n## Work Plan\n"
+            "- [x] done one\n- [ ] genuinely open\n")
+        self.assertEqual(self.run_tasks("work", "086").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 1)
+        self.assertNotEqual(status_of(self.project / ".agent" / "tasks" / "086-gate" / "task.md"), "done")
+
+
+class TestParkedAndRetro(WorkReadoptBase):
+    """Parked items become un-swallowable and the retro loop gets a trigger."""
+
+    def _parked_task(self, num: str, items, status="pending") -> Path:
+        d = self.project / ".agent" / "tasks" / f"{num}-parked"
+        d.mkdir(parents=True, exist_ok=True)
+        tf = d / "task.md"
+        body = (f"# {num} - Parked Fixture\n\n## Status\n{status}\n\n"
+                "## Work Plan\n- [x] g\n\n## Parked\n"
+                + "\n".join(f"- {it}" for it in items) + "\n")
+        tf.write_text(body, encoding="utf-8")
+        return tf
+
+    def test_parked_command_lists_open_only(self):
+        self._parked_task("090", ["donut collision", "old thing [dismissed: wontfix]"])
+        r = self.run_tasks("parked")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("donut collision", r.stdout)
+        self.assertNotIn("old thing", r.stdout)  # dismissed hidden without --all
+
+    def test_parked_all_shows_resolved(self):
+        self._parked_task("091", ["gone [promoted → 092]"])
+        r = self.run_tasks("parked", "--all")
+        self.assertIn("gone", r.stdout)
+        self.assertIn("promoted", r.stdout)
+
+    def test_close_surfaces_open_parked_items(self):
+        self._parked_task("092", ["label vs DOM donut collision"], status="pending")
+        self.assertEqual(self.run_tasks("work", "092").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("open parked item", r.stdout)
+        self.assertIn("donut collision", r.stdout)
+
+    def test_close_nudges_retro_at_threshold(self):
+        # Ten already-closed tasks + one active task to close → the close nudges.
+        for i in range(1, 11):
+            write_task(self.project, f"{i:03d}", "done", gates_checked=True)
+        tf = write_task(self.project, "030", "pending", gates_checked=True)
+        self.assertEqual(self.run_tasks("work", "030").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("tasks retro", r.stdout)
 
 
 if __name__ == "__main__":

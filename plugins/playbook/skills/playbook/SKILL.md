@@ -300,6 +300,18 @@ After all work patterns complete, before code becomes permanent:
 
 ---
 
+## Limits of Review — what a panel structurally cannot catch
+
+Judges (single or panel) do **conformance** review: does the code match the intent, does the intent match what the user asked. That is genuinely valuable and it is the strongest part of the tool. But three classes of failure are **outside** what any judge can verify, and assuming a clean panel covers them is exactly how they ship. A green panel is *not evidence* on any of these:
+
+- **Correspondence — does the result match the WORLD, not just the intent?** A judge reads code and text; it cannot see reality. A measurement can be internally consistent and wrong (a ruler that measures the wrong thing); a UI can pass every code lens and look broken. Across the evidence base, 12 owner-found defects were visible in a screenshot and caught by *zero* of 46 panels. For user-facing work or any asserted measured fact, **you** check the real artifact (screenshot/recording/actual output) or the instrument — the panel cannot.
+- **Disclosure — provenance, secrets, attribution, AI-authorship in public files.** This is a mechanical scan (`tasks audit`, a pre-commit grep), not a judgement call. Run it; do not expect a judge to.
+- **Irreversibility / blast radius.** A panel weighs correctness, not consequence — it will happily approve a clean diff that drops a database. Consequence is carried by `## Risk` (reversible / irreversible / assertive), not by the review: an `irreversible` or `assertive` task needs a rollback plan or the claim-and-its-instrument signed off **regardless** of how clean the findings are.
+
+The fix for each is not a better judge or an eighth seat — it is a different check (your eyes, a grep, the risk gate). Naming the limit is what stops a passing panel from reading as "all clear."
+
+---
+
 ## Mind Map
 
 Format reference and generation guide for project mind maps (`MIND_MAP.md`).

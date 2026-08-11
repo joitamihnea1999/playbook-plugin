@@ -67,6 +67,15 @@ if [ -z "$TASK_FILE" ]; then
     exit 0
 fi
 
+# Blocked state (#08): a task paused awaiting the owner's decision is NOT waiting
+# on the agent — let the turn end without a fabricated checkbox. Keyed on the
+# status marker (the line after `## Status`), NOT on gate text, so it can't
+# inherit the freehand bypass's first-unchecked-gate fragility.
+STATUS_LINE=$(awk '/^## Status[[:space:]]*$/{getline; print; exit}' "$TASK_FILE" 2>/dev/null | tr -d '[:space:]')
+if [ "$STATUS_LINE" = "blocked" ]; then
+    exit 0
+fi
+
 # Count unchecked gates (only real gates at line start, not inside blockquotes)
 UNCHECKED=$(grep -cE '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null) || UNCHECKED=0
 

@@ -42,8 +42,23 @@ from tasks import template  # noqa: E402
 from tasks.cli import (  # noqa: E402
     _findings_markers,
     _neutralise_markers,
+    _panel_triage_frame,
     _write_review_findings,
 )
+
+
+class PanelTriageFrameLimits(unittest.TestCase):
+    """P11: the panel's own judge.md must name what a panel structurally cannot
+    catch, so a clean panel is never read as 'all clear' on these classes."""
+
+    def test_frame_names_the_three_limits(self):
+        text = "\n".join(_panel_triage_frame()).lower()
+        self.assertIn("correspondence", text)
+        self.assertIn("disclosure", text)
+        self.assertIn("irreversib", text)  # irreversibility / irreversible
+        # and points each at its real (non-panel) check
+        self.assertIn("screenshot", text)     # correspondence → the real artifact
+        self.assertIn("risk", text)           # irreversibility → the ## Risk gate
 
 TASK_MD = """# 007 - Demo
 

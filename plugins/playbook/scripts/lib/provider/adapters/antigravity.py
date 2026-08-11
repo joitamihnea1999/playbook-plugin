@@ -126,6 +126,11 @@ class AntigravityAdapter(ProviderAdapter):
                 return (f"(error: agy judge prompt+context is ~{payload} chars on argv; "
                         "Windows caps the command line at 32,767 chars and agy 1.1.1 reads "
                         "its prompt from argv only — shrink the context or use another backend)")
+        # POSIX per-element BYTE cap (#10): fail loud before dispatch, not a cryptic E2BIG.
+        from provider.argv_guard import argv_byte_error
+        _argv_err = argv_byte_error(agent_args, "agy")
+        if _argv_err:
+            return _argv_err
         env = os.environ.copy()
         env["PLAYBOOK_SESSION_ID"] = self._session_id or "judge"
         from provider import sandbox as _sandbox

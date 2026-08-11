@@ -34,7 +34,15 @@ def status() -> str:
 ## Status
 pending
 
-> **Before filling this in:** run `.claude/bin/tasks work <N>` to activate this task. Hooks won't enforce until activated."""
+> **Before filling this in:** run `.claude/bin/tasks work <N>` to activate this task. Hooks won't enforce until activated.
+
+## Risk
+unclassified
+
+> **Set this at the Structure gate** to one of: `reversible` / `irreversible` / `assertive`.
+> - `reversible` — `git revert` undoes it completely. Normal bar.
+> - `irreversible` — deletes/migrates data, rotates a secret, rewrites history, or publishes. Needs a named rollback plan + explicit confirmation, and cannot light-close.
+> - `assertive` — changes a **claim about the world** (docs, a calibration, a measurement, a "verified accurate"). Reviewed for the claim AND its instrument regardless of diff size — a docs-only diff can be the most review-worthy thing a task produces. Cannot light-close."""
 
 
 def intent_why_refs(playbook: str) -> str:
@@ -81,7 +89,8 @@ def understand() -> str:
 def structure() -> str:
     return """\
 ### Structure
-- [ ] What kind of work is this? (build / investigate / evaluate / decide / combination?) If combination, what's the sequence? If >15 gates or uncertain approach, pick a checkpoint where you pause and reassess direction before continuing."""
+- [ ] What kind of work is this? (build / investigate / evaluate / decide / combination?) If combination, what's the sequence? If >15 gates or uncertain approach, pick a checkpoint where you pause and reassess direction before continuing.
+- [ ] **Set `## Risk`** (reversible / irreversible / assertive). Ask: if this claim/change were WRONG, what would show it? An `assertive` task (changes a claim about the world — docs, a calibration, a measurement) must name the instrument that would reveal the claim false. An `irreversible` task must name its rollback plan. These cannot be light-closed for being small."""
 
 
 def reflection_gates() -> str:
@@ -295,6 +304,10 @@ def plan_review_prompt(
         "(6) Prove it — cite file:line evidence for claims about existing code. No hand-waving. "
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
+        "Then, as your LAST line, report whether the cap bound you: "
+        "`CAP: 5/5 reported, more remain` if you had to drop findings to fit, or "
+        "`CAP: <k>/5 reported, exhausted` if you reported everything you found — "
+        "so the reader can tell convergence (nothing left) from saturation (more remain). "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
         "DO NOT edit any files — you are sandboxed read-only and the attempt will "
         "fail. Output your findings to stdout only; the parent process writes them "
@@ -341,6 +354,10 @@ def impl_review_prompt(
         "(6) Prove it works — cite file:line evidence showing correctness, or construct a concrete scenario showing failure. "
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
+        "Then, as your LAST line, report whether the cap bound you: "
+        "`CAP: 5/5 reported, more remain` if you had to drop findings to fit, or "
+        "`CAP: <k>/5 reported, exhausted` if you reported everything you found — "
+        "so the reader can tell convergence (nothing left) from saturation (more remain). "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
         "DO NOT edit any files — you are sandboxed read-only and the attempt will "
         "fail. Output your findings to stdout only; the parent process writes them "
@@ -386,6 +403,10 @@ def panel_plan_review_prompt(
         "(6) Prove it — cite file:line evidence for claims about existing code. No hand-waving. "
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
+        "Then, as your LAST line, report whether the cap bound you: "
+        "`CAP: 5/5 reported, more remain` if you had to drop findings to fit, or "
+        "`CAP: <k>/5 reported, exhausted` if you reported everything you found — "
+        "so the reader can tell convergence (nothing left) from saturation (more remain). "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
         "Note: your findings will be triaged by the reading agent — they will verify file:line claims before applying, push back on speculative concerns, and require concrete evidence. Self-flag any claim you cannot defend with code citation. The reading agent lives with the outcomes; you do not. "
         "DO NOT edit any files. Output your findings to stdout only."
@@ -430,6 +451,10 @@ def panel_impl_review_prompt(
         "(6) Prove it works — cite file:line evidence showing correctness, or construct a concrete scenario showing failure. "
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
+        "Then, as your LAST line, report whether the cap bound you: "
+        "`CAP: 5/5 reported, more remain` if you had to drop findings to fit, or "
+        "`CAP: <k>/5 reported, exhausted` if you reported everything you found — "
+        "so the reader can tell convergence (nothing left) from saturation (more remain). "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
         "Note: your findings will be triaged by the reading agent — they will verify file:line claims before applying, push back on speculative concerns, and require concrete evidence. Self-flag any claim you cannot defend with code citation. The reading agent lives with the outcomes; you do not. "
         "DO NOT edit any files. Output your findings to stdout only."
@@ -784,7 +809,14 @@ Usage: tasks <command> [args]
 
 Commands:
   work <number>       Set active task (e.g. tasks work 058)
-  work done [--force] Finish task; bounces if gates still open (--force overrides)
+  work done [--force --reason "why"]  Finish task; runs the verify contract and
+                      records a receipt; a failing verify or an unreviewed
+                      assertive/irreversible task blocks (--force needs --reason)
+  audit [<N>]         Run mechanical pre-panel sweeps (conflict markers, merge
+                      artifacts, stale markers, + project sweeps); receipt to task.md
+  parked [--all]      List open parked items across tasks (--all: incl. resolved)
+  blocked "<reason>"  Pause the active task awaiting the owner's decision — an
+                      honest state (not a faked checkbox); resume with work <N>
   freehand            User-driven mode (no gate pressure)
   new <type> <name> [intent]   Create task (intent pre-fills ## Intent)
   new --stub <type> <name> [intent]   Create stub (expands on work)

@@ -433,6 +433,31 @@ def _panel_triage_frame() -> list[str]:
             "Push back where you have concrete evidence the panel doesn't."
         ),
         "",
+        # P11: name what a panel structurally CANNOT catch, at the moment the
+        # agent is tempted to read a clean panel as "all clear". Three classes
+        # went through 46 real panels untouched because everyone assumed the
+        # panel covered them. A panel does CONFORMANCE (does the code match the
+        # intent); it cannot do these — so a green panel is NOT evidence on them.
+        "**A clean panel does NOT clear these — they are outside what any judge can verify:**",
+        (
+            "- **Correspondence** — does the result match the WORLD, not just the "
+            "intent? A judge reads code and text, not reality. If the work is "
+            "user-facing or asserts a measured fact, YOU check the real artifact "
+            "(screenshot/recording/actual output) or the measuring instrument — "
+            "the panel cannot."
+        ),
+        (
+            "- **Disclosure** — provenance, secrets, attribution, AI-authorship in "
+            "public files. This is a mechanical grep (`tasks audit` / a pre-commit "
+            "scan), not a judgement call — run it; do not expect a judge to."
+        ),
+        (
+            "- **Irreversibility / blast radius** — a panel weighs correctness, not "
+            "consequence. If `## Risk` is `irreversible` or `assertive`, the "
+            "rollback plan or the claim-and-its-instrument needs YOUR explicit "
+            "sign-off regardless of how clean the findings are."
+        ),
+        "",
     ]
 
 
@@ -1370,6 +1395,13 @@ def main():
         if task_num != "done" and task_num.isdigit():
             task_num = task_num.zfill(3)
         force = any(a in ("--force", "-f") for a in cmd_args[1:])
+        # --reason "why": required for any forced close so the escape hatch leaves
+        # a trace (the 046 fix). Stored in the verification receipt.
+        reason = None
+        for _i, _a in enumerate(cmd_args):
+            if _a == "--reason" and _i + 1 < len(cmd_args):
+                reason = cmd_args[_i + 1]
+                break
         project_path = find_project_root()
 
         # Handle 'tasks work done' - deactivate current task and set Status in task.md
@@ -1389,6 +1421,79 @@ def main():
                     task_file = matches[0]
                     if not force and _gate_bounce(prev_task, task_file, "closing this task"):
                         sys.exit(1)
+                    # Belt to gate-bounce's suspenders (#09): head-position can be
+                    # fooled by a tricky line while the honest, line-anchored COUNT
+                    # still shows open gates — the 71/74-yet-"all-checked" symptom.
+                    # Refuse on the count too, so no single parser's blind spot can
+                    # close a task with open gates.
+                    if not force:
+                        from tasks.core import _gate_counts
+                        try:
+                            _chk, _tot = _gate_counts(task_file.read_text(encoding="utf-8"))
+                        except OSError:
+                            _chk, _tot = 0, 0
+                        if _tot and _chk < _tot:
+                            print(f"Blocked: task {prev_task} shows {_chk}/{_tot} gates "
+                                  f"checked — {_tot - _chk} still open by the line-anchored "
+                                  "count. Finish them, or override with --force --reason.",
+                                  file=sys.stderr)
+                            sys.exit(1)
+                    # Evidence contract + consequence gate (P1 / P2). Close is no
+                    # longer "write the string done": run the project's declared
+                    # verify contract, record a receipt, and refuse to close on a
+                    # failing verify or an unreviewed high-consequence change —
+                    # unless forced with a recorded reason.
+                    from tasks.core import (
+                        close_decision, extract_risk, format_verify_receipt,
+                        has_review_evidence, resolve_verify_commands,
+                    )
+                    risk = extract_risk(task_file)
+                    commands = resolve_verify_commands(project_path, risk)
+                    entries = []
+                    verify_failed = False
+                    if commands:
+                        mv = _merge_verify_module()
+                        if mv is None:
+                            print("Error: cannot load the verify runner "
+                                  "(skills/merge/merge-verify.py missing).", file=sys.stderr)
+                            sys.exit(1)
+                        print(f"Verifying close ({len(commands)} declared command(s), risk={risk})...",
+                              flush=True)
+                        for label, cmd in commands:
+                            rc, output = mv.run_command_capture(cmd, str(project_path))
+                            entries.append((label, cmd, rc, output))
+                            if rc != 0:
+                                verify_failed = True
+                            print(f"  [{'PASS' if rc == 0 else f'FAIL exit {rc}'}] {cmd.splitlines()[0]}",
+                                  flush=True)
+                    else:
+                        print(f"  (no verify contract declared — NOTHING verified at close; risk={risk})",
+                              file=sys.stderr, flush=True)
+
+                    allowed, block_reason = close_decision(
+                        risk=risk, verify_declared=bool(commands),
+                        verify_failed=verify_failed,
+                        has_review_evidence=has_review_evidence(task_file),
+                        force=force, reason=reason,
+                    )
+                    if not allowed:
+                        print(f"\nBlocked: cannot close task {prev_task} — {block_reason}",
+                              file=sys.stderr, flush=True)
+                        sys.exit(1)
+
+                    # Close is earned — append the receipt (the trace), then set done.
+                    import subprocess
+                    try:
+                        _head = subprocess.run(
+                            ["git", "rev-parse", "HEAD"], cwd=project_path,
+                            capture_output=True, text=True).stdout.strip()
+                    except (OSError, subprocess.SubprocessError):
+                        _head = ""
+                    receipt = format_verify_receipt(
+                        entries, _head, risk, reason=(reason if force else None))
+                    existing = task_file.read_text(encoding="utf-8")
+                    task_file.write_text(
+                        existing.rstrip("\n") + "\n\n" + receipt + "\n", encoding="utf-8")
                     lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
                     for i, line in enumerate(lines):
                         if line.strip() == "## Status" and i + 1 < len(lines):
@@ -1408,10 +1513,45 @@ def main():
                         except OSError:
                             pass
                 print(f"Task {prev_task} done.")
+
+                # P9: surface this task's OPEN parked items at close so they are
+                # not swallowed. Advisory (does not block) — resolve each by
+                # promoting (`tasks new` then mark `[promoted → NNN]`), dismissing
+                # (`[dismissed: reason]`), or leaving open deliberately.
+                from tasks.core import open_parked_items, retro_proposal
+                try:
+                    _still_open = open_parked_items(task_file.read_text(encoding="utf-8"))
+                except OSError:
+                    _still_open = []
+                if _still_open:
+                    print(f"\n⚠ {len(_still_open)} open parked item(s) from this task — "
+                          "resolve before they rot (`tasks parked` to review):")
+                    for _p in _still_open:
+                        print(f"    - {_p}")
+                    print("  Promote (`tasks new …` + mark `[promoted → NNN]`), "
+                          "dismiss (`[dismissed: reason]`), or re-park deliberately.")
+
+                # P4: the learning loop finally gets a trigger — propose a retro
+                # once enough tasks have closed since the last one.
+                _retro = retro_proposal(project_path)
+                if _retro:
+                    print(f"\n💡 {_retro}")
             else:
                 print("No active task.")
             print("Code edits blocked until: tasks work <N>")
             return
+
+        # Resume a BLOCKED task (#08): `tasks work <N>` is the "I am picking this
+        # up" verb. Clear the block FIRST — flip status back to in_progress — so
+        # normal activation below sees an ordinary in_progress task (a blocked
+        # task is skipped by _find_active_task, so it must be cleared here).
+        _resume_matches = list(
+            (resolve_agent_dir(project_path) / "tasks").glob(f"{task_num}-*/task.md"))
+        if _resume_matches:
+            from tasks.core import _is_blocked, resume_blocked_task
+            if _is_blocked(_resume_matches[0]):
+                resume_blocked_task(_resume_matches[0])
+                print(f"Resuming task {task_num} (was blocked — decision made).")
 
         # Verify task exists
         # _extract_head_position is imported here, not further down where the
@@ -1923,12 +2063,22 @@ def main():
                 sys.exit(1)
             task_file = matches[0]
             task_path = str(task_file.relative_to(project_path))
+            # P6 nudge: mechanically-detectable issues shouldn't cost judge tokens.
+            if "## Pre-Panel Audit" not in task_file.read_text(encoding="utf-8"):
+                print(f"  note: no pre-panel audit on this task — consider "
+                      f"`tasks audit {task_num}` first to clear mechanically-"
+                      f"detectable issues before the panel.", file=sys.stderr, flush=True)
 
         from tasks.template import panel_plan_review_prompt, panel_impl_review_prompt
 
-        # Build context
+        # Build context. Every truncation here is receipted (C3/P3): a review
+        # that silently sees a fraction of its own trace is how a judge reviews
+        # the design four rounds running and never sees a fix. context_receipts
+        # rides to stderr AND into judge.md so the operator can compensate.
+        from tasks.core import select_task_context
         MAX_CONTEXT_CHARS = 100_000
         context_parts = []
+        context_receipts = []
         if not bare:
             if not no_mind_map:
                 mm_content = _load_mind_map(project_path)
@@ -1936,8 +2086,10 @@ def main():
                     context_parts.append(f"=== MIND_MAP.md ===\n{mm_content}")
             if task_file:
                 task_content = task_file.read_text(encoding="utf-8")
-                if len(task_content) > MAX_CONTEXT_CHARS // 2:
-                    task_content = task_content[:MAX_CONTEXT_CHARS // 2] + "\n\n[... truncated ...]"
+                task_content, task_receipt = select_task_context(
+                    task_content, MAX_CONTEXT_CHARS // 2)
+                if task_receipt:
+                    context_receipts.append(task_receipt)
                 context_parts.append(f"=== {task_path} ===\n{task_content}")
             else:
                 # Taskless: include recent chat log as project context
@@ -1946,11 +2098,20 @@ def main():
                     chat_content = chat_log.read_text(encoding="utf-8", errors="replace")
                     max_chat = MAX_CONTEXT_CHARS // 2
                     if len(chat_content) > max_chat:
-                        chat_content = "[... truncated ...]\n\n" + chat_content[-max_chat:]
+                        context_receipts.append(
+                            f"chat_log.md {len(chat_content):,} → {max_chat:,} chars "
+                            "(kept most recent tail)")
+                        chat_content = "[... older chat elided ...]\n\n" + chat_content[-max_chat:]
                     context_parts.append(f"=== .agent/chat_log.md (recent) ===\n{chat_content}")
         system_context = "\n\n".join(context_parts)
         if len(system_context) > MAX_CONTEXT_CHARS:
+            context_receipts.append(
+                f"combined system context {len(system_context):,} → {MAX_CONTEXT_CHARS:,} "
+                "chars (head-clamped — mind map is large; raise headroom or use "
+                "--no-mind-map)")
             system_context = system_context[:MAX_CONTEXT_CHARS] + "\n\n[... truncated ...]"
+        if context_receipts:
+            print("  context: " + " | ".join(context_receipts), file=sys.stderr, flush=True)
 
         # Prompt strategy: bare/taskless → extra_prompt is full mission; with task → review prompt + optional steering
         if task_file:
@@ -2119,15 +2280,38 @@ def main():
         over_budget = {lbl for lbl in failed if budget_exceeded(results[lbl])}
         succeeded = len(results) - len(failed)
 
+        # Verdict, not just a count (C4/P7). A panel is a gate: resolve the
+        # quorum against the judges that actually launched, decide PASS/FAIL, and
+        # exit non-zero below it (at the end, after all diagnostics print). The
+        # tamper hard-stop below still wins — a mutated tree fails regardless of
+        # how many judges succeeded.
+        from tasks.core import resolve_panel_quorum
+        panel_quorum = resolve_panel_quorum(project_path, len(results))
+        panel_passed = succeeded >= panel_quorum
+        verdict_reason = (
+            f"{succeeded}/{len(results)} judges succeeded, quorum {panel_quorum}"
+            + ("" if panel_passed else " — below quorum")
+        )
+        verdict_banner = (
+            f"**PANEL VERDICT: {'PASS' if panel_passed else 'FAIL'}** — {verdict_reason}\n"
+        )
+
         # Write judge.md (path already set above based on task_file presence)
         display_label = task_path or extra_prompt[:60]
-        lines = [f"# Panel {review_label.title()} — {display_label}\n"]
+        lines = [f"# Panel {review_label.title()} — {display_label}\n", verdict_banner]
         # Tamper banner rides at the very top of judge.md (#1) — the reading
         # agent must see it before any finding. judge.md is still written (paid
         # verdicts are never discarded), but the run exits non-zero below.
         if _tamper_changes:
             lines = [_tamper_banner(_tamper_changes) + "\n\n"] + lines
-        lines.append(f"**Judges:** {succeeded}/{len(results)} succeeded | **Web search:** {'yes' if web_search else 'no'} | **Timeout:** {timeout_label}\n")
+        lines.append(f"**Judges:** {succeeded}/{len(results)} succeeded | **Quorum:** {panel_quorum} | **Web search:** {'yes' if web_search else 'no'} | **Timeout:** {timeout_label}\n")
+        # Context receipt (C3/P3): the judges saw what this line says they saw —
+        # nothing was dropped without being named. A full trace means the line
+        # simply confirms the whole task.md reached them.
+        if context_receipts:
+            lines.append(f"**Context:** {' | '.join(context_receipts)}\n")
+        else:
+            lines.append("**Context:** full task.md + mind map delivered (no truncation)\n")
         if failed:
             lines.append(f"**⚠ Failed judges:** {', '.join(sorted(failed))} — see their blocks below for the exit code / stderr. NOT a clean empty review.\n")
         if over_budget:
@@ -2150,7 +2334,8 @@ def main():
             lines.append(results[label].strip())
             lines.append("\n\n")
         judge_md.write_text("\n".join(lines), encoding="utf-8")
-        summary = f"\nSaved: {judge_md.relative_to(project_path)} ({succeeded}/{len(judges)} judges succeeded)"
+        summary = (f"\nPANEL {'PASS' if panel_passed else 'FAIL'}: {verdict_reason}"
+                   f"\nSaved: {judge_md.relative_to(project_path)}")
         if failed:
             summary += f"; FAILED: {', '.join(sorted(failed))}"
         if over_budget:
@@ -2200,6 +2385,16 @@ def main():
                 print("\nReview saved to judge.md but the panel is degraded — "
                       "decide how to proceed before re-running.", file=sys.stderr)
                 sys.exit(1)
+
+        # Quorum gate (C4/P7): below the required number of succeeding judges the
+        # panel is a FAIL, not a report. judge.md leads with the same verdict and
+        # is already written, so nothing is lost — but the run exits non-zero so a
+        # caller (or the reviewing agent) cannot mistake a 4/7 panel for a pass.
+        if not panel_passed:
+            print(f"\nPANEL FAIL: {verdict_reason}. Raise the panel (fix/rerun the "
+                  "failed seats) or set `panel_quorum` in .agent/config.json if this "
+                  "bar is wrong for the project.", file=sys.stderr, flush=True)
+            sys.exit(1)
 
     elif cmd == "models":
         # Model-availability discovery + panel selection (task 012).
@@ -2312,19 +2507,29 @@ def main():
 
         from tasks.template import plan_review_prompt, impl_review_prompt
 
-        # Build context: mind map + task content (bounded to avoid argv/context limits)
+        # Build context: mind map + task content (bounded to avoid argv/context
+        # limits). Structure-aware and receipted (C3/P3) — the single-judge path
+        # head-sliced exactly as the panel did, so it gets the same fix.
+        from tasks.core import select_task_context
         MAX_CONTEXT_CHARS = 100_000
         context_parts = []
+        context_receipts = []
         mm_content = _load_mind_map(project_path)
         if mm_content:
             context_parts.append(f"=== MIND_MAP.md ===\n{mm_content}")
         task_content = task_file.read_text(encoding="utf-8")
-        if len(task_content) > MAX_CONTEXT_CHARS // 2:
-            task_content = task_content[:MAX_CONTEXT_CHARS // 2] + "\n\n[... truncated for context budget ...]"
+        task_content, task_receipt = select_task_context(task_content, MAX_CONTEXT_CHARS // 2)
+        if task_receipt:
+            context_receipts.append(task_receipt)
         context_parts.append(f"=== {task_path} ===\n{task_content}")
         system_context = "\n\n".join(context_parts)
         if len(system_context) > MAX_CONTEXT_CHARS:
+            context_receipts.append(
+                f"combined system context {len(system_context):,} → {MAX_CONTEXT_CHARS:,} "
+                "chars (head-clamped)")
             system_context = system_context[:MAX_CONTEXT_CHARS] + "\n\n[... truncated for context budget ...]"
+        if context_receipts:
+            print("  context: " + " | ".join(context_receipts), file=sys.stderr, flush=True)
 
         # Determine mode: explicit from command, or auto-detect for legacy "judge"
         if review_cmd == "plan-review":
@@ -2595,6 +2800,12 @@ def main():
                           "prompt from argv — shrink the context or use another backend.",
                           file=sys.stderr)
                     sys.exit(1)
+            # POSIX per-element byte cap (#10) — the char budget can't bound argv bytes.
+            from provider.argv_guard import argv_byte_error
+            _argv_err = argv_byte_error(grok_args, "grok")
+            if _argv_err:
+                print(_argv_err, file=sys.stderr)
+                sys.exit(1)
 
             grok_env = os.environ.copy()
             grok_env["PLAYBOOK_SESSION_ID"] = "judge"
@@ -2615,6 +2826,15 @@ def main():
                 )
             except subprocess.TimeoutExpired as _expired:
                 _bail_review_timeout(_expired)
+            except OSError as _e:
+                # #10: E2BIG (argv too long) and kin were an uncaught traceback on
+                # this path — a knowable pre-dispatch condition presented as a
+                # crash. Turn it into a clean, actionable error.
+                print(f"Error: grok judge dispatch failed ({_e}). Most likely the "
+                      "prompt+context exceeded this platform's argv byte limit — "
+                      "shrink the context or use a stdin-capable backend (claude/codex).",
+                      file=sys.stderr)
+                sys.exit(1)
 
         else:  # pi (local Qwen via oMLX)
             if not (shutil.which("pi") or shutil.which("omlx")):
@@ -2649,6 +2869,12 @@ def main():
                           "prompt from argv only — shrink the context or use another backend.",
                           file=sys.stderr)
                     sys.exit(1)
+            # POSIX per-element byte cap (#10).
+            from provider.argv_guard import argv_byte_error
+            _argv_err = argv_byte_error(pi_args, "pi")
+            if _argv_err:
+                print(_argv_err, file=sys.stderr)
+                sys.exit(1)
 
             pi_env = os.environ.copy()
             pi_env["PLAYBOOK_SESSION_ID"] = "judge"
@@ -2669,6 +2895,12 @@ def main():
                 )
             except subprocess.TimeoutExpired as _expired:
                 _bail_review_timeout(_expired)
+            except OSError as _e:
+                print(f"Error: pi judge dispatch failed ({_e}). Most likely the "
+                      "prompt+context exceeded this platform's argv byte limit — "
+                      "shrink the context or use a stdin-capable backend (claude/codex).",
+                      file=sys.stderr)
+                sys.exit(1)
 
         if result.stdout:
             print(result.stdout, end="", flush=True)
@@ -3319,6 +3551,104 @@ def main():
     elif cmd == "status":
         project_path = find_project_root()
         task_status(project_path)
+
+    elif cmd == "audit":
+        # P6: mechanical pre-panel sweeps — catch the stale/zombie/half-merged
+        # stuff a grep can find before a judge spends a token on it. Records a
+        # receipt into task.md and exits non-zero on real breakage so a review
+        # can't proceed over a red audit.
+        project_path = find_project_root()
+        from tasks.audit import run_audit, format_audit_receipt
+        # Optional task arg (else the active task) for the receipt destination.
+        task_arg = next((a for a in cmd_args if a.isdigit()), None)
+        agent_dir = resolve_agent_dir(project_path)
+        task_file = None
+        if task_arg:
+            m = list((agent_dir / "tasks").glob(f"{task_arg.zfill(3)}-*/task.md"))
+            task_file = m[0] if m else None
+        else:
+            sf = agent_dir / "sessions" / resolve_session_id() / "current_state"
+            if sf.exists():
+                active = sf.read_text(encoding="utf-8").strip()
+                m = list((agent_dir / "tasks").glob(f"{active}-*/task.md"))
+                task_file = m[0] if m else None
+
+        print("Running pre-panel audit...", flush=True)
+        audit = run_audit(project_path)
+        for r in audit["results"]:
+            n = len([ln for ln in r["output"].splitlines() if ln.strip()])
+            tag = {"clean": "CLEAN", "findings": f"FINDINGS({n})", "error": "ERROR"}[r["status"]]
+            print(f"  [{tag}] {r['name']} — {r['why']}", flush=True)
+        if task_file:
+            import subprocess as _sp
+            try:
+                _head = _sp.run(["git", "rev-parse", "HEAD"], cwd=project_path,
+                                capture_output=True, text=True).stdout.strip()
+            except (OSError, _sp.SubprocessError):
+                _head = ""
+            receipt = format_audit_receipt(audit, head_sha=_head)
+            existing = task_file.read_text(encoding="utf-8")
+            task_file.write_text(existing.rstrip("\n") + "\n\n" + receipt + "\n", encoding="utf-8")
+            print(f"  Receipt appended to {task_file.relative_to(project_path)}")
+        print(f"\nAUDIT {'PASS' if audit['passed'] else 'FAIL'}", flush=True)
+        if not audit["passed"]:
+            print("  Fix the error-severity findings (or a broken sweep) before "
+                  "reviewing — a red audit means mechanically-detectable issues remain.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "blocked":
+        # #08: an honest state for "paused, waiting on the owner's decision" — so
+        # the agent never fakes a checkbox or misuses freehand to end its turn.
+        # Satisfies the Stop hook via the status marker (not gate text), records
+        # the reason in task.md, shows as BLOCKED, and is cleared by `tasks work`.
+        project_path = find_project_root()
+        reason = " ".join(cmd_args).strip()
+        if not reason:
+            print('Error: a reason is required — tasks blocked "why you are paused '
+                  'and what decision you need"', file=sys.stderr)
+            sys.exit(1)
+        agent_dir = resolve_agent_dir(project_path)
+        session_id = resolve_session_id()
+        state_file = agent_dir / "sessions" / session_id / "current_state"
+        active = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else None
+        if not active:
+            print("No active task to block. Activate one first: tasks work <N>",
+                  file=sys.stderr)
+            sys.exit(1)
+        matches = list((agent_dir / "tasks").glob(f"{active}-*/task.md"))
+        if not matches:
+            print(f"Task {active} not found", file=sys.stderr)
+            sys.exit(1)
+        from tasks.core import set_task_blocked
+        set_task_blocked(matches[0], reason)
+        print(f"Task {active} marked BLOCKED — {' '.join(reason.split())}")
+        print("You can end your turn; the Stop hook won't block a blocked task. "
+              f"Resume with: tasks work {active}")
+
+    elif cmd == "parked":
+        # P9: the standing query that makes parked items un-swallowable. Lists
+        # OPEN parked items across all tasks, oldest first; --all includes
+        # resolved ones. Nothing else in the tool ever surfaced them again.
+        project_path = find_project_root()
+        show_all = "--all" in cmd_args
+        from tasks.core import scan_parked
+        items = scan_parked(project_path, open_only=not show_all)
+        if not items:
+            print("No parked items." if show_all else "No open parked items.")
+        else:
+            scope = "" if show_all else " open"
+            print(f"{len(items)}{scope} parked item(s):")
+            cur = None
+            for it in items:
+                if it["task"] != cur:
+                    cur = it["task"]
+                    print(f"\n  T{it['task']:03d} — {it['slug'].replace('-', ' ')}")
+                tag = "" if it["status"] == "open" else f"  [{it['status']}]"
+                print(f"    - {it['item']}{tag}")
+            print("\nResolve each: promote (`tasks new …` then mark the bullet "
+                  "`[promoted → NNN]`), dismiss (`[dismissed: reason]`), or leave "
+                  "open deliberately.")
 
     elif cmd == "freehand":
         project_path = find_project_root()

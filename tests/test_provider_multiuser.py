@@ -811,7 +811,7 @@ class TestSplitBrainEndToEnd(TempProjectCase):
         # --force: the scratch task's template gates are deliberately unfinished;
         # we are testing lane plumbing, not gate discipline.
         done = subprocess.run(
-            [str(SCRIPTS / "tasks"), "work", "done", "--force"],
+            [str(SCRIPTS / "tasks"), "work", "done", "--force", "--reason", "plumbing test"],
             cwd=str(project), env=cli_env, capture_output=True, text=True,
         )
         self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
