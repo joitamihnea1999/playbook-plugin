@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -853,13 +853,22 @@ def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
     return True, ""
 
 
-def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=None) -> str:
+def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=None,
+                          dirty_files=0) -> str:
     """Render ONE receipt ENTRY for the `## Verification Receipt` section (the
     heading itself belongs to upsert_task_section, which keeps entries
     newest-first). `entries` is a list of (source_label, command, rc, output);
-    an empty list means nothing was declared. Never raises."""
+    an empty list means nothing was declared. Never raises.
+
+    `dirty_files`: modified/untracked count at close. The normal flow closes THEN
+    commits, so the stamped commit predates the verified code — observed live
+    (StrataDB task 005 closed with 100% of its work uncommitted). The receipt
+    must say so, or 'commit X' claims a state X does not contain."""
     ts = timestamp or datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    out = [f"### {ts} · risk {risk} · commit {head_sha or '(unknown)'}"]
+    commit_label = head_sha or "(unknown)"
+    if dirty_files:
+        commit_label += f" (+{dirty_files} uncommitted file(s) — verified code is NOT in this commit)"
+    out = [f"### {ts} · risk {risk} · commit {commit_label}"]
     if reason:
         out.append(f"- **Forced close, reason:** {reason.strip()}")
     if not entries:

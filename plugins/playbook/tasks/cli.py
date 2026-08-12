@@ -1497,10 +1497,27 @@ def main():
                             capture_output=True, text=True).stdout.strip()
                     except (OSError, subprocess.SubprocessError):
                         _head = ""
+                    # Dirty-tree honesty (StrataDB F6): closing before committing
+                    # is the normal flow, so say so in the receipt and out loud —
+                    # a crash between close and commit silently loses "done" work.
+                    _dirty = 0
+                    try:
+                        _porcelain = subprocess.run(
+                            ["git", "status", "--porcelain"], cwd=project_path,
+                            capture_output=True, text=True).stdout
+                        _dirty = len([ln for ln in _porcelain.splitlines() if ln.strip()])
+                    except (OSError, subprocess.SubprocessError):
+                        pass
                     receipt = format_verify_receipt(
-                        entries, _head, risk, reason=(reason if force else None))
+                        entries, _head, risk, reason=(reason if force else None),
+                        dirty_files=_dirty)
                     upsert_task_section(task_file, "Verification Receipt", receipt)
                     _set_status(task_file, "done")
+                    if _dirty:
+                        print(f"⚠ {_dirty} modified/untracked file(s) — this close's "
+                              "receipt describes UNCOMMITTED work. Commit before ending "
+                              "the session, or a crash loses 'done' work silently.",
+                              flush=True)
                 # Remove session dirs that reference this task.
                 # PLAYBOOK_SESSION_ID is not set when called from Bash tool, so scan all sessions.
                 # Intentional partial delete: only sessions pointing at prev_task are removed;

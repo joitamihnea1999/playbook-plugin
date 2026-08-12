@@ -153,8 +153,14 @@ _CODE_EXT = (
     "py js jsx ts tsx go rs java rb php c cpp cc h hpp cs kt swift scala sh bash zsh "
     "css scss html htm sql md json toml yaml yml tf proto gradle lua r pl ex exs vue svelte"
 ).split()
+# Longest extension first + a boundary guard: with `js` tried before `json` and
+# no guard, `.agent/config.json` matched as `agent/config.js` and was reported
+# stale — a false positive found live in the StrataDB field test. A noisy
+# detector gets ignored, which is worse than none.
 _MM_PATH_RE = re.compile(
-    r"([A-Za-z0-9_./\-]+\.(?:" + "|".join(_CODE_EXT) + r"))(?::\d+)?"
+    r"([A-Za-z0-9_./\-]+\.(?:"
+    + "|".join(sorted(_CODE_EXT, key=len, reverse=True))
+    + r"))(?![A-Za-z0-9])(?::\d+)?"
 )
 _MM_EXCLUDE_DIRS = {".git", ".agent", "node_modules", ".venv", "__pycache__", "dist", "build"}
 
@@ -173,12 +179,19 @@ def _extract_mindmap_paths(text: str) -> "list[str]":
         # longer path token; not a standalone repo path.
         if start >= 1 and text[start - 1] in ":/":
             continue
-        cand = m.group(1).lstrip("./")
+        cand = m.group(1)
+        # `./`-prefix removal, NOT lstrip("./") — lstrip strips a char SET, so it
+        # mangled `.agent/config.json` into `agent/config.json` (field FP #3).
+        while cand.startswith("./"):
+            cand = cand[2:]
         if "/" not in cand:
             continue  # bare filename — too fuzzy to verify precisely
-        first_seg = cand.split("/", 1)[0]
-        if "." in first_seg:
-            continue  # domain-shaped (github.com/…), not a repo path
+        segs = cand.split("/")
+        if any(s in _MM_EXCLUDE_DIRS for s in segs[:-1]):
+            continue  # lives in a dir the walker skips — we cannot judge it
+        first_seg = segs[0]
+        if "." in first_seg and not first_seg.startswith("."):
+            continue  # domain-shaped (github.com/…); dot-DIRS (.claude/) are real paths
         out.append(cand)
     return out
 
@@ -192,7 +205,8 @@ def check_mindmap_staleness(project_path) -> "dict | None":
     Deletion/full-rename precision: a path is stale only if neither it nor its
     basename survives, so a file merely moved to a new directory is NOT flagged
     (its basename still exists) — chosen to keep false positives near zero."""
-    mm = Path(project_path) / "MIND_MAP.md"
+    project_path = Path(project_path)  # str accepted — crashed live when a caller passed one
+    mm = project_path / "MIND_MAP.md"
     if not mm.exists():
         return None
     try:
@@ -209,8 +223,16 @@ def check_mindmap_staleness(project_path) -> "dict | None":
             relpaths.add(rel)
             basenames.add(f)
 
+    def _placeholder(cand: str) -> bool:
+        # `journal/NNN.md`-style template placeholders are documentation of a
+        # NAMING SCHEME, not a citation of a file — an all-caps/digit stem on a
+        # path that doesn't exist is a placeholder, not staleness (field FP).
+        stem = os.path.splitext(os.path.basename(cand))[0]
+        return bool(re.fullmatch(r"[A-Z0-9_]{2,}", stem))
+
     stale = [c for c in candidates
-             if c not in relpaths and os.path.basename(c) not in basenames]
+             if c not in relpaths and os.path.basename(c) not in basenames
+             and not _placeholder(c)]
     # Advisory by default (a stale ref can be a legit historical note), but a
     # project that wants zero-tolerance sets audit.mindmap_severity: "error".
     cfg = load_config(project_path)

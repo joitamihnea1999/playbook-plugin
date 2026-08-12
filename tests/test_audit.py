@@ -208,6 +208,40 @@ class MindmapStaleness(unittest.TestCase):
         self._map(p, "[1] `_node_starts` at commit a1b2c3d handles fences; 25000 chars.\n")
         self.assertEqual(check_mindmap_staleness(p)["status"], "clean")
 
+    def test_extension_not_matched_as_substring(self):
+        """Field FP (StrataDB batch 2): `config.json` was extracted as
+        `config.js` — `js` tried before `json`, no boundary guard."""
+        paths = _extract_mindmap_paths("declared in `pkg/config.json` at startup")
+        self.assertIn("pkg/config.json", paths)
+        self.assertNotIn("pkg/config.js", paths)
+
+    def test_placeholder_paths_not_flagged(self):
+        """Field FP: `journal/NNN.md` documents a NAMING SCHEME, not a file."""
+        p = self._proj()
+        (p / "journal").mkdir()
+        self._map(p, "[1] one entry per task: `journal/NNN.md` (NNN = task number).\n")
+        self.assertEqual(check_mindmap_staleness(p)["status"], "clean")
+
+    def test_dot_dir_citations_handled(self):
+        """Field FP #3: `.agent/config.json` was lstrip-mangled to
+        `agent/config.json` AND lives in a walker-excluded dir — citations into
+        excluded dirs are unjudgeable and must be skipped, not flagged."""
+        p = self._proj()
+        (p / ".agent").mkdir()
+        (p / ".agent" / "config.json").write_text("{}", encoding="utf-8")
+        self._map(p, "[1] declared in `.agent/config.json`; see `.claude/x.py` too.\n")
+        r = check_mindmap_staleness(p)
+        self.assertNotIn("agent/config.json", r["output"])
+        # .claude/ IS walked, so a missing .claude/x.py is a legitimate finding.
+        self.assertIn(".claude/x.py", r["output"])
+
+    def test_str_project_path_accepted(self):
+        """Field crash: a str project_path hit `str / str` in load_config."""
+        p = self._proj()
+        self._map(p, "[1] router in `tasks/router.py`.\n")
+        r = check_mindmap_staleness(str(p))   # str, not Path — must not raise
+        self.assertEqual(r["status"], "clean")
+
     def test_extractor_precision(self):
         paths = _extract_mindmap_paths(
             "see `tasks/router.py:42` and utils/helpers.js but not input/output "

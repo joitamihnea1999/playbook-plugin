@@ -194,6 +194,15 @@ class Receipt(unittest.TestCase):
                                   reason="owner override", timestamp="t")
         self.assertIn("owner override", r)
 
+    def test_dirty_tree_marker(self):
+        """StrataDB F6: close-then-commit is the normal flow, so a receipt whose
+        stamped commit predates the verified code must say so."""
+        dirty = format_verify_receipt([], head_sha="abc", risk="reversible",
+                                      timestamp="t", dirty_files=7)
+        self.assertIn("+7 uncommitted file(s)", dirty)
+        clean = format_verify_receipt([], head_sha="abc", risk="reversible", timestamp="t")
+        self.assertNotIn("uncommitted", clean)
+
     def test_entry_form_no_own_heading(self):
         """The heading belongs to upsert_task_section — the entry leads with a
         `###` stamp so re-closes stack under ONE section, newest first (A3)."""

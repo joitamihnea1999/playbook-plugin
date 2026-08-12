@@ -2,6 +2,15 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.1] — 2026-08-12
+
+First fixes driven by the StrataDB field test (five real tasks, one session handoff — findings in the fork owner's lab notebook).
+
+### Fixed
+
+- **Dirty-close honesty.** The normal flow closes a task and commits after, so a Verification Receipt's `commit X` named a commit that did not contain the verified code — observed live with a closed task whose entire work sat uncommitted at session end, one crash away from silent loss. `tasks work done` now records `commit X (+N uncommitted file(s) — verified code is NOT in this commit)` in the receipt and warns out loud to commit before ending the session.
+- **Mind-map staleness detector: three field false-positives and one crash.** Extension alternation now matches longest-first with a boundary guard (`config.json` no longer reads as `config.js`); all-caps-stem placeholders (`journal/NNN.md`) are naming-scheme documentation, not stale citations; citations into walker-excluded dirs (`.agent/…`) are unjudgeable and skipped, with `./`-prefix removal no longer mangling dot-dirs; a `str` project path no longer crashes the check. A noisy detector gets ignored — these keep it quiet unless it is right.
+
 ## [1.5.0] — 2026-08-11
 
 The correctness-contract release: a close is now **earned, not asserted**, and the information judges and agents reason over is kept complete, current, and honest. Driven by a 79-task field report (13 design gaps) plus the `upstream-issues/` defect write-ups; every mechanism below ships with tests, including negative controls proving each new detector can report failure (suite 514 → 640).

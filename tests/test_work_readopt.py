@@ -352,6 +352,21 @@ class TestEvidenceContract(WorkReadoptBase):
         self.assertEqual(ok.returncode, 0, ok.stderr)
         self.assertEqual(status_of(tf), "done")
 
+    def test_dirty_close_warns_and_marks_receipt(self):
+        """StrataDB F6 e2e: closing with uncommitted work must warn out loud and
+        mark the receipt — a crash between close and commit loses 'done' work."""
+        import subprocess as sp
+        sp.run(["git", "init", "-q"], cwd=self.project, check=True)
+        sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-q", "--allow-empty", "-m", "seed"], cwd=self.project, check=True)
+        tf = write_task(self.project, "077", "pending", gates_checked=True)
+        (self.project / "wal.py").write_text("x = 1\n", encoding="utf-8")  # uncommitted work
+        self.assertEqual(self.run_tasks("work", "077").returncode, 0)
+        r = self.run_tasks("work", "done")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("UNCOMMITTED work", r.stdout)
+        self.assertIn("uncommitted file(s)", tf.read_text(encoding="utf-8"))
+
     def test_reclose_stacks_entries_under_one_receipt_heading(self):
         """Close → reopen → close must not accrete duplicate `## Verification
         Receipt` headings (A3) — one section, newest entry first."""
