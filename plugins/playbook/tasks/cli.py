@@ -1527,6 +1527,28 @@ def main():
                               "receipt describes UNCOMMITTED work. Commit before ending "
                               "the session, or a crash loses 'done' work silently.",
                               flush=True)
+                    # Panel freshness advisory (1.5.3): the newest impl round in
+                    # judge.md stamped the tree-state it reviewed; if the CODE
+                    # state differs now, the verdict predates the current code.
+                    # Advisory, not blocking — fix-findings-then-close is the
+                    # normal loop, and re-panel-after-fixes is the agent's call.
+                    _jm = task_file.parent / "judge.md"
+                    if _jm.exists():
+                        from tasks.core import parse_judge_rounds, tree_state_fingerprint
+                        try:
+                            _rounds = parse_judge_rounds(
+                                _jm.read_text(encoding="utf-8", errors="replace"))
+                        except OSError:
+                            _rounds = []
+                        _impl = next((r for r in _rounds if r["mode"] == "impl"), None)
+                        if _impl and _impl["tree_state"]:
+                            _now_fp = tree_state_fingerprint(project_path)
+                            if _now_fp and _now_fp != _impl["tree_state"]:
+                                print("note: the code state changed after the newest "
+                                      "impl panel (tree-state mismatch) — if code was "
+                                      "edited post-review, consider re-running "
+                                      "`tasks panel-review <N> --mode impl`.",
+                                      flush=True)
                 # Remove session dirs that reference this task.
                 # PLAYBOOK_SESSION_ID is not set when called from Bash tool, so scan all sessions.
                 # Intentional partial delete: only sessions pointing at prev_task are removed;
@@ -2107,47 +2129,71 @@ def main():
 
         from tasks.template import panel_plan_review_prompt, panel_impl_review_prompt
 
-        # Build context. Every truncation here is receipted (C3/P3): a review
-        # that silently sees a fraction of its own trace is how a judge reviews
-        # the design four rounds running and never sees a fix. context_receipts
-        # rides to stderr AND into judge.md so the operator can compensate.
-        from tasks.core import select_task_context
-        MAX_CONTEXT_CHARS = 100_000
-        context_parts = []
-        context_receipts = []
-        if not bare:
-            if not no_mind_map:
-                mm_content = _load_mind_map(project_path)
-                if mm_content:
-                    context_parts.append(f"=== MIND_MAP.md ===\n{mm_content}")
-            if task_file:
-                task_content = task_file.read_text(encoding="utf-8")
-                task_content, task_receipt = select_task_context(
-                    task_content, MAX_CONTEXT_CHARS // 2)
-                if task_receipt:
-                    context_receipts.append(task_receipt)
-                context_parts.append(f"=== {task_path} ===\n{task_content}")
-            else:
-                # Taskless: include recent chat log as project context
-                chat_log = resolve_agent_dir(project_path) / "chat_log.md"
-                if chat_log.exists():
-                    chat_content = chat_log.read_text(encoding="utf-8", errors="replace")
-                    max_chat = MAX_CONTEXT_CHARS // 2
-                    if len(chat_content) > max_chat:
-                        context_receipts.append(
-                            f"chat_log.md {len(chat_content):,} → {max_chat:,} chars "
-                            "(kept most recent tail)")
-                        chat_content = "[... older chat elided ...]\n\n" + chat_content[-max_chat:]
-                    context_parts.append(f"=== .agent/chat_log.md (recent) ===\n{chat_content}")
-        system_context = "\n\n".join(context_parts)
-        if len(system_context) > MAX_CONTEXT_CHARS:
-            context_receipts.append(
-                f"combined system context {len(system_context):,} → {MAX_CONTEXT_CHARS:,} "
-                "chars (head-clamped — mind map is large; raise headroom or use "
-                "--no-mind-map)")
-            system_context = system_context[:MAX_CONTEXT_CHARS] + "\n\n[... truncated ...]"
-        if context_receipts:
-            print("  context: " + " | ".join(context_receipts), file=sys.stderr, flush=True)
+        # Build context PER TRANSPORT (1.5.3). stdin seats (claude/codex) have no
+        # OS argv limit, so they get the high budget — an argv seat's ceiling
+        # must not dictate what a stdin seat is allowed to read. Every truncation
+        # is receipted (C3/P3) per transport, and a trimmed seat's PROMPT names
+        # what it did not receive and where the full file lives.
+        from tasks.core import (load_config, resolve_review_context_chars,
+                                select_task_context)
+
+        def _build_payload(budget: int) -> dict:
+            parts, receipts = [], []
+            trim_notice = ""
+            if not bare:
+                if not no_mind_map:
+                    mm_content = _load_mind_map(project_path)
+                    if mm_content:
+                        parts.append(f"=== MIND_MAP.md ===\n{mm_content}")
+                if task_file:
+                    task_content = task_file.read_text(encoding="utf-8")
+                    task_content, task_receipt = select_task_context(
+                        task_content, budget // 2)
+                    if task_receipt:
+                        receipts.append(task_receipt)
+                        _dm = re.search(r"· dropped: (.+?)(?: · WARNING|$)", task_receipt)
+                        _dropped = (_dm.group(1)[:200] if _dm else "some sections")
+                        trim_notice = (
+                            f"your inline copy of {task_path} was TRIMMED to fit "
+                            f"your transport (dropped sections: {_dropped}) — read "
+                            f"{task_path} in the repo for the full trace.")
+                    parts.append(f"=== {task_path} ===\n{task_content}")
+                else:
+                    # Taskless: include recent chat log as project context
+                    chat_log = resolve_agent_dir(project_path) / "chat_log.md"
+                    if chat_log.exists():
+                        chat_content = chat_log.read_text(encoding="utf-8", errors="replace")
+                        max_chat = budget // 2
+                        if len(chat_content) > max_chat:
+                            receipts.append(
+                                f"chat_log.md {len(chat_content):,} → {max_chat:,} chars "
+                                "(kept most recent tail)")
+                            chat_content = "[... older chat elided ...]\n\n" + chat_content[-max_chat:]
+                        parts.append(f"=== .agent/chat_log.md (recent) ===\n{chat_content}")
+            sc = "\n\n".join(parts)
+            if len(sc) > budget:
+                receipts.append(
+                    f"combined system context {len(sc):,} → {budget:,} chars "
+                    "(head-clamped — mind map is large; raise headroom or use "
+                    "--no-mind-map)")
+                sc = sc[:budget] + "\n\n[... truncated ...]"
+            return {"context": sc, "receipts": receipts, "trim_notice": trim_notice}
+
+        _argv_budget = resolve_review_context_chars(project_path, stdin=False)
+        _stdin_budget = resolve_review_context_chars(project_path, stdin=True)
+        payloads = {"argv": _build_payload(_argv_budget)}
+        payloads["stdin"] = (payloads["argv"] if _stdin_budget == _argv_budget
+                             else _build_payload(_stdin_budget))
+        for _tname in ("stdin", "argv"):
+            if payloads[_tname]["receipts"]:
+                print(f"  context[{_tname}]: " + " | ".join(payloads[_tname]["receipts"]),
+                      file=sys.stderr, flush=True)
+
+        # Judge execution L1: the project may declare commands safe to run in the
+        # judge's read-only sandbox. Undeclared → clause absent, pre-1.5.3 prompt.
+        _jv_raw = load_config(project_path).get("judge_verify")
+        judge_verify_cmds = ([c for c in _jv_raw if isinstance(c, str) and c.strip()]
+                             if isinstance(_jv_raw, list) else [])
 
         # Prompt strategy: bare/taskless → extra_prompt is full mission; with task → review prompt + optional steering
         if task_file:
@@ -2233,12 +2279,17 @@ def main():
             adapter_cls, variant = judge_spec
             provider_name = adapter_cls.binary_name()
             label = f"{provider_name}:{variant}" if variant else provider_name
+            # Per-transport payload (1.5.3): each seat gets the biggest context
+            # its transport can carry; a trimmed seat's prompt says what was cut.
+            _payload = payloads.get(adapter_cls.context_transport(), payloads["argv"])
             if prompt_fn:
                 prompt = prompt_fn(
                     task_path,
                     inline_context=(provider_name != "claude"),
                     soft_timeout_secs=soft_timeout_secs,
                     hard_timeout_secs=timeout_secs,
+                    trim_notice=_payload["trim_notice"],
+                    judge_verify=judge_verify_cmds,
                 )
                 if extra_prompt:
                     prompt += f"\n\nAdditional steering from the user:\n{extra_prompt}"
@@ -2256,7 +2307,7 @@ def main():
                 output = adapter.run_headless_judge(
                     prompt=prompt,
                     model=variant,
-                    system_context=system_context,
+                    system_context=_payload["context"],
                     web_search=web_search,
                     timeout_secs=timeout_secs,
                     budget_usd=panel_budget,
@@ -2335,22 +2386,32 @@ def main():
         # Write judge.md (path already set above based on task_file presence)
         display_label = task_path or extra_prompt[:60]
         lines = [f"# Panel {review_label.title()} — {display_label}\n", verdict_banner]
-        # Tamper banner rides at the very top of judge.md (#1) — the reading
-        # agent must see it before any finding. judge.md is still written (paid
-        # verdicts are never discarded), but the run exits non-zero below.
+        # Tamper banner rides directly under the round heading (#1) — the reading
+        # agent must meet it before any finding, and the heading must stay FIRST
+        # because judge.md stacks rounds by `# Panel …` headings (1.5.3). The
+        # file is still written (paid verdicts are never discarded), but the run
+        # exits non-zero below.
         if _tamper_changes:
-            lines = [_tamper_banner(_tamper_changes) + "\n\n"] + lines
+            lines.insert(1, _tamper_banner(_tamper_changes) + "\n")
         lines.append(f"**Judges:** {succeeded}/{len(results)} succeeded | **Quorum:** {panel_quorum} | **Web search:** {'yes' if web_search else 'no'} | **Timeout:** {timeout_label}\n")
-        # Context receipt (C3/P3): the judges saw what this line says they saw —
-        # nothing was dropped without being named. A full trace means the line
-        # simply confirms the whole task.md reached them.
-        if context_receipts:
-            lines.append(f"**Context:** {' | '.join(context_receipts)}\n")
-        else:
-            lines.append("**Context:** full task.md + mind map delivered (no truncation)\n")
-        # Commit stamp: names WHICH code state this panel reviewed, so a later
-        # reader (and the close gate's freshness logic) can tell a current
-        # verdict from one that predates the fixes it triggered.
+        # Context receipt (C3/P3), per transport (1.5.3): each seat saw what its
+        # line says it saw — nothing was dropped without being named.
+        _seats_by_transport = {"stdin": [], "argv": []}
+        for _cls, _var in judges:
+            _lbl = f"{_cls.binary_name()}:{_var}" if _var else _cls.binary_name()
+            _seats_by_transport.setdefault(_cls.context_transport(), []).append(_lbl)
+        for _tname in ("stdin", "argv"):
+            _seats = _seats_by_transport.get(_tname) or []
+            if not _seats:
+                continue
+            _r = payloads[_tname]["receipts"]
+            _desc = " | ".join(_r) if _r else "full task.md + mind map delivered (no truncation)"
+            lines.append(f"**Context[{_tname}: {', '.join(sorted(_seats))}]:** {_desc}\n")
+        # Commit + tree-state stamps: name WHICH code state this panel reviewed.
+        # The fingerprint (content-based, .agent-excluded) is what the close
+        # gate's freshness advisory compares against — mtimes lie, content
+        # doesn't.
+        from tasks.core import tree_state_fingerprint
         try:
             _judged_head = subprocess.run(
                 ["git", "rev-parse", "HEAD"], cwd=project_path,
@@ -2359,6 +2420,9 @@ def main():
             _judged_head = ""
         if _judged_head:
             lines.append(f"**Commit:** {_judged_head}\n")
+        _fp = tree_state_fingerprint(project_path)
+        if _fp:
+            lines.append(f"**Tree-state:** {_fp}\n")
         if failed:
             lines.append(f"**⚠ Failed judges:** {', '.join(sorted(failed))} — see their blocks below for the exit code / stderr. NOT a clean empty review.\n")
         if over_budget:
@@ -2380,7 +2444,11 @@ def main():
             lines.append("═" * 60 + "\n")
             lines.append(results[label].strip())
             lines.append("\n\n")
-        judge_md.write_text("\n".join(lines), encoding="utf-8")
+        # Stack, never clobber (1.5.3): a re-run panel must not destroy the
+        # previous round's verdicts. Newest round first; the close gate reads
+        # only the newest round's mode+verdict.
+        from tasks.core import stack_judge_round
+        stack_judge_round(judge_md, "\n".join(lines))
         summary = (f"\nPANEL {'PASS' if panel_passed else 'FAIL'}: {verdict_reason}"
                    f"\nSaved: {judge_md.relative_to(project_path)}")
         if failed:
@@ -2554,13 +2622,16 @@ def main():
 
         from tasks.template import plan_review_prompt, impl_review_prompt
 
-        # Build context: mind map + task content (bounded to avoid argv/context
-        # limits). Structure-aware and receipted (C3/P3) — the single-judge path
-        # head-sliced exactly as the panel did, so it gets the same fix.
-        from tasks.core import select_task_context
-        MAX_CONTEXT_CHARS = 100_000
+        # Build context: mind map + task content, transport-aware (1.5.3) —
+        # stdin backends (claude/codex) get the high budget, argv backends the
+        # byte-guarded one. Structure-aware and receipted (C3/P3).
+        from tasks.core import (load_config, resolve_review_context_chars,
+                                select_task_context)
+        _sj_stdin = backend in ("claude", "codex")
+        MAX_CONTEXT_CHARS = resolve_review_context_chars(project_path, stdin=_sj_stdin)
         context_parts = []
         context_receipts = []
+        sj_trim_notice = ""
         mm_content = _load_mind_map(project_path)
         if mm_content:
             context_parts.append(f"=== MIND_MAP.md ===\n{mm_content}")
@@ -2568,6 +2639,11 @@ def main():
         task_content, task_receipt = select_task_context(task_content, MAX_CONTEXT_CHARS // 2)
         if task_receipt:
             context_receipts.append(task_receipt)
+            _dm = re.search(r"· dropped: (.+?)(?: · WARNING|$)", task_receipt)
+            sj_trim_notice = (
+                f"your inline copy of {task_path} was TRIMMED "
+                f"(dropped sections: {(_dm.group(1)[:200] if _dm else 'some sections')}) — "
+                f"read {task_path} in the repo for the full trace.")
         context_parts.append(f"=== {task_path} ===\n{task_content}")
         system_context = "\n\n".join(context_parts)
         if len(system_context) > MAX_CONTEXT_CHARS:
@@ -2577,6 +2653,9 @@ def main():
             system_context = system_context[:MAX_CONTEXT_CHARS] + "\n\n[... truncated for context budget ...]"
         if context_receipts:
             print("  context: " + " | ".join(context_receipts), file=sys.stderr, flush=True)
+        _jv_raw = load_config(project_path).get("judge_verify")
+        sj_judge_verify = ([c for c in _jv_raw if isinstance(c, str) and c.strip()]
+                           if isinstance(_jv_raw, list) else [])
 
         # Determine mode: explicit from command, or auto-detect for legacy "judge"
         if review_cmd == "plan-review":
@@ -2595,6 +2674,8 @@ def main():
                 inline_context=inline_context,
                 soft_timeout_secs=review_soft_timeout,
                 hard_timeout_secs=review_timeout,
+                trim_notice=sj_trim_notice,
+                judge_verify=sj_judge_verify,
             )
 
         review_label = "plan review" if review_mode == "plan" else "impl review"
@@ -3010,10 +3091,16 @@ def main():
                     pass
                 saved_review_text = (
                     codex_out if codex_out.strip() else (result.stdout or ""))
-                judge_log.write_text(saved_review_text, encoding="utf-8")
             else:
                 saved_review_text = result.stdout or ""
-                judge_log.write_text(saved_review_text, encoding="utf-8")
+            # Durable context receipt (1.5.3): what THIS judge was shown rides
+            # with its findings — a log without its delivery record is a verdict
+            # with no chain of custody.
+            _ctx_header = ("[context] "
+                           + (" | ".join(context_receipts) if context_receipts
+                              else "full task.md + mind map delivered (no truncation)")
+                           + "\n\n")
+            judge_log.write_text(_ctx_header + saved_review_text, encoding="utf-8")
             print(f"\nSaved: {judge_log.relative_to(project_path)}", flush=True)
 
         # Model-unavailable hard stop (task 012), same contract as the panel:

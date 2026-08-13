@@ -58,6 +58,8 @@ The close is **earned, not asserted** — these are enforced by the CLI, not con
 - **`tasks audit`** — run before any review: mechanical sweeps (conflict markers, merge artifacts, stale markers, mind-map drift) so judges spend tokens on hard problems, not greppable ones. Reviews warn when the audit is missing or stale.
 - **Judges are advisors, not oracles.** Triage every finding (accept/park/reject with rationale). A clean panel does NOT clear correspondence (does it match the world? check the real artifact), disclosure (secrets/provenance — a grep's job), or blast radius (the `## Risk` gate's job).
 - **Test claims need executable proof.** A test you haven't watched fail is not evidence; assert against real output, not a mock you wrote.
+- **Judges can execute what you declare safe.** Add `"judge_verify": ["<command>"]` to `.agent/config.json` — commands that never write inside the repo (redirect caches, unique temp dirs, parallel-safe) — and reviewers may run them to check a specific suspicion. Write your tests to qualify.
+- **Keep task.md reviewable.** Judges read it through a bounded window (newest sections + Intent/Design survive trimming; receipts in judge.md say exactly what was delivered). When a task file grows past the budget, `tasks audit` nudges the sanctioned compaction: move old review-round narrative VERBATIM to `task-archive.md` — never gates, never Intent/Design/Parked. A section that must survive any trim gets `<!-- pin -->` on its own line right under the heading.
 
 ## CLI
 

@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -296,6 +296,42 @@ def resolve_verify_timeout(project_path: Path, cli_value: "str | None" = None) -
         ),
         _parse_timeout,
         DEFAULT_VERIFY_TIMEOUT_SECS,
+    )
+
+
+# Context budgets are transport-relative (1.5.3): stdin seats (claude/codex)
+# have no OS argv limit — their ceiling is model context and attention, so they
+# get a HIGH budget; argv seats (grok/agy/pi) stay under the byte-guarded
+# default. Raising a ceiling is honest only alongside the receipts that report
+# what was actually delivered per seat.
+DEFAULT_REVIEW_CONTEXT_CHARS = 100_000
+DEFAULT_REVIEW_CONTEXT_CHARS_STDIN = 200_000
+
+
+def _parse_context_chars(raw) -> int:
+    if isinstance(raw, bool):
+        raise ValueError(raw)
+    value = int(str(raw).strip())
+    if value < 10_000:
+        # Below ~10k the payload can't even hold orientation — a config typo,
+        # not a choice.
+        raise ValueError(raw)
+    return value
+
+
+def resolve_review_context_chars(project_path: Path, stdin: bool = False) -> int:
+    """Per-transport judge context budget (chars). Precedence: env > config >
+    default. Keys: review_context_chars / review_context_chars_stdin."""
+    key = "review_context_chars_stdin" if stdin else "review_context_chars"
+    env = "PLAYBOOK_REVIEW_CONTEXT_CHARS_STDIN" if stdin else "PLAYBOOK_REVIEW_CONTEXT_CHARS"
+    default = DEFAULT_REVIEW_CONTEXT_CHARS_STDIN if stdin else DEFAULT_REVIEW_CONTEXT_CHARS
+    return _first_valid(
+        (
+            (os.environ.get(env), env),
+            (load_config(project_path).get(key), f"config.json {key}"),
+        ),
+        _parse_context_chars,
+        default,
     )
 
 
@@ -676,8 +712,21 @@ def select_task_context(text: str, budget: int) -> "tuple[str, str]":
     keep = [False] * n
     used = 0
 
+    def _pinned(chunk: str) -> bool:
+        # `<!-- pin -->` on its own line within the first 3 lines UNDER the
+        # heading marks an author-pinned section: the selection heuristic can't
+        # know which old section is load-bearing this time, so the author says
+        # so. The marker deliberately lives BELOW the heading, never inside it —
+        # heading text is parsed exactly by receipts/evidence/selection, and a
+        # decorated heading would break that family (the 1.5.1 accretion bug's
+        # shape).
+        for ln in chunk.splitlines()[1:4]:
+            if ln.strip() == "<!-- pin -->":
+                return True
+        return False
+
     for i, (heading, chunk) in enumerate(sections):
-        if heading is None or _ORIENTATION_HEADING.match(heading):
+        if heading is None or _ORIENTATION_HEADING.match(heading) or _pinned(chunk):
             keep[i] = True
             used += len(chunk)
 
@@ -724,7 +773,8 @@ def select_task_context(text: str, budget: int) -> "tuple[str, str]":
         f" · dropped: {', '.join(dropped) or '(none)'}"
     )
     if overflowed:
-        receipt += " · WARNING: orientation alone exceeded budget, hard-truncated"
+        receipt += (" · WARNING: orientation+pinned sections exceed the budget, "
+                    "hard-truncated — unpin something or raise the budget")
     return selected, receipt
 
 
@@ -768,6 +818,94 @@ def extract_risk(task_file) -> str:
     return DEFAULT_RISK
 
 
+def tree_state_fingerprint(project_path: Path) -> str:
+    """Content fingerprint of the CODE STATE: sha256 over HEAD + porcelain status
+    + working diff, 12 hex chars. Names *what state* a panel reviewed or a close
+    certified — deterministic, unlike mtimes, and sensitive to uncommitted work
+    (which is the normal state at review time). Empty string when git is absent:
+    no fingerprint beats a fabricated one."""
+    import hashlib
+    # `.agent/` is EXCLUDED: triaging findings edits task.md between the panel
+    # and the close by design — the fingerprint must answer "did the CODE
+    # change?", not "did the workflow record change?" (else the advisory fires
+    # on every single close and gets ignored).
+    exclude = [":(exclude).agent"]
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project_path,
+                              capture_output=True, text=True).stdout.strip()
+        if not head:
+            return ""
+        porcelain = subprocess.run(
+            ["git", "status", "--porcelain", "--", ".", *exclude],
+            cwd=project_path, capture_output=True, text=True).stdout
+        diff = subprocess.run(
+            ["git", "diff", "HEAD", "--", ".", *exclude],
+            cwd=project_path, capture_output=True, text=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return hashlib.sha256((head + porcelain + diff).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+# One round per `# Panel {Plan|Impl} Review` H1. judge.md stacks rounds NEWEST
+# FIRST (stack_judge_round), so rounds[0] is the round that decides anything.
+_ROUND_HEAD_RE = re.compile(r"^# Panel (Plan|Impl) Review\b", re.MULTILINE)
+_ROUND_VERDICT_RE = re.compile(r"\*\*PANEL VERDICT: (PASS|FAIL)\*\*")
+_ROUND_TREE_RE = re.compile(r"\*\*Tree-state:\*\* ([0-9a-f]{6,64})")
+JUDGE_MD_MAX_ROUNDS = 5
+
+
+def parse_judge_rounds(text: str) -> "list[dict]":
+    """Structural parse of judge.md into rounds, file order (newest first under
+    the stacking convention). Each round: {mode: 'plan'|'impl', verdict:
+    'PASS'|'FAIL'|None, tree_state: str, body: str}. Substring checks over the
+    whole file are how a stale or wrong-mode PASS satisfies a gate — the #09
+    disease; this parser exists so verdicts are read per-round, never per-file."""
+    matches = list(_ROUND_HEAD_RE.finditer(text))
+    rounds: "list[dict]" = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[m.start():end]
+        vm = _ROUND_VERDICT_RE.search(body)
+        tm = _ROUND_TREE_RE.search(body)
+        rounds.append({
+            "mode": m.group(1).lower(),
+            "verdict": vm.group(1) if vm else None,
+            "tree_state": tm.group(1) if tm else "",
+            "body": body,
+        })
+    return rounds
+
+
+def stack_judge_round(judge_md: Path, round_text: str,
+                      max_rounds: int = JUDGE_MD_MAX_ROUNDS) -> None:
+    """Prepend a panel round to judge.md, newest first — a re-run must never
+    clobber the previous round's verdicts (they are paid work and the record).
+    Retention keeps the newest `max_rounds`; older rounds live on in git history,
+    and the trim is announced in the file rather than silent."""
+    old_bodies: "list[str]" = []
+    if judge_md.exists():
+        try:
+            old_text = judge_md.read_text(encoding="utf-8", errors="replace")
+            old_rounds = parse_judge_rounds(old_text)
+            if old_rounds:
+                old_bodies = [r["body"].rstrip() for r in old_rounds]
+            elif old_text.strip():
+                # Legacy / taskless content that predates round headings: keep it
+                # as one opaque block — stacking must never silently destroy a
+                # prior record it merely cannot parse.
+                old_bodies = [old_text.strip()]
+        except OSError:
+            old_bodies = []
+    kept = [round_text.rstrip()] + old_bodies
+    trimmed = len(kept) - max_rounds
+    kept = kept[:max_rounds]
+    out = "\n\n".join(kept) + "\n"
+    if trimmed > 0:
+        out += (f"\n[... {trimmed} older round(s) trimmed — the full history is "
+                "in git ...]\n")
+    _atomic_write(judge_md, out)
+
+
 def resolve_panel_required(project_path: Path, risk: str) -> bool:
     """Owner policy: does a close of a task with this risk class demand
     PANEL-grade review evidence (all available judges), not just a single judge?
@@ -786,19 +924,24 @@ def resolve_panel_required(project_path: Path, risk: str) -> bool:
 
 
 def has_panel_impl_evidence(task_file) -> bool:
-    """PANEL-grade implementation evidence: a judge.md whose newest content is a
-    panel IMPL review that reached quorum (leads with PANEL VERDICT: PASS).
-    A FAIL-verdict panel is a degraded panel — it does not count; neither does a
-    plan-mode panel (it cannot vouch for what was BUILT)."""
+    """PANEL-grade implementation evidence: judge.md's NEWEST round must be an
+    IMPL panel that reached quorum (PANEL VERDICT: PASS). Parsed structurally —
+    a stale impl-PASS buried under a newer FAIL (or under a newer PLAN round,
+    which implies replanning and new work) must never satisfy the close gate.
+    A FAIL-verdict panel is a degraded panel; a plan panel cannot vouch for what
+    was BUILT."""
     p = Path(task_file)
     jm = p.parent / "judge.md"
     try:
         if not jm.exists():
             return False
-        text = jm.read_text(encoding="utf-8", errors="replace")
+        rounds = parse_judge_rounds(jm.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return False
-    return "Panel Impl Review" in text and "PANEL VERDICT: PASS" in text
+    if not rounds:
+        return False
+    newest = rounds[0]
+    return newest["mode"] == "impl" and newest["verdict"] == "PASS"
 
 
 def has_review_evidence(task_file, impl_only: bool = False) -> bool:

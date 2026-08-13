@@ -251,6 +251,53 @@ def check_mindmap_staleness(project_path) -> "dict | None":
     }
 
 
+def check_task_bloat(project_path) -> "dict | None":
+    """Advisory: an OPEN task.md that has outgrown the review context budget will
+    be judged through a trimmed keyhole — nudge the sanctioned compaction ritual
+    (move old review-round narrative verbatim to task-archive.md) BEFORE a judge
+    reviews a partial view. Threshold: half the argv context budget (the task.md
+    share of a review payload), overridable via audit.task_bloat_chars. Returns a
+    sweep-shaped result, or None when there are no open tasks."""
+    from tasks.core import (_extract_status, _iter_task_dirs, load_config,
+                            resolve_review_context_chars)
+    project_path = Path(project_path)
+    cfg = load_config(project_path)
+    audit_cfg = cfg.get("audit") if isinstance(cfg.get("audit"), dict) else {}
+    try:
+        threshold = int(audit_cfg["task_bloat_chars"]) if "task_bloat_chars" in audit_cfg else 0
+    except (TypeError, ValueError):
+        threshold = 0
+    if threshold <= 0:
+        threshold = resolve_review_context_chars(project_path) // 2
+
+    findings = []
+    seen_any = False
+    for _num, _slug, tf in _iter_task_dirs(project_path):
+        try:
+            if _extract_status(tf).startswith("done"):
+                continue
+            seen_any = True
+            size = tf.stat().st_size
+        except OSError:
+            continue
+        if size > threshold:
+            findings.append(
+                f"{tf.parent.name}/task.md is {size:,} bytes (> {threshold:,}) — "
+                "judges will see a trimmed view; compact old review narrative to "
+                "task-archive.md (see the task sticker) or pin what must survive")
+    if not seen_any:
+        return None
+    return {
+        "name": "task-bloat",
+        "severity": "advisory",
+        "why": "an open task.md larger than the review budget gets judged through a keyhole",
+        "command": "(built-in)",
+        "rc": 0 if findings else 1,
+        "status": "findings" if findings else "clean",
+        "output": "\n".join(findings),
+    }
+
+
 def run_audit(project_path) -> dict:
     """Run every resolved sweep plus the built-in mind-map staleness check.
     Returns {results, passed}. The audit FAILS when any sweep ERRORED (a broken
@@ -269,6 +316,9 @@ def run_audit(project_path) -> dict:
     mm = check_mindmap_staleness(project_path)
     if mm is not None:
         results.append(mm)
+    tb = check_task_bloat(project_path)
+    if tb is not None:
+        results.append(tb)
     passed = not any(
         r["status"] == "error" or (r["status"] == "findings" and r["severity"] == "error")
         for r in results

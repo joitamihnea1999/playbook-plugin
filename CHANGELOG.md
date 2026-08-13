@@ -2,6 +2,25 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.3] — 2026-08-13
+
+Context perfection + judge execution (L1), red-teamed before building: the design review of our own plan found seven flaws — including one in already-shipped code and a sandbox write hole — and every fix below carries the correction.
+
+### Fixed
+
+- **judge.md stacks rounds instead of clobbering them** (newest first, retention 5 with a loud trim note; legacy/unparseable content preserved as an opaque block). A re-run panel no longer destroys the previous round's verdicts.
+- **Panel evidence is parsed structurally, not by substring.** The close gate reads the NEWEST round's mode+verdict only — a stale impl-PASS buried under a newer FAIL, or under a newer plan round (which implies replanning), no longer satisfies `panel_required_for`. The substring version shipped in 1.5.2 and was correct only by accident of the old clobbering behavior.
+- **Sandbox bind order** (shipped earlier on this branch): broad rw mounts (/tmp, home subpaths) now bind BEFORE the project, so a /tmp-resident project can no longer be re-exposed writable to judges. Found by the empirical spike that validated judge execution.
+
+### Added
+
+- **Per-transport context budgets.** stdin seats (claude, codex — no OS argv limit) receive up to `review_context_chars_stdin` (default 200k chars); argv seats (grok/agy/pi) keep `review_context_chars` (default 100k) under the byte guard. judge.md's Context receipt reports per transport with seat names; a TRIMMED seat's own prompt now says exactly which sections were dropped and where the full task.md lives (it has repo read access — an elision is an instruction to go read).
+- **Tree-state fingerprints.** Panels stamp `**Tree-state:**` (sha256 over HEAD + status + diff, `.agent/` excluded so triage edits don't false-positive); the close prints an advisory when the newest impl round's fingerprint no longer matches the code. Content, never mtimes.
+- **Judge execution, level 1** — `judge_verify` in `.agent/config.json` declares commands safe to run inside the judge's read-only sandbox (empirically verified: exec and /tmp writes work, repo writes blocked). Prompt rules keep execution evidence honest: hypothesis-first, reproduce-twice, no timing evidence (parallel judges contend), targeted use only. Undeclared projects get exactly the old prompt.
+- **Pinned sections** — `<!-- pin -->` on its own line under a task.md heading forces that section through any context trim (the heuristic can't know which old decision is load-bearing; the author can). Deliberately NOT in the heading text, which is parsed exactly by the receipts/evidence family. Over-budget pins hard-truncate with a loud receipt.
+- **Sanctioned compaction + task-bloat sweep.** The task sticker now carves out the one exception to "never replace original text": old review-round narrative may move VERBATIM to `task-archive.md` (never gates, never Intent/Design/Parked/receipts). `tasks audit` gains an advisory `task-bloat` check that nudges compaction when an OPEN task.md outgrows the review budget.
+- Single-judge (fallback) path: transport-aware budget, trim notice, judge_verify clause, and a durable `[context]` receipt line at the top of its log.
+
 ## [1.5.2] — 2026-08-13
 
 Panel-always, by owner decree from the field test: "another pair of eyes is always better, so why not enforce this?"

@@ -25,6 +25,7 @@ def sticker() -> str:
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
 > Never batch. Never backfill. The document IS the execution trace.
 > **Closing a gate:** check the box, append your outcome. Never replace the original text.
+> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir), leaving a one-paragraph summary + pointer. Never gates, never Intent/Design/Parked/receipts \u2014 moving history is not deleting it.
 > Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).
 > If you see the same gate 5+ times in the hook echo, you're drifting \u2014 STOP and update."""
 
@@ -198,6 +199,41 @@ def _intent_check(task_path: str) -> str:
     return ""
 
 
+def judge_verify_clause(commands) -> str:
+    """Optional judge-execution clause (L1): the PROJECT declares commands safe
+    to run inside the judge's read-only sandbox (`judge_verify` in
+    .agent/config.json — read-only-repo-safe AND parallel-safe, unique temp
+    dirs). Empty when nothing is declared, so undeclared projects get exactly
+    the pre-1.5.3 prompt. The rules exist to keep execution evidence honest:
+    hypothesis-first kills vacuous 'it ran and passed'; reproduce-twice kills
+    flake noise; no-timing kills parallel-contention garbage."""
+    cmds = [c.strip() for c in (commands or [])
+            if isinstance(c, str) and c.strip()]
+    if not cmds:
+        return ""
+    listed = "; ".join(f"`{c}`" for c in cmds[:6])
+    return (
+        "EXECUTION (optional): the project declares these commands safe to run "
+        f"in your read-only sandbox: {listed}. Use them only to check a SPECIFIC "
+        "suspicion — never as routine (the close gate already runs the suite). "
+        "Rules: state your predicted outcome BEFORE running — an unpredicted "
+        "result is a lead to investigate, not evidence by itself; reproduce any "
+        "failure a second time before reporting it; never use timing or "
+        "benchmark output as evidence (judges run in parallel and contend for "
+        "CPU); if a command fails for environmental reasons, say so plainly "
+        "rather than reporting a code defect. "
+    )
+
+
+def _trim_clause(trim_notice: str) -> str:
+    """One line telling a TRIMMED seat what it did not receive and where the
+    full file lives — the judge has repo read access, so an elision is an
+    instruction to go read, not a blind spot."""
+    if not trim_notice:
+        return ""
+    return f"CONTEXT NOTE: {trim_notice} "
+
+
 def _depth_budget_clause(soft_timeout_secs: "int | None") -> str:
     """The parenthetical inside the depth instruction.
 
@@ -270,6 +306,8 @@ def plan_review_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Return the blind judge prompt for plan review (before implementation)."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
@@ -283,6 +321,8 @@ def plan_review_prompt(
         "Read the source files referenced in the plan to understand existing patterns. "
         f"{intent_check}"
         f"{time_budget}"
+        f"{_trim_clause(trim_notice)}"
+        f"{judge_verify_clause(judge_verify)}"
         "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
         f"({depth_budget}). "
         "Where you have file access, read the relevant source and its callers/callees (don't judge from names alone) and trace, end-to-end, the data and control flow the plan would touch. "
@@ -320,6 +360,8 @@ def impl_review_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Return the blind judge prompt for implementation review (after code is written)."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
@@ -333,6 +375,8 @@ def impl_review_prompt(
         "Read the source files changed by this task (look at the Work Plan gates for paths). "
         f"{intent_check}"
         f"{time_budget}"
+        f"{_trim_clause(trim_notice)}"
+        f"{judge_verify_clause(judge_verify)}"
         "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
         f"({depth_budget}). "
         "Where you have file access, read the changed source and its callers/callees (don't judge from names alone) and trace the data and control flow end-to-end. "
@@ -369,6 +413,8 @@ def panel_plan_review_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Panel judge prompt for plan review — writes to stdout, never edits task.md."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
@@ -382,6 +428,8 @@ def panel_plan_review_prompt(
         "Read the source files referenced in the plan to understand existing patterns. "
         f"{intent_check}"
         f"{time_budget}"
+        f"{_trim_clause(trim_notice)}"
+        f"{judge_verify_clause(judge_verify)}"
         "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
         f"({depth_budget}). "
         "Where you have file access, read the relevant source and its callers/callees (don't judge from names alone) and trace, end-to-end, the data and control flow the plan would touch. "
@@ -417,6 +465,8 @@ def panel_impl_review_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Panel judge prompt for impl review — writes to stdout, never edits task.md."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
@@ -430,6 +480,8 @@ def panel_impl_review_prompt(
         "Read the source files changed by this task (look at the Work Plan gates for paths). "
         f"{intent_check}"
         f"{time_budget}"
+        f"{_trim_clause(trim_notice)}"
+        f"{judge_verify_clause(judge_verify)}"
         "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
         f"({depth_budget}). "
         "Where you have file access, read the changed source and its callers/callees (don't judge from names alone) and trace the data and control flow end-to-end. "
@@ -467,6 +519,8 @@ def judge_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Deprecated: use plan_review_prompt() or impl_review_prompt() instead."""
     kwargs = dict(

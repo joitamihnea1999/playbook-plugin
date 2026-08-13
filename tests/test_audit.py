@@ -269,6 +269,50 @@ class MindmapStaleness(unittest.TestCase):
         self.assertFalse(run_audit(p)["passed"])
 
 
+class TaskBloat(unittest.TestCase):
+    """An open task.md past the review budget gets judged through a keyhole —
+    the sweep nudges the sanctioned compaction BEFORE that happens (1.5.3)."""
+
+    def _proj(self, body):
+        d = Path(tempfile.mkdtemp())
+        td = d / ".agent" / "tasks" / "001-t"
+        td.mkdir(parents=True)
+        (td / "task.md").write_text(body, encoding="utf-8")
+        return d
+
+    def test_open_oversized_task_flagged(self):
+        from tasks.audit import check_task_bloat
+        r = check_task_bloat(self._proj("## Status\npending\n" + "x" * 60_000))
+        self.assertEqual(r["status"], "findings")
+        self.assertIn("001-t/task.md", r["output"])
+        self.assertIn("compact", r["output"])
+
+    def test_small_open_task_clean(self):
+        from tasks.audit import check_task_bloat
+        r = check_task_bloat(self._proj("## Status\npending\nsmall\n"))
+        self.assertEqual(r["status"], "clean")
+
+    def test_done_tasks_ignored(self):
+        from tasks.audit import check_task_bloat
+        # A closed task may be huge — it is no longer being reviewed.
+        r = check_task_bloat(self._proj("## Status\ndone\n" + "x" * 60_000))
+        self.assertIsNone(r, "no open tasks → nothing to measure")
+
+    def test_threshold_configurable(self):
+        from tasks.audit import check_task_bloat
+        p = self._proj("## Status\npending\n" + "x" * 5_000)
+        (p / ".agent" / "config.json").write_text(
+            json.dumps({"audit": {"task_bloat_chars": 1_000}}))
+        self.assertEqual(check_task_bloat(p)["status"], "findings")
+
+    def test_participates_in_run_audit(self):
+        p = self._proj("## Status\npending\n" + "x" * 60_000)
+        names = [r["name"] for r in run_audit(p)["results"]]
+        self.assertIn("task-bloat", names)
+        # advisory: an oversized task must not FAIL the audit
+        self.assertTrue(run_audit(p)["passed"])
+
+
 class Receipt(unittest.TestCase):
     def test_records_verdict_and_findings(self):
         audit = {"passed": False, "results": [

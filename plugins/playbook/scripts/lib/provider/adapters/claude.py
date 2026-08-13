@@ -67,6 +67,12 @@ class ClaudeAdapter(ProviderAdapter):
         return "claude"
 
     @classmethod
+    def context_transport(cls) -> str:
+        # Prompt + context travel on STDIN — no OS argv limit; the panel gives
+        # stdin seats the high context budget.
+        return "stdin"
+
+    @classmethod
     def panel_variants(cls) -> list[Optional[str]]:
         return list(cls._DEFAULT_PANEL_VARIANTS)
 
