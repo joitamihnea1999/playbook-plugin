@@ -16,7 +16,7 @@ Perform **every** step in order.
 
 ### 1. Run mechanical setup
 
-Find and run the plugin's `scripts/init` script, which handles: `.claude/settings.json` permissions, `.agent/tasks/` directory, `MIND_MAP.md` stub, and `.claude/bin/` wrappers. Resolve it from the install manifest first (the same copy the harness hooks run — a bare `find` can pick a stale cached version), falling back to a deterministic find:
+Find and run the plugin's `scripts/init` script, which handles: `.claude/settings.json` permissions, `.agent/tasks/` directory, `MIND_MAP.md` stub, `.claude/bin/` wrappers, **CLAUDE.md** (created from the template, or template-owned sections merged in place — project content is preserved byte-for-byte), and **.gitignore** (a marker-guarded playbook runtime-state block). Resolve it from the install manifest first (the same copy the harness hooks run — a bare `find` can pick a stale cached version), falling back to a deterministic find:
 
 ```bash
 INIT_SCRIPT="$(python3 - "$PWD" 2>/dev/null <<'PY'
@@ -63,15 +63,13 @@ bash "$INIT_SCRIPT" "<project name>"
 
 Check the output. If it reports any failures, stop and fix before continuing.
 
-### 2. Create or update CLAUDE.md
+### 2. Review CLAUDE.md and enrich it
 
-This is the step that requires intelligence — the rest was mechanical.
+The base write already happened mechanically in step 1 (create-or-merge; a pre-existing CLAUDE.md keeps every byte of project-specific content, and template-owned sections are updated in place). Your job is the part that requires intelligence:
 
-Find the template next to the init script you just ran (same plugin copy, no second lookup): `"$(dirname "$INIT_SCRIPT")/CLAUDE.md.template"`
-
-**If CLAUDE.md does not exist:** Write the template as CLAUDE.md. Replace "Project Name" with the actual project name.
-
-**If CLAUDE.md already exists:** Read both files. Follow the merge instructions in the template header: update playbook sections to match the template, preserve all project-specific content. Don't duplicate sections that already match.
+- Read the merged CLAUDE.md. If the mechanical merge left anything semantically off — e.g. the project's own rules now duplicate or contradict a template section — reconcile it, keeping the project's intent.
+- Add project-specific content the template cannot know: what the project is, its verify command in `.agent/config.json`, domain rules. Project content belongs in its own sections, not inside template-owned ones (those are refreshed on upgrade).
+- Check `.gitignore`: the playbook runtime-state block is present; add language/tooling ignores the project needs (`__pycache__/`, `node_modules/`, …) — those are deliberately not mechanical.
 
 ### 3. Generate mind map if stub
 

@@ -408,6 +408,35 @@ else
     SKIPPED+=("$AGENT_REL/monitor/ (monitor-lib not found in plugin)")
 fi
 
+# --- (h) CLAUDE.md + .gitignore — mechanical doctrine files (F15) ---
+# These were the AGENT half of /playbook:init: the doctrine (CLAUDE.md teaches
+# the correctness contract; .gitignore keeps runtime state out of the record)
+# held only if the agent performed it. Written mechanically now — MERGING,
+# never clobbering: a seeded CLAUDE.md keeps its content, template-owned
+# sections update in place, custom sections survive byte-for-byte, and the
+# .gitignore block is marker-guarded so re-runs are no-ops. The agent half
+# shrinks to project-specific enrichment.
+MERGE_OUT=$(python3 "$(to_native_path "$SCRIPT_DIR/claude-md-merge.py")" \
+    "$(to_native_path "$SCRIPT_DIR/CLAUDE.md.template")" \
+    "$(to_native_path "$PROJECT_DIR")" "$PROJECT_NAME" 2>&1)
+MERGE_RC=$?
+while IFS= read -r line; do
+    case "$line" in
+        CLAUDE.md:CREATED)    CREATED+=("CLAUDE.md (from template)") ;;
+        CLAUDE.md:MERGED)     CREATED+=("CLAUDE.md (template sections merged — project content preserved)") ;;
+        CLAUDE.md:UNCHANGED)  SKIPPED+=("CLAUDE.md (already current)") ;;
+        .gitignore:CREATED)   CREATED+=(".gitignore (playbook runtime-state block)") ;;
+        .gitignore:APPENDED)  CREATED+=(".gitignore playbook runtime-state block (appended)") ;;
+        .gitignore:UNCHANGED) SKIPPED+=(".gitignore (playbook block present)") ;;
+        ERROR:*)              FAILED+=("CLAUDE.md/.gitignore: ${line#ERROR:}") ;;
+        "") ;;
+        *)                    FAILED+=("CLAUDE.md/.gitignore: unexpected output: $line") ;;
+    esac
+done <<< "$MERGE_OUT"
+if [ $MERGE_RC -ne 0 ] && [ ${#FAILED[@]} -eq 0 ]; then
+    FAILED+=("CLAUDE.md/.gitignore: claude-md-merge.py exited $MERGE_RC")
+fi
+
 # --- (f) Summary ---
 echo "playbook init: $PROJECT_NAME"
 echo ""
