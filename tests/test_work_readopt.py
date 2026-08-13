@@ -212,17 +212,26 @@ class TestUntouchedBranches(WorkReadoptBase):
 class TestAdjacentBehaviour(WorkReadoptBase):
     """Side effects the re-adoption arm must not disturb."""
 
-    def test_switching_away_still_auto_closes_a_fully_gated_previous_task(self):
-        """The auto-close branch fires on `prev_task != task_num`, i.e. a
-        DIFFERENT target. The new arm keys on the target task, so it must not
-        shadow it: switching from a finished-but-open task still closes it."""
+    def test_switching_away_from_a_fully_gated_task_bounces_to_work_done(self):
+        """POLICY CHANGE (1.5.5, F14 blind-judge Finding 1): this branch used
+        to AUTO-CLOSE — writing `done` directly with no risk check, no review
+        evidence, no verify contract, no receipt. A policy-free second close
+        path defeats the evidence contract, so the switch now bounces to
+        `tasks work done` (the only closer, per 1.4.7), and --force switches
+        away leaving the task honestly open."""
         prev = write_task(self.project, "070", "pending", gates_checked=True)
         nxt = write_task(self.project, "071", "pending", gates_checked=False)
         self.assertEqual(self.run_tasks("work", "070").returncode, 0)
         r = self.run_tasks("work", "071")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("Auto-closed task 070", r.stdout)
-        self.assertEqual(status_of(prev), "done")
+        self.assertEqual(r.returncode, 1,
+                         "the policy-free auto-close is back: " + r.stdout)
+        self.assertIn("tasks work done", r.stderr + r.stdout)
+        self.assertEqual(status_of(prev), "pending",
+                         "the switch path wrote ## Status again")
+        forced = self.run_tasks("work", "071", "--force")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(status_of(prev), "pending",
+                         "--force must leave the task open, never done")
         self.assertEqual(status_of(nxt), "pending")
 
     def test_status_reports_a_readopted_task(self):

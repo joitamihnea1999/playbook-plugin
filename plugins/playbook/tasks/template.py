@@ -919,7 +919,15 @@ Examples:
 def sticker_quick() -> str:
     return """\
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
-> Never backfill. The document IS the execution trace. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one gate at a time)."""
+> Never backfill. The document IS the execution trace. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one gate at a time).
+> **Selection rule:** quick is for declared-reversible trivia only \u2014 anything touching docs, claims, data, or publishing belongs in `light` or heavier (risk decides review; smallness never does)."""
+
+
+def sticker_light() -> str:
+    return """\
+> **Light shape** \u2014 small, sub-day work; ceremony compressed, review NEVER waived: risk decides review, smallness never does. If this grows beyond small, convert: `tasks new <type> <name>`.
+> Gate discipline unchanged: one gate \u2192 do work \u2192 check box with its outcome. Never backfill. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one at a time).
+> **Selection rule:** `quick` is for declared-reversible trivia only; docs, claims, data, or publishing belong here or heavier."""
 
 
 def render_stub_template(num: int, title: str, intent_text: str = "",
@@ -951,6 +959,41 @@ def render_quick_template(num: int, title: str) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def render_light_template(num: int, title: str) -> str:
+    """Small-work shape (F14): ~6 gates, risk classified FIRST, review routed
+    by risk — never by size. The 056 lesson is enforced close-side
+    (`close_decision`): an assertive/irreversible task cannot close without
+    impl-grade review evidence whatever template it used; this shape's job is
+    to say so early and shed the Build ceremony around it.
+
+    Wording constraint (blind-judge Finding 2): no checkable line may carry
+    the literal `impl-review` / `panel-review` / `plan-review` tokens —
+    `has_review_evidence` matches those substrings on checked lines, so a
+    routing gate that names the command would MINT evidence when checked.
+    Say "the implementation panel"; the close gate reads judge.md, not boxes.
+    """
+    parts = [
+        header(num, title),
+        sticker_light(),
+        status(),
+        "## Intent\n(one line — what to do and what proves it worked)",
+        "## References\n(optional context; recent chat lands here at activation)",
+        "---",
+        """## Risk Routing
+- [ ] `## Risk` above set to exactly one word — reversible / irreversible / assertive — BEFORE any work, and this gate's outcome note states WHY in one line (what would `git revert` NOT undo? does this assert a claim about the world?). If assertive or irreversible: ceremony stays light but the FULL review bar applies — run the implementation panel once the work is built; the close gate enforces the evidence in judge.md. Light never waives review.""",
+        """## Work
+- [ ] Orient: name the files/claims this touches and what "verified" means (one paragraph)
+- [ ] Do the work
+- [ ] Verify: run the check that proves it — paste the result on this line""",
+        """## Review
+- [ ] Review routing honored — reversible: may proceed without review; assertive/irreversible: the implementation panel ran and its findings are triaged in judge.md (the close gate checks the evidence itself, not this box)""",
+        """## Pre-review
+- [ ] MIND_MAP.md: owning node updated in place (only if architecture or claims moved)""",
+        parked(),
+    ]
+    return "\n\n".join(parts) + "\n"
+
+
 # ---------------------------------------------------------------------------
 
 def render_template(num: int, title: str, task_type: str | None = None) -> str:
@@ -964,9 +1007,11 @@ def render_template(num: int, title: str, task_type: str | None = None) -> str:
     Returns:
         Complete task.md content as a string
     """
-    # Quick template — standalone, no PLAYBOOKS lookup
+    # Quick/light templates — standalone, no PLAYBOOKS lookup
     if task_type == "quick":
         return render_quick_template(num, title)
+    if task_type == "light":
+        return render_light_template(num, title)
 
     pattern_name = PLAYBOOKS.get(task_type) if task_type else None
     playbook_ref = f"playbook/{pattern_name}" if pattern_name else "(none)"

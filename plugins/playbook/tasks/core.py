@@ -1384,7 +1384,7 @@ def _find_custom_playbook(project_path: Path, task_type: str) -> Path | None:
 
 def list_all_types(project_path: Path) -> list[str]:
     """Return sorted list of all available task types (built-in + custom)."""
-    types = set(PLAYBOOKS.keys()) | {"quick"}
+    types = set(PLAYBOOKS.keys()) | {"quick", "light"}
     playbooks_dir = resolve_agent_dir(project_path) / "playbooks"
     if playbooks_dir.exists():
         for f in playbooks_dir.glob("*.md"):

@@ -1506,6 +1506,19 @@ def main():
                               file=sys.stderr, flush=True)
                         sys.exit(1)
 
+                    # F14 blind-judge Finding 3: `unclassified` is not in
+                    # HIGH_CONSEQUENCE, so the risk-keyed review bar was never
+                    # evaluated — say so loudly instead of failing open in
+                    # silence. A warning, not a block: every pre-1.5.0 task is
+                    # unclassified, and panel-always projects already hold
+                    # "all" closes to panel evidence regardless of risk.
+                    if risk == "unclassified":
+                        print("⚠ closing with ## Risk unclassified — the "
+                              "risk-keyed review requirement was NOT evaluated "
+                              "for this close. Set ## Risk to exactly one word "
+                              "(reversible / irreversible / assertive) at the "
+                              "Risk gate.", file=sys.stderr, flush=True)
+
                     # Close is earned — record the receipt (ONE section, newest
                     # entry first — a reopened task must not accrete duplicate
                     # headings that section parsers read as current), then set done.
@@ -1681,16 +1694,27 @@ def main():
                 prev_file = prev_matches[0]
                 prev_status = _extract_status(prev_file)
                 prev_head = _extract_head_position(prev_file)
-                if prev_head == "(all gates checked)":
-                    if not prev_status.startswith("done"):
-                        # Auto-close: set status to done
-                        prev_lines = prev_file.read_text(encoding="utf-8").splitlines(keepends=True)
-                        for i, line in enumerate(prev_lines):
-                            if line.strip() == "## Status" and i + 1 < len(prev_lines):
-                                prev_lines[i + 1] = "done\n"
-                                prev_file.write_text("".join(prev_lines), encoding="utf-8")
-                                break
-                        print(f"Auto-closed task {prev_task} (all gates checked).")
+                if prev_head == "(all gates checked)" and not prev_status.startswith("done"):
+                    # F14 blind-judge Finding 1 (the class, not a light-only
+                    # patch): this branch used to write `done` DIRECTLY — no
+                    # risk check, no review evidence, no verify contract, no
+                    # receipt. A policy-free second close path defeats the
+                    # whole 1.5.0 evidence contract, and `work done` is
+                    # supposed to be the ONLY thing that closes a task (the
+                    # 1.4.7 principle). The switch now bounces to the real
+                    # close; --force switches away leaving the task honestly
+                    # open, never silently done.
+                    if force:
+                        print(f"--force: switching away from task {prev_task} "
+                              "(all gates checked, NOT closed — left open; "
+                              "close it with `tasks work done` later).")
+                    else:
+                        print(f"Task {prev_task} has all gates checked but is not closed.\n"
+                              f"Close it properly first: tasks work done   "
+                              "(runs the verify contract + close policy)\n"
+                              f"Or switch anyway: tasks work {task_num} --force   "
+                              f"(leaves {prev_task} open)", file=sys.stderr)
+                        sys.exit(1)
                 elif not prev_status.startswith("done") and not force:
                     # prev task still has open gates — don't silently abandon it.
                     _gate_bounce(prev_task, prev_file, f"switching to task {task_num}")
@@ -1816,7 +1840,7 @@ def main():
         from tasks.core import list_all_types, _find_custom_playbook
         project_path_for_check = find_project_root()
         is_custom = _find_custom_playbook(project_path_for_check, task_type) is not None
-        if task_type not in PLAYBOOKS and task_type != "quick" and not is_custom:
+        if task_type not in PLAYBOOKS and task_type not in ("quick", "light") and not is_custom:
             all_types = list_all_types(project_path_for_check)
             print(f"Error: unknown type '{task_type}'", file=sys.stderr)
             print(f"Types: {', '.join(all_types)}", file=sys.stderr)
@@ -1853,14 +1877,17 @@ def main():
         print(f"Created: {task_file.relative_to(project_path)}")
         if is_stub:
             print(f"Stub ({pattern_name}) — expand with: tasks work {task_num}")
-        elif task_type != "quick":
+        elif task_type not in ("quick", "light"):
             print(f"Pattern: {pattern_name}")
             print(f"Next: fill in task.md gates, then ask user to run: tasks work {task_num}")
         else:
             print(f"Next: fill in task.md gates, then ask user to run: tasks work {task_num}")
         print()
 
-        if task_type != "quick":
+        # quick/light skip the full playbook-guide dump — shedding that
+        # ceremony is their reason to exist (light still routes review by
+        # risk; see the template's Risk Routing gate).
+        if task_type not in ("quick", "light"):
             # Print full playbook so agent has workflow guidance inline
             playbook_path = _find_playbook_skill(project_path)
             if playbook_path:

@@ -561,7 +561,8 @@ def _format_gate_echo(task_num: str, done: int, total: int, gate_text: str | Non
     if total == 0:
         return f"# [{task_num}] no gates defined yet — add work plan before continuing."
     if gate_text is None:
-        return f"# [{task_num}] — all gates done. Stay for follow-up. Auto-closes on task switch."
+        return (f"# [{task_num}] — all gates done. Close it with `tasks work done` "
+                "(runs the verify contract + close policy); switching tasks bounces until then.")
     # Freehand-mode echo when gate text is "Freehand" (bare) or starts with
     # "Freehand <punctuation>..." (e.g. "Freehand — work is done"). Must NOT
     # match "Freehand log" — alphanumeric continuations are normal gates
