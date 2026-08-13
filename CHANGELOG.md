@@ -2,6 +2,18 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.4] — 2026-08-13
+
+Three defects found by the full-surface live gauntlet (a scratch project driven through every command of the INSTALLED plugin, ending in real codex+grok panel runs). Each fix carries a regression test.
+
+### Fixed
+
+- **`extract_parked_items` read only the FIRST `## Parked` section.** The template ships one, so a second section (agent-added, or produced by receipt reordering) was invisible to `tasks parked` and the close-time surface — parked debt silently unswallowable again. All sections are read now. The multi-heading hazard, same family as #09.
+- **`resolve_agent_dir` crashed on a `str` project path** — the single chokepoint every state helper funnels through now coerces, closing the whole class (third instance of the str/Path disease; the first two were in audit).
+- **The single-judge fallback could not write findings into panel-first tasks.** 1.5.2 renamed the section placeholder to "…triage appears here"; the fallback write-back still anchored only on the old "…findings appear here", so a live judge's findings refused to land (loudly and safely — but the fallback exists precisely for degraded days). Both placeholder generations anchor now.
+
+Gauntlet outcomes worth recording: init's mechanical half, full task lifecycle, close-gate matrix (verify pass/fail/timeout, force+reason, dirty markers, receipts upsert), blocked state through the real Stop hook, audit sweeps incl. mind-map staleness and task-bloat, retro trigger at 10, merge-verify's five exit codes, quorum verdicts, per-transport context receipts, tree-state freshness advisory, and two REAL cross-provider panels (codex stdin + grok argv, 2/2 PASS, rounds stacked, close accepted against real evidence) — all verified working.
+
 ## [1.5.3] — 2026-08-13
 
 Context perfection + judge execution (L1), red-teamed before building: the design review of our own plan found seven flaws — including one in already-shipped code and a sandbox write hole — and every fix below carries the correction.

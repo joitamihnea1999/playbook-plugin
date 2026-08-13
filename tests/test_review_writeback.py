@@ -47,6 +47,30 @@ from tasks.cli import (  # noqa: E402
 )
 
 
+class NewTemplatePlaceholderAnchor(unittest.TestCase):
+    """Gauntlet regression (1.5.2): the panel-first template renamed the section
+    placeholder to '…triage appears here', and the single-judge FALLBACK's
+    write-back only anchored on the old text — a live judge's findings could not
+    land in a new-template task.md. Both generations must anchor."""
+
+    def _tf(self, placeholder):
+        import tempfile
+        from pathlib import Path as _P
+        tf = _P(tempfile.mkdtemp()) / "task.md"
+        tf.write_text(f"# 1 - t\n\n## Implementation Review\n- [ ] gate\n\n{placeholder}\n\n---\n")
+        return tf
+
+    def test_old_placeholder_still_anchors(self):
+        tf = self._tf("(implementation review findings appear here)")
+        self.assertIsNone(_write_review_findings(tf, "impl", "finding"))
+        self.assertIn("finding", tf.read_text())
+
+    def test_new_triage_placeholder_anchors(self):
+        tf = self._tf("(implementation review triage appears here)")
+        self.assertIsNone(_write_review_findings(tf, "impl", "finding"))
+        self.assertIn("finding", tf.read_text())
+
+
 class PanelTriageFrameLimits(unittest.TestCase):
     """P11: the panel's own judge.md must name what a panel structurally cannot
     catch, so a clean panel is never read as 'all clear' on these classes."""

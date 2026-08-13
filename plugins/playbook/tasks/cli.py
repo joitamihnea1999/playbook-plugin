@@ -582,9 +582,17 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     return {"porcelain": porcelain, "task_hash": task_hash}
 
 
+# Each mode accepts BOTH placeholder generations: pre-1.5.2 templates say
+# "findings appear here", the panel-first templates say "triage appears here".
+# The single-judge fallback write-back must anchor in either — caught live by
+# the 1.5.3 gauntlet, where a new-template task refused the fallback's write.
 _REVIEW_SECTIONS = {
-    "plan": ("## Plan Review", "(plan review findings appear here)"),
-    "impl": ("## Implementation Review", "(implementation review findings appear here)"),
+    "plan": ("## Plan Review",
+             ("(plan review findings appear here)",
+              "(plan review triage appears here)")),
+    "impl": ("## Implementation Review",
+             ("(implementation review findings appear here)",
+              "(implementation review triage appears here)")),
 }
 
 
@@ -626,7 +634,7 @@ def _write_review_findings(task_file: Path, review_mode: str, findings: str) -> 
     section = _REVIEW_SECTIONS.get(review_mode)
     if section is None:
         return f"unknown review mode {review_mode!r}"
-    heading, placeholder = section
+    heading, placeholders = section
     open_m, close_m = _findings_markers(review_mode)
     body = _neutralise_markers(findings.strip(), review_mode)
     block = f"{open_m}\n{body}\n{close_m}"
@@ -659,13 +667,16 @@ def _write_review_findings(task_file: Path, review_mode: str, findings: str) -> 
         if end < start:
             return f"{heading} findings markers are out of order"
         section = section[:start] + block + section[end + len(close_m):]
-    elif section.count(placeholder) == 1:
-        section = section.replace(placeholder, block, 1)
-    elif placeholder in section:
-        return f"{heading} placeholder appears more than once"
     else:
-        return (f"{heading} has neither its placeholder nor findings markers "
-                f"(hand-edited?)")
+        _once = [p for p in placeholders if section.count(p) == 1]
+        _multi = [p for p in placeholders if section.count(p) > 1]
+        if _once:
+            section = section.replace(_once[0], block, 1)
+        elif _multi:
+            return f"{heading} placeholder appears more than once"
+        else:
+            return (f"{heading} has neither its placeholder nor findings markers "
+                    f"(hand-edited?)")
     new_text = before + section + after
 
     # Atomic: task.md IS the execution trace, so an interrupt must not truncate

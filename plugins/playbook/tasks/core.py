@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.3"
+VERSION = "1.5.4"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -180,6 +180,10 @@ def resolve_agent_dir(project_path: Path) -> Path:
     Legacy mode:     .agent/current_user absent  → .agent/  (unchanged)
     Invalid content: print error and exit(1).
     """
+    # str accepted — this is THE path chokepoint every helper funnels through,
+    # and a str caller crashed scan_parked live in the 1.5.3 gauntlet (same
+    # str/Path disease fixed in audit at F7a).
+    project_path = Path(project_path)
     marker = project_path / ".agent" / "current_user"
     if not marker.exists():
         return project_path / ".agent"
@@ -1104,9 +1108,14 @@ def _parked_item_status(item: str) -> str:
 
 
 def extract_parked_items(task_md_text: str) -> "list[str]":
-    """Return the '- ' bullets under a task.md's ## Parked section, skipping the
+    """Return the '- ' bullets under EVERY ## Parked section, skipping the
     template placeholder. Same shape retro.py parses, kept here so `tasks parked`
-    and the close-time surface share one definition of 'a parked item'."""
+    and the close-time surface share one definition of 'a parked item'.
+
+    ALL sections, not the first: the template ships a ## Parked section, so an
+    agent (or a receipt upsert reordering the file) can easily produce a second
+    one — and a first-match read makes every later section invisible. Found live
+    by the 1.5.3 gauntlet; the multi-heading hazard, same family as #09."""
     in_section = False
     body: "list[str]" = []
     for line in task_md_text.splitlines():
@@ -1115,7 +1124,8 @@ def extract_parked_items(task_md_text: str) -> "list[str]":
             continue
         if in_section:
             if line.startswith("## "):
-                break
+                in_section = False  # keep scanning — there may be another section
+                continue
             body.append(line)
     items: "list[str]" = []
     for line in body:

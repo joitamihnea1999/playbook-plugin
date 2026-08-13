@@ -49,6 +49,22 @@ class ExtractParked(unittest.TestCase):
     def test_no_section_is_empty(self):
         self.assertEqual(extract_parked_items("# 1 - t\n\n## Intent\nx\n"), [])
 
+    def test_duplicate_sections_all_read(self):
+        """Gauntlet finding: the template ships a ## Parked section, so a second
+        one appears easily — a first-match read made every later one invisible
+        (the multi-heading hazard, #09's family)."""
+        text = (f"## Parked\n{PARKED_PLACEHOLDER}\n\n## Debrief\n- [x] d\n\n"
+                "## Parked\n- item from the second section\n")
+        self.assertEqual(extract_parked_items(text), ["item from the second section"])
+
+    def test_scan_parked_accepts_str_path(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        (Path(d) / ".agent" / "tasks" / "001-t").mkdir(parents=True)
+        (Path(d) / ".agent" / "tasks" / "001-t" / "task.md").write_text(
+            "## Status\ndone\n## Parked\n- thing\n")
+        self.assertEqual([i["item"] for i in scan_parked(d)], ["thing"])  # str, not Path
+
 
 class ParkedStatus(unittest.TestCase):
     def test_open_by_default(self):
