@@ -128,11 +128,10 @@ def design_phase() -> str:
 def judge_section() -> str:
     return """\
 ## Plan Review
-- [ ] Run `.claude/bin/tasks plan-review <N>` — wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only and will NOT touch your gates). Re-read this file to see its findings below, then address valid concerns by revising Work Plan gates yourself. **Justify lens:** does every work gate trace up to something in Intent/Design? Are there gates that justify nothing above them (scope creep)? Intent claims with no gate to satisfy them (gaps)?
-- [ ] **Triage plan-review findings: judge = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale). Push back where you have concrete evidence — you live with the outcomes, the reviewer doesn't. Verify file:line claims before applying — single-judge reviews can cite wrong locations.
-- [ ] *(Optional)* Run `.claude/bin/tasks panel-review <N>` for multi-model panel (writes to judge.md, not this file). Add `--prompt "..."` to append extra steering (e.g. focus area, constraint). Read judge.md with user, accept/reject findings, apply selected advice to Work Plan.
+- [ ] Run `.claude/bin/tasks panel-review <N>` — ALL available judges review the plan in parallel (blind: they see the repo, not your conversation). Wait for it to finish; findings land in `judge.md` (this dir), led by a PANEL VERDICT. Read judge.md, then address valid concerns by revising Work Plan gates yourself. **Justify lens:** does every work gate trace up to something in Intent/Design? Are there gates that justify nothing above them (scope creep)? Intent claims with no gate to satisfy them (gaps)? *(Fallback if no panel can run: `.claude/bin/tasks plan-review <N>` — single judge, writes into this file.)*
+- [ ] **Triage panel findings into this file: judges = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale) here under this gate. Push back where you have concrete evidence — you live with the outcomes, the reviewers don't. Verify file:line claims before applying. Where judges DISAGREE with each other, say which you believed and why — disagreement between models is signal, not noise.
 
-(plan review findings appear here)
+(plan review triage appears here)
 
 ---"""
 
@@ -152,11 +151,10 @@ def work_plan() -> str:
 def judge_impl_section() -> str:
     return """\
 ## Implementation Review
-- [ ] Run `.claude/bin/tasks impl-review <N>` — wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only). Re-read findings. **Satisfy lens:** does every Intent claim trace down through code to tests? Where does the chain break?
-- [ ] **Triage impl-review findings: judge = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale). Push back where you have concrete evidence — you live with the outcomes, the reviewer doesn't. Verify file:line claims before applying — single-judge reviews can cite wrong locations.
-- [ ] *(Optional)* Run `.claude/bin/tasks panel-review <N> --mode impl` for multi-model panel review. Add `--prompt "..."` to append extra steering.
+- [ ] Run `.claude/bin/tasks panel-review <N> --mode impl` — ALL available judges review the implementation in parallel. Wait for it to finish; findings land in `judge.md`, led by a PANEL VERDICT (a quorum-PASS impl panel is what the close gate accepts as evidence when `panel_required_for` is set). Read judge.md. **Satisfy lens:** does every Intent claim trace down through code to tests? Where does the chain break? *(Fallback if no panel can run: `.claude/bin/tasks impl-review <N>` — single judge, writes into this file.)*
+- [ ] **Triage panel findings into this file: judges = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale) here under this gate. Push back where you have concrete evidence — you live with the outcomes, the reviewers don't. Verify file:line claims before applying. Where judges DISAGREE, say which you believed and why.
 
-(implementation review findings appear here)
+(implementation review triage appears here)
 
 ---"""
 

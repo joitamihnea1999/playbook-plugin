@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -768,6 +768,39 @@ def extract_risk(task_file) -> str:
     return DEFAULT_RISK
 
 
+def resolve_panel_required(project_path: Path, risk: str) -> bool:
+    """Owner policy: does a close of a task with this risk class demand
+    PANEL-grade review evidence (all available judges), not just a single judge?
+
+    config.json `panel_required_for`: "all", or a list of risk classes
+    (["irreversible", "assertive"]). Absent/malformed → False (single-judge
+    evidence suffices, the pre-1.5.2 behavior). Rationale: another pair of eyes
+    is nearly free insurance when tokens are not the constraint — and a policy
+    that lives in config is enforced, where one that lives in memory decays."""
+    raw = load_config(project_path).get("panel_required_for")
+    if raw == "all":
+        return True
+    if isinstance(raw, list):
+        return risk in raw or "all" in raw
+    return False
+
+
+def has_panel_impl_evidence(task_file) -> bool:
+    """PANEL-grade implementation evidence: a judge.md whose newest content is a
+    panel IMPL review that reached quorum (leads with PANEL VERDICT: PASS).
+    A FAIL-verdict panel is a degraded panel — it does not count; neither does a
+    plan-mode panel (it cannot vouch for what was BUILT)."""
+    p = Path(task_file)
+    jm = p.parent / "judge.md"
+    try:
+        if not jm.exists():
+            return False
+        text = jm.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "Panel Impl Review" in text and "PANEL VERDICT: PASS" in text
+
+
 def has_review_evidence(task_file, impl_only: bool = False) -> bool:
     """True when a task carries evidence that a review actually ran: a judge.md
     in its directory, or a checked plan/impl/panel-review gate in task.md. Used
@@ -829,14 +862,20 @@ def resolve_verify_commands(project_path: Path, risk: str = DEFAULT_RISK) -> "li
 
 
 def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
-                   has_review_evidence: bool, force: bool, reason: "str | None") -> "tuple[bool, str]":
+                   has_review_evidence: bool, force: bool, reason: "str | None",
+                   panel_required: bool = False) -> "tuple[bool, str]":
     """Pure close policy → (allowed, block_reason). block_reason is '' when allowed.
 
     1. --force ALWAYS requires a non-empty reason: a forced close must be
        self-documenting (task 046 was force-closed with 25 open gates and left no
        trace). With a reason, force allows the close.
     2. otherwise a FAILING declared verify blocks — the evidence bar.
-    3. otherwise an assertive/irreversible task with NO review evidence blocks —
+    3. panel_required (owner policy `panel_required_for`): EVERY close in scope
+       needs the evidence the caller passed — which the caller has resolved as
+       PANEL-grade (all available judges, quorum PASS). Another pair of eyes is
+       cheap insurance; the policy is enforced here so it cannot decay into a
+       habit someone forgets.
+    4. otherwise an assertive/irreversible task with NO review evidence blocks —
        high-consequence work cannot be light-closed for being small (056)."""
     if force:
         if not (reason and reason.strip()):
@@ -844,6 +883,12 @@ def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
         return True, ""
     if verify_declared and verify_failed:
         return False, "declared verification failed — fix it, or override with --force --reason."
+    if panel_required and not has_review_evidence:
+        return False, (
+            "panel review required by policy (`panel_required_for`): close needs a "
+            "quorum-PASS panel IMPL review in judge.md — run `tasks panel-review <N> "
+            "--mode impl`, or override with --force --reason."
+        )
     if risk in HIGH_CONSEQUENCE and not has_review_evidence:
         return False, (
             f"{risk} task cannot light-close: it changes "

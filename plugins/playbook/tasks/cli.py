@@ -1445,7 +1445,8 @@ def main():
                     # unless forced with a recorded reason.
                     from tasks.core import (
                         close_decision, extract_risk, format_verify_receipt,
-                        has_review_evidence, resolve_verify_commands,
+                        has_panel_impl_evidence, has_review_evidence,
+                        resolve_panel_required, resolve_verify_commands,
                         resolve_verify_timeout,
                     )
                     risk = extract_risk(task_file)
@@ -1473,13 +1474,21 @@ def main():
                         print(f"  (no verify contract declared — NOTHING verified at close; risk={risk})",
                               file=sys.stderr, flush=True)
 
+                    # Owner policy: panel_required_for makes the evidence bar
+                    # PANEL-grade (all available judges, quorum PASS) — for the
+                    # configured risk classes, or "all". Otherwise single-judge
+                    # impl evidence suffices as before.
+                    _panel_req = resolve_panel_required(project_path, risk)
+                    _evidence = (has_panel_impl_evidence(task_file) if _panel_req
+                                 else has_review_evidence(task_file, impl_only=True))
                     allowed, block_reason = close_decision(
                         risk=risk, verify_declared=bool(commands),
                         verify_failed=verify_failed,
-                        # impl_only: a plan-phase review cannot vouch for what was
-                        # BUILT — high-consequence closes need impl-grade evidence.
-                        has_review_evidence=has_review_evidence(task_file, impl_only=True),
+                        # impl-grade only: a plan-phase review cannot vouch for
+                        # what was BUILT.
+                        has_review_evidence=_evidence,
                         force=force, reason=reason,
+                        panel_required=_panel_req,
                     )
                     if not allowed:
                         print(f"\nBlocked: cannot close task {prev_task} — {block_reason}",

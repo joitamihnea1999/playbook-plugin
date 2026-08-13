@@ -2,6 +2,19 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.2] — 2026-08-13
+
+Panel-always, by owner decree from the field test: "another pair of eyes is always better, so why not enforce this?"
+
+### Added
+
+- **`panel_required_for` policy** (`.agent/config.json`: `"all"` or a list of risk classes). For closes in scope, the evidence bar becomes **panel-grade**: a `judge.md` whose impl panel reached quorum (`PANEL VERDICT: PASS`). A plan-mode panel does not count (it cannot vouch for what was built) and a FAIL-verdict panel does not count (a degraded panel is not a panel). `--force --reason` remains the recorded escape hatch. `init` seeds new projects with `"panel_required_for": "all"`.
+- **Templates are panel-first.** The mandatory Plan Review and Implementation Review gates now run `tasks panel-review` (all available judges in parallel, findings in judge.md led by a verdict), with single-judge `plan-review`/`impl-review` demoted to documented fallbacks. Triage guidance now asks the agent to name which judge it believed when judges disagree — disagreement between models is signal.
+
+### Changed
+
+- Shipped default panel is provider-diverse: `opus, sonnet, codex:gpt-5.5, grok, agy` (grok seated, third same-family claude seat dropped). Availability filtering still skips CLIs that are not installed.
+
 ## [1.5.1] — 2026-08-12
 
 First fixes driven by the StrataDB field test (five real tasks, one session handoff — findings in the fork owner's lab notebook).

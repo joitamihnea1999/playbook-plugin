@@ -173,6 +173,52 @@ class ResolveVerifyCommands(unittest.TestCase):
         self.assertEqual(resolve_verify_commands(p, "reversible"), [])
 
 
+class PanelAlwaysPolicy(unittest.TestCase):
+    """Owner policy `panel_required_for` (StrataDB owner's call: 'another pair of
+    eyes is always better — enforce it'): the configured risk classes (or "all")
+    demand PANEL-grade impl evidence at close — quorum-PASS panel impl review —
+    not just a single judge."""
+
+    def _proj(self, cfg):
+        d = Path(tempfile.mkdtemp())
+        (d / ".agent").mkdir()
+        (d / ".agent" / "config.json").write_text(json.dumps(cfg))
+        return d
+
+    def test_resolve_all_and_list_and_absent(self):
+        from tasks.core import resolve_panel_required
+        self.assertTrue(resolve_panel_required(self._proj({"panel_required_for": "all"}), "reversible"))
+        lst = self._proj({"panel_required_for": ["irreversible"]})
+        self.assertTrue(resolve_panel_required(lst, "irreversible"))
+        self.assertFalse(resolve_panel_required(lst, "reversible"))
+        self.assertFalse(resolve_panel_required(self._proj({}), "irreversible"))
+        self.assertFalse(resolve_panel_required(self._proj({"panel_required_for": 7}), "assertive"))
+
+    def test_panel_evidence_requires_impl_mode_and_pass(self):
+        from tasks.core import has_panel_impl_evidence
+        d = Path(tempfile.mkdtemp())
+        (d / "task.md").write_text("# 1 - t\n")
+        tf = d / "task.md"
+        self.assertFalse(has_panel_impl_evidence(tf))                       # no judge.md
+        (d / "judge.md").write_text("# Panel Plan Review — t\n\n**PANEL VERDICT: PASS** — ok\n")
+        self.assertFalse(has_panel_impl_evidence(tf), "plan panel can't vouch for the build")
+        (d / "judge.md").write_text("# Panel Impl Review — t\n\n**PANEL VERDICT: FAIL** — 1/4, quorum 3\n")
+        self.assertFalse(has_panel_impl_evidence(tf), "a degraded panel is not a panel")
+        (d / "judge.md").write_text("# Panel Impl Review — t\n\n**PANEL VERDICT: PASS** — 4/4, quorum 3\n")
+        self.assertTrue(has_panel_impl_evidence(tf))
+
+    def test_close_decision_blocks_without_panel_evidence(self):
+        allowed, why = close_decision(
+            risk="reversible", verify_declared=False, verify_failed=False,
+            has_review_evidence=False, force=False, reason=None, panel_required=True)
+        self.assertFalse(allowed)
+        self.assertIn("panel", why.lower())
+        allowed, _ = close_decision(
+            risk="reversible", verify_declared=False, verify_failed=False,
+            has_review_evidence=True, force=False, reason=None, panel_required=True)
+        self.assertTrue(allowed)
+
+
 class Receipt(unittest.TestCase):
     def test_records_pass_and_fail(self):
         r = format_verify_receipt(
