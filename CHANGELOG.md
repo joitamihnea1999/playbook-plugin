@@ -2,6 +2,14 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.5] — 2026-08-13
+
+The field-backlog release: every item below carries evidence from the StrataDB stress test (batches 1–4) or the 1.5.4 full-surface gauntlet — see the fork owner's lab notebook.
+
+### Fixed
+
+- **`reversible` now asks whether the WORLD reverts, not the diff** (F11 — third judge-driven reclassification in the field). The template defined `reversible` as "`git revert` undoes it completely", which reads as *diff*-revertibility: an agent classified data-loss-class work `reversible` reasoning "the DIFF is git-revertible" while its own notes said the blast radius was data-loss-class. Both teaching sites (the `## Risk` block in every rendered task, and the CLAUDE.md `init` seeds) now state the operative question — persisted data, on-disk formats, secrets, history, and published claims never qualify even when the diff reverts cleanly.
+
 ## [1.5.4] — 2026-08-13
 
 Three defects found by the full-surface live gauntlet (a scratch project driven through every command of the INSTALLED plugin, ending in real codex+grok panel runs). Each fix carries a regression test.

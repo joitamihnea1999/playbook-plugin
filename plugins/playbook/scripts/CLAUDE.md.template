@@ -49,7 +49,7 @@ The task.md **is** the execution trace. Never skip checkboxes. Never backfill. O
 
 The close is **earned, not asserted** — these are enforced by the CLI, not conventions:
 
-- **`## Risk`** — set at the Structure gate: `reversible` (git revert undoes it), `irreversible` (deletes/migrates data, publishes — needs a named rollback plan), or `assertive` (changes a **claim about the world**: docs, a calibration, a "verified accurate"). Assertive/irreversible tasks **cannot close without an implementation review** — a small diff is not a reason to skip review; a docs-only diff can be the most review-worthy thing a task produces.
+- **`## Risk`** — set at the Structure gate: `reversible` (the WORLD reverts, not the diff — only code/config that `git revert` fully undoes; persisted data, on-disk formats, secrets, history, and published claims never qualify even when the diff reverts cleanly), `irreversible` (deletes/migrates data, publishes — needs a named rollback plan), or `assertive` (changes a **claim about the world**: docs, a calibration, a "verified accurate"). Assertive/irreversible tasks **cannot close without an implementation review** — a small diff is not a reason to skip review; a docs-only diff can be the most review-worthy thing a task produces.
 - **Verify contract** — declare in `.agent/config.json` what green means for this project, and closes run it:
   ```json
   {"verify": {"_always": ["<your test command>"], "assertive": ["<claim checks>"]}}
