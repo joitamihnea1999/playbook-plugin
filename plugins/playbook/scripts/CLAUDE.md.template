@@ -43,7 +43,7 @@ Work through task.md gates: Design Phase (understand, structure, verify) → Wor
 
 When done: `tasks work done` — runs the project's verify contract, records a receipt, sets status to done.
 
-The task.md **is** the execution trace. Never skip checkboxes. Never backfill. One gate at a time.
+The task.md **is** the execution trace. Never skip checkboxes. Never backfill. Close each gate as you complete it; closing several ALREADY-DONE gates in one edit is allowed only when each line carries its own outcome note (hook-enforced, max 5 — a bare batch tick is blocked; where no hook runs, keep to one gate at a time).
 
 ## Correctness Contract
 

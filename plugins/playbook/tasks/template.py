@@ -23,7 +23,7 @@ def header(num: int, title: str) -> str:
 def sticker() -> str:
     return """\
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
-> Never batch. Never backfill. The document IS the execution trace.
+> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).
 > **Closing a gate:** check the box, append your outcome. Never replace the original text.
 > **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir), leaving a one-paragraph summary + pointer. Never gates, never Intent/Design/Parked/receipts \u2014 moving history is not deleting it.
 > Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).
@@ -703,6 +703,7 @@ def workflow_briefing() -> str:
     """Workflow rules shown at task activation (tasks work <N>)."""
     return """\
 - One gate at a time: read gate → do work → check box → next gate
+- Closing several ALREADY-DONE gates in one edit: allowed only when each line carries its own outcome note (hook-enforced, max 5; where no hook runs, keep to one at a time). Bare batch ticks are blocked.
 - Pattern templates in task.md ARE the work plan — fill them in, don't skip"""
 
 
@@ -770,7 +771,9 @@ This sets the active task.  Without it, edits are blocked.
 - Read the task.md that `tasks work` prints.
 - Work **one gate at a time**: read the gate → do the work → check the box
   (append your outcome on the same line) → move to the next gate.
-- Never skip gates.  Never batch-close multiple gates in one edit.
+- Never skip gates.  Batch-closing ALREADY-DONE gates in one edit is allowed
+  only where a hook enforces an outcome note per line — no such hook runs on
+  this provider, so keep to one gate at a time here.
 - If you discover new work, add new gates to task.md immediately.
 
 ## End of Task
@@ -829,7 +832,8 @@ Activate a task:
 ## Working Through a Task
 
 Work one gate at a time.  Check each gate box before moving to the next.
-Never skip.  Never batch.
+Never skip.  Batch-closing needs a hook that enforces per-line outcome
+notes — none runs on this provider, so keep to one gate at a time here.
 
 ## End of Task
 
@@ -915,7 +919,7 @@ Examples:
 def sticker_quick() -> str:
     return """\
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
-> Never batch. Never backfill. The document IS the execution trace."""
+> Never backfill. The document IS the execution trace. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one gate at a time)."""
 
 
 def render_stub_template(num: int, title: str, intent_text: str = "",
