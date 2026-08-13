@@ -1768,6 +1768,14 @@ def main():
                     flags=_stub_re.DOTALL,
                 )
 
+            # F8: standing gates land at expansion (a stub has no gates until
+            # now) — same helper create_task uses, same LAST-gates guarantee.
+            from tasks.core import append_standing_gates, load_config
+            full_content, _sg_issues = append_standing_gates(
+                full_content, load_config(project_path), task_num_int)
+            for _msg in _sg_issues:
+                print(f"[playbook] standing_gates: {_msg}", file=sys.stderr)
+
             task_file.write_text(full_content, encoding="utf-8")
             # Re-read for chat injection and display
             task_content = full_content

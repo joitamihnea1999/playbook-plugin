@@ -788,6 +788,65 @@ def select_task_context(text: str, budget: int) -> "tuple[str, str]":
 # shape, so a docs-only diff that upgraded "uncalibrated" to "audited accurate"
 # got a light close). These helpers add both, as pure/testable policy.
 
+def append_standing_gates(content: str, cfg: dict, task_num: int) -> "tuple[str, list[str]]":
+    """Append project-declared standing gates as the FINAL gates of a task.
+
+    `standing_gates` in .agent/config.json: a list of {title, text} objects.
+    Field evidence (F8, StrataDB batches 2/2b): the project's journal gate was
+    hand-relocated below Pre-review VERBATIM on consecutive tasks — a gate a
+    project wants on EVERY task should come from generation, not from the
+    agent remembering to re-add it. Opt-in: key absent/empty → content
+    returned byte-identical.
+
+    Each valid entry becomes `## <title>` + one `- [ ] <text>` gate, appended
+    at the very END of the assembled content (after any custom playbook
+    append) in declared order — the last gates of the document. `{{NNN}}` in
+    title/text substitutes the zero-padded task number (the journal use case:
+    `journal/{{NNN}}.md`).
+
+    Returns (content, issues). Malformed entries and titles colliding with an
+    existing section heading are SKIPPED and named in `issues` (callers print
+    them) — never silently written, never silently dropped. Title and text are
+    whitespace-collapsed to one line, so a config value cannot open a new
+    heading line or gate line of its own (the #09 multi-heading disease, via
+    config).
+    """
+    raw = cfg.get("standing_gates")
+    if raw is None:
+        return content, []
+    if not isinstance(raw, list):
+        return content, [
+            f"standing_gates must be a list of {{title, text}} objects, "
+            f"got {type(raw).__name__} — ignored"]
+    issues: "list[str]" = []
+    nnn = f"{int(task_num):03d}"
+    existing = {ln.strip()[3:].strip().lower()
+                for ln in content.splitlines() if ln.strip().startswith("## ")}
+    blocks: "list[str]" = []
+    seen: "set[str]" = set()
+    for i, entry in enumerate(raw):
+        label = f"standing_gates[{i}]"
+        if not isinstance(entry, dict):
+            issues.append(f"{label}: not a {{title, text}} object — skipped")
+            continue
+        title = " ".join(str(entry.get("title", "")).replace("{{NNN}}", nnn).split())
+        title = title.lstrip("#").strip()
+        text = " ".join(str(entry.get("text", "")).replace("{{NNN}}", nnn).split())
+        if not title or not text:
+            issues.append(f"{label}: needs non-empty 'title' and 'text' — skipped")
+            continue
+        if title.lower() in existing or title.lower() in seen:
+            issues.append(
+                f"{label}: title {title!r} collides with an existing section "
+                "— skipped (a duplicate heading breaks the receipt/evidence parsers)")
+            continue
+        seen.add(title.lower())
+        blocks.append(f"## {title}\n- [ ] {text}")
+    if not blocks:
+        return content, issues
+    return content.rstrip("\n") + "\n\n" + "\n\n".join(blocks) + "\n", issues
+
+
 RISK_CLASSES = ("reversible", "irreversible", "assertive")
 # assertive = changes a CLAIM about the world (docs, a calibration, a measurement,
 # a "verified accurate"). irreversible = deletes/migrates data, rotates a secret,
@@ -1401,6 +1460,16 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
             if placeholder in content:
                 content = content.replace(placeholder, intent_text)
                 break
+
+    # F8: standing gates — project-declared gates appended LAST, whatever
+    # branch assembled the content (base template, custom playbook, role
+    # append). Stubs are skipped: they carry no gates until activation, and
+    # the expansion path applies the same helper then.
+    if not stub:
+        content, _sg_issues = append_standing_gates(
+            content, load_config(project_path), task_num)
+        for _msg in _sg_issues:
+            print(f"[playbook] standing_gates: {_msg}", file=sys.stderr)
 
     task_file = task_dir / "task.md"
     task_file.write_text(content, encoding="utf-8")

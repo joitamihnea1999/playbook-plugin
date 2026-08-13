@@ -64,6 +64,23 @@ Nothing is inferred on your behalf: if you declare no command, the skill will no
 
 **Commit the file.** Nothing forces you to — `merge-verify.py` runs whatever `.agent/config.json` it finds on disk — but an untracked config means the gate exists only in your clone: your merges verify, everyone else's report SKIPPED. `tasks doctor` warns when a `merge_verify` is declared in a file git isn't tracking. And because the command is read from the *merged* tree, an incoming branch can change it — the same trust you already extend to running that branch's tests, but worth a `git diff "$target_before" -- .agent/config.json` when the branch isn't yours.
 
+## `.agent/config.json` — `standing_gates` (project policy)
+
+Gates your project wants on **every** task — a journal entry, a changelog line — declared once instead of hand-added (and hand-relocated) per task:
+
+```json
+{
+  "standing_gates": [
+    {"title": "Journal", "text": "Write journal/{{NNN}}.md — Shipped / Friction / Value / Honesty-check / One-change"},
+    {"title": "Changelog", "text": "Add the user-visible change to CHANGELOG.md"}
+  ]
+}
+```
+
+Each entry becomes a `## <title>` section with a single `- [ ] <text>` gate, appended in declared order as the **final gates** of every generated task — base templates, `quick`, custom `.agent/playbooks/` templates, and stub expansion alike (a stub gains them when it expands at activation). `{{NNN}}` in title or text substitutes the zero-padded task number. The Stop hook enforces them like any other gate.
+
+Rules, all loud: the key is **opt-in** (absent means task generation is byte-identical to before — `init` seeds none); title and text are collapsed to a single line so a config value can never mint a phantom section or gate; an entry that is malformed, or whose title collides with a section the task already has, is skipped with a printed warning — never silently written, never silently dropped. Like `merge_verify`, this is project policy: commit the file so every clone generates the same tasks.
+
 ## `.agent/models.json` — judge panel pins
 
 Judge selection lives in `models.json`: the plugin ships defaults in `provider/models.json`, and each install can shadow them per key with a gitignored `.agent/models.json`:
