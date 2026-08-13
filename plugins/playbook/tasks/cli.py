@@ -4182,10 +4182,25 @@ def main():
         # (wired via the plugin's hooks.json), not in the project tree. Resolve
         # that dir too so doctor doesn't false-negative "missing" on every
         # plugin install even though the gates demonstrably fire.
+        #
+        # F16 (batch-4): resolve the RUNNING code's own scripts dir — the same
+        # tree the version check reads (block 5, task 010) and the copy the
+        # daily `tasks` wrapper resolved to. Without it, doctor hunted
+        # ~/.claude/plugins by mtime and could inspect a DIFFERENT install than
+        # the one executing: 4 FAIL (hooks "missing", truncation, resolver)
+        # while every hook demonstrably enforced all session. The home glob
+        # stays only as a last resort for layouts where the module has no
+        # sibling scripts/ (dev src/ checkouts).
         _plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+        _resolved_install = False
         if _plugin_root and (Path(_plugin_root) / "scripts").is_dir():
             hooks_dirs.append(Path(_plugin_root) / "scripts")
-        else:
+            _resolved_install = True
+        _own_scripts = Path(__file__).resolve().parent.parent / "scripts"
+        if _own_scripts.is_dir():
+            hooks_dirs.append(_own_scripts)
+            _resolved_install = True
+        if not _resolved_install:
             _plugins_home = Path.home() / ".claude" / "plugins"
             if _plugins_home.exists():
                 _found = sorted(_plugins_home.glob("**/playbook/scripts"),

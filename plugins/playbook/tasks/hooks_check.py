@@ -140,6 +140,33 @@ def _installed_playbook_paths(home: Path) -> list[Path]:
     return out
 
 
+def authoritative_hooks_path(env=None) -> "Path | None":
+    """The hooks.json copy belonging to the code that is RUNNING.
+
+    CLAUDE_PLUGIN_ROOT when the host set it (inside a hook context), else the
+    copy shipped alongside this module — the same tree doctor's version check
+    reads (the running module's own manifest, task 010). This is the copy whose
+    defects are actionable for THIS install; every other candidate is another
+    host's copy or a stale cache, and findings there must say so (F16: doctor
+    warned about a grok marketplace-cache copy while the bound install enforced
+    cleanly all session — noise indistinguishable from disease trains people to
+    ignore the check).
+
+    Returns None when neither resolves to a real file (e.g. a dev src/ layout
+    with no hooks dir) — callers then cannot rank copies and should not try.
+    """
+    import os
+
+    env = os.environ if env is None else env
+    plugin_root = env.get("CLAUDE_PLUGIN_ROOT")
+    if plugin_root:
+        p = Path(plugin_root) / "hooks" / "hooks.json"
+        if p.is_file():
+            return p
+    p = Path(__file__).resolve().parent.parent / "hooks" / "hooks.json"
+    return p if p.is_file() else None
+
+
 def candidate_hooks_paths(project_path, env=None) -> list[Path]:
     """Resolve the hooks.json copies a running host might actually load.
 
@@ -204,11 +231,33 @@ def hooks_check_report(project_path, env=None) -> list[tuple[str, str]]:
     so the doctor wiring is a plain for-loop and this function is unit-testable
     with fixture paths. Each warning is labelled with which copy is dirty so a
     clean CLI tree but stale grok copy is distinguishable.
+
+    F16: copies OTHER than the authoritative one (the tree this code runs
+    from / CLAUDE_PLUGIN_ROOT) are labelled as such. Scanning them stays —
+    a stale grok copy WAS the firing one in the AloVet bug — but a finding in
+    a stray cache must not read like a defect in the live install. When no
+    authoritative copy resolves, ranking is impossible and labels stay plain.
     """
     report: list[tuple[str, str]] = []
+    auth = authoritative_hooks_path(env=env)
+    auth_key = None
+    if auth is not None:
+        try:
+            auth_key = str(auth.resolve())
+        except OSError:
+            auth_key = None
     for path in candidate_hooks_paths(project_path, env=env):
+        label = f"hooks: {path}"
+        if auth_key is not None:
+            try:
+                is_auth = str(path.resolve()) == auth_key
+            except OSError:
+                is_auth = False
+            if not is_auth:
+                label = (f"hooks (other install copy — not the one this CLI "
+                         f"runs from): {path}")
         for issue in hook_command_issues(path):
-            report.append((f"hooks: {path}", issue))
+            report.append((label, issue))
     return report
 
 
