@@ -6,6 +6,10 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 The field-backlog release: every item below carries evidence from the StrataDB stress test (batches 1–4) or the 1.5.4 full-surface gauntlet — see the fork owner's lab notebook.
 
+### Tests
+
+- **The monitor skill has tests** (it shipped with zero). `tests/test_monitor_sensor.py` (23) pins the mechanical seams: sensor JSONL extraction (noise/isMeta filters, malformed-line resilience, thinking markers, turn boundaries), BYTE-offset arithmetic under real multi-byte UTF-8 (the fixture now writes raw UTF-8 like the real session files — an all-ASCII fixture was proven toothless by mutation), incremental resume, `wait_once` (cold start seeds at EOF, turn-end flush, stall flush for crashed agents, dead-pid exit, nothing-happened → nothing reported), the `monitor-nudge.sh` delivery hook (pending nudge consumed/emitted/logged; **no nudge → no output**; the monitor's own session never eats its own nudge; malformed lane markers deliver nothing), and `bootstrap.sh` guards (no project dir / no session id / shell-metacharacter SESSION_ID all refused; happy path emits the COMMANDS briefing and seeds the offset at EOF). What the monitor *decides* — nudge or silence, judgment quality — is LLM work and is deliberately not asserted; the tests cover everything that feeds and delivers those decisions.
+
 ### Verified
 
 - **The close-time tree-state freshness advisory fires** (F17 — flagged unverifiable in the field because it is console-only). Reproduced end-to-end under the field scenario's exact conditions (impl round stamped, code edited post-panel, close): the advisory prints; a matching fingerprint stays silent. The 1.5.3 suite never exercised the close path — `tests/test_freshness_advisory.py` now pins mismatch-fires, match-silent, and no-impl-round-silent.
