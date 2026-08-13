@@ -6,6 +6,10 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 The field-backlog release: every item below carries evidence from the StrataDB stress test (batches 1–4) or the 1.5.4 full-surface gauntlet — see the fork owner's lab notebook.
 
+### Verified
+
+- **The close-time tree-state freshness advisory fires** (F17 — flagged unverifiable in the field because it is console-only). Reproduced end-to-end under the field scenario's exact conditions (impl round stamped, code edited post-panel, close): the advisory prints; a matching fingerprint stays silent. The 1.5.3 suite never exercised the close path — `tests/test_freshness_advisory.py` now pins mismatch-fires, match-silent, and no-impl-round-silent.
+
 ### Fixed
 
 - **Chat attribution can no longer go blind on the messages that matter most** (F2 — the judges' intent-check lens ran with no data on the first real panels). Three legs, one class: (1) the earliest-activated task's attribution window now opens at the epoch, not at its activation — the message that DEFINES a project (the owner's mandate) predates `tasks work 1` by construction and was unattributable to anything; (2) `tasks tag` applies the same pre-history rule when writing `<!-- TNNN -->` spans; (3) `tasks context` falls back to timestamp-window attribution (gate entries + bash_history — the same fallback `tasks intent`'s chat layer already had) when no spans exist, because nothing runs `tasks tag` automatically, so the span-only reader was blind for EVERY task on real projects. Verified against the real field data: task 001 now returns the mandate, task 010 returns the owner's "go with transactions" decision. Still fails loudly when nothing is attributable, and the provenance note goes to stderr — stdout stays pure messages. Also: `extract_chatlog` no longer leaks the `(provider/pid)` header suffix into message text (same disease `tasks log` had, fixed in 1.4.3; the extractor was missed).
