@@ -204,9 +204,12 @@ def extract_chatlog(path: Path, task_windows: dict[int, tuple[str, str]] | None 
     content = path.read_text(encoding="utf-8", errors="replace")
     messages = []
 
-    # Pattern: **[M001]** [2026-02-14 10:14:45 UTC] `HOST`
+    # Pattern: **[M001]** [2026-02-14 10:14:45 UTC] `HOST` (claude/pid-123)
+    # The (provider/pid) suffix is optional: multi-provider tagging added it in
+    # 1.4.3 and it must not leak into message text (same disease `tasks log`
+    # had; entries from before the suffix still parse).
     msg_pattern = re.compile(
-        r'\*\*\[M(\d+)\]\*\*\s+\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+UTC)?)\]\s+`(\w+)`'
+        r'\*\*\[M(\d+)\]\*\*\s+\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+UTC)?)\]\s+`(\w+)`(?:[ \t]*\([^)\n]*\))?'
     )
 
     # Split on message headers
@@ -292,6 +295,14 @@ def build_task_windows(chatlog_path: Path, bash_history_path: Path | None = None
     sorted_tasks = sorted(windows.items(), key=lambda x: x[1])
     result = {}
     for i, (task_num, start_ts) in enumerate(sorted_tasks):
+        if i == 0:
+            # F2 (first-task attribution): the earliest-activated task's window
+            # opens at the epoch, not at its activation. The message that
+            # DEFINES a project — the owner's mandate — predates `tasks work 1`
+            # by construction, and a window that starts at activation makes
+            # exactly that message unattributable. Pre-history IS the seed of
+            # the first task; later windows are unaffected.
+            start_ts = "0000-01-01 00:00:00"
         if i + 1 < len(sorted_tasks):
             end_ts = sorted_tasks[i + 1][1]
         else:

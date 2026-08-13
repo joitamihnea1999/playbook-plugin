@@ -3215,8 +3215,40 @@ def main():
             spans.append("\n".join(current_span))
 
         if not spans:
-            print(f"No attributed messages for task {task_num}.", file=sys.stderr)
-            sys.exit(1)
+            # F2 (untagged projects): `<!-- TNNN -->` spans are written only by
+            # `tasks tag`, which nothing runs automatically — so this path was
+            # blind for EVERY task on most projects while gate entries +
+            # bash_history held everything needed to attribute messages. Fall
+            # back to timestamp-window attribution (the same fallback `tasks
+            # intent`'s chat layer uses); still fail loudly when nothing is
+            # attributable. stdout stays pure messages — the provenance note
+            # goes to stderr.
+            fallback_msgs = []
+            try:
+                _n = int(task_num)
+            except ValueError:
+                _n = None
+            if _n is not None:
+                from tasks.retro import build_task_windows, extract_chatlog
+                _bash_history = resolve_agent_dir(project_path) / "bash_history"
+                _windows = build_task_windows(
+                    chat_log, _bash_history if _bash_history.exists() else None)
+                if _n in _windows:
+                    fallback_msgs = [m for m in extract_chatlog(chat_log, _windows)
+                                     if m.get("task") == _n]
+            if not fallback_msgs:
+                print(f"No attributed messages for task {task_num}.", file=sys.stderr)
+                sys.exit(1)
+            print(f"note: no <!-- T{task_num} --> tags in chat_log.md; messages "
+                  "attributed via timestamp window (gate entries + bash_history). "
+                  "Run `tasks tag` to persist attribution.", file=sys.stderr)
+            _max_line = 200
+            for m in fallback_msgs:
+                text = " ".join(m["text"].split())
+                if len(text) > _max_line:
+                    text = text[:_max_line] + "..."
+                print(f"[M{m['id']:03d}] {text}")
+            # spans is empty: the tagged-span output loop below is a no-op.
 
         # Token-efficient output: strip markdown boilerplate, one line per message
         import re as _re
@@ -3504,7 +3536,11 @@ def main():
             """Return task number active at timestamp ts, or None."""
             idx = bisect_right(trans_times, ts) - 1
             if idx < 0:
-                return None
+                # F2 (first-task attribution): messages before the first
+                # activation are the project seed — the mandate that produced
+                # the first task. Attribute them to the first task ever
+                # activated instead of dropping them.
+                return next((t for _, t in transitions if t is not None), None)
             return transitions[idx][1]
 
         # 2. Scan chat_log.md, find message headers with timestamps,
