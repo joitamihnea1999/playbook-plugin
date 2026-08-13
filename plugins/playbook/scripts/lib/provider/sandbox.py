@@ -448,16 +448,19 @@ def build_bwrap_argv(
     rw_paths = _normalize_rw(extra_rw)
 
     argv = ["bwrap", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"]
-    project_bind = "--bind" if project_writable else "--ro-bind"
-    argv += [project_bind, project, project, "--bind", "/tmp", "/tmp"]
+
+    # ORDER IS LOAD-BEARING: in bwrap, later binds stack over earlier ones.
+    # The broad read-write mounts (/tmp, the write log, per-agent home subpaths)
+    # go FIRST, and the project bind goes AFTER them — so a project that happens
+    # to live UNDER one of those paths (a /tmp checkout, a scratch clone) is
+    # still governed by its own bind. The original order bound the project
+    # first and /tmp second, which silently re-exposed a /tmp-resident project
+    # read-write in judge mode — found by an empirical spike, 2026-08-13.
+    argv += ["--bind", "/tmp", "/tmp"]
 
     write_log_dir = home / ".local" / "share" / "playbook"
     write_log_dir.mkdir(parents=True, exist_ok=True)
     argv += ["--bind", str(write_log_dir), str(write_log_dir)]
-
-    if git_dir:
-        git_resolved = str(Path(git_dir).resolve())
-        argv += ["--ro-bind", git_resolved, git_resolved]
 
     # Pre-create + bind per-agent home subpaths.
     for sub in (".claude", *_HOME_RW_SUBPATHS):
@@ -465,6 +468,17 @@ def build_bwrap_argv(
         target.mkdir(parents=True, exist_ok=True)
         argv += ["--bind", str(target), str(target)]
 
+    project_bind = "--bind" if project_writable else "--ro-bind"
+    argv += [project_bind, project, project]
+
+    # .git stays read-only even when the project is writable — after the
+    # project bind so it wins the overlap.
+    if git_dir:
+        git_resolved = str(Path(git_dir).resolve())
+        argv += ["--ro-bind", git_resolved, git_resolved]
+
+    # extra_rw (the judge workspace / outdir) deliberately LAST: it must stay
+    # writable even when it lives inside a read-only project.
     for rw in rw_paths:
         Path(rw).mkdir(parents=True, exist_ok=True)
         argv += ["--bind", rw, rw]
