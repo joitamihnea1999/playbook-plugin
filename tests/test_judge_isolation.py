@@ -153,6 +153,42 @@ class TamperGuardTest(unittest.TestCase):
         before = tcli._snapshot_repo_state(d, tf)
         self.assertEqual(tcli._detect_tamper(d, tf, before), [])
 
+    def test_monitor_state_churn_is_not_tamper(self):
+        # F22 (batch-7 wake 3): the conversation monitor writes trace.md /
+        # session.md in .agent/monitor/ WHILE a panel runs — a sanctioned
+        # concurrent writer, OS-contained to exactly that dir. Its churn cost
+        # the agent a verification cycle when the tamper banner named it.
+        d = self._git_repo()
+        tf = d / "task.md"
+        tf.write_text("gate1\n")
+        mon = d / ".agent" / "monitor"
+        mon.mkdir(parents=True)
+        (mon / "trace.md").write_text("wake 1\n")
+        lane_mon = d / ".agent" / "alice" / "monitor"
+        lane_mon.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
+        before = tcli._snapshot_repo_state(d, tf)
+        (mon / "trace.md").write_text("wake 1\nwake 2\n")     # tracked churn
+        (mon / "session.md").write_text("judgment\n")          # new file
+        (lane_mon / "trace.md").write_text("lane wake\n")      # per-user lane
+        self.assertEqual(tcli._detect_tamper(d, tf, before), [],
+                         "monitor state churn must not read as judge tampering")
+
+    def test_non_monitor_agent_file_still_flags(self):
+        # Negative control: the exclusion is the monitor dir ONLY — a new file
+        # elsewhere under .agent (or anywhere) still trips the guard.
+        d = self._git_repo()
+        tf = d / "task.md"
+        tf.write_text("gate1\n")
+        (d / ".agent").mkdir()
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
+        before = tcli._snapshot_repo_state(d, tf)
+        (d / ".agent" / "monitor-notes.md").write_text("rogue\n")
+        changes = tcli._detect_tamper(d, tf, before)
+        self.assertTrue(changes, "a non-monitor .agent file must still flag")
+
     def test_git_tamper_catches_taskmd_edit_and_new_file(self):
         d = self._git_repo()
         tf = d / "task.md"

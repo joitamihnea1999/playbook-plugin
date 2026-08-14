@@ -567,7 +567,11 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     porcelain = None
     try:
         r = subprocess.run(
-            ["git", "-C", str(project_path), "status", "--porcelain"],
+            # -uall: enumerate untracked files INDIVIDUALLY. A collapsed
+            # `?? newdir/` line hides what is inside — the F22 monitor
+            # exclusion needs full paths to match, and naming each rogue
+            # file is strictly better evidence than naming its directory.
+            ["git", "-C", str(project_path), "status", "--porcelain", "-uall"],
             capture_output=True, text=True, timeout=30,
             encoding="utf-8", errors="replace",
         )
@@ -720,8 +724,16 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     changes: list[str] = []
     b_porc, a_porc = before.get("porcelain"), after.get("porcelain")
     if b_porc is not None and a_porc is not None and b_porc != a_porc:
+        # F22: the conversation monitor writes trace.md/session.md under
+        # `.agent/monitor/` (or `.agent/<user>/monitor/`) WHILE panels run —
+        # a sanctioned concurrent writer whose own sandbox confines it to
+        # exactly that directory, so churn there is expected, not a judge
+        # writing the repo. Everything else under .agent still flags.
+        _monitor_re = re.compile(r"^..\s+\"?\.agent(/[^/]+)?/monitor/")
         new_lines = set(a_porc.splitlines()) - set(b_porc.splitlines())
         for line in sorted(new_lines):
+            if _monitor_re.match(line):
+                continue
             changes.append(f"working tree: {line.strip()}")
     b_hash, a_hash = before.get("task_hash"), after.get("task_hash")
     if b_hash and a_hash and b_hash != a_hash:
