@@ -23,10 +23,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# Import the helpers from the tasks package (cli.py guards its dispatch under __main__).
+# Import the helpers from the tasks package (moved out of cli.py by the 1.5.9 split).
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
-from tasks.cli import (  # noqa: E402
+from tasks.mindmap import (  # noqa: E402
     _load_mind_map, _trim_mind_map_by_node, _trim_mind_map_by_lines,
 )
 

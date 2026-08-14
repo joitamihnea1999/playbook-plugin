@@ -12,10 +12,10 @@ import sys
 import unittest
 from pathlib import Path
 
-# Import the helper from the tasks package (cli.py guards its dispatch under __main__).
+# Import the helper from the tasks package (moved out of cli.py by the 1.5.9 split).
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
-from tasks.cli import (  # noqa: E402
+from tasks.mindmap import (  # noqa: E402
     sort_overflow_by_id, _scan_overflow_ids, _node_starts, _parse_nodes,
     _unnumbered_tail, _unnumbered_tail_notice,
 )
