@@ -39,7 +39,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
 
 from tasks import template  # noqa: E402
-from tasks.cli import (  # noqa: E402
+from tasks.review import (  # noqa: E402
     _findings_markers,
     _neutralise_markers,
     _panel_triage_frame,
@@ -331,17 +331,17 @@ class AtomicityTest(unittest.TestCase):
         _write_review_findings(f, "plan", "good findings")
         intact = f.read_bytes()
 
-        import tasks.cli as cli_mod
-        orig_replace = cli_mod.os.replace
+        import tasks.review as review_mod
+        orig_replace = review_mod.os.replace
 
         def boom(src, dst):
             raise OSError("simulated interrupt")
 
-        cli_mod.os.replace = boom
+        review_mod.os.replace = boom
         try:
             reason = _write_review_findings(f, "plan", "should not land")
         finally:
-            cli_mod.os.replace = orig_replace
+            review_mod.os.replace = orig_replace
 
         self.assertIsNotNone(reason)
         self.assertEqual(intact, f.read_bytes())

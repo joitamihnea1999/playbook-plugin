@@ -31,6 +31,7 @@ from provider.adapters.codex import CodexAdapter  # noqa: E402
 from provider.adapters.grok import GrokAdapter  # noqa: E402
 from provider.adapters.pi import PiAdapter  # noqa: E402
 from tasks import cli as tcli  # noqa: E402
+from tasks import review as treview  # noqa: E402  (tamper trio moved by the 1.5.9 split)
 
 
 def _ok_result(stdout="REVIEW BODY"):
@@ -150,8 +151,8 @@ class TamperGuardTest(unittest.TestCase):
         tf.write_text("gate1\n")
         subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
-        before = tcli._snapshot_repo_state(d, tf)
-        self.assertEqual(tcli._detect_tamper(d, tf, before), [])
+        before = treview._snapshot_repo_state(d, tf)
+        self.assertEqual(treview._detect_tamper(d, tf, before), [])
 
     def test_monitor_state_churn_is_not_tamper(self):
         # F22 (batch-7 wake 3): the conversation monitor writes trace.md /
@@ -168,11 +169,11 @@ class TamperGuardTest(unittest.TestCase):
         lane_mon.mkdir(parents=True)
         subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
-        before = tcli._snapshot_repo_state(d, tf)
+        before = treview._snapshot_repo_state(d, tf)
         (mon / "trace.md").write_text("wake 1\nwake 2\n")     # tracked churn
         (mon / "session.md").write_text("judgment\n")          # new file
         (lane_mon / "trace.md").write_text("lane wake\n")      # per-user lane
-        self.assertEqual(tcli._detect_tamper(d, tf, before), [],
+        self.assertEqual(treview._detect_tamper(d, tf, before), [],
                          "monitor state churn must not read as judge tampering")
 
     def test_non_monitor_agent_file_still_flags(self):
@@ -184,9 +185,9 @@ class TamperGuardTest(unittest.TestCase):
         (d / ".agent").mkdir()
         subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
-        before = tcli._snapshot_repo_state(d, tf)
+        before = treview._snapshot_repo_state(d, tf)
         (d / ".agent" / "monitor-notes.md").write_text("rogue\n")
-        changes = tcli._detect_tamper(d, tf, before)
+        changes = treview._detect_tamper(d, tf, before)
         self.assertTrue(changes, "a non-monitor .agent file must still flag")
 
     def test_git_tamper_catches_taskmd_edit_and_new_file(self):
@@ -195,10 +196,10 @@ class TamperGuardTest(unittest.TestCase):
         tf.write_text("gate1\n")
         subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
-        before = tcli._snapshot_repo_state(d, tf)
+        before = treview._snapshot_repo_state(d, tf)
         tf.write_text("gate1 REWRITTEN BY ROGUE\n")   # task.md rewrite
         (d / "task_audit.md").write_text("fabricated\n")  # new rogue file
-        changes = tcli._detect_tamper(d, tf, before)
+        changes = treview._detect_tamper(d, tf, before)
         joined = " ".join(changes)
         self.assertIn("task.md", joined)
         self.assertIn("task_audit.md", joined)
@@ -208,15 +209,15 @@ class TamperGuardTest(unittest.TestCase):
         d = Path(tempfile.mkdtemp())
         tf = d / "task.md"
         tf.write_text("a\n")
-        before = tcli._snapshot_repo_state(d, tf)
+        before = treview._snapshot_repo_state(d, tf)
         self.assertIsNone(before["porcelain"])          # not a git repo
         self.assertIsNotNone(before["task_hash"])
-        self.assertEqual(tcli._detect_tamper(d, tf, before), [])   # unchanged
+        self.assertEqual(treview._detect_tamper(d, tf, before), [])   # unchanged
         tf.write_text("b\n")
-        self.assertTrue(tcli._detect_tamper(d, tf, before))        # changed
+        self.assertTrue(treview._detect_tamper(d, tf, before))        # changed
 
     def test_banner_names_changes_and_says_do_not_ingest(self):
-        banner = tcli._tamper_banner(["working tree: ?? rogue.md",
+        banner = treview._tamper_banner(["working tree: ?? rogue.md",
                                       "task.md content changed (task.md)"])
         self.assertIn("TAMPER DETECTED", banner)
         self.assertIn("rogue.md", banner)
@@ -227,8 +228,8 @@ class TamperGuardTest(unittest.TestCase):
         # detector must return [] (no false positive), not crash.
         import tempfile
         d = Path(tempfile.mkdtemp())
-        before = tcli._snapshot_repo_state(d, None)
-        self.assertEqual(tcli._detect_tamper(d, None, before), [])
+        before = treview._snapshot_repo_state(d, None)
+        self.assertEqual(treview._detect_tamper(d, None, before), [])
 
 
 if __name__ == "__main__":

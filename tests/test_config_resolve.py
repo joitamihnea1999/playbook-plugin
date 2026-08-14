@@ -564,7 +564,7 @@ class EffortFlagScopeTest(unittest.TestCase):
 
     Two paths exist and are easy to forget: the panel seat goes through
     ClaudeAdapter.run_headless_judge, while `plan-review --backend claude`
-    assembles its own argv in tasks/cli.py. A depth setting on one and not the
+    assembles its own argv in tasks/review.py. A depth setting on one and not the
     other means the same judge reviews differently depending on how it was
     invoked.
     """
@@ -574,7 +574,7 @@ class EffortFlagScopeTest(unittest.TestCase):
     def test_both_claude_launch_paths_pass_effort_high(self):
         adapter = (self.PLAYBOOK / "provider" / "adapters" / "claude.py").read_text(
             encoding="utf-8")
-        cli = (self.PLAYBOOK / "tasks" / "cli.py").read_text(encoding="utf-8")
+        cli = (self.PLAYBOOK / "tasks" / "review.py").read_text(encoding="utf-8")
         self.assertIn('"--effort", "high"', adapter)
         self.assertIn('"--effort", "high"', cli)
 
