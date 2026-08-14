@@ -1,15 +1,24 @@
-"""CLI entry point for standalone tasks management."""
+"""CLI entry point for standalone tasks management — DISPATCH ONLY.
+
+Boundary (the 1.5.9 split, design-1.5.9.md): this module parses argv, runs
+the session-GC sweep, and routes each command to its owning module — nothing
+else. Command bodies live in: tasks/lifecycle.py (work/close/new/blocked/
+parked/freehand), tasks/review.py (panel + single-judge), tasks/history.py
+(context/intent/timeline/tagger/tag/retro/log), tasks/diagnostics.py
+(doctor/audit), tasks/project_setup.py (init/bootstrap), tasks/mindmap.py
+(mindmap-sync + map parsing), tasks/merge_prep.py (prepare-merge/
+merge-doctor); shared helpers in tasks/shared.py. The trivial list/status/
+models delegates stay inline. Dispatch branches import lazily (house style;
+also keeps startup flat and cycles impossible). The if/elif chain's shape is
+load-bearing: tests/test_cli_dispatch.py parses it against COMMANDS, and the
+readme-audit skill greps it to count subcommands. `python3 -m tasks.cli` is
+the shipped entry (scripts/tasks execs it) — main() stays here forever.
+"""
 from __future__ import annotations
 
-import os
-import re
-import shutil
 import sys
-import time
-from pathlib import Path
-from tasks.core import create_task, list_tasks, task_status, PLAYBOOKS, _find_playbook_skill, resolve_session_id, resolve_agent_dir, require_lane_marker, run_merge_doctor
-from tasks.shared import find_project_root, _gc_dead_sessions, _merge_verify_module
-from tasks.mindmap import _load_mind_map
+from tasks.core import list_tasks, task_status
+from tasks.shared import find_project_root, _gc_dead_sessions
 
 # Every top-level command the dispatcher accepts, aliases included. Pinned two
 # ways by tests/test_cli_dispatch.py: this tuple must equal the dispatch
