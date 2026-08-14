@@ -9,6 +9,19 @@ import time
 from pathlib import Path
 from tasks.core import create_task, list_tasks, task_status, PLAYBOOKS, _find_playbook_skill, resolve_session_id, resolve_agent_dir, require_lane_marker, run_merge_doctor
 
+# Every top-level command the dispatcher accepts, aliases included. Pinned two
+# ways by tests/test_cli_dispatch.py: this tuple must equal the dispatch
+# chain's literals, and every entry must reach its arm through a real
+# `python3 -m tasks.cli <cmd>` invocation — so a module peel can never orphan
+# an arm silently. Keep it in dispatch order.
+COMMANDS = (
+    "work", "new", "init", "bootstrap", "list", "ls", "panel-review",
+    "models", "plan-review", "impl-review", "judge", "context", "intent",
+    "timeline", "tagger", "tag", "retro", "status", "audit", "blocked",
+    "parked", "freehand", "doctor", "merge-doctor", "mindmap-sync", "log",
+    "prepare-merge",
+)
+
 
 def _state_file(project_path: Path) -> Path:
     """Return per-session state file under .agent/sessions/<id>/current_state."""
