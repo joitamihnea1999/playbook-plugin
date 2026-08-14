@@ -82,7 +82,7 @@ print(t if isinstance(t, str) and t and '\n' not in t and '\r' not in t else '')
 
     # GC: sweep session dirs from crashed/killed sessions.
     #
-    # CANONICAL POLICY LIVES IN `tasks/cli.py::_gc_dead_sessions` — this is its
+    # CANONICAL POLICY LIVES IN `tasks/shared.py::_gc_dead_sessions` — this is its
     # bash twin, and the two MUST agree. Both run against the same directory:
     # this one at SessionStart, that one at every CLI invocation.
     #

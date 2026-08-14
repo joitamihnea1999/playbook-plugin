@@ -821,7 +821,7 @@ echo "=== S18: SessionStart GC must not delete a live session (field report 2026
     # therefore had its OWN pointer rm -rf'd at the next SessionStart, which
     # fires on `compact` too — and task-gate-hook then hard-blocks Edit/Write.
     #
-    # The policy is now `tasks/cli.py::_gc_dead_sessions`' policy, and S18
+    # The policy is now `tasks/shared.py::_gc_dead_sessions`' policy, and S18
     # asserts BOTH sweepers agree on the same tree (A2 below).
     #
     # Ages are deliberately far from the 24h boundary (now vs 2020) — `find
@@ -912,7 +912,7 @@ echo "=== S18: SessionStart GC must not delete a live session (field report 2026
     set +e
     pyout="$(cd "$d2" && PYTHONPATH="$HERE/../plugins/playbook" PLAYBOOK_SESSION_ID="$OWN" \
         python3 -c 'import sys; from pathlib import Path
-from tasks.cli import _gc_dead_sessions
+from tasks.shared import _gc_dead_sessions
 _gc_dead_sessions(Path(sys.argv[1]))' "$d2" 2>&1)"; pyrc=$?
     set -e
     assert_eq "$pyrc" "0" "S18/A2 python sweeper runs clean${pyout:+ ($pyout)}"
