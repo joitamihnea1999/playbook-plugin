@@ -75,8 +75,11 @@ Report:
 
 ```bash
 # List tasks that are pending or in_progress
-PYTHONPATH=src python3.12 -m tasks.cli list --pending
+.claude/bin/tasks list --pending
 ```
+
+If that fails (a plugin source checkout with no installed wrapper), try the
+local dev path: `PYTHONPATH=plugins/playbook python3 -m tasks.cli list --pending`.
 
 Flag any pending/in_progress tasks older than 2 weeks with no recent git activity in their directory.
 
