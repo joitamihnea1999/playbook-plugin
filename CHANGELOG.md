@@ -2,6 +2,23 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.7] — 2026-08-14
+
+The batch-6 release: three field findings from the first 1.5.6 workload (StrataDB task 012, v3 concurrency) — one of them owner-found in the monitor's first attached run.
+
+### Fixed
+
+- **The monitor binds to the session's OWN transcript (F19, owner-found).** It used to resolve its target as "newest `.jsonl` by mtime at bootstrap moment" — unlinked to the pid it announced — and in batch 6 it tailed a stale conversation's EOF for 40 minutes while the real session streamed megabytes into other files. Now: the session-start and state-echo hooks record the hook payload's `transcript_path` into `.agent/sessions/<id>/transcript_path` (refreshed every tool call, so a compaction rollover moves the pointer); bootstrap prefers the pointer ("session-bound" in the briefing) and falls back to the mtime guess only with a loud warning; the sensor takes `--pointer-file` and re-resolves every invocation, resetting its offset when the pointer moves to a different file (the offset file is now path-aware; legacy int-only files still parse).
+
+### Changed
+
+- **The born-checked block shows the closest open gate to restore (F20).** The batch-6 agent truncated a parenthetical while appending an outcome and "had to eyeball what I'd dropped" across 3 retries. Each born-checked line now carries the nearest OPEN original underneath, so restoration is copy-paste; a fabricated gate with no near-miss gets no hint.
+- **Activation nudges the parked-consumption marker (F21).** Task 012 consumed task 010's parked item — the designed pickup — but nothing at the consumption moment taught `[promoted → NNN]`, so the source entry still read open. `tasks work <N>` now prints one line when open parked items exist in earlier tasks; silent when all are resolved.
+
+### Tests
+
+- 821 → **833**: transcript binding (hooks record/refuse-newline, bootstrap pointer-beats-decoy + loud fallback + pointer-following WAIT command, sensor pointer override + switch-resets-offset + stable-pointer persistence control), born-checked closest-original + no-hint control, parked-pickup nudge + all-resolved silence control. All new behaviors watched red or mutation-checked.
+
 ## [1.5.6] — 2026-08-14
 
 The batch-5 release: every item traces to the first real 1.5.5 workload (StrataDB task 011, the v3 migration) or the gauntlet-155 live pass — see the fork owner's lab notebook.
