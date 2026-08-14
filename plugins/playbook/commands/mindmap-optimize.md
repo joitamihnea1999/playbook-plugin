@@ -41,6 +41,28 @@ For each node in MIND_MAP.md, check if the files/paths/concepts it references st
 
 Flag nodes that reference files or directories that no longer exist.
 
+### 3b. Claim consistency scan
+
+Staleness (step 3) catches dead file paths; this catches **live contradictions** —
+the same project fact stated with different truth values in different nodes.
+Field origin: StrataDB batch 5 — the owning node said the migration slice
+"shipped (task 011)" while the overview node still said it was "still ahead";
+the path-based scan cannot see this.
+
+For each claim about project state (shipped / complete / done / in progress /
+still ahead / planned / TODO) that appears in MORE THAN ONE node:
+
+- Collect every node restating the claim (overview/hub nodes are the usual
+  offenders — they summarize owning nodes and go stale when the owning node
+  is updated in place).
+- If the statements disagree, flag a **claim contradiction**: name both nodes,
+  quote both sentences, and identify the owning node (the one whose subsystem
+  the fact belongs to — it is almost always the fresher one, but verify
+  against the repo/git history, not by assuming).
+- Recommended fix direction: update the hub node's sentence in place, or
+  compress the hub to a bare `[N]` pointer so the fact lives in ONE node and
+  cannot fork again.
+
 ### 4. Size and compression analysis
 
 Report:
@@ -82,6 +104,9 @@ Print a structured report:
 
 ### Stale Nodes
 (nodes referencing nonexistent files/paths, or "None")
+
+### Claim Contradictions
+(same fact, different truth values across nodes — both quotes + owning node, or "None")
 
 ### Broken Cross-References
 (list or "None")
