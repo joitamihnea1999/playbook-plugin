@@ -2,6 +2,30 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.9] — 2026-08-14
+
+The structural release: `tasks/cli.py` — 4,868 lines, every command arm inside one 3,475-line `main()` — split into eight cohesive modules behind a dispatch-only entry point. A behavior-preserving refactor, executed leaf-first with the close path moved last, one commit per peel, suite green at every commit; design (`design-1.5.9.md`, fork owner's notebook) red-teamed and blind-judged (PASS-conditional; all five conditions built, including the judge's Critical catch below).
+
+### Fixed
+
+- **Both review arms crashed on a trimmed task.md (judge F1, Critical — live since 1.5.3, pre-existing).** Sibling arms' local `import re` statements made `re` a local of the whole `main()`, so the two bare `re.search` trim-notice sites (panel `_build_payload`; the single-review context build) raised UnboundLocalError whenever `select_task_context` actually trimmed an oversized task.md. Unreached in the field only because every task.md fit its budget. Found by the split's blind judge inspecting `main.__code__.co_cellvars` — proof that 837 green tests did not pin uncovered paths, and fixed BEFORE the split in its own commit so the move could not silently repair an untested crash. Regression test drives both arms through the real CLI with a ~165k task.md.
+- **User-facing path hints name the RESOLVED lane (genesis cosmetic, F-class widened).** `tasks list` on a multi-user repo printed `Task files: .agent/tasks/<name>/task.md` — a path that does not exist there. All 11 sites that named a lane-resident path with the single-user literal (the list hint, both "No .agent/tasks/ directory found" sites, the chat_log/bash_history not-found messages in context/timeline/tagger/tag/log, freehand log) now print the path the command actually resolved. Single-user output is byte-unchanged.
+- **mindmap-optimize's abandoned-task scan command works in real projects.** Step 5's only command was the dev-repo-shaped `PYTHONPATH=src python3.12 -m tasks.cli list --pending`, which fails everywhere the skill actually runs; found by driving the skill end-to-end against a real map. Now the installed-wrapper form with a dev fallback.
+
+### Changed
+
+- **cli.py is dispatch-only: 168 lines.** Command bodies moved verbatim to `tasks/lifecycle.py` (work/close/new/blocked/parked/freehand), `tasks/review.py` (panel + single-judge + tamper machinery), `tasks/history.py` (context/intent/timeline/tagger/tag/retro/log), `tasks/diagnostics.py` (doctor/audit), `tasks/project_setup.py` (init/bootstrap), `tasks/mindmap.py` (map parsing/trim + mindmap-sync), `tasks/merge_prep.py` (prepare-merge/merge-doctor), with shared helpers in `tasks/shared.py` (root discovery, THE session-liveness policy, merge-verify loading). Every module opens with a one-paragraph boundary header; import direction is one-way (shared < mindmap < command modules < cli). `python3 -m tasks.cli` and the shipped wrapper are unchanged; `--help`, `list`, and `doctor` output byte-compared against the pre-split tree.
+- **Doctor check #7 (encoding= on write_text/read_text) scans the whole tasks package** instead of resolving `[cli.py, core.py]` via `sys.modules[__name__]` — the old resolution would have silently shrunk the scan once the arms moved. Output identical today (every module scans clean); a planted-unencoded-call negative control pins that the widened check can still fail.
+
+### Verified live (no code change needed)
+
+- **The lane rename/rename rescue is field-closed** — the last suite-only merge choreography. Scratch two-user repos drove both contamination shapes live: the marker variant AND the doctrine's silent variant (content-merge succeeds with zero conflict markers, both lanes contaminated). `tasks merge-doctor` caught every instance with per-file attribution in both inspection modes (mid-merge and post-merge-commit); staging didn't launder; the Step 4 reset-to-own-branch rescue converged to SAFE TO CONTINUE, idempotent; final lane files byte-identical to their own branches.
+- **`/playbook:intent` and mindmap-optimize ran as full LLM passes** (installed CLI, StrataDB): intent produced 4/4 grounded blind extractions (chat layer via the F2 timestamp-window fallback, dirty-worktree provenance honestly flagged) with the reconciliation seams workable as written; the mindmap 1.5.6 claim-consistency lens caught a real, new contradiction on the live map ([8] "Next roadmap slice is v2 durability" vs [1]/[10] "v3 complete"). F23's single-map degrade also fired correctly through the installed CLI.
+
+### Tests
+
+- 837 → **852**: the dispatch pin (COMMANDS/source parity + per-command baseline markers, exit codes, and no-traceback smoke through the real entry — an orphaned or miswired arm fails loudly; mutation-checked red), the review trim-path regression (watched RED at the real UnboundLocalError), the doctor encoding-scan pair (PASS + planted-failure negative control), and the lane-aware hint matrix (multi-user lane paths + single-user byte-unchanged controls).
+
 ## [1.5.8] — 2026-08-14
 
 The genesis release: findings from the first full-lifecycle gauntlet on a NON-Python project (genesis-ts, TypeScript/node:test) — start on an empty repo, through real panels, F18-in-anger, blocked lifecycle, retro, the merge skill, and multi-user lanes.
