@@ -1875,6 +1875,26 @@ def main():
         # Print the full task file
         print(task_file.read_text(encoding="utf-8").rstrip())
 
+        # F21 (batch-6 finding): the parked lifecycle taught its markers only
+        # at CLOSE (own-task items). The consumption moment — a new task picks
+        # up an EARLIER task's parked item — had no nudge, so task 012 consumed
+        # 010's parked guard and 010's entry still reads open. One line, at
+        # activation, only when parked debt exists.
+        from tasks.core import open_parked_items as _opi
+        _parked_elsewhere = 0
+        try:
+            for _tf in sorted((agent_dir / "tasks").glob("*/task.md")):
+                if _tf == task_file:
+                    continue
+                _parked_elsewhere += len(_opi(_tf.read_text(encoding="utf-8")))
+        except OSError:
+            pass
+        if _parked_elsewhere:
+            print(f"\nnote: {_parked_elsewhere} open parked item(s) in earlier "
+                  "tasks (`tasks parked` to list). If THIS task picks one up, "
+                  f"mark the source entry `[promoted → {task_num}]` so the "
+                  "lifecycle shows it consumed.", flush=True)
+
 
     elif cmd == "new":
         # Parse --stub flag — position-independent, so a trailing
