@@ -1822,11 +1822,12 @@ def main():
 
 
     elif cmd == "new":
-        # Parse --stub flag
-        is_stub = False
-        if cmd_args and cmd_args[0] == "--stub":
-            is_stub = True
-            cmd_args = cmd_args[1:]
+        # Parse --stub flag — position-independent, so a trailing
+        # `tasks new feature name --stub` can't silently become Intent text
+        # (gauntlet-155 wart: the flag was only honored in first position).
+        is_stub = "--stub" in cmd_args
+        if is_stub:
+            cmd_args = [a for a in cmd_args if a != "--stub"]
 
         if len(cmd_args) < 2:
             print("Error: 'new' requires a type and a name", file=sys.stderr)
