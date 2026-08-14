@@ -1406,8 +1406,17 @@ def main():
         if task_num != "done" and task_num.isdigit():
             task_num = task_num.zfill(3)
         force = any(a in ("--force", "-f") for a in cmd_args[1:])
+        # --stale-panel-ok: the NARROW exit from the F18 irreversible freshness
+        # gate — suppresses only that gate, only with a --reason, and the
+        # reason is recorded in the receipt's freshness clause. Deliberately
+        # not folded into --force: batch-5 field data shows agents take the
+        # cheapest sanctioned exit under friction, and the cheap exit must not
+        # be whole-policy bypass.
+        stale_panel_ok = "--stale-panel-ok" in cmd_args[1:]
         # --reason "why": required for any forced close so the escape hatch leaves
-        # a trace (the 046 fix). Stored in the verification receipt.
+        # a trace (the 046 fix). Stored in the verification receipt. Shared by
+        # --stale-panel-ok; when BOTH --force and --stale-panel-ok appear, the
+        # reason is attributed to force (the stronger hatch — judge F5).
         reason = None
         for _i, _a in enumerate(cmd_args):
             if _a == "--reason" and _i + 1 < len(cmd_args):
@@ -1492,6 +1501,63 @@ def main():
                     _panel_req = resolve_panel_required(project_path, risk)
                     _evidence = (has_panel_impl_evidence(task_file) if _panel_req
                                  else has_review_evidence(task_file, impl_only=True))
+
+                    # F18: panel freshness — computed BEFORE the close is
+                    # earned, recorded in the receipt for every close with an
+                    # impl round, and GATING for irreversible closes that rest
+                    # on panel evidence (design-1.5.6.md; blind judge
+                    # conditional-PASS, all conditions built).
+                    from tasks.core import (
+                        freshness_gate_decision, parse_judge_rounds,
+                        tree_state_fingerprint,
+                    )
+                    _jm = task_file.parent / "judge.md"
+                    _rounds = []
+                    if _jm.exists():
+                        try:
+                            _rounds = parse_judge_rounds(
+                                _jm.read_text(encoding="utf-8", errors="replace"))
+                        except OSError:
+                            _rounds = []
+                    _impl = next((r for r in _rounds if r["mode"] == "impl"), None)
+                    # evidence_carries = the panel evidence that would satisfy
+                    # THIS close: rounds[0] impl + PASS (judge C3 — a FAIL
+                    # round or a replan on top falls through to the
+                    # panel-evidence block, never a double-block).
+                    _carries = bool(_panel_req and _rounds
+                                    and _rounds[0]["mode"] == "impl"
+                                    and _rounds[0]["verdict"] == "PASS")
+                    _now_fp = tree_state_fingerprint(project_path) if _impl else ""
+                    _freshness = None
+                    if _impl is not None:
+                        if not _impl["tree_state"]:
+                            # Judge F4: a missing stamp must leave a RECORD
+                            # when panel evidence carries the close — silence
+                            # here would be the one zero-record bypass.
+                            if _carries:
+                                _freshness = {"verdict": "NO-STAMP"}
+                        elif _now_fp:
+                            _stale = _now_fp != _impl["tree_state"]
+                            _freshness = {
+                                "verdict": "STALE" if _stale else "FRESH",
+                                "round_fp": _impl["tree_state"],
+                                "now_fp": _now_fp,
+                                "accepted_reason": (
+                                    reason if (_stale and stale_panel_ok
+                                               and not force) else None),
+                            }
+                    _f_allowed, _f_reason = freshness_gate_decision(
+                        risk=risk, panel_required=_panel_req,
+                        evidence_carries=_carries,
+                        round_fp=(_impl["tree_state"] if _impl else ""),
+                        now_fp=_now_fp, force=force,
+                        stale_ok=stale_panel_ok, stale_reason=reason,
+                    )
+                    if not _f_allowed:
+                        print(f"\nBlocked: cannot close task {prev_task} — {_f_reason}",
+                              file=sys.stderr, flush=True)
+                        sys.exit(1)
+
                     allowed, block_reason = close_decision(
                         risk=risk, verify_declared=bool(commands),
                         verify_failed=verify_failed,
@@ -1543,7 +1609,7 @@ def main():
                         pass
                     receipt = format_verify_receipt(
                         entries, _head, risk, reason=(reason if force else None),
-                        dirty_files=_dirty)
+                        dirty_files=_dirty, freshness=_freshness)
                     upsert_task_section(task_file, "Verification Receipt", receipt)
                     _set_status(task_file, "done")
                     if _dirty:
@@ -1551,28 +1617,17 @@ def main():
                               "receipt describes UNCOMMITTED work. Commit before ending "
                               "the session, or a crash loses 'done' work silently.",
                               flush=True)
-                    # Panel freshness advisory (1.5.3): the newest impl round in
-                    # judge.md stamped the tree-state it reviewed; if the CODE
-                    # state differs now, the verdict predates the current code.
-                    # Advisory, not blocking — fix-findings-then-close is the
-                    # normal loop, and re-panel-after-fixes is the agent's call.
-                    _jm = task_file.parent / "judge.md"
-                    if _jm.exists():
-                        from tasks.core import parse_judge_rounds, tree_state_fingerprint
-                        try:
-                            _rounds = parse_judge_rounds(
-                                _jm.read_text(encoding="utf-8", errors="replace"))
-                        except OSError:
-                            _rounds = []
-                        _impl = next((r for r in _rounds if r["mode"] == "impl"), None)
-                        if _impl and _impl["tree_state"]:
-                            _now_fp = tree_state_fingerprint(project_path)
-                            if _now_fp and _now_fp != _impl["tree_state"]:
-                                print("note: the code state changed after the newest "
-                                      "impl panel (tree-state mismatch) — if code was "
-                                      "edited post-review, consider re-running "
-                                      "`tasks panel-review <N> --mode impl`.",
-                                      flush=True)
+                    # Panel freshness console note (1.5.3 advisory, F18-reworked):
+                    # the receipt clause above is now the durable record; the
+                    # note keeps the mismatch visible in the session where the
+                    # close happened. Uses the already-computed freshness —
+                    # re-parsing here could disagree with what the receipt says.
+                    if _freshness and _freshness.get("verdict") == "STALE":
+                        print("note: the code state changed after the newest "
+                              "impl panel (tree-state mismatch) — if code was "
+                              "edited post-review, consider re-running "
+                              "`tasks panel-review <N> --mode impl`.",
+                              flush=True)
                 # Remove session dirs that reference this task.
                 # PLAYBOOK_SESSION_ID is not set when called from Bash tool, so scan all sessions.
                 # Intentional partial delete: only sessions pointing at prev_task are removed;

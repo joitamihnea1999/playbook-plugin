@@ -891,22 +891,64 @@ def tree_state_fingerprint(project_path: Path) -> str:
     # `.agent/` is EXCLUDED: triaging findings edits task.md between the panel
     # and the close by design — the fingerprint must answer "did the CODE
     # change?", not "did the workflow record change?" (else the advisory fires
-    # on every single close and gets ignored).
+    # on every single close and gets ignored). Projects can extend the
+    # exclusion for owner-declared bookkeeping (`fingerprint_exclude` in
+    # .agent/config.json, git pathspec strings — e.g. "journal/"): a standing
+    # journal gate writes project-side files after the last panel by
+    # construction, and F18's irreversible gate must not tax that.
     exclude = [":(exclude).agent"]
+    try:
+        _cfg = load_config(Path(project_path))
+    except Exception:
+        _cfg = {}
+    _raw_ex = _cfg.get("fingerprint_exclude")
+    if _raw_ex is not None:
+        if not isinstance(_raw_ex, list):
+            print("[playbook] fingerprint_exclude: must be a list of git "
+                  "pathspec strings — ignored", file=sys.stderr)
+        else:
+            for _i, _p in enumerate(_raw_ex):
+                if isinstance(_p, str) and _p.strip() and "\x00" not in _p:
+                    exclude.append(f":(exclude){_p.strip()}")
+                else:
+                    print(f"[playbook] fingerprint_exclude[{_i}]: needs a "
+                          "non-empty pathspec string — skipped", file=sys.stderr)
     try:
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project_path,
                               capture_output=True, text=True).stdout.strip()
         if not head:
             return ""
+        # -uall enumerates untracked files INDIVIDUALLY (a bare `?? dir/`
+        # hides everything inside the directory from the hash below).
         porcelain = subprocess.run(
-            ["git", "status", "--porcelain", "--", ".", *exclude],
+            ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
             cwd=project_path, capture_output=True, text=True).stdout
         diff = subprocess.run(
             ["git", "diff", "HEAD", "--", ".", *exclude],
             cwd=project_path, capture_output=True, text=True).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
-    return hashlib.sha256((head + porcelain + diff).encode("utf-8", "replace")).hexdigest()[:12]
+    # Untracked CONTENT is hashed explicitly (F18 judge C1, verified
+    # empirically): porcelain names an untracked file but never its bytes,
+    # and `diff HEAD` covers tracked paths only — so the pre-1.5.6
+    # fingerprint was blind to edits inside new files, which is exactly
+    # where post-panel fixes land (batches 4 and 5 both did). NOTE: this
+    # changes fingerprint values across the 1.5.5→1.5.6 upgrade; a stamp
+    # from an older round reads STALE once and self-heals at the next panel.
+    untracked_digest = hashlib.sha256()
+    for line in sorted(porcelain.splitlines()):
+        if not line.startswith("?? "):
+            continue
+        rel = line[3:].strip().strip('"')
+        try:
+            content = (Path(project_path) / rel).read_bytes()
+            fhash = hashlib.sha256(content).hexdigest()
+        except OSError:
+            fhash = "unreadable"
+        untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
+    return hashlib.sha256(
+        (head + porcelain + diff + untracked_digest.hexdigest())
+        .encode("utf-8", "replace")).hexdigest()[:12]
 
 
 # One round per `# Panel {Plan|Impl} Review` H1. judge.md stacks rounds NEWEST
@@ -1104,8 +1146,50 @@ def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
     return True, ""
 
 
+def freshness_gate_decision(*, risk: str, panel_required: bool,
+                            evidence_carries: bool, round_fp: str, now_fp: str,
+                            force: bool, stale_ok: bool,
+                            stale_reason: "str | None") -> "tuple[bool, str]":
+    """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built):
+    an IRREVERSIBLE close resting on panel evidence must not silently rest on
+    a verdict that predates the closed code. Pure policy → (allowed, block_reason).
+
+    The gate is deliberately narrow (judge C3): it applies only when the panel
+    evidence would actually CARRY this close — rounds[0] is an impl round with
+    verdict PASS (`evidence_carries`) — so a FAIL round or a replan on top
+    falls through to the panel-evidence block instead of double-blocking, and
+    only when both fingerprints exist and disagree. --force bypasses close
+    policy wholesale as always (A8 — one blunt hatch, unchanged semantics);
+    `--stale-panel-ok --reason "..."` is the narrow exit, and the reason is
+    recorded in the receipt's freshness clause. Advisory (console note +
+    receipt clause, no block) remains the behavior for every other risk:
+    batch 5 showed re-panels happen voluntarily when the delta is material —
+    the block is reserved for the one place a wrong close cannot be undone."""
+    if force:
+        return True, ""
+    if risk != "irreversible" or not panel_required or not evidence_carries:
+        return True, ""
+    if not round_fp or not now_fp or round_fp == now_fp:
+        return True, ""
+    if stale_ok:
+        if stale_reason and stale_reason.strip():
+            return True, ""
+        return False, ('--stale-panel-ok requires --reason "why the post-panel '
+                       "delta doesn't need a re-panel\" — the acceptance must "
+                       "be on the record.")
+    return False, (
+        "risk is irreversible and the code state changed after the newest impl "
+        f"panel (tree-state {round_fp} → {now_fp}) — the panel's verdict "
+        "predates the code being closed.\n"
+        "  Either re-run:  tasks panel-review <N> --mode impl\n"
+        "  or record the delta judgment:  tasks work done --stale-panel-ok "
+        '--reason "..."\n'
+        "  (run `git status` / `git diff` to see what changed since the panel)"
+    )
+
+
 def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=None,
-                          dirty_files=0) -> str:
+                          dirty_files=0, freshness=None) -> str:
     """Render ONE receipt ENTRY for the `## Verification Receipt` section (the
     heading itself belongs to upsert_task_section, which keeps entries
     newest-first). `entries` is a list of (source_label, command, rc, output);
@@ -1122,6 +1206,24 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
     out = [f"### {ts} · risk {risk} · commit {commit_label}"]
     if reason:
         out.append(f"- **Forced close, reason:** {reason.strip()}")
+    # F18 Leg 1: panel freshness is part of the durable record for EVERY close
+    # where an impl round exists (the F17 advisory was console-only and its
+    # firing at task 010 stayed unwitnessable forever). `freshness` is a dict:
+    # {verdict: "FRESH"|"STALE"|"NO-STAMP", round_fp, now_fp, accepted_reason}.
+    if freshness:
+        v = freshness.get("verdict")
+        if v == "NO-STAMP":
+            out.append("- **Panel tree-state:** no stamp recorded on the "
+                       "newest impl round — freshness unverifiable")
+        elif v in ("FRESH", "STALE"):
+            line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} "
+                    f"vs close {freshness.get('now_fp', '?')} — {v}")
+            if v == "STALE":
+                line += " (code changed after newest impl panel)"
+                ar = freshness.get("accepted_reason")
+                if ar:
+                    line += f', accepted: "{ar.strip()}"'
+            out.append(line)
     if not entries:
         out.append("- **Verification:** NONE DECLARED — nothing was verified at close. "
                    "Declare `verify` in `.agent/config.json` to make close self-verifying.")

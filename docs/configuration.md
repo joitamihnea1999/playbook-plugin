@@ -81,6 +81,43 @@ Each entry becomes a `## <title>` section with a single `- [ ] <text>` gate, app
 
 Rules, all loud: the key is **opt-in** (absent means task generation is byte-identical to before — `init` seeds none); title and text are collapsed to a single line so a config value can never mint a phantom section or gate; an entry that is malformed, or whose title collides with a section the task already has, is skipped with a printed warning — never silently written, never silently dropped. Like `merge_verify`, this is project policy: commit the file so every clone generates the same tasks.
 
+## `.agent/config.json` — `fingerprint_exclude` (project policy)
+
+Panels stamp the tree-state fingerprint they reviewed; close compares it and
+records `FRESH`/`STALE` in the receipt, and an **irreversible** close resting
+on a stale panel BLOCKS (see below). The fingerprint already ignores `.agent/`
+— workflow bookkeeping is not code. If your project has **owner-declared
+bookkeeping outside `.agent/`** that standing gates write after the last panel
+(the canonical case: a `journal/` directory), declare it:
+
+```json
+{
+  "fingerprint_exclude": ["journal/"]
+}
+```
+
+Entries are git pathspec strings, appended to the exclusion set for both the
+panel stamp and the close comparison. Malformed entries are skipped with a
+printed warning, never silently. Exclude only true bookkeeping: anything
+excluded here can change after a panel without anyone being told, so a path
+that can carry claims or code does NOT belong in this list. Commit the file —
+stamp and close must agree across clones.
+
+### The irreversible freshness gate (`--stale-panel-ok`)
+
+When `## Risk` is `irreversible`, panel evidence is required by
+`panel_required_for`, and the newest impl round's stamp no longer matches the
+tree, `tasks work done` blocks: the panel's verdict predates the code being
+closed. Two exits, both on the record —
+
+- re-run `tasks panel-review <N> --mode impl` (fresh evidence), or
+- `tasks work done --stale-panel-ok --reason "..."` — closes, and the reason
+  lands in the receipt's freshness clause (`STALE, accepted: "..."`).
+
+`--stale-panel-ok` suppresses only this gate; verify failures, gate bounces,
+and the panel-evidence requirement are untouched. Every other risk class gets
+the console note + receipt clause, no block.
+
 ## `.agent/models.json` — judge panel pins
 
 Judge selection lives in `models.json`: the plugin ships defaults in `provider/models.json`, and each install can shadow them per key with a gitignored `.agent/models.json`:
