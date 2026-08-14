@@ -2,6 +2,32 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.6] — 2026-08-14
+
+The batch-5 release: every item traces to the first real 1.5.5 workload (StrataDB task 011, the v3 migration) or the gauntlet-155 live pass — see the fork owner's lab notebook.
+
+### Added
+
+- **The irreversible freshness gate (F18; design → red-team → blind judge, all five findings built).** A close whose `## Risk` is `irreversible`, whose panel evidence is required by `panel_required_for`, and whose newest impl round is a quorum-PASS whose `Tree-state` stamp no longer matches the tree, now BLOCKS: the panel's verdict predates the code being closed. Two exits, both durable — re-run the impl panel, or `tasks work done --stale-panel-ok --reason "..."` (narrow override, suppresses only this gate, reason lands in the receipt). Batch 4 closed exactly this way with the delta judgment living only in prose; batch 5's agent re-panelled voluntarily and caught two CRITICALs its own fixes had introduced, then asked for this gate in its journal.
+- **Panel freshness is part of the close receipt for every close** with an impl round: `FRESH`, `STALE (code changed after newest impl panel)` (+ `accepted: "..."` when overridden), or `no stamp recorded` (a missing stamp is recorded, not silently treated as legacy — the judge found that was the one zero-record bypass). Closes F17's console-only gap with an artifact.
+- **`fingerprint_exclude` config** (git pathspecs, e.g. `"journal/"`): owner-declared bookkeeping written after the last panel by standing gates no longer reads as a stale tree. Malformed entries are skipped loudly. Commit the file — stamp and close must agree across clones.
+- **`--print-argv` and `--ro-project` on `provider.sandbox`**: inspectable containment argv, and a contained-observer mode (project read-only, only `--rw` paths writable project-side).
+
+### Fixed
+
+- **The monitor runs on Linux.** `launch-monitor` hard-exec'd the macOS sandbox binary with a hand-rolled seatbelt profile — no Linux branch, owner-found on first launch attempt. It now delegates containment to `provider.sandbox` (Darwin seatbelt / Linux bwrap, the 1.5.3 bind-order lesson encoded once): project read-only, `<agent-dir>/monitor/` the only project-side writable. Hook suppression moved from the `--settings '{}'` shim to `claude --safe-mode` (T136: settings overrides cannot suppress plugin-registered hooks). Live-verified under bwrap: project write denied, monitor dir writable, reads intact.
+- **`tree_state_fingerprint` was blind to edits in untracked files** (judge C1 on the F18 design, verified empirically): porcelain names an untracked file without its content and `git diff HEAD` covers tracked paths only — and new-file work is exactly where batches 4 and 5 put their post-panel fixes. Untracked content is now hashed explicitly (`-uall` enumeration + per-file sha256). Fingerprint values change across this upgrade: an old round's stamp reads STALE once and self-heals at the next panel.
+- **`tasks new` accepts `--stub` anywhere** in the argument list. A trailing `--stub` used to be silently swallowed into the task's Intent text and a full template was created instead of a stub (gauntlet-155 wart).
+- **The born-checked block message teaches the rewrite case.** Batch 5's agent burned ~4 retries inferring that rewriting a gate's text while checking it is what "born-checked" means; the message now names the cause and the fix (keep the original text, append the outcome).
+
+### Changed
+
+- **`mindmap-optimize` gains a claim-consistency lens**: cross-node contradictions (an overview node saying "still ahead" while the owning node says "shipped" — observed live in batch 5) are flagged with both quotes and the owning node named, with the single-home fix taught. The report gains a `Claim Contradictions` section.
+
+### Tests
+
+- 802 → **821**: batch-guard rewrite-case message, `--stub` position matrix, mindmap lens surface pins (mutation-checked), launch-monitor containment (argv shape under bwrap + launcher delegation pins), and the F18 suite (fingerprint coverage incl. untracked/dir/exclude/malformed, pure gate matrix with negative controls, end-to-end close matrix: block / override refused bare / override recorded / FRESH / advisory-only risks / no-policy control / FAIL-round and replan fall-through / no-stamp clause / --force attribution). Gate mutation-checked red-first.
+
 ## [1.5.5] — 2026-08-13
 
 The field-backlog release: every item below carries evidence from the StrataDB stress test (batches 1–4) or the 1.5.4 full-surface gauntlet — see the fork owner's lab notebook.
