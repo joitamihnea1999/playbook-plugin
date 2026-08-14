@@ -4553,8 +4553,18 @@ def main():
             print("Error: MIND_MAP.md not found", file=sys.stderr)
             sys.exit(1)
         if not overflow_file.exists():
-            print("Error: MIND_MAP_OVERFLOW.md not found", file=sys.stderr)
-            sys.exit(1)
+            # F23 (genesis gauntlet): a young project has no overflow yet —
+            # the merge skill's Step 6 says "mindmap-sync, then --fix", and a
+            # hard error there strands a faithful run on exactly the
+            # single-map shape every project starts with. No overflow means
+            # nothing to mirror: say so and exit clean, the same graceful
+            # degrade ref-integrity.py already ships ("overflow checks
+            # skipped"). Creating one is NOT this command's job — overflow
+            # exists only once the map outgrows its budget.
+            print("note: MIND_MAP_OVERFLOW.md not present — nothing to sync "
+                  "(a single-map project is the normal young shape; overflow "
+                  "is created when the map outgrows its budget)")
+            sys.exit(0)
 
         fix_mode = "--fix" in cmd_args
 
