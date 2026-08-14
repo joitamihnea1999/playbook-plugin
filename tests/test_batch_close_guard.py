@@ -205,6 +205,35 @@ class BatchBlocks(unittest.TestCase):
         self.assertIn("rewrote", err.lower())
         self.assertIn("append", err.lower())
 
+    def test_born_checked_block_shows_the_closest_original(self):
+        # Batch-6 journal one-change (F20): the agent truncated a parenthetical
+        # while appending and "had to eyeball what I'd dropped". The block must
+        # SHOW the closest open gate so restoration is copy-paste, not memory.
+        f = ProjectFixture()
+        truncated = [
+            # G1 with its tail dropped, G2 rewritten — both near-misses
+            "- [x] G1: run the → 283 green",
+            "- [x] G2: mind map refreshed, node 10",
+        ]
+        r = f.run_hook(f.edit_payload(G[:2], truncated))
+        self.assertEqual(r.returncode, 2, r.stderr.decode())
+        err = r.stderr.decode()
+        self.assertIn("G1: run the suite", err,
+                      "the dropped original must be shown for restoration")
+        self.assertIn("G2: update the mind map", err)
+
+    def test_genuinely_new_minted_line_gets_no_closest_hint(self):
+        # Negative control: a fabricated gate with no near-miss original must
+        # not be blamed on some unrelated open gate.
+        f = ProjectFixture()
+        new = [checked(G[0], NOTE),
+               "- [x] Deployed the flux capacitor to production regions"]
+        r = f.run_hook(f.edit_payload(G[:1], new))
+        self.assertEqual(r.returncode, 2, r.stderr.decode())
+        err = r.stderr.decode()
+        self.assertNotIn("closest open gate", err.split("flux capacitor")[-1],
+                         "no near-miss original exists — no hint may be minted")
+
     def test_uncheck_cannot_launder_batch_size(self):
         # Uncheck 2 + check 3 bare in one write: raw x-delta is 1, but the
         # newly-checked count is 3 — must block as a bare batch.

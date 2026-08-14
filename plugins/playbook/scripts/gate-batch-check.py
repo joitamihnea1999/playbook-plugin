@@ -159,7 +159,24 @@ def main() -> int:
         return 0
 
     if born:
-        print(BORN_MSG.format(lines="\n".join(f"  - [x] {b}" for b in born)))
+        # F20 (batch-6 journal one-change): a born-checked line is usually a
+        # near-miss — the agent rewrote or truncated the gate's text while
+        # checking it, then "had to eyeball what I'd dropped". Show the closest
+        # OPEN original under each offending line so restoration is copy-paste,
+        # not memory. No near-miss → no hint (a fabricated gate must not be
+        # blamed on some unrelated open gate).
+        import difflib
+        open_originals = [m.group(2) for line in old.splitlines()
+                          if (m := GATE_RE.match(line)) and m.group(1) == " "
+                          and m.group(2).strip()]
+        rendered = []
+        for b in born:
+            rendered.append(f"  - [x] {b}")
+            close = difflib.get_close_matches(b, open_originals, n=1, cutoff=0.4)
+            if close:
+                rendered.append("      closest open gate (restore byte-for-byte, "
+                                f"then append your outcome):\n      - [ ] {close[0]}")
+        print(BORN_MSG.format(lines="\n".join(rendered)))
         return 2
 
     if n > BATCH_CEILING:
