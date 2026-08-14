@@ -134,6 +134,22 @@ mkdir -p "$SESSION_DIR" 2>/dev/null || PLAYBOOK_WRITE_FAILED=true
 STATE_FILE="$SESSION_DIR/current_state"
 COUNTER_FILE="$SESSION_DIR/counters"
 
+# F19: record this session's OWN transcript path (hook payloads carry it) so
+# the monitor binds to the exact file instead of guessing by mtime — the
+# batch-6 defect: the monitor tailed a stale conversation for 40 minutes while
+# the real session streamed into another file. Refreshed every tool call, so a
+# rollover (compaction hands the session a new transcript file) updates the
+# pointer and the sensor's --pointer-file re-resolve follows it. A value with
+# a newline is refused (one path, one line — no pointer-file injection).
+TRANSCRIPT_PATH=$(echo "$INPUT" | python3 -c "
+import sys, json
+t = json.loads(sys.stdin.read()).get('transcript_path', '')
+print(t if isinstance(t, str) and t and '\n' not in t and '\r' not in t else '')
+" 2>/dev/null || echo "")
+if [ -n "$TRANSCRIPT_PATH" ] && [ "$AGENT_WRITABLE" = true ]; then
+    printf '%s\n' "$TRANSCRIPT_PATH" > "$SESSION_DIR/transcript_path" 2>/dev/null || true
+fi
+
 # Increment tool/write counters
 if [ "$AGENT_WRITABLE" = true ]; then
     TOOLS_VAL=$(read_counter "$COUNTER_FILE" tools)

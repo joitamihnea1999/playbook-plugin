@@ -67,6 +67,17 @@ if [ -n "$PROJECT_DIR" ]; then
     else
         SESSION_DIR="$AGENT_DIR/sessions/$SESSION_ID"
         mkdir -p "$SESSION_DIR"
+        # F19: bind the session to its OWN transcript from the very first
+        # moment (state-echo refreshes it per tool call thereafter) — the
+        # monitor reads this pointer instead of guessing newest-by-mtime.
+        TRANSCRIPT_PATH=$(echo "$INPUT" | python3 -c "
+import sys, json
+t = json.loads(sys.stdin.read()).get('transcript_path', '')
+print(t if isinstance(t, str) and t and '\n' not in t and '\r' not in t else '')
+" 2>/dev/null || echo "")
+        if [ -n "$TRANSCRIPT_PATH" ]; then
+            printf '%s\n' "$TRANSCRIPT_PATH" > "$SESSION_DIR/transcript_path" 2>/dev/null || true
+        fi
     fi
 
     # GC: sweep session dirs from crashed/killed sessions.

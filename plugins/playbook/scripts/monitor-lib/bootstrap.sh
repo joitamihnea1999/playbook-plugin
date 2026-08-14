@@ -67,10 +67,30 @@ if ! echo "$SESSION_ID" | grep -Eq '^pid-[0-9]+$'; then
 fi
 
 SLUG=$(echo "$PROJECT_ROOT" | tr '/' '-')
-# Quote the directory: a project path containing spaces (iCloud Drive's
-# "Mobile Documents" is the common case) word-splits unquoted, so the glob never
-# matches and the monitor briefs itself with no recent events — silently.
-JSONL=$(ls -t "$HOME/.claude/projects/$SLUG"/*.jsonl 2>/dev/null | head -1)
+# F19: bind to the session's OWN transcript. The playbook hooks record the
+# front session's transcript_path (from the hook payload) into its session
+# dir; reading it is EXACT. The old resolution — newest .jsonl by mtime at
+# bootstrap moment — attached a live monitor to a stale conversation for a
+# whole session (batch 6): any older file can win the mtime race, and a fresh
+# session's transcript may not exist until its first user message.
+POINTER_FILE="$AGENT_DIR/sessions/$SESSION_ID/transcript_path"
+JSONL=""
+JSONL_BINDING=""
+if [ -f "$POINTER_FILE" ]; then
+    _PTR_TARGET=$(head -1 "$POINTER_FILE" 2>/dev/null)
+    if [ -n "$_PTR_TARGET" ] && [ -f "$_PTR_TARGET" ]; then
+        JSONL="$_PTR_TARGET"
+        JSONL_BINDING="session-bound (hooks recorded this session's transcript_path)"
+    fi
+fi
+if [ -z "$JSONL" ]; then
+    # Fallback: newest-by-mtime guess. Quote the directory: a project path
+    # containing spaces (iCloud Drive's "Mobile Documents" is the common case)
+    # word-splits unquoted, so the glob never matches and the monitor briefs
+    # itself with no recent events — silently.
+    JSONL=$(ls -t "$HOME/.claude/projects/$SLUG"/*.jsonl 2>/dev/null | head -1)
+    JSONL_BINDING="WARNING: mtime-guess — no transcript pointer at $POINTER_FILE (front session predates 1.5.7 hooks, or no tool call has fired yet); this may be the WRONG session's transcript"
+fi
 
 # Flat layout (T121): single state dir under target project, no pid subdir.
 MONITOR_DIR="$AGENT_DIR/monitor"
@@ -108,6 +128,7 @@ You are the conversation monitor for the project at:
 
 Front agent session ID: $SESSION_ID
 Front agent JSONL:      $JSONL
+JSONL binding:          $JSONL_BINDING
 Your state dir:         $MONITOR_DIR
 
 This briefing is complete. Do not read any files outside what's inlined below.
@@ -320,7 +341,7 @@ cat >> $MONITOR_DIR/session.md <<'JUDGMENT'
 JUDGMENT
 
 ### WAIT FOR NEXT TURN (block until agent hits stop_reason=end_turn)
-python3 $MONITOR_SRC/sensor.py $JSONL --wait-once --offset-file $OFFSET_FILE --trace-file $TRACE_FILE
+python3 $MONITOR_SRC/sensor.py $JSONL --pointer-file $POINTER_FILE --wait-once --offset-file $OFFSET_FILE --trace-file $TRACE_FILE
 
 ---
 
