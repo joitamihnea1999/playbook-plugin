@@ -842,6 +842,13 @@ def _main(argv: list[str]) -> int:
                         help="Print seatbelt profile to stdout and exit")
     parser.add_argument("--rw", action="append", default=[],
                         help="Extra read-write path (repeatable)")
+    parser.add_argument("--ro-project", action="store_true",
+                        help="Bind the project read-only; only --rw paths stay "
+                             "writable project-side (contained-observer mode, "
+                             "e.g. the conversation monitor)")
+    parser.add_argument("--print-argv", action="store_true",
+                        help="Print the fully wrapped argv (one arg per line) "
+                             "instead of executing — inspectable containment")
     parser.add_argument("--project-root", default=None,
                         help="Project root (default: cwd)")
     parser.add_argument("--prompt", default=None,
@@ -872,7 +879,8 @@ def _main(argv: list[str]) -> int:
     project = Path(args.project_root or Path.cwd()).resolve()
 
     if args.print_profile:
-        print(build_seatbelt_profile(project, _git_dir_of(project), args.rw))
+        print(build_seatbelt_profile(project, _git_dir_of(project), args.rw,
+                                     project_writable=not args.ro_project))
         return 0
 
     forwarded = list(args.agent_args)
@@ -919,7 +927,14 @@ def _main(argv: list[str]) -> int:
         print(res.text)
         return res.returncode
 
-    result = run(agent, forwarded, project, extra_rw=args.rw)
+    if args.print_argv:
+        for a in _wrapped_argv(agent, forwarded, project, args.rw,
+                               project_writable=not args.ro_project):
+            print(a)
+        return 0
+
+    result = run(agent, forwarded, project, extra_rw=args.rw,
+                 project_writable=not args.ro_project)
     return result.returncode
 
 

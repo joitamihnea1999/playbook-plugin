@@ -1,11 +1,9 @@
 #!/bin/bash
 # launch-monitor — start claude as the conversation monitor, sandboxed
 #
-# Forked from .claude/bin/sandbox's pattern (which works). Differences:
-#   - Writable scope narrowed from whole PROJECT_DIR to <agent-dir>/monitor/
-#   - Disables playbook plugin hooks via --settings '{}' so the monitor's own
-#     claude startup doesn't hang on session-start-hook (which would try to
-#     write to <agent-dir>/sessions/, outside our narrow scope)
+# Containment via provider.sandbox (Darwin seatbelt / Linux bwrap):
+#   - project read-only, <agent-dir>/monitor/ the only project-side writable
+#   - plugin hooks disabled at the source via claude --safe-mode
 #
 # Usage:
 #   .claude/bin/monitor start                           (auto-detect oldest alive pid)
@@ -40,7 +38,6 @@ fi
 # so failing loud is right here (unlike the hooks, which must skip quietly).
 require_lane_marker "$PROJECT_DIR" "launch-monitor"
 AGENT_DIR="$(resolve_agent_dir "$PROJECT_DIR")"
-HOME_DIR="$HOME"
 
 # --- Parse --session-id ---
 SESSION_ID="${PLAYBOOK_SESSION_ID:-}"
@@ -116,37 +113,26 @@ fi
 MONITOR_DIR="$AGENT_DIR/monitor"
 mkdir -p "$MONITOR_DIR"
 
-# --- Seatbelt profile (forked from bin/sandbox) ---
-# Writable: <agent-dir>/monitor/ (flat layout — T121) + standard system areas.
-# Denied: everything else, including:
-#   - project src/, scripts/, tests/, <agent-dir>/sessions/, <agent-dir>/chat_log.md,
-#     <agent-dir>/tasks/, MIND_MAP.md
-# Monitor now has r/w on its own rules.md, MONITOR_MIND_MAP.md, session.md
-# (propose-accept dropped — trust-with-audit model).
-# ~/.local and ~/Library must be writable for claude's interactive UI startup.
-PROFILE="(version 1)
-(allow default)
-(deny file-write*
-    (require-all
-        (require-not (subpath \"$MONITOR_DIR\"))
-        (require-not (subpath \"/tmp\"))
-        (require-not (subpath \"/private/tmp\"))
-        (require-not (subpath \"/var/folders\"))
-        (require-not (subpath \"/private/var/folders\"))
-        (require-not (regex #\"^$HOME_DIR/\\.claude\"))
-        (require-not (subpath \"$HOME_DIR/.cache\"))
-        (require-not (subpath \"$HOME_DIR/.local\"))
-        (require-not (subpath \"$HOME_DIR/Library\"))
-        (require-not (subpath \"/dev\"))
-    )
-)"
-
-# --- Disable playbook plugin hooks for the monitor session ---
-# Without this, claude's session-start-hook fires on startup and tries to
-# write to <agent-dir>/sessions/<id>/ — sandbox-blocked → claude hangs. The
-# monitor doesn't need playbook hooks; it uses its own CLAUDE.md + bootstrap.sh.
-NOHOOKS_FILE="/tmp/playbook-monitor-no-hooks-$$.json"
-echo '{}' > "$NOHOOKS_FILE"
+# --- Containment: delegate to provider.sandbox (batch-5 fix) ---
+# This launcher used to hand-roll a seatbelt profile and exec the macOS
+# sandbox binary directly — macOS-only, found broken on Linux by the owner
+# (batch 5).
+# provider.sandbox is the single source of truth for containment: Darwin
+# seatbelt AND Linux bwrap, with the bind-order lesson (1.5.3 spike) encoded
+# once. Monitor containment model, expressed in its terms:
+#   --ro-project           project (incl. sessions/, chat_log.md, tasks/,
+#                          MIND_MAP.md) binds READ-ONLY
+#   --rw "$MONITOR_DIR"    the one project-side writable, bound last so it
+#                          stays writable inside the read-only project
+# System/home areas claude's UI needs stay writable via the module's own
+# allowlist (same one the judge sandbox uses).
+PLUGIN_ROOT="$(cd "$MONITOR_SRC/../.." && pwd -P)"
+if [ ! -d "$PLUGIN_ROOT/provider" ]; then
+    echo "Error: provider/ module not found at $PLUGIN_ROOT (launch-monitor moved?)" >&2
+    exit 1
+fi
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null \
+    || { echo "Playbook needs python3 >= 3.10 (found: $(python3 --version 2>&1))" >&2; exit 1; }
 
 echo "[launch-monitor] watching session: $SESSION_ID" >&2
 echo "[launch-monitor] writable: $MONITOR_DIR (+ system dirs)" >&2
@@ -172,4 +158,12 @@ SEED="$BOOTSTRAP_OUT
 
 That was your bootstrap output. Based on the briefing above, form your initial judgment, append to session.md (using the SESSION.MD APPEND command from the COMMANDS section), and run the WAIT COMMAND."
 
-exec sandbox-exec -p "$PROFILE" claude --dangerously-skip-permissions --settings "$NOHOOKS_FILE" "${ARGS[@]}" "$SEED"
+# --safe-mode replaces the old `--settings '{}'` shim: a settings override
+# cannot suppress plugin-REGISTERED hooks (T136 — the session-start-hook this
+# comment block used to guard against still fired). --safe-mode disables
+# CLAUDE.md + plugins + hooks at the source; the monitor's whole briefing
+# arrives via $SEED, so it loses nothing.
+exec env PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m provider.sandbox --agent claude --ro-project \
+    --rw "$MONITOR_DIR" --project-root "$PROJECT_DIR" \
+    -- --dangerously-skip-permissions --safe-mode "${ARGS[@]}" "$SEED"
