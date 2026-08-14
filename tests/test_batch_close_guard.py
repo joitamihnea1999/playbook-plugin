@@ -191,6 +191,20 @@ class BatchBlocks(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stderr.decode())
         self.assertIn(b"born-checked", r.stderr.lower())
 
+    def test_born_checked_block_teaches_the_rewrite_case(self):
+        # Batch-5 field finding (task 011 journal): the agent's first batches
+        # were born-checked-blocked because it REWROTE the gate text while
+        # checking, then had to infer the cause. The block message must name
+        # the likely cause and the fix (restore original text, APPEND).
+        f = ProjectFixture()
+        rewritten = ["- [x] G1: suite ran and everything is green now",
+                     "- [x] G2: mind map refreshed in place, node 10"]
+        r = f.run_hook(f.edit_payload(G[:2], rewritten))
+        self.assertEqual(r.returncode, 2, r.stderr.decode())
+        err = r.stderr.decode()
+        self.assertIn("rewrote", err.lower())
+        self.assertIn("append", err.lower())
+
     def test_uncheck_cannot_launder_batch_size(self):
         # Uncheck 2 + check 3 bare in one write: raw x-delta is 1, but the
         # newly-checked count is 3 — must block as a bare batch.

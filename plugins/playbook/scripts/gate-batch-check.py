@@ -56,7 +56,10 @@ BORN_MSG = """\
 BLOCKED: this batch mints gate line(s) already checked (born-checked):
 {lines}
 Gates are added OPEN the moment you discover the work (Standing Orders),
-then closed after the work is done — a line born [x] was never observable."""
+then closed after the work is done — a line born [x] was never observable.
+Most common cause: you REWROTE the gate's text while checking it. Keep the
+original gate text byte-for-byte and APPEND your outcome after it — e.g.
+"- [x] <original text> — 316 green"."""
 
 CONSECUTIVE_MSG = """\
 BLOCKED: second batch close with no tool call in between.
