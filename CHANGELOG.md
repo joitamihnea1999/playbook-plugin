@@ -2,6 +2,23 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.8] — 2026-08-14
+
+The genesis release: findings from the first full-lifecycle gauntlet on a NON-Python project (genesis-ts, TypeScript/node:test) — start on an empty repo, through real panels, F18-in-anger, blocked lifecycle, retro, the merge skill, and multi-user lanes.
+
+### Fixed
+
+- **`mindmap-sync` no longer hard-errors on a single-map project (F23).** The merge skill's Step 6 mandates it, but a young project has no `MIND_MAP_OVERFLOW.md` yet — the command now prints a clean note and exits 0 (the same graceful degrade `ref-integrity.py` ships); a missing `MIND_MAP.md` still errors.
+- **Monitor state churn is not judge tampering (F22).** `_detect_tamper` skips `.agent/monitor/` and `.agent/<user>/monitor/` (the monitor is a sanctioned concurrent writer, OS-contained to that dir); the snapshot uses `-uall` so untracked files are named individually. A non-monitor `.agent` file still flags.
+
+### Verified live in the genesis gauntlet (no code change needed)
+
+- init on an empty zero-commit repo; chat-log-hook; `tasks tag` + span-based `context` (first runs); the tamper guard's first live firing (correct, on a real mid-review tree change); a real codex judge AND a real 4-seat panel on TypeScript (findings quality held cross-stack; judges caught fabricated completion traces twice); verify-at-close + merge_verify on a `node --test` contract; F18 block→refusal→recorded-acceptance in anger; blocked lifecycle through the real Stop hook; retro generation; the merge skill end-to-end (merge-doctor first live run, semantic map merge, ref-integrity, code identity); multi-user lane resolution + isolation.
+
+### Tests
+
+- 833 → **837**: tamper monitor-churn + non-monitor control, sync no-overflow degrade + missing-map control.
+
 ## [1.5.7] — 2026-08-14
 
 The batch-6 release: three field findings from the first 1.5.6 workload (StrataDB task 012, v3 concurrency) — one of them owner-found in the monitor's first attached run.
