@@ -1883,7 +1883,9 @@ def list_tasks(project_path: Path, pending_only: bool = False) -> None:
     tasks_dir = resolve_agent_dir(project_path) / "tasks"
 
     if not tasks_dir.exists():
-        print("No .agent/tasks/ directory found")
+        # Lane-aware (genesis finding): name the path this command RESOLVED —
+        # single-user repos reproduce the old ".agent/tasks/" literal exactly.
+        print(f"No {tasks_dir.relative_to(project_path).as_posix()}/ directory found")
         return
 
     task_files = sorted(tasks_dir.glob("*/task.md"))
@@ -1946,7 +1948,10 @@ def list_tasks(project_path: Path, pending_only: bool = False) -> None:
     if pending_only:
         summary += f" (showing {len(rows)} open)"
     print(summary)
-    print("Task files: .agent/tasks/<name>/task.md — activate with: tasks work <number>")
+    # Lane-aware: <lane>/tasks/<name>/task.md, where <lane> is what this very
+    # listing read — ".agent" single-user (byte-identical to the old literal),
+    # ".agent/<user>" on a multi-user repo (the genesis-gauntlet cosmetic).
+    print(f"Task files: {tasks_dir.relative_to(project_path).as_posix()}/<name>/task.md — activate with: tasks work <number>")
 
 
 def task_status(project_path: Path) -> None:
@@ -1954,7 +1959,9 @@ def task_status(project_path: Path) -> None:
     tasks_dir = resolve_agent_dir(project_path) / "tasks"
 
     if not tasks_dir.exists():
-        print("No .agent/tasks/ directory found")
+        # Lane-aware (genesis finding): name the path this command RESOLVED —
+        # single-user repos reproduce the old ".agent/tasks/" literal exactly.
+        print(f"No {tasks_dir.relative_to(project_path).as_posix()}/ directory found")
         return
 
     task_files = sorted(tasks_dir.glob("*/task.md"))

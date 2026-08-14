@@ -852,7 +852,7 @@ def cmd_freehand(cmd_args):
         # Read chat_log.md and extract messages in the span
         chat_log = agent_dir / "chat_log.md"
         if not chat_log.exists():
-            print("Error: .agent/chat_log.md not found", file=sys.stderr)
+            print(f"Error: {chat_log.relative_to(project_path).as_posix()} not found", file=sys.stderr)
             sys.exit(1)
 
         log_text = chat_log.read_text(encoding="utf-8", errors="replace")

@@ -33,7 +33,7 @@ def cmd_context(cmd_args):
 
     chat_log = resolve_agent_dir(project_path) / "chat_log.md"
     if not chat_log.exists():
-        print("No .agent/chat_log.md found.", file=sys.stderr)
+        print(f"No {chat_log.relative_to(project_path).as_posix()} found.", file=sys.stderr)
         sys.exit(1)
 
     import re
@@ -231,7 +231,7 @@ def cmd_timeline(cmd_args):
     project_path = find_project_root()
     bash_history = resolve_agent_dir(project_path) / "bash_history"
     if not bash_history.exists():
-        print("No .agent/bash_history found.", file=sys.stderr)
+        print(f"No {bash_history.relative_to(project_path).as_posix()} found.", file=sys.stderr)
         sys.exit(1)
 
     import re
@@ -258,10 +258,10 @@ def cmd_tagger(cmd_args):
     chat_log = resolve_agent_dir(project_path) / "chat_log.md"
     bash_history = resolve_agent_dir(project_path) / "bash_history"
     if not chat_log.exists():
-        print("No .agent/chat_log.md found.", file=sys.stderr)
+        print(f"No {chat_log.relative_to(project_path).as_posix()} found.", file=sys.stderr)
         sys.exit(1)
     if not bash_history.exists():
-        print("No .agent/bash_history found.", file=sys.stderr)
+        print(f"No {bash_history.relative_to(project_path).as_posix()} found.", file=sys.stderr)
         sys.exit(1)
 
     import re
@@ -345,10 +345,10 @@ def cmd_tag(cmd_args):
     chat_log = resolve_agent_dir(project_path) / "chat_log.md"
     bash_history = resolve_agent_dir(project_path) / "bash_history"
     if not chat_log.exists():
-        print("No .agent/chat_log.md found.", file=sys.stderr)
+        print(f"No {chat_log.relative_to(project_path).as_posix()} found.", file=sys.stderr)
         sys.exit(1)
     if not bash_history.exists():
-        print("No .agent/bash_history found.", file=sys.stderr)
+        print(f"No {bash_history.relative_to(project_path).as_posix()} found.", file=sys.stderr)
         sys.exit(1)
 
     import re
@@ -541,7 +541,7 @@ def cmd_log(cmd_args):
     project_path = find_project_root()
     chat_log = resolve_agent_dir(project_path) / "chat_log.md"
     if not chat_log.exists():
-        print("Error: .agent/chat_log.md not found", file=sys.stderr)
+        print(f"Error: {chat_log.relative_to(project_path).as_posix()} not found", file=sys.stderr)
         sys.exit(1)
     text = chat_log.read_text(encoding="utf-8", errors="replace")
     blocks = text.split("\n---\n")
