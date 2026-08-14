@@ -2285,7 +2285,13 @@ def main():
                         task_content, budget // 2)
                     if task_receipt:
                         receipts.append(task_receipt)
-                        _dm = re.search(r"· dropped: (.+?)(?: · WARNING|$)", task_receipt)
+                        # Aliased on purpose: other arms' local `import re`
+                        # statements make bare `re` a local of main() for the
+                        # WHOLE function, so this path (only reached when the
+                        # task was actually trimmed) crashed UnboundLocal from
+                        # 1.5.3 until the 1.5.9 judge caught it.
+                        import re as _re
+                        _dm = _re.search(r"· dropped: (.+?)(?: · WARNING|$)", task_receipt)
                         _dropped = (_dm.group(1)[:200] if _dm else "some sections")
                         trim_notice = (
                             f"your inline copy of {task_path} was TRIMMED to fit "
@@ -2773,7 +2779,10 @@ def main():
         task_content, task_receipt = select_task_context(task_content, MAX_CONTEXT_CHARS // 2)
         if task_receipt:
             context_receipts.append(task_receipt)
-            _dm = re.search(r"· dropped: (.+?)(?: · WARNING|$)", task_receipt)
+            # Aliased for the same reason as the panel arm's trim-notice site:
+            # bare `re` is an unbound main() local on this path (judge F1).
+            import re as _re
+            _dm = _re.search(r"· dropped: (.+?)(?: · WARNING|$)", task_receipt)
             sj_trim_notice = (
                 f"your inline copy of {task_path} was TRIMMED "
                 f"(dropped sections: {(_dm.group(1)[:200] if _dm else 'some sections')}) — "
