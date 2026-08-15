@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/task-gate-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -41,7 +41,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/state-echo-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -52,7 +52,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -63,7 +63,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-end-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
