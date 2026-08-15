@@ -20,8 +20,8 @@ import shutil
 import sys
 from pathlib import Path
 from tasks.core import (
-    PLAYBOOKS, _find_playbook_skill, create_task, resolve_agent_dir,
-    resolve_session_id,
+    PLAYBOOKS, _atomic_write, _find_playbook_skill, create_task,
+    resolve_agent_dir, resolve_session_id,
 )
 from tasks.shared import _merge_verify_module, find_project_root
 
@@ -134,7 +134,7 @@ def _inject_chat_into_task(task_file: Path, messages: list[str]) -> None:
             flags=re.DOTALL,
         )
         content = references.rstrip() + "\n" + chat_block + content[first_sep:]
-        task_file.write_text(_utf8_safe(content), encoding="utf-8")
+        _atomic_write(task_file, _utf8_safe(content))  # I9: atomic like every task.md writer
 
 
 def _gate_bounce(task_id: str, task_file, action: str) -> bool:
@@ -498,7 +498,7 @@ def cmd_work(cmd_args):
                 for i, line in enumerate(lines):
                     if line.strip() == "## Status" and i + 1 < len(lines):
                         lines[i + 1] = "in_progress\n"
-                        tf.write_text("".join(lines), encoding="utf-8")
+                        _atomic_write(tf, "".join(lines))  # I9: atomic reopen write
                         break
                 print(f"Note: task {task_num} was marked done — reopening.")
                 task_file = tf
@@ -652,7 +652,7 @@ def cmd_work(cmd_args):
         for _msg in _sg_issues:
             print(f"[playbook] standing_gates: {_msg}", file=sys.stderr)
 
-        task_file.write_text(full_content, encoding="utf-8")
+        _atomic_write(task_file, full_content)  # I9: atomic stub expansion
         # Re-read for chat injection and display
         task_content = full_content
         print(f"Expanded stub to full {stub_type} template.")
@@ -920,7 +920,7 @@ def cmd_freehand(cmd_args):
         insert_pos = log_gate_match.end()
         log_content = "\n\n" + "\n\n---\n\n".join(extracted) + "\n"
         new_text = task_text[:insert_pos] + log_content + task_text[insert_pos:]
-        task_file.write_text(new_text, encoding="utf-8")
+        _atomic_write(task_file, new_text)  # I9: atomic task.md write
         print(f"Inserted {len(extracted)} chat_log messages into task.md")
         return
 
@@ -947,7 +947,8 @@ def cmd_freehand(cmd_args):
         # Write minimal template — Freehand gate is first unchecked gate
         from datetime import datetime, timezone
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        task_file.write_text(
+        _atomic_write(  # I9: atomic like every task.md writer
+            task_file,
             f"# {task_num} - Freehand\n\n"
             f"## Status\nin_progress\n\n"
             f"## Intent\n(freehand session — intent determined during work)\n\n"
@@ -959,7 +960,6 @@ def cmd_freehand(cmd_args):
             f"then retro-add checked gates for work done\n"
             f"- [ ] Rewrite this freehand work into normal task gates inside this task so the final trace reads like ordinary tracked work\n"
             f"- [ ] Rename this task folder and header to match what was actually done, then check this gate last\n",
-            encoding="utf-8",
         )
         # Activate it
         session_id = resolve_session_id()
@@ -1008,6 +1008,6 @@ def cmd_freehand(cmd_args):
             insert_pos = len(task_text)
 
         new_text = task_text[:insert_pos] + freehand_block + "\n" + task_text[insert_pos:]
-        task_file.write_text(new_text, encoding="utf-8")
+        _atomic_write(task_file, new_text)  # I9: atomic task.md write
         print(f"Freehand block inserted in task {task_num}")
     print(f"Freehand mode active. Agent: wait for user instructions. Close only when user says done.")
