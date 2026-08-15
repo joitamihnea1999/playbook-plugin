@@ -118,10 +118,13 @@ SETTINGS_FILE="$PROJECT_DIR/.claude/settings.json"
 mkdir -p "$PROJECT_DIR/.claude"
 SETTINGS_FILE_PY="$(to_native_path "$SETTINGS_FILE")"
 
-SETTINGS_RESULT=$(python3 -c "
+SETTINGS_RESULT=$(PB_SETTINGS_PATH="$SETTINGS_FILE_PY" python3 -c "
 import json, sys, os
 
-path = '$SETTINGS_FILE_PY'
+# I4: read the path from the environment, never interpolate it into the source
+# — a project path with a single quote otherwise breaks python's string literal
+# (SyntaxError → set -e abort).
+path = os.environ['PB_SETTINGS_PATH']
 required = ['TodoWrite', 'Task', 'EnterPlanMode']
 
 try:
@@ -280,9 +283,10 @@ if [ -f "$BASH_LOG_SRC" ]; then
     # This is the reliable path — CC reads settings.json env key and injects vars before tool calls.
     CC_SETTINGS="$HOME/.claude/settings.json"
     CC_SETTINGS_PY="$(to_native_path "$CC_SETTINGS")"
-    BASH_ENV_RESULT=$(python3 -c "
+    BASH_ENV_RESULT=$(PB_CC_SETTINGS_PATH="$CC_SETTINGS_PY" python3 -c "
 import json, os, tempfile
-path = '$CC_SETTINGS_PY'
+# I4: path via env, not interpolated (single-quote paths would SyntaxError).
+path = os.environ['PB_CC_SETTINGS_PATH']
 # Always bash-log.sh — CC's Bash tool is /bin/bash regardless of user's login shell.
 # Forward-slash the path: on Windows expanduser yields backslashes, but BASH_ENV
 # is read by Git-Bash which needs a POSIX-sourceable path (C:/Users/... works).
@@ -378,10 +382,12 @@ if [ -n "$MONITOR_LIB_DIR" ] && [ -d "$MONITOR_LIB_DIR" ]; then
 
     # Register PostToolUse hook for monitor-nudge in .claude/settings.json
     NUDGE_HOOK_CMD='bash "$CLAUDE_PROJECT_DIR/.claude/hooks/monitor-nudge.sh"'
-    HOOK_RESULT=$(python3 -c "
+    HOOK_RESULT=$(PB_SETTINGS_PATH="$SETTINGS_FILE_PY" PB_NUDGE_CMD="$NUDGE_HOOK_CMD" python3 -c "
 import json, os
-path = '$SETTINGS_FILE_PY'
-target_cmd = '''$NUDGE_HOOK_CMD'''
+# I4: path AND command via env, never interpolated — a single quote in either
+# broke the python literal (SyntaxError → set -e abort mid-install).
+path = os.environ['PB_SETTINGS_PATH']
+target_cmd = os.environ['PB_NUDGE_CMD']
 try:
     data = json.loads(open(path).read()) if os.path.exists(path) else {}
     hooks = data.setdefault('hooks', {})
@@ -416,10 +422,16 @@ fi
 # sections update in place, custom sections survive byte-for-byte, and the
 # .gitignore block is marker-guarded so re-runs are no-ops. The agent half
 # shrinks to project-specific enrichment.
-MERGE_OUT=$(python3 "$(to_native_path "$SCRIPT_DIR/claude-md-merge.py")" \
+# I4: guard the assignment — `set -e` aborts on a bare `VAR=$(cmd)` when cmd
+# fails, which would kill init here (before the FAILED handler + summary) on any
+# CLAUDE.md merge failure. The `if` form captures output AND rc without aborting.
+if MERGE_OUT=$(python3 "$(to_native_path "$SCRIPT_DIR/claude-md-merge.py")" \
     "$(to_native_path "$SCRIPT_DIR/CLAUDE.md.template")" \
-    "$(to_native_path "$PROJECT_DIR")" "$PROJECT_NAME" 2>&1)
-MERGE_RC=$?
+    "$(to_native_path "$PROJECT_DIR")" "$PROJECT_NAME" 2>&1); then
+    MERGE_RC=0
+else
+    MERGE_RC=$?
+fi
 while IFS= read -r line; do
     case "$line" in
         CLAUDE.md:CREATED)    CREATED+=("CLAUDE.md (from template)") ;;
