@@ -290,6 +290,26 @@ read_counter() {
     fi
 }
 
+# _safe_int VALUE
+# Coerce arbitrary (untrusted) bytes to a non-negative decimal integer,
+# defaulting to 0. Counter/offset files live under .agent/, which the task-gate
+# EXEMPTS from the code-edit gate, so their content is untrusted — and bash
+# arithmetic EXECUTES command substitution / array subscripts embedded in an
+# operand: `tools=x[$(touch PWNED)]` ran `touch` inside `$(( TOOLS + 1 ))` (C5).
+# NEVER feed raw file bytes to `$(( ))`; run them through this first. `10#`
+# forces base-10 so a leading-zero counter ("008") doesn't trip octal parsing.
+_safe_int() {
+    case "$1" in
+        ''|*[!0-9]*) printf '0' ;;
+        *) printf '%d' "$((10#$1))" ;;
+    esac
+}
+
+# read_counter_int FILE KEY — read_counter coerced to a safe integer (C5).
+read_counter_int() {
+    _safe_int "$(read_counter "$1" "$2")"
+}
+
 # write_counter FILE KEY VALUE
 # Set a key=value in the counter file. Creates file if missing, updates in-place if key exists.
 # Uses grep-filter-append instead of sed to avoid delimiter collisions with gate text

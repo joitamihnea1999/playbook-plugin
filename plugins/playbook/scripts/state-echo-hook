@@ -152,12 +152,14 @@ fi
 
 # Increment tool/write counters
 if [ "$AGENT_WRITABLE" = true ]; then
-    TOOLS_VAL=$(read_counter "$COUNTER_FILE" tools)
-    write_counter "$COUNTER_FILE" tools $(( ${TOOLS_VAL:-0} + 1 ))
+    # read_counter_int (not read_counter): the counter bytes are untrusted and
+    # `$(( ))` executes command substitution embedded in an operand (C5).
+    TOOLS_VAL=$(read_counter_int "$COUNTER_FILE" tools)
+    write_counter "$COUNTER_FILE" tools $(( TOOLS_VAL + 1 ))
     case "$TOOL_NAME" in
         Edit|Write|Bash)
-            WRITES_VAL=$(read_counter "$COUNTER_FILE" writes)
-            write_counter "$COUNTER_FILE" writes $(( ${WRITES_VAL:-0} + 1 ))
+            WRITES_VAL=$(read_counter_int "$COUNTER_FILE" writes)
+            write_counter "$COUNTER_FILE" writes $(( WRITES_VAL + 1 ))
             ;;
     esac
     # Write log: persist file content after Write/Edit
@@ -248,7 +250,8 @@ if [ -n "$GATE_LINE" ] && [ "$IS_FREEHAND" = true ]; then
 elif [ -n "$GATE_LINE" ]; then
     GATE_KEY="${TASK}:${GATE_LINE}"
     PREV_KEY=$(read_counter "$COUNTER_FILE" gate_key)
-    PREV_COUNT=$(read_counter "$COUNTER_FILE" gate_count)
+    # gate_count feeds `$((PREV_COUNT + 1))` — coerce it (C5).
+    PREV_COUNT=$(read_counter_int "$COUNTER_FILE" gate_count)
     PREV_TEXT=$(read_counter "$COUNTER_FILE" gate_text)
     if [ -n "$PREV_KEY" ] && [ "$PREV_KEY" = "$GATE_KEY" ]; then
         NEW_COUNT=$((PREV_COUNT + 1))
@@ -295,7 +298,7 @@ else
     # All gates done — log final gate if exists, clean up gate_* counters
     PREV_KEY=$(read_counter "$COUNTER_FILE" gate_key)
     if [ -n "$PREV_KEY" ] && [ "$AGENT_WRITABLE" = true ]; then
-        PREV_COUNT=$(read_counter "$COUNTER_FILE" gate_count)
+        PREV_COUNT=$(read_counter_int "$COUNTER_FILE" gate_count)
         PREV_TEXT=$(read_counter "$COUNTER_FILE" gate_text)
         PREV_TASK="${PREV_KEY%%:*}"
         PREV_LINE="${PREV_KEY##*:}"
