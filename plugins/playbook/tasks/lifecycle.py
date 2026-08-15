@@ -203,8 +203,28 @@ def cmd_work(cmd_args):
             # Set ## Status to done in task.md
             tasks_dir = agent_dir / "tasks"
             matches = list(tasks_dir.glob(f"{prev_task}-*/task.md"))
+            if not matches:
+                # C1: the pointer names a task whose `NNN-*` folder does not
+                # resolve — a renamed/deleted folder, a wrong-lane pointer, or
+                # the C1b substring bug that wrote a raw non-padded pointer.
+                # The close path used to keep going: it printed "Task X done.",
+                # wiped every session dir pointing at the pointer, never wrote
+                # `## Status`, then crashed reading the unbound `task_file`.
+                # Resolve to a REAL task before ANY destructive step; if it
+                # does not resolve, fail loud and change NOTHING — an
+                # autonomous agent must never be told finished work is done.
+                print(f"Error: active task pointer '{prev_task}' does not "
+                      f"resolve to a task under {tasks_dir} — refusing to "
+                      "close. Nothing changed (no status write, no session "
+                      "wipe). Re-activate a real task with `tasks work <N>`.",
+                      file=sys.stderr)
+                sys.exit(1)
+            # Guaranteed non-empty here (the guard above exits otherwise).
+            # Bind before the (now always-true) `if matches:` wrapper — kept to
+            # avoid reindenting the whole close body — so nothing downstream can
+            # read an unbound `task_file` (the original C1 crash).
+            task_file = matches[0]
             if matches:
-                task_file = matches[0]
                 if not force and _gate_bounce(prev_task, task_file, "closing this task"):
                     sys.exit(1)
                 # Belt to gate-bounce's suspenders (#09): head-position can be

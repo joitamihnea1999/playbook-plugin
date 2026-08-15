@@ -1750,16 +1750,35 @@ def resume_blocked_task(task_file: Path) -> None:
         _atomic_write(task_file, "\n".join(out) + "\n")
 
 
+def _folder_matches_filter(folder_name: str, name_filter: str) -> bool:
+    """Does a task folder name match the activation filter?
+
+    A numeric filter is a task NUMBER — it must match ONLY the exact `NNN-`
+    prefix, never a substring (C1b: `tasks work 100` must not resolve to
+    `1000-bar`; the old `name_filter not in folder` substring test let it,
+    then wrote the raw pointer `100`, which fed the C1 non-resolving-pointer
+    crash on close). A non-numeric filter keeps the substring behaviour for
+    slug-style lookups.
+    """
+    if not name_filter:
+        return True
+    if name_filter.isdigit():
+        return (folder_name == name_filter
+                or folder_name.startswith(name_filter + "-"))
+    return name_filter in folder_name
+
+
 def _find_active_task(project_path: Path, name_filter: str = "") -> Path | None:
     """Find the active task: earliest non-done task with unchecked gates.
 
-    If name_filter is given, only match tasks whose folder name contains it.
+    If name_filter is given, only match tasks whose folder name matches it
+    (exact `NNN-` prefix for a numeric filter, substring otherwise).
     """
     tasks_dir = resolve_agent_dir(project_path) / "tasks"
     if not tasks_dir.exists():
         return None
     for task_file in sorted(tasks_dir.glob("*/task.md")):
-        if name_filter and name_filter not in task_file.parent.name:
+        if name_filter and not _folder_matches_filter(task_file.parent.name, name_filter):
             continue
         if _is_done(task_file):
             continue
