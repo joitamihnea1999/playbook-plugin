@@ -74,7 +74,9 @@ _BASELINE = {
     "blocked": (1, "a reason is required"),
     "parked": (0, "No open parked items."),
     "freehand": (0, "creating freehand session"),
-    "doctor": (0, "tasks doctor"),
+    # I5: doctor exits non-zero when a check FAILs. The bare scratch project has
+    # no CLAUDE.md/MIND_MAP.md, so doctor deterministically reports failures → 1.
+    "doctor": (1, "tasks doctor"),
     "merge-doctor": (2, "Usage: tasks merge-doctor"),
     "mindmap-sync": (1, "MIND_MAP.md not found"),
     "log": (1, ".agent/chat_log.md not found"),

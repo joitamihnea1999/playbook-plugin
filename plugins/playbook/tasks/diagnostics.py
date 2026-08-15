@@ -513,3 +513,9 @@ def cmd_doctor(cmd_args):
     if warned:
         summary += f" ({warned} warning{'s' if warned != 1 else ''})"
     print(summary)
+
+    # I5: exit non-zero when any check FAILED, so `tasks doctor && deploy` (or
+    # any CI gate) sees the failure. cmd_doctor was dispatched with no exit
+    # wrapping and printed FAIL lines while still exiting 0 — a false green.
+    # Warnings alone do NOT fail (they are advisory by design).
+    sys.exit(1 if failed else 0)
