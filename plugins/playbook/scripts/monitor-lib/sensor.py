@@ -103,6 +103,13 @@ def read_new_events(jsonl_path: Path, since_offset: int,
                     d = json.loads(raw_line.decode("utf-8", errors="replace"))
                 except json.JSONDecodeError:
                     continue
+                # I18: a JSONL line can decode to null/[]/a string, not just a
+                # dict. `.get()` on those raised AttributeError — and the crash
+                # happened BEFORE this offset returned, so every poll re-read the
+                # poison line and the monitor was PERMANENTLY WEDGED. Skip
+                # non-dict records (the offset has already advanced past them).
+                if not isinstance(d, dict):
+                    continue
 
                 ts = d.get("timestamp", "")
                 msg_type = d.get("type", "")
@@ -110,7 +117,8 @@ def read_new_events(jsonl_path: Path, since_offset: int,
                 if msg_type == "user":
                     if d.get("isMeta"):
                         continue
-                    content = d.get("message", {}).get("content", "")
+                    _msg = d.get("message")
+                    content = _msg.get("content", "") if isinstance(_msg, dict) else ""
                     if not content:
                         content = d.get("content", "")
                     if isinstance(content, list):

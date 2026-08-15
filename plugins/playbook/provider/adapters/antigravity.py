@@ -406,6 +406,9 @@ class AntigravityAdapter(ProviderAdapter):
                         obj = json.loads(raw_line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         continue
+                    # I18: skip non-dict records rather than AttributeError.
+                    if not isinstance(obj, dict):
+                        continue
                     if obj.get("source") != "USER_EXPLICIT":
                         continue
                     if obj.get("type") != "USER_INPUT":
