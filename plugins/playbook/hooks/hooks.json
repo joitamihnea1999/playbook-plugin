@@ -13,7 +13,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|search_replace|write|Bash|Shell|StrReplace|run_terminal_command",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|search_replace|write|Bash|Shell|StrReplace|run_terminal_command",
         "hooks": [
           {
             "type": "command",

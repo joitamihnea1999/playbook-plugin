@@ -27,7 +27,7 @@ source "$HOOK_DIR/gate-echo-lib.sh"
 is_code_file_path() {
     local file_path="$1"
     case "$file_path" in
-        *.py|*.ts|*.js|*.tsx|*.jsx|*.sh|*.bash|*.go|*.rs|*.rb|*.java|*.c|*.cpp|*.h|*.hpp|*.swift|*.kt|*.kts|*.dart|*.cs|*.php|*.r|*.R|*.m|*.mm|*.scala|*.zig|*.lua|*.ex|*.exs|*.ml|*.mli|*.tf|*.vue|*.svelte)
+        *.py|*.ts|*.js|*.tsx|*.jsx|*.sh|*.bash|*.go|*.rs|*.rb|*.java|*.c|*.cpp|*.h|*.hpp|*.swift|*.kt|*.kts|*.dart|*.cs|*.php|*.r|*.R|*.m|*.mm|*.scala|*.zig|*.lua|*.ex|*.exs|*.ml|*.mli|*.tf|*.vue|*.svelte|*.ipynb)
             return 0
             ;;
         */.claude/bin/*|*/bin/*|*/src/hooks/*)
@@ -193,11 +193,16 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
     fi
 fi
 
-# --- Guard 1: Edit/Write — require active task for code files ---
-if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
-    # Reuse FILE_PATH from Guard 0/0.5 if already set
+# --- Guard 1: Edit/Write/MultiEdit/NotebookEdit — require active task for code files ---
+# I13: MultiEdit (file_path) and NotebookEdit (notebook_path) edit code too, but
+# were omitted from the matcher AND this guard, so a no-task edit through them
+# was never gated. `.ipynb` is now in is_code_file_path as well.
+if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ] \
+   || [ "$TOOL_NAME" = "MultiEdit" ] || [ "$TOOL_NAME" = "NotebookEdit" ]; then
+    # Reuse FILE_PATH from Guard 0/0.5 if already set; else read file_path OR
+    # notebook_path (NotebookEdit uses the latter).
     if [ -z "$FILE_PATH" ]; then
-        FILE_PATH=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('file_path',''))" 2>/dev/null || echo "")
+        FILE_PATH=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin).get('tool_input',{}); print(d.get('file_path','') or d.get('notebook_path',''))" 2>/dev/null || echo "")
     fi
 
     # Allow .agent/ and .claude/ edits (task management, hook config)

@@ -134,6 +134,7 @@ def _is_code_file_path(file_path: str) -> bool:
         ".py", ".ts", ".js", ".tsx", ".jsx", ".sh", ".bash",
         ".go", ".rs", ".rb", ".java", ".c", ".cpp", ".h",
         ".css", ".html", ".sql", ".yaml", ".yml", ".toml",
+        ".ipynb",  # I13: notebooks are code (parity with task-gate-hook)
     }
     _CODE_DIRS = {"scripts", "bin", "src", "hooks", "lib", "cmd"}
 
