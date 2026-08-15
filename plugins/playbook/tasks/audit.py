@@ -58,7 +58,19 @@ DEFAULT_SWEEPS = [
         "name": "merge-artifacts",
         "severity": "error",
         "why": ".orig/.rej files left by a merge or failed patch are zombie files",
-        "command": r"find . -path ./.git -prune -o \( -name '*.orig' -o -name '*.rej' \) -print | grep .",
+        # I6: the old `find … | grep .` took the pipeline status from grep, so a
+        # find that errored mid-scan (permission-denied dir) → grep sees no
+        # input → exit 1 → false CLEAN. `pipefail` does NOT fix it (find's error
+        # exit is 1, colliding with grep's clean exit 1). Capture find's output
+        # and check ITS status: a find error → exit 2 (ERROR, scan incomplete),
+        # matches printed → exit 0 (FINDINGS), nothing → exit 1 (CLEAN).
+        "command": (
+            r"out=$(find . -path ./.git -prune -o \( -name '*.orig' -o -name '*.rej' \) -print) || exit 2"
+            "\n"
+            r'[ -n "$out" ] && { printf "%s\n" "$out"; exit 0; }'
+            "\n"
+            r"exit 1"
+        ),
     },
     {
         "name": "stale-markers",
