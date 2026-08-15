@@ -117,7 +117,7 @@ def _inject_chat_into_task(task_file: Path, messages: list[str]) -> None:
         """Replace non-UTF-8-survivable code points like lone surrogates."""
         return text.encode("utf-8", errors="replace").decode("utf-8")
 
-    content = task_file.read_text(encoding="utf-8")
+    content = task_file.read_text(encoding="utf-8", errors="replace")
 
     chat_block = "\n### Recent Chat (auto-captured at activation — review and remove unrelated)\n"
     for msg in messages:
@@ -148,7 +148,7 @@ def _gate_bounce(task_id: str, task_file, action: str) -> bool:
         return False
     try:
         open_count = sum(
-            1 for ln in task_file.read_text(encoding="utf-8").splitlines()
+            1 for ln in task_file.read_text(encoding="utf-8", errors="replace").splitlines()
             if ln.strip().startswith("- [ ]")
         )
     except OSError:
@@ -208,7 +208,7 @@ def cmd_work(cmd_args):
         session_state = agent_dir / "sessions" / session_id / "current_state"
 
         # Find the active task from session state file
-        prev_task = session_state.read_text(encoding="utf-8").strip() if session_state.exists() else None
+        prev_task = session_state.read_text(encoding="utf-8", errors="replace").strip() if session_state.exists() else None
 
         if prev_task:
             # Set ## Status to done in task.md
@@ -246,7 +246,7 @@ def cmd_work(cmd_args):
                 if not force:
                     from tasks.core import _gate_counts
                     try:
-                        _chk, _tot = _gate_counts(task_file.read_text(encoding="utf-8"))
+                        _chk, _tot = _gate_counts(task_file.read_text(encoding="utf-8", errors="replace"))
                     except OSError:
                         _chk, _tot = 0, 0
                     if _tot and _chk < _tot:
@@ -433,7 +433,7 @@ def cmd_work(cmd_args):
             if sessions_dir.exists():
                 for sf in sessions_dir.glob("*/current_state"):
                     try:
-                        if sf.read_text(encoding="utf-8").strip() == prev_task:
+                        if sf.read_text(encoding="utf-8", errors="replace").strip() == prev_task:
                             shutil.rmtree(sf.parent, ignore_errors=True)
                     except OSError:
                         pass
@@ -445,7 +445,7 @@ def cmd_work(cmd_args):
             # (`[dismissed: reason]`), or leaving open deliberately.
             from tasks.core import open_parked_items, retro_proposal
             try:
-                _still_open = open_parked_items(task_file.read_text(encoding="utf-8"))
+                _still_open = open_parked_items(task_file.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 _still_open = []
             if _still_open:
@@ -494,7 +494,7 @@ def cmd_work(cmd_args):
             done = _is_done(tf)
             if done:
                 # Reopen: reset Status to in_progress so activation can proceed.
-                lines = tf.read_text(encoding="utf-8").splitlines(keepends=True)
+                lines = tf.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
                 for i, line in enumerate(lines):
                     if line.strip() == "## Status" and i + 1 < len(lines):
                         lines[i + 1] = "in_progress\n"
@@ -503,7 +503,7 @@ def cmd_work(cmd_args):
                 print(f"Note: task {task_num} was marked done — reopening.")
                 task_file = tf
                 # Fall through to activation below
-            elif "<!-- stub:" in tf.read_text(encoding="utf-8"):
+            elif "<!-- stub:" in tf.read_text(encoding="utf-8", errors="replace"):
                 # Stub — allow activation, expansion happens below
                 task_file = tf
             elif _extract_head_position(tf) == "(all gates checked)":
@@ -538,7 +538,7 @@ def cmd_work(cmd_args):
     session_state = session_dir / "current_state"
     prev_task = None
     if session_state.exists():
-        prev_task = session_state.read_text(encoding="utf-8").strip()
+        prev_task = session_state.read_text(encoding="utf-8", errors="replace").strip()
     if prev_task and prev_task != task_num:
         from tasks.core import _extract_head_position, _extract_status
         prev_matches = list((agent_dir / "tasks").glob(f"{prev_task}-*/task.md"))
@@ -591,7 +591,7 @@ def cmd_work(cmd_args):
     # mtime is what task 027 fixed; don't reintroduce it.
 
     # Expand stubs on activation
-    task_content = task_file.read_text(encoding="utf-8")
+    task_content = task_file.read_text(encoding="utf-8", errors="replace")
     import re as _stub_re
     stub_match = _stub_re.search(r'<!-- stub:(\w+) -->', task_content)
     if stub_match:
@@ -670,7 +670,7 @@ def cmd_work(cmd_args):
         print(f"Captured {len(recent_chat)} recent chat message(s) into References.")
 
     # Print the full task file
-    print(task_file.read_text(encoding="utf-8").rstrip())
+    print(task_file.read_text(encoding="utf-8", errors="replace").rstrip())
 
     # F21 (batch-6 finding): the parked lifecycle taught its markers only
     # at CLOSE (own-task items). The consumption moment — a new task picks
@@ -683,7 +683,7 @@ def cmd_work(cmd_args):
         for _tf in sorted((agent_dir / "tasks").glob("*/task.md")):
             if _tf == task_file:
                 continue
-            _parked_elsewhere += len(_opi(_tf.read_text(encoding="utf-8")))
+            _parked_elsewhere += len(_opi(_tf.read_text(encoding="utf-8", errors="replace")))
     except OSError:
         pass
     if _parked_elsewhere:
@@ -771,7 +771,7 @@ def cmd_new(cmd_args):
                 print("Use this to improve your task.md: select patterns and gates as appropriate,")
                 print("or invent new ones. This is a starting point — expand as needed.")
                 print()
-                content = playbook_file.read_text(encoding="utf-8")
+                content = playbook_file.read_text(encoding="utf-8", errors="replace")
                 # Strip sections not relevant to task design
                 for marker in ["## Mind Map", "> Evidence base:"]:
                     idx = content.find(marker)
@@ -797,7 +797,7 @@ def cmd_blocked(cmd_args):
     agent_dir = resolve_agent_dir(project_path)
     session_id = resolve_session_id()
     state_file = agent_dir / "sessions" / session_id / "current_state"
-    active = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else None
+    active = state_file.read_text(encoding="utf-8", errors="replace").strip() if state_file.exists() else None
     if not active:
         print("No active task to block. Activate one first: tasks work <N>",
               file=sys.stderr)
@@ -851,14 +851,14 @@ def cmd_freehand(cmd_args):
         if not state_file.exists():
             print("Error: no active task", file=sys.stderr)
             sys.exit(1)
-        task_num = state_file.read_text(encoding="utf-8").strip()
+        task_num = state_file.read_text(encoding="utf-8", errors="replace").strip()
         tasks_dir = agent_dir / "tasks"
         matches = list(tasks_dir.glob(f"{task_num}-*/task.md"))
         if not matches:
             print(f"Error: task {task_num} not found", file=sys.stderr)
             sys.exit(1)
         task_file = matches[0]
-        task_text = task_file.read_text(encoding="utf-8")
+        task_text = task_file.read_text(encoding="utf-8", errors="replace")
 
         # Find the freehand-start marker
         import re
@@ -929,7 +929,7 @@ def cmd_freehand(cmd_args):
     agent_dir = resolve_agent_dir(project_path)
 
     if state_file.exists():
-        task_num = state_file.read_text(encoding="utf-8").strip()
+        task_num = state_file.read_text(encoding="utf-8", errors="replace").strip()
     else:
         task_num = None
 
@@ -977,7 +977,7 @@ def cmd_freehand(cmd_args):
         task_file = matches[0]
 
         from datetime import datetime, timezone
-        task_text = task_file.read_text(encoding="utf-8")
+        task_text = task_file.read_text(encoding="utf-8", errors="replace")
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         freehand_block = (

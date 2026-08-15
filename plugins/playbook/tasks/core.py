@@ -210,7 +210,7 @@ def resolve_agent_dir(project_path: Path) -> Path:
     marker = project_path / ".agent" / "current_user"
     if not marker.exists():
         return project_path / ".agent"
-    name = marker.read_text(encoding="utf-8").strip()
+    name = marker.read_text(encoding="utf-8", errors="replace").strip()
     _validate_username(name)
     return project_path / ".agent" / name
 
@@ -1475,7 +1475,7 @@ def _load_playbook(task_type: str, project_path: Path | None = None) -> str | No
     if not skill_path:
         return None
 
-    content = skill_path.read_text(encoding="utf-8")
+    content = skill_path.read_text(encoding="utf-8", errors="replace")
 
     # Extract the ```markdown ... ``` block under ### <pattern_name>
     in_section = False
@@ -1561,7 +1561,7 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
             task_type=task_type,
         )
     elif custom:
-        content = custom.read_text(encoding="utf-8")
+        content = custom.read_text(encoding="utf-8", errors="replace")
         content = content.replace("{{NNN}}", f"{task_num:03d}")
         content = content.replace("{{TITLE}}", _display_title(name))
     else:
@@ -1605,7 +1605,7 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
 def _extract_status(task_file: Path) -> str:
     """Extract status from task file (line after last ## Status)."""
     try:
-        lines = task_file.read_text(encoding="utf-8").splitlines()
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
         status_idx = None
         for i, line in enumerate(lines):
             if line.strip() == "## Status":
@@ -1620,7 +1620,7 @@ def _extract_status(task_file: Path) -> str:
 def _extract_problem(task_file: Path) -> str:
     """Extract first line of Problem/Intent section from task file."""
     try:
-        lines = task_file.read_text(encoding="utf-8").splitlines()
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
         in_section = False
         for line in lines:
             if line.strip() in ("## Problem", "## Intent"):
@@ -1643,7 +1643,7 @@ def _extract_problem(task_file: Path) -> str:
 def _extract_head_position(task_file: Path) -> str:
     """Find the first unchecked checkbox or empty required field."""
     try:
-        lines = task_file.read_text(encoding="utf-8").splitlines()
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
         for line in lines:
             stripped = line.strip()
             # Unchecked checkbox
@@ -1692,7 +1692,7 @@ def _atomic_write(path: Path, text: str) -> None:
 def _set_status(task_file: Path, value: str) -> None:
     """Rewrite the line after the LAST ## Status (matching _extract_status).
     The single writer of task status."""
-    lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     target = None
     for i, line in enumerate(lines):
         if line.strip() == "## Status" and i + 1 < len(lines):
@@ -1711,7 +1711,7 @@ def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
     newest-first `###` entries keeps the full history AND makes the first thing
     under the heading the truth."""
     p = Path(task_file)
-    text = p.read_text(encoding="utf-8")
+    text = p.read_text(encoding="utf-8", errors="replace")
     marker = f"## {heading}"
     lines = text.splitlines()
     for i, ln in enumerate(lines):
@@ -1732,7 +1732,7 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     clean = " ".join(reason.split()) or "(no reason given)"
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
     _set_status(task_file, "blocked")
-    lines = task_file.read_text(encoding="utf-8").splitlines()
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
     # Drop any prior ## Blocked section (idempotent re-block), then append fresh.
     out, skip = [], False
     for line in lines:
@@ -1756,7 +1756,7 @@ def resume_blocked_task(task_file: Path) -> None:
     resume line so the history stays true and current rather than stale (#08)."""
     _set_status(task_file, "in_progress")
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
-    lines = task_file.read_text(encoding="utf-8").splitlines()
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
     out, i, n, stamped = [], 0, len(lines), False
     while i < n:
         out.append(lines[i])
@@ -1828,7 +1828,7 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
     for state_file in state_files:
         if not state_file.exists():
             continue
-        task_num = state_file.read_text(encoding="utf-8").strip()
+        task_num = state_file.read_text(encoding="utf-8", errors="replace").strip()
         if not task_num:
             continue
         matches = sorted((agent_dir / "tasks").glob(f"{task_num}-*/task.md"))
@@ -1850,7 +1850,7 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
         return {"error": "No active task with open gates"}
 
     task_name = task_file.parent.name
-    lines = task_file.read_text(encoding="utf-8").splitlines()
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
 
     # Find and check off the first unchecked gate
     checked_text = None
@@ -1914,7 +1914,7 @@ def _gate_counts(content: str) -> "tuple[int, int]":
 def _extract_progress(task_file: Path) -> str:
     """Count checked/total gates in a task file (line-anchored, prose-safe)."""
     try:
-        checked, total = _gate_counts(task_file.read_text(encoding="utf-8"))
+        checked, total = _gate_counts(task_file.read_text(encoding="utf-8", errors="replace"))
         return f"{checked}/{total}" if total > 0 else "-"
     except Exception:
         return "-"
