@@ -64,15 +64,38 @@ def find_agent_root_pid() -> int | None:
     return last_agent_pid
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _sanitize_session_id(sid: str) -> str:
+    """Accept an externally-supplied session id ONLY if it is a safe single
+    directory component; otherwise return "" so the caller falls back to the
+    derived pid (C4).
+
+    This value becomes a path component in `rm -rf .agent/sessions/<id>` and in
+    EVERY hook's path composition, so an unsanitized `PLAYBOOK_SESSION_ID=../tasks`
+    deleted the task DB. Allow the canonical `pid-*` ids AND the sanctioned
+    `judge` session id (both match the charset); reject anything with a slash,
+    whitespace, control char, or the traversal components `.`/`..`. Neutralize
+    (not hard-reject) because this resolver is shared by non-enforcing hooks
+    that must keep working (fail-open decree) — a bad value simply loses its
+    override, it does not abort the session.
+    """
+    if sid in (".", ".."):
+        return ""
+    return sid if _SESSION_ID_RE.fullmatch(sid) else ""
+
+
 def resolve_session_id() -> str:
     """Resolve session_id used to namespace .agent/sessions/<id>/.
 
-    Order: PLAYBOOK_SESSION_ID env → ancestor scan (root agent PID) →
-    immediate-parent PID. The ancestor scan is the robust path: it survives
+    Order: PLAYBOOK_SESSION_ID env (sanitized) → ancestor scan (root agent PID)
+    → immediate-parent PID. The ancestor scan is the robust path: it survives
     env-propagation failures (VSCode CLAUDE_ENV_FILE quirks, missing wrappers,
-    subprocess loss). Bash hooks mirror this resolver in gate-echo-lib.sh.
+    subprocess loss). Bash hooks mirror this resolver — including the
+    sanitization — in gate-echo-lib.sh.
     """
-    sid = os.environ.get("PLAYBOOK_SESSION_ID", "")
+    sid = _sanitize_session_id(os.environ.get("PLAYBOOK_SESSION_ID", ""))
     if sid:
         return sid
     # On Windows the ancestor scan is skipped (see find_agent_root_pid) and a

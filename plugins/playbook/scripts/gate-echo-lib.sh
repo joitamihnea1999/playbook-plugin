@@ -82,8 +82,18 @@ find_agent_root_pid() {
 # — Python and bash converge on the same value when env var is unset.
 resolve_session_id() {
     if [ -n "${PLAYBOOK_SESSION_ID:-}" ]; then
-        echo "$PLAYBOOK_SESSION_ID"
-        return 0
+        # Sanitize (C4): this value becomes a path component in `rm -rf
+        # .agent/sessions/<id>` and in every hook. An unsanitized `../tasks`
+        # deleted the task DB. Accept only a safe single component (the
+        # canonical `pid-*` ids AND the sanctioned `judge` session id);
+        # NEUTRALIZE anything else — a slash, whitespace, or the traversal
+        # components `.`/`..` — by falling through to the derived pid. Mirrors
+        # tasks.core._sanitize_session_id.
+        case "$PLAYBOOK_SESSION_ID" in
+            .|..) : ;;                       # traversal → neutralize
+            *[!A-Za-z0-9._-]*) : ;;          # slash / space / control char → neutralize
+            *) echo "$PLAYBOOK_SESSION_ID"; return 0 ;;
+        esac
     fi
     # Windows/MSYS: a PID fallback split-brains — this shell sees MSYS PIDs
     # while the Python CLI sees native-Windows PIDs (disjoint namespaces), so
