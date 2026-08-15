@@ -55,8 +55,12 @@ def _capture_recent_chat(project_path: Path, max_messages: int = 10,
 
     content = chat_log.read_text(encoding="utf-8", errors="replace")
     # Split into message blocks on --- separator
+    # `\w+`[^\n]* (not `\w+`\s*\n): the producer appends a ` (provider/pid)`
+    # suffix to the header since 1.4.3, so anchoring the backtick-host tag right
+    # before the newline made this parser DEAD on every modern entry (I12).
+    # Consume the rest of the header line, matching both legacy and modern.
     msg_pattern = re.compile(
-        r'\*\*\[(M\d+)\]\*\*\s+\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\]\s+`\w+`\s*\n\s*\n(.*?)(?=\n---|\Z)',
+        r'\*\*\[(M\d+)\]\*\*\s+\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\]\s+`\w+`[^\n]*\n\s*\n(.*?)(?=\n---|\Z)',
         re.DOTALL
     )
 
