@@ -51,6 +51,26 @@ def _cmd_prepare_merge(project_path: Path, target: str, dry_run: bool) -> None:
         print("(dry-run — no files written)")
 
 
+def _renumbered_dir_name(old_name: str, new_num: int) -> str:
+    """Rename a `NNN-slug` task dir to `new_num`, PRESERVING the zero-pad width
+    (C2). The single source of truth for both the `--dry-run` preview and the
+    real rename — computing them separately let the preview lie about the
+    action (`002-feat-two` → preview `003`, action `302`). Slicing by the
+    *unpadded* number's width (`str(new_num) + old_name[len(str(old_num)):]`)
+    corrupted every task < 100: it kept the padding zeros as data
+    (`002` → `302`, `099` → `1009`). Replace the WHOLE leading digit run.
+    """
+    import re
+    m = re.match(r"^(\d+)(.*)$", old_name)
+    if not m:
+        # No leading number — nothing sane to renumber; leave as-is.
+        return old_name
+    digits, rest = m.group(1), m.group(2)
+    # Preserve the original prefix width (canonical layout is 3-digit); a
+    # larger new number naturally widens (format never truncates).
+    return f"{new_num:0{len(digits)}d}" + rest
+
+
 def _git_ls_tasks(project_path: Path, ref: str, agent_dir: Path) -> dict[int, str]:
     """Return {task_number: dir_name} for tasks present at git ref. Empty dict if path absent."""
     import subprocess
@@ -112,7 +132,7 @@ def _prepare_merge_tasks(project_path: Path, agent_dir: Path, target: str,
     if dry_run:
         for old_num in sorted(rename_map):
             old_name = current_tasks[old_num]
-            new_name = old_name.replace(str(old_num) + "-", str(rename_map[old_num]) + "-", 1)
+            new_name = _renumbered_dir_name(old_name, rename_map[old_num])
             print(f"  [dry-run] rename {old_name} → {new_name}")
         return
 
@@ -150,8 +170,8 @@ def _rename_colliding_tasks(project_path: Path, agent_dir: Path,
     for old_num in sorted(rename_map):
         new_num = rename_map[old_num]
         old_name = current_tasks[old_num]
-        # Preserve slug: "133-prepare-merge" → "135-prepare-merge"
-        new_name = str(new_num) + old_name[len(str(old_num)):]
+        # Pad-preserving, UNIFIED with the dry-run preview (C2).
+        new_name = _renumbered_dir_name(old_name, new_num)
         old_rel = str((tasks_dir / old_name).relative_to(project_path))
         new_rel = str((tasks_dir / new_name).relative_to(project_path))
 
