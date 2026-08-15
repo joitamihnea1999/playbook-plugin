@@ -223,11 +223,19 @@ MSG
         exit 2
     fi
 
-    # Check for active task
+    # Check for active task — the pointer must RESOLVE to a real task dir, not
+    # merely be non-empty (I2). `.agent/**` is gate-exempt, so an agent could
+    # `Write current_state=junk` and self-authorize; this also fires on a
+    # stale/leftover pointer whose task dir was renamed or deleted. Same
+    # NNN-*/task.md resolution the state-echo/stop hooks use.
     if [ -f "$STATE_FILE" ]; then
         TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
         if [ -n "$TASK" ]; then
-            exit 0
+            RESOLVED=$(find "$AGENT_DIR/tasks" -maxdepth 2 -name "task.md" \
+                -path "*/${TASK}-*/*" 2>/dev/null | head -1)
+            if [ -n "$RESOLVED" ]; then
+                exit 0
+            fi
         fi
     fi
 

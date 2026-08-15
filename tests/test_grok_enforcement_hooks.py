@@ -236,6 +236,13 @@ class GateHookGrokDialectTests(unittest.TestCase):
     def test_grok_write_allowed_with_active_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = self._project(tmp)
+            # A REAL active task the pointer resolves to (I2: the gate no longer
+            # trusts a bare non-empty pointer — it must name an existing task).
+            tdir = project / ".agent" / "tasks" / "001-x"
+            tdir.mkdir(parents=True)
+            (tdir / "task.md").write_text(
+                "# 001 - x\n## Status\nin_progress\n## Work Plan\n- [ ] g\n",
+                encoding="utf-8")
             sess = project / ".agent" / "sessions" / self.SESSION
             sess.mkdir(parents=True)
             (sess / "current_state").write_text("001\n", encoding="utf-8")
