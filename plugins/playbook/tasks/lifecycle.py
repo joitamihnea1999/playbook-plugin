@@ -186,7 +186,14 @@ def cmd_work(cmd_args):
     reason = None
     for _i, _a in enumerate(cmd_args):
         if _a == "--reason" and _i + 1 < len(cmd_args):
-            reason = cmd_args[_i + 1]
+            _val = cmd_args[_i + 1]
+            # I11: don't swallow the NEXT FLAG as the reason —
+            # `--reason --force` used to force-close with the reason literally
+            # "--force", satisfying "a forced close must record why" with a
+            # flag name. A real reason is prose; a `--`-prefixed token is
+            # another flag, so leave reason unset (the force gate then blocks).
+            if not _val.startswith("--"):
+                reason = _val
             break
     project_path = find_project_root()
 
