@@ -62,7 +62,18 @@ fi
 # or abort in a read-only sandbox.
 heal_empty_wrappers "$PROJECT_DIR" || true
 
-AGENT_DIR=$(resolve_agent_dir "$PROJECT_DIR")
+# I1: a malformed .agent/current_user makes resolve_agent_dir `exit 1`. At top
+# level under `set -e` that aborted the whole hook with exit 1 — which Claude
+# Code treats as a NON-blocking error, so the code edit proceeded (the enforcing
+# gate failed OPEN). Detect the failure and FAIL CLOSED below (block code edits)
+# instead of aborting-open, while still allowing .agent/.claude edits so the
+# marker stays fixable. Never falls back to shared-root state for authorization.
+if ! AGENT_DIR=$(resolve_agent_dir "$PROJECT_DIR" 2>/dev/null); then
+    MARKER_INVALID=true
+    AGENT_DIR="$PROJECT_DIR/.agent"   # nominal for path building; guards fail closed
+else
+    MARKER_INVALID=false
+fi
 
 # State file lives in per-session subdirectory; "default" used when no session_id
 SESSION_DIR="$AGENT_DIR/sessions/default"
@@ -197,6 +208,19 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
     # Only block code files
     if ! is_code_file_path "$FILE_PATH"; then
         exit 0
+    fi
+
+    # I1: malformed marker — FAIL CLOSED. We cannot resolve which lane owns the
+    # tasks, so no code edit is authorized (.agent/.claude edits were already
+    # allowed above, so the marker stays fixable).
+    if [ "${MARKER_INVALID:-false}" = true ]; then
+        cat >&2 <<'MSG'
+BLOCKED: .agent/current_user is malformed — cannot resolve your lane.
+Fix it to a single username line (letters, digits, and ._- only), e.g.:
+  echo alice > .agent/current_user
+Code edits are blocked until the lane resolves.
+MSG
+        exit 2
     fi
 
     # Check for active task

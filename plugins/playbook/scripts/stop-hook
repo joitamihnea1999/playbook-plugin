@@ -27,7 +27,17 @@ if [ -z "$PROJECT_DIR" ]; then
     exit 0
 fi
 
-AGENT_DIR=$(resolve_agent_dir "$PROJECT_DIR")
+# I1: a malformed .agent/current_user makes resolve_agent_dir `exit 1`, which at
+# top level under `set -e` aborted the hook with exit 1 — a NON-blocking error,
+# so the stop proceeded with open gates (failed OPEN). Detect it and FAIL CLOSED
+# below (block the stop once), never abort-open. The stop_hook_active valve
+# still ends a re-issued stop, so this can't wedge the session.
+if ! AGENT_DIR=$(resolve_agent_dir "$PROJECT_DIR" 2>/dev/null); then
+    MARKER_INVALID=true
+    AGENT_DIR="$PROJECT_DIR/.agent"   # nominal for path building; blocks below
+else
+    MARKER_INVALID=false
+fi
 
 # Read stdin (Stop JSON) — extract stop_hook_active
 INPUT=$(cat)
@@ -37,6 +47,17 @@ SESSION_ID="$(resolve_session_id)"
 # Safety valve: if already blocked once, allow stopping to prevent loops
 if [ "$STOP_ACTIVE" = "True" ]; then
     exit 0
+fi
+
+# I1: malformed marker — FAIL CLOSED (block the stop, never abort-open). Placed
+# AFTER the stop_hook_active valve so a re-issued stop still ends the turn.
+if [ "${MARKER_INVALID:-false}" = true ]; then
+    cat >&2 <<'MSG'
+BLOCKED: .agent/current_user is malformed — cannot resolve your lane to check
+task gates. Fix it to a single username line (letters, digits, and ._- only),
+then finish.
+MSG
+    exit 2
 fi
 
 # --- Eval mode: skip stop guard if stop_guard=off ---
