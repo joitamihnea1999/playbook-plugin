@@ -609,8 +609,15 @@ with open(d/".agent"/"current_user", "w", newline="") as fh:
 ' "$1" "$2"
     }
 
+    # zsh is optional on the host: skip the zsh-logger half cleanly when it is
+    # absent (otherwise `set -e` + a 127 from a missing zsh aborts the whole
+    # fixture, losing the bash-logger, S15, and S18 session-GC coverage).
+    if command -v zsh >/dev/null 2>&1; then _HAVE_ZSH=1; else
+        _HAVE_ZSH=0
+        echo "  (zsh not installed — S16 zsh-logger assertions skipped)"
+    fi
     log_bash() { (cd "$1" && bash -c 'source "$1"; echo probe >/dev/null' _ "$BASH_LOG" >/dev/null 2>&1); }
-    log_zsh()  { (cd "$1" && ZSH_EXECUTION_STRING="echo probe" zsh -f -c "source '$ZSH_LOG'" >/dev/null 2>&1); }
+    log_zsh()  { [ "$_HAVE_ZSH" = 1 ] || return 0; (cd "$1" && ZSH_EXECUTION_STRING="echo probe" zsh -f -c "source '$ZSH_LOG'" >/dev/null 2>&1); }
 
     # --- legacy: root, and it must be the file the CLI reads ---
     d="$WORK/s16-legacy"; build_project "$d" legacy
@@ -630,9 +637,10 @@ with open(d/".agent"/"current_user", "w", newline="") as fh:
         || pass "S16 multi-user: no root history"
     assert_eq "$d/.agent/alice/bash_history" "$(cli_lane "$d")/bash_history" \
         "S16 multi-user: writer file == the file tasks retro/context read"
-    # Both shells logged into the same file.
-    assert_eq "$(grep -c 'AGENT' "$d/.agent/alice/bash_history")" "2" \
-        "S16 both shells appended to the lane file"
+    # Both shells logged into the same file (bash always; zsh only if present).
+    _EXPECT_LOGS=$([ "$_HAVE_ZSH" = 1 ] && echo 2 || echo 1)
+    assert_eq "$(grep -c 'AGENT' "$d/.agent/alice/bash_history")" "$_EXPECT_LOGS" \
+        "S16 shells appended to the lane file (bash$([ "$_HAVE_ZSH" = 1 ] && echo '+zsh'))"
 
     # --- CRLF marker: must resolve, not silently disable logging ---
     d="$WORK/s16-crlf"; mkdir -p "$d/.agent/alice/tasks"
