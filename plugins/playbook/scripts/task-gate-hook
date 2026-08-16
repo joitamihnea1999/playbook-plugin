@@ -235,13 +235,20 @@ MSG
     # NNN-*/task.md resolution the state-echo/stop hooks use.
     if [ -f "$STATE_FILE" ]; then
         TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
-        if [ -n "$TASK" ]; then
-            RESOLVED=$(find "$AGENT_DIR/tasks" -maxdepth 2 -name "task.md" \
-                -path "*/${TASK}-*/*" 2>/dev/null | head -1)
-            if [ -n "$RESOLVED" ]; then
-                exit 0
-            fi
-        fi
+        # N2: the pointer feeds a `find -path "*/${TASK}-*/*"` GLOB, so a bare
+        # glob metacharacter (`*`, `?`, `[…]`) in the gate-exempt current_state
+        # matched a real task and self-authorized. Task pointers are numeric —
+        # reject anything non-digit before it reaches the glob.
+        case "$TASK" in
+            ''|*[!0-9]*) ;;   # empty or non-digit → not a valid pointer; fall through to block
+            *)
+                RESOLVED=$(find "$AGENT_DIR/tasks" -maxdepth 2 -name "task.md" \
+                    -path "*/${TASK}-*/*" 2>/dev/null | head -1)
+                if [ -n "$RESOLVED" ]; then
+                    exit 0
+                fi
+                ;;
+        esac
     fi
 
     # No active task — block code edit

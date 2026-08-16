@@ -177,6 +177,9 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
+# N2: a non-digit pointer (incl. a glob metachar) is not a valid task number;
+# blank it so it reads as "no active task" rather than glob-matching a real one.
+case "$TASK" in *[!0-9]*) TASK="" ;; esac
 
 if [ -z "$TASK" ]; then
     echo '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"# No active task (.claude/bin/tasks work <N> to activate)"}}'

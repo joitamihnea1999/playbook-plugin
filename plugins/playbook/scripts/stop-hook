@@ -77,6 +77,10 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
+# N2: task pointers are numeric — a non-digit value (incl. a glob metachar that
+# would match a real task under the `-path "*/${TASK}-*/*"` find below) is not a
+# valid pointer. Blank it so it reads as "no active task".
+case "$TASK" in *[!0-9]*) TASK="" ;; esac
 if [ -z "$TASK" ]; then
     exit 0
 fi

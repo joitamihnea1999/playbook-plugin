@@ -213,7 +213,12 @@ def cmd_work(cmd_args):
         if prev_task:
             # Set ## Status to done in task.md
             tasks_dir = agent_dir / "tasks"
-            matches = list(tasks_dir.glob(f"{prev_task}-*/task.md"))
+            # N2: task pointers are numeric — a non-digit value (incl. a glob
+            # metacharacter like `*`, which would otherwise match a real task
+            # dir and close the WRONG task) is not a valid pointer. Force the
+            # non-resolving path below (fail loud, change nothing).
+            matches = (list(tasks_dir.glob(f"{prev_task}-*/task.md"))
+                       if prev_task.isdigit() else [])
             if not matches:
                 # C1: the pointer names a task whose `NNN-*` folder does not
                 # resolve — a renamed/deleted folder, a wrong-lane pointer, or

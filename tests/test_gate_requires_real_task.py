@@ -63,6 +63,17 @@ class GateRequiresRealTask(unittest.TestCase):
         self.assertEqual(r.returncode, 2,
                          f"stale pointer self-authorized a code edit (rc={r.returncode})")
 
+    def test_glob_metachar_pointer_does_not_authorize(self):
+        # N2 (verification-report-1.5.10): the pointer feeds a `find -path
+        # "*/${TASK}-*/*"` glob, so a bare `*` matched the real task 001-real
+        # and self-authorized. A glob metacharacter is not a task number.
+        for meta in ("*", "?", "[0-9]"):
+            with self.subTest(pointer=meta):
+                self.pointer.write_text(meta + "\n", encoding="utf-8")
+                r = self.run_gate(self.project / "src" / "main.py")
+                self.assertEqual(r.returncode, 2,
+                                 f"glob pointer {meta!r} self-authorized (rc={r.returncode})")
+
     def test_real_pointer_authorizes(self):
         # Negative control: a pointer resolving to a real task still allows.
         self.pointer.write_text("001\n", encoding="utf-8")
