@@ -2,6 +2,62 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.12] — 2026-08-16
+
+The publish-readiness batch: a four-way independent audit of 1.5.11 (core
+workflow, enforcement/security, review/provider/merge, docs) found defects behind
+the 935-green suite — two new gate-integrity holes, two first-run functional
+bugs, and default-config exposure. All fixed red-first. The audit also confirmed
+the whole prior foundation holds (C1–C5, N1, N2, I1/I13, panel/merge fail-closed
+guarantees, GC — all independently re-reproduced).
+
+### Security
+
+- **NEW-1 (High) — code-edit gate bypass via `..`.** The gate exempted any path
+  *containing* `.agent`/`.claude` without resolving `..`, so `Edit
+  .agent/../src/main.py` was exempted while the write landed on the real code
+  file — a one-string defeat of "no code without an active task", on both the
+  Claude hook and the codex `_is_management_path`. Both now lexically normalize
+  the path (no fs/symlink resolution) before the exemption and the code-file test.
+- **NEW-2 (Medium) — enforcing gate fail-open on an unwritable sessions dir.**
+  `mkdir -p "$SESSION_DIR"` ran unguarded under `set -e`, so a full/read-only
+  sessions dir aborted the hook with exit 1 (non-blocking) and the edit proceeded.
+  Guarded (`2>/dev/null || true`); on failure the pointer simply doesn't exist,
+  which reads as "no active task" (block).
+
+### Fixed
+
+- **`tasks freehand log` crashed on Python 3.10 (B2).** The reader parsed the
+  `Z`-suffixed timestamp it writes with `datetime.fromisoformat()`, which rejects
+  `Z` before 3.11 — so the feature was dead on Ubuntu 22.04 (a common host)
+  despite the plugin's 3.10+ floor. Normalize `Z` → `+00:00`.
+- **`tasks new light <name> <intent>` dropped the intent (B1).** `create_task`
+  substituted intent only into the feature/quick placeholders, not the light
+  template's. Added it.
+- **`tasks --help` omitted the `light` task type (D2).** Now listed.
+- **Parity hardening:** stop-hook reads its counters as integers (C5 parity), and
+  `shared._own_session_id` is sanitized via the shared resolver (both flagged by
+  the audit; neither exploitable).
+
+### Changed
+
+- **Shipped judge defaults are now all-Claude.** `default_judge` → `opus` and the
+  default panel → `[opus, sonnet]` (was codex-default + a mixed panel). A
+  Claude-first user's `tasks judge`/`panel-review` no longer exercises the codex/
+  grok/pi adapter drift (I16/I17). Other vendors remain available via the
+  `models.json` aliases, `.agent/models.json`, `--backend`, or `--models`.
+
+### Docs
+
+- Documented `panel_required_for` in the config `_doc` and reconciled the
+  `--help` close text with the panel-always default (the policy is unchanged —
+  every close needs a PASS panel under the seeded `"all"`).
+- Fixed the `configuration.md` alias example (was an off-schema bare string the
+  parser silently drops → the `[agent, model, [extras]]` schema); `/init` →
+  `/playbook:init` and the pattern list in `commands/playbook.md`; a ghost
+  `src/tasks/` path and the "Never batch" wording in `playbooks-README.md`; and
+  the mind-map node-count contradiction. Refreshed the README audit baseline.
+
 ## [1.5.11] — 2026-08-16
 
 Closes the two residuals the independent analyst pass found in 1.5.10
