@@ -112,20 +112,41 @@ _OLD_CHAT_HEADER_RE = re.compile(r"^\*\*\[([0-9-]{10} [0-9:]{8} UTC)\]\*\*(.*)$"
 _NEW_CHAT_HEADER_RE = re.compile(r"^\*\*\[M(\d{3,})\]\*\* ")
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _sanitize_session_id(sid: str) -> str:
+    """Accept an externally-supplied session id ONLY if it is a safe single
+    directory component; otherwise "" so the caller falls back (N1).
+
+    This value composes codex hook paths that are WRITTEN — `counters`,
+    turn-baseline JSON, the stop-block marker — so an unsanitized
+    `PLAYBOOK_SESSION_ID=../tasks/…` escaped `sessions/` and wrote inside the
+    task dir (the codex twin of C4). Same whitelist as
+    tasks.core / gate-echo-lib.sh so the "one resolver contract" holds across
+    all three surfaces: `pid-*` ids and the sanctioned `judge` pass; a slash,
+    whitespace, control char, or `.`/`..` is rejected.
+    """
+    if not sid or sid in (".", ".."):
+        return ""
+    return sid if _SESSION_ID_RE.fullmatch(sid) else ""
+
+
 def resolve_session_id() -> str:
     """Best available session ID for Codex hook scripts.
 
-    Priority:
+    Priority (each env source is SANITIZED — N1):
     1. PLAYBOOK_SESSION_ID — set by bin/playbook-codex wrapper (may not survive sandbox)
     2. CODEX_THREAD_ID — native Codex env var, stable per session, always present
     3. pid-{ppid} — parent process PID (the Codex process that spawned this hook)
     """
     import os as _os
-    return (
-        _os.environ.get("PLAYBOOK_SESSION_ID")
-        or _os.environ.get("CODEX_THREAD_ID")
-        or f"pid-{_os.getppid()}"
-    )
+    for _src in (_os.environ.get("PLAYBOOK_SESSION_ID"),
+                 _os.environ.get("CODEX_THREAD_ID")):
+        _clean = _sanitize_session_id(_src or "")
+        if _clean:
+            return _clean
+    return f"pid-{_os.getppid()}"
 
 
 def codex_config_path(home_dir: Path | None = None) -> Path:
