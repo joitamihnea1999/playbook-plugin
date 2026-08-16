@@ -116,9 +116,15 @@ def evaluate_tool_call(
 
 
 def _is_management_path(file_path: str) -> bool:
-    """Return True if path is under .agent/ or .claude/ (always allowed without task)."""
+    """Return True if path is genuinely under .agent/ or .claude/ (always allowed
+    without a task).
+
+    NEW-1: resolve `..` FIRST (lexical normpath) — a path that merely contains
+    the token but traverses back out to a code file (`.agent/../src/main.py`)
+    must not be treated as management, or it bypasses the code-edit gate.
+    """
     import os
-    norm = file_path.replace("\\", "/")
+    norm = os.path.normpath(file_path.replace("\\", "/"))
     parts = norm.split("/")
     return ".agent" in parts or ".claude" in parts
 
