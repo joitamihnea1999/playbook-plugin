@@ -535,6 +535,17 @@ def cmd_work(cmd_args):
             print(f"Task {task_num} not found", file=sys.stderr)
             sys.exit(1)
 
+    # F11: `tasks work` accepts a bare number, a `NNN-slug`, or a bare slug
+    # (`tasks list` shows the folder name, so an agent naturally copies it).
+    # Whatever was given, the session pointer MUST be the canonical numeric —
+    # the numeric-only code-edit gate (N2) rejects a slug pointer and blocks the
+    # very next edit, silently stranding the agent after an apparently-successful
+    # activation. Canonicalize to the resolved folder's number here so activation
+    # and the gate agree (and so the `int(task_num)` in stub-expansion is safe).
+    _resolved_num = task_file.parent.name.split("-", 1)[0]
+    if _resolved_num.isdigit():
+        task_num = _resolved_num.zfill(3)
+
     # Auto-close previous task if all gates are checked
     agent_dir = resolve_agent_dir(project_path)
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -598,7 +609,10 @@ def cmd_work(cmd_args):
     # Expand stubs on activation
     task_content = task_file.read_text(encoding="utf-8", errors="replace")
     import re as _stub_re
-    stub_match = _stub_re.search(r'<!-- stub:(\w+) -->', task_content)
+    # F7: custom playbook type names carry hyphens (`sp-eval`, the flagship
+    # example in playbooks-README) — `\w+` can't match `stub:sp-eval` so the
+    # marker survived `work` and the stub never expanded. Accept `-` too.
+    stub_match = _stub_re.search(r'<!-- stub:([\w-]+) -->', task_content)
     if stub_match:
         stub_type = stub_match.group(1)
         # Extract user's Intent and Why sections before expanding
@@ -612,23 +626,39 @@ def cmd_work(cmd_args):
         user_refs = _extract_section(task_content, "References")
 
         # Render full template
-        from tasks.template import render_template
         task_num_int = int(task_num)
         title = task_file.parent.name.split("-", 1)[1].replace("-", " ").title()
-        full_content = render_template(num=task_num_int, title=title, task_type=stub_type)
 
-        # F3: Append playbook role template (same as create_task)
-        from tasks.core import _load_playbook
-        role_template = _load_playbook(stub_type, project_path)
-        if role_template:
-            full_content += "\n" + role_template + "\n"
+        # F18: a custom stub type (.agent/playbooks/<type>.md) must expand to
+        # ITS playbook \u2014 the WHOLE file, as create_task does \u2014 not the base
+        # Build template. Without this dispatch the custom playbook was never
+        # loaded (`_load_playbook` only knows built-in PLAYBOOKS keys), so a
+        # custom stub silently expanded to the base template and every custom
+        # gate vanished on activation. Mirror create_task's dispatch exactly.
+        from tasks.core import _find_custom_playbook, _load_playbook
+        custom = _find_custom_playbook(project_path, stub_type)
+        if custom:
+            full_content = custom.read_text(encoding="utf-8", errors="replace")
+            full_content = full_content.replace("{{NNN}}", f"{task_num_int:03d}")
+            full_content = full_content.replace("{{TITLE}}", title)
+        else:
+            from tasks.template import render_template
+            full_content = render_template(num=task_num_int, title=title, task_type=stub_type)
+            # F3: Append playbook role template (same as create_task)
+            role_template = _load_playbook(stub_type, project_path)
+            if role_template:
+                full_content += "\n" + role_template + "\n"
 
         # Inject preserved user content
         if user_intent:
-            # F2: Try both placeholder variants (build + quick)
+            # Try every base-template Intent placeholder variant.
             for placeholder in [
                 "(what we want to achieve \u2014 the outcome, not the activity)",
                 "(one line \u2014 what to do and how to verify)",
+                # F6: the `light` template's Intent placeholder (B1 twin) \u2014 was
+                # missing here, so `tasks new --stub light <name> <intent>`
+                # captured the intent in the stub but dropped it on activation.
+                "(one line \u2014 what to do and what proves it worked)",
             ]:
                 if placeholder in full_content:
                     full_content = full_content.replace(placeholder, user_intent)

@@ -132,8 +132,14 @@ def _is_management_path(file_path: str) -> bool:
 def _is_code_file_path(file_path: str) -> bool:
     """Return True if path looks like a code file (should require active task).
 
-    Mirrors task-gate-hook is_code_file_path: extensions, scripts/bin/src/hooks
-    directories, and shebang detection (shebang not checked here — hooks only).
+    NOTE (panel finding F2): this classifier is NOT byte-for-byte identical to
+    the bash `is_code_file_path` in scripts/task-gate-hook. It additionally
+    treats `.css/.html/.sql/.yaml/.yml/.toml` as code and keys directories off a
+    `_CODE_DIRS` set rather than the hook's path globs + `scripts/` markup
+    special-case. On the default all-Claude path only the bash hook enforces, so
+    the divergence surfaces only under the opt-in codex apply_patch gate (where
+    this IS live, via provider.codex_hooks.apply_patch_pre_decision). Reconciling
+    the two lists is tracked for a codex-parity pass; do not assume they agree.
     """
     import os
     _CODE_EXTENSIONS = {

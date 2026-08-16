@@ -800,7 +800,7 @@ def cmd_single_review(cmd, cmd_args):
     review_cmd = cmd
     if not cmd_args:
         print(f"Error: '{review_cmd}' requires a task number", file=sys.stderr)
-        print(f"Usage: tasks {review_cmd} <number> [--backend codex|claude|agy|grok|pi] [--model <variant>] [--prompt \"...\"] [--timeout SECONDS] [--budget USD]  (default backend: models.json default_judge, ships codex; --budget is claude-only)", file=sys.stderr)
+        print(f"Usage: tasks {review_cmd} <number> [--backend claude|codex|agy|grok|pi] [--model <variant>] [--prompt \"...\"] [--timeout SECONDS] [--budget USD]  (default backend: models.json default_judge, ships \"opus\" (claude); --budget is claude-only)", file=sys.stderr)
         sys.exit(1)
 
     import subprocess
@@ -838,8 +838,9 @@ def cmd_single_review(cmd, cmd_args):
             i += 1
 
     # No --backend → models.json default_judge (provider or provider:variant,
-    # project-overridable; ships as "codex" so headless review avoids the
-    # metered claude -p path by default). --model overrides the variant.
+    # project-overridable; since 1.5.12 ships as "opus" — the all-Claude default,
+    # so a Claude-first user's review doesn't exercise the codex/grok adapter
+    # drift). --model overrides the variant.
     if backend is None:
         from provider.sandbox import load_judge_config, resolve_judge_spec
         dj = load_judge_config().get("default_judge") or "claude"

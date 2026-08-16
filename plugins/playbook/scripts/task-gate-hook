@@ -160,7 +160,7 @@ BLOCKED: Only `.claude/bin/tasks new` creates task.md files.
 Don't create task files manually. The CLI enforces templates and numbering.
 
 Use:  .claude/bin/tasks new <type> <name>
-Types: feature, bugfix, refactor, explore, research, review, decision, test
+Types: audit, bugfix, build, cleanup, eval, feature, light, ops, quick, refactor, research (run `tasks new` to see the current set)
 MSG
             exit 2
         fi
@@ -316,7 +316,7 @@ BLOCKED: Don't create task directories manually.
 
 Use `.claude/bin/tasks new <type> <name>` to create tasks. The CLI enforces templates and numbering.
 
-Types: feature, bugfix, refactor, explore, research, review, decision, test
+Types: audit, bugfix, build, cleanup, eval, feature, light, ops, quick, refactor, research (run `tasks new` to see the current set)
 MSG
         exit 2
     fi

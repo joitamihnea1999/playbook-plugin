@@ -869,7 +869,7 @@ Commands:
   work done [--force --reason "why"]  Finish task; runs the verify contract and
                       records a receipt; a failing verify blocks, as does an
                       unreviewed task under the panel_required_for policy
-                      (init default "all" ⇒ every close needs a PASS panel;
+                      (/playbook:init seeds "all" ⇒ every close needs a PASS panel;
                       set it to a risk list to require review only for those,
                       e.g. assertive/irreversible). --force needs --reason.
   audit [<N>]         Run mechanical pre-panel sweeps (conflict markers, merge

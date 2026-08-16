@@ -7,7 +7,7 @@ How the plugin is put together, and how the enforcement actually works.
 The plugin (`plugins/playbook/` in this repo) has four user-visible parts plus two engine directories:
 
 - `commands/` — seven `/playbook:*` slash commands (markdown the agent executes as instructions).
-- `skills/` — six skill bundles loaded at `tasks bootstrap` (playbook patterns, judge, monitor, merge, stack, task template).
+- `skills/` — five harness-discoverable skill bundles, each with a `SKILL.md` (playbook patterns, judge, monitor, merge, stack), plus `skills/tasks/` which holds the canonical task template the `new` command copies (not a discoverable skill).
 - `hooks/hooks.json` — six lifecycle hook registrations (below).
 - `scripts/` — executable entry points: the `tasks` dispatcher, hook scripts, `sandbox`, `monitor`, `init`, the `playbook-*` provider launchers.
 - `tasks/` — the Python package behind the `tasks` CLI (dispatcher sets `PYTHONPATH` here).

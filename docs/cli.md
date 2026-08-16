@@ -67,7 +67,7 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 **`tasks status`** — the active task's current gate position: the fastest way to see where a long run actually is.
 
-**`tasks init [--provider codex|antigravity|grok|pi] [--hooks]`** — mechanical project setup (normally invoked via `/playbook:init`): `.agent/` structure, `.claude/bin/` wrappers, settings, MIND_MAP.md stub. With `--provider`, additionally writes that agent's bootstrap file (`AGENTS.md` / `GEMINI.md`) and, with `--hooks`, installs its hook integration — see [providers](providers.md). On a fresh clone of a multi-user repo (per-user lanes present but the gitignored `.agent/current_user` missing) this refuses rather than create a phantom root lane — set the marker first.
+**`tasks init [--provider codex|antigravity|grok|pi] [--hooks]`** — creates the `.agent/` tasks structure, `CLAUDE.md`, and the `MIND_MAP.md` stub. With `--provider`, additionally writes that agent's bootstrap file (`AGENTS.md` / `GEMINI.md`) and, with `--hooks`, installs its hook integration — see [providers](providers.md). The FULL mechanical scaffolding — `.claude/bin/` wrappers, `.claude/settings.json` hook registrations, `.agent/config.json` (including the seeded `panel_required_for: "all"` close bar), and the `.gitignore` runtime-state block — is done by `scripts/init`, run via the `/playbook:init` slash command (the normal entry point). Running the bare `tasks init` CLI alone does not seed those. On a fresh clone of a multi-user repo (per-user lanes present but the gitignored `.agent/current_user` missing) this refuses rather than create a phantom root lane — set the marker first.
 
 ## Slash commands (user-invoked)
 
@@ -83,7 +83,7 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 ## Skills (agent-loaded)
 
-Six skill bundles ship with the plugin, discovered by the agent harness's plugin skill mechanism (not printed by `tasks bootstrap` — that prints the mind map, pending tasks, and CLI reference):
+Five skill bundles are discovered by the agent harness's plugin skill mechanism (each carries a `SKILL.md`: playbook, judge, monitor, merge, stack). A sixth directory, `skills/tasks/`, is not a harness-discoverable skill — it holds the canonical task template the `new` command copies. (None are printed by `tasks bootstrap`, which prints the mind map, pending tasks, and CLI reference.)
 
 | Skill | What it does |
 |---|---|
