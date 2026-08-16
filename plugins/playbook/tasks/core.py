@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.10"
+VERSION = "1.5.11"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
