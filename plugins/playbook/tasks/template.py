@@ -858,7 +858,9 @@ notes — none runs on this provider, so keep to one gate at a time here.
 
 def usage_text() -> str:
     """Usage text for `tasks --help`."""
-    types = ", ".join(sorted(set(PLAYBOOKS.keys()) | {"quick"}))
+    # D2: `light` is a first-class type (own template, accepted by cmd_new, listed
+    # by list_all_types on the error path) — include it here too, not just `quick`.
+    types = ", ".join(sorted(set(PLAYBOOKS.keys()) | {"quick", "light"}))
     return f"""\
 Usage: tasks <command> [args]
 

@@ -1581,6 +1581,9 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
         for placeholder in [
             "(what we want to achieve \u2014 the outcome, not the activity)",
             "(one line \u2014 what to do and how to verify)",
+            # B1: the `light` template's Intent placeholder \u2014 was missing here, so
+            # `tasks new light <name> <intent>` silently discarded the intent.
+            "(one line \u2014 what to do and what proves it worked)",
         ]:
             if placeholder in content:
                 content = content.replace(placeholder, intent_text)
