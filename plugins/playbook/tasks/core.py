@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.12"
+VERSION = "1.5.13"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -1044,8 +1044,23 @@ def resolve_panel_required(project_path: Path, risk: str) -> bool:
     is nearly free insurance when tokens are not the constraint — and a policy
     that lives in config is enforced, where one that lives in memory decays."""
     raw = load_config(project_path).get("panel_required_for")
-    if raw == "all":
-        return True
+    if isinstance(raw, str):
+        # F5 (panel finding): the seeded default is "all". A near-miss like
+        # "ALL"/"All" used to fall through to False and SILENTLY disable the
+        # close gate — a case typo quietly downgrading the safety posture. Match
+        # case-insensitively, and WARN (never silently) on any other unrecognized
+        # scalar so a real typo is loud rather than a hidden fail-open.
+        rv = raw.strip().lower()
+        if rv == "all":
+            return True
+        if rv in ("", "none"):
+            return False
+        import sys as _sys
+        print(f"[playbook] config.json panel_required_for={raw!r} is not "
+              "recognized (use \"all\", a risk-class list like "
+              "[\"assertive\",\"irreversible\"], or omit) — treating as NO panel "
+              "requirement; fix it to restore the close gate.", file=_sys.stderr)
+        return False
     if isinstance(raw, list):
         return risk in raw or "all" in raw
     return False

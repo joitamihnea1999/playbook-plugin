@@ -2,6 +2,92 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.13] — 2026-08-17
+
+The final-acceptance batch: a five-model review panel (opus, sonnet, two codex
+variants, grok — two rounds, invoked through the plugin's own adapters) audited
+1.5.12 against the 952-green suite. Every candidate finding was re-reproduced by
+hand in scratch dirs (judges advise; reproductions decide); the CONFIRMED,
+in-scope defects are fixed here red-first, each with a test that fails on 1.5.12.
+The named foundation (C1–C5, N1, N2, NEW-1, NEW-2, B1, B2) was independently
+re-reproduced DEAD and did not regress. See `verification-report-1.5.12-panel.md`.
+
+### Fixed
+
+- **`tasks work <slug>`/`work <NNN-slug>` stranded the agent (F11).** `tasks list`
+  shows the folder name (`001-fix-widget`), so an agent naturally passed it back to
+  `work`; activation printed the briefing and exited 0 but wrote the raw slug as the
+  session pointer, which the numeric-only code-edit gate (N2) then rejected —
+  blocking the very next edit as "No active task". `cmd_work` now canonicalizes the
+  pointer to the resolved folder's number, so activation and the gate agree.
+- **Custom-playbook stubs lost their gates on activation (F7 + F18).** A `--stub`
+  of a custom `.agent/playbooks/<type>.md` type expanded to the base Build template
+  instead of the custom playbook — every custom gate silently vanished — and a
+  hyphenated type name (`sp-eval`, the flagship example) never expanded at all (the
+  stub marker regex was `\w+`). Stub-expansion now mirrors `create_task`'s dispatch
+  (`_find_custom_playbook`, whole-file) and the marker regex accepts `-`.
+- **`tasks new --stub light <name> <intent>` dropped the intent on activation
+  (F6).** B1 fixed the direct `tasks new light` path but not its stub-expansion twin,
+  whose placeholder list omitted the `light` template's Intent placeholder. Added.
+
+### Security / robustness
+
+- **A `panel_required_for` typo silently disabled the seeded close gate (F5).**
+  `resolve_panel_required` matched only exact lowercase `"all"`, so `"ALL"`/`"All"`
+  fell through to "no panel required" — a case typo quietly downgrading the seeded
+  safety posture. Now case-folds the keyword and WARNS (never silently) on any other
+  unrecognized scalar. (Adjudicated non-critical — single-judge/risk-keyed evidence
+  still applied — but a real fail-open on a near-miss of the seeded default.)
+
+### Changed
+
+- **`tasks intent`'s unset-config fallback is now all-Claude (F13).** It fell back
+  to `codex`/`CodexAdapter` when `default_judge` was unset, while the review path
+  falls back to `claude` — re-exposing the codex adapter on that edge path. Aligned
+  to `opus`/`ClaudeAdapter`.
+
+### Docs
+
+- **`review.py` no longer claims the default judge "ships codex" (F12).** The usage
+  string and a code comment were stale after 1.5.12 flipped `default_judge` to
+  `opus`; four of five panel models flagged it. Reconciled to the all-Claude default.
+- **`commands/upgrade.md` now points at `/playbook:init`, not bare `/init` (F14).**
+  Claude Code's built-in `/init` is a generic CLAUDE.md generator that runs none of
+  the mechanical upgrade work (wrappers, hooks, `.gitignore`, CLAUDE.md merge) that
+  `scripts/init` does; the documented upgrade flow silently skipped all of it.
+- **`docs/cli.md` + `docs/architecture.md`: "six skill bundles" → five (F15)**,
+  since only five carry a `SKILL.md`; `skills/tasks/` is the task-template asset, not
+  a harness-discoverable skill.
+- **`docs/cli.md` + the `work done --help` text: reconciled the `tasks init` vs
+  `/playbook:init` split (F16/F19).** The bare CLI `tasks init` creates the `.agent/`
+  structure + `CLAUDE.md` + `MIND_MAP.md`; the full scaffolding (`.claude/bin/`
+  wrappers, `settings.json`, `.agent/config.json` with the seeded
+  `panel_required_for: "all"`, `.gitignore`) is done by `scripts/init` via
+  `/playbook:init`. The docs had attributed the wrappers/settings/seed to the CLI.
+- **`scripts/task-gate-hook` BLOCKED text now lists the real task types (F17)** —
+  it advertised `explore/review/decision/test` (all rejected) and omitted seven real
+  ones. Fixed both messages and the matching `README.md` overview line.
+- **`provider/policy._is_code_file_path` docstring corrected (F2):** it claimed to
+  mirror the bash `is_code_file_path` but adds `.css/.html/.sql/.yaml/.yml/.toml`.
+  Documented the real (opt-in codex-only) divergence; enforcement alignment is
+  deferred to a codex-parity pass (the default all-Claude path is self-consistent).
+
+### Notes — panel findings adjudicated as accepted/deferred (not fixed)
+
+- **Arbitrary Bash writes are not gated (F1/F9/F10-write):** the PreToolUse gate
+  enforces the code-EDIT tools; parsing arbitrary shell (or the `.agent`-writable
+  stop-hook counters) is out of scope by the "no new gates" decree and the
+  honest-agent threat model. 0/5 panel CONFIRM as a defect.
+- **Judge tamper backstop / already-dirty files (F4):** documented "known gap" and
+  unreachable under the read-only judge sandbox (`project_writable=False`).
+- **Done-task pointer self-authorizes (F3):** the I2 contract is "pointer resolves
+  to a real task"; `work done` clears the pointer, so this needs a manual `.agent`
+  re-point at a done task — the accepted self-auth family, narrow.
+- **`_safe_int` wraps a 2^64-1 input to a negative (F10):** a docstring contract nit
+  with no exploit beyond the already-accepted agent-writable-counter case.
+- **Custom-playbook `[intent]` substitution (F8):** custom playbooks document only
+  `{{NNN}}`/`{{TITLE}}`; intent prefill is not a promised contract for them.
+
 ## [1.5.12] — 2026-08-16
 
 The publish-readiness batch: a four-way independent audit of 1.5.11 (core
