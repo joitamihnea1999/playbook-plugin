@@ -46,8 +46,14 @@ def _own_session_id() -> str:
     `int()`/`kill -0` fail. With an empty own-id, every CLI invocation would
     therefore classify the shared Windows session dir as dead and delete it
     (task 027).
+
+    Delegates to resolve_session_id() so the env value is SANITIZED (a malformed
+    PLAYBOOK_SESSION_ID is neutralized to the derived pid, not returned raw) —
+    parity with the one-resolver contract. This id is only ever a comparison key
+    for GC exclusion, never a path/delete component, so it was never a traversal
+    vector; the change is for consistency, not a live fix.
     """
-    return os.environ.get("PLAYBOOK_SESSION_ID", "") or resolve_session_id()
+    return resolve_session_id()
 
 
 def _session_is_dead(session_dir: Path, own_session: str, cutoff: float) -> bool:

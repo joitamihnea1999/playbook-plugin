@@ -116,9 +116,13 @@ fi
 # Missing counter file = assume work was done (block)
 COUNTER_FILE="$SESSION_DIR/counters"
 if [ -f "$COUNTER_FILE" ]; then
-    WRITES=$(read_counter "$COUNTER_FILE" writes)
-    TOOLS=$(read_counter "$COUNTER_FILE" tools)
-    if [ "${WRITES:-0}" -eq 0 ] && [ "${TOOLS:-0}" -lt 5 ]; then
+    # read_counter_int (not read_counter): coerce the .agent/-resident counter
+    # bytes to integers before the `[ -eq ]`/`[ -lt ]` tests — parity with the
+    # C5 hardening elsewhere (the `[` builtin doesn't command-substitute like
+    # `$(( ))`, but keep the whole codebase off raw counter bytes in arithmetic).
+    WRITES=$(read_counter_int "$COUNTER_FILE" writes)
+    TOOLS=$(read_counter_int "$COUNTER_FILE" tools)
+    if [ "$WRITES" -eq 0 ] && [ "$TOOLS" -lt 5 ]; then
         exit 0
     fi
 fi
