@@ -223,8 +223,11 @@ class IntentRunnerHonoursConfigTest(unittest.TestCase):
     """
 
     def test_default_runner_passes_the_resolved_budget(self):
-        import types
-        from provider.adapters import codex as codex_mod
+        # The shipped default_judge is now a claude alias (all-Claude defaults,
+        # 1.5.11 audit), so stub the CLAUDE adapter — the runner constructs
+        # whichever adapter default_judge resolves to. The assertion (runner
+        # passes the resolved budget + timeout) is backend-agnostic.
+        from provider.adapters import claude as claude_mod
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -243,10 +246,10 @@ class IntentRunnerHonoursConfigTest(unittest.TestCase):
             return "report"
 
         from tasks import intent as intent_mod
-        orig = codex_mod.CodexAdapter.run_headless_judge
-        codex_mod.CodexAdapter.run_headless_judge = fake_judge
+        orig = claude_mod.ClaudeAdapter.run_headless_judge
+        claude_mod.ClaudeAdapter.run_headless_judge = fake_judge
         self.addCleanup(lambda: setattr(
-            codex_mod.CodexAdapter, "run_headless_judge", orig))
+            claude_mod.ClaudeAdapter, "run_headless_judge", orig))
 
         runner = intent_mod.make_default_runner(project, timeout_secs=1200)
         runner("chat", "prompt --- EVIDENCE\nstuff")
