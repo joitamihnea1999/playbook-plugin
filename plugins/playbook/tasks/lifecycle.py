@@ -878,7 +878,12 @@ def cmd_freehand(cmd_args):
         from datetime import datetime, timezone
         start_str = marker_match.strip()
         try:
-            start_ts = datetime.fromisoformat(start_str)
+            # B2: the freehand writer emits a `Z`-suffixed UTC stamp, but
+            # datetime.fromisoformat() rejects a trailing `Z` before Python 3.11
+            # (Ubuntu 22.04 ships 3.10) — normalize `Z` → `+00:00` so `freehand
+            # log` works on the plugin's declared 3.10+ floor, not just 3.11+.
+            _iso = start_str[:-1] + "+00:00" if start_str.endswith("Z") else start_str
+            start_ts = datetime.fromisoformat(_iso)
             if start_ts.tzinfo is None:
                 start_ts = start_ts.replace(tzinfo=timezone.utc)
         except ValueError:
