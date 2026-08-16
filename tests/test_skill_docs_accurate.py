@@ -22,6 +22,30 @@ PLUGIN = REPO_ROOT / "plugins" / "playbook"
 JUDGE = PLUGIN / "skills" / "judge" / "SKILL.md"
 MONITOR = PLUGIN / "skills" / "monitor" / "SKILL.md"
 MONITOR_LIB = PLUGIN / "scripts" / "monitor-lib"
+CONFIG_DOC = REPO_ROOT / "docs" / "configuration.md"
+CMD_PLAYBOOK = PLUGIN / "commands" / "playbook.md"
+PLAYBOOKS_README = PLUGIN / "scripts" / "playbooks-README.md"
+
+
+class DocDriftFixed(unittest.TestCase):
+    """1.5.11-audit doc drifts stay closed."""
+
+    def test_configuration_alias_example_is_on_schema(self):
+        text = CONFIG_DOC.read_text(encoding="utf-8")
+        # The alias VALUE must be a list, not a bare string the parser drops.
+        self.assertIn('"aliases": {"opus": ["claude"', text,
+                      "configuration.md alias example is off-schema (copy-paste trap)")
+
+    def test_commands_playbook_uses_namespaced_init_and_lists_fix(self):
+        text = CMD_PLAYBOOK.read_text(encoding="utf-8")
+        self.assertIn("/playbook:init", text)
+        self.assertNotIn("Run `/init`", text, "bare /init collides with the builtin")
+        self.assertIn("**Fix**", text, "Fix pattern missing from commands/playbook.md")
+
+    def test_playbooks_readme_has_no_ghost_src_path(self):
+        text = PLAYBOOKS_README.read_text(encoding="utf-8")
+        self.assertNotIn("src/tasks/template.py", text,
+                         "playbooks-README references a non-existent src/ path")
 
 
 class JudgeSkillCliPath(unittest.TestCase):

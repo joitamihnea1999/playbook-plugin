@@ -1,7 +1,7 @@
 {
-  "audited_commit": "0d8eb0bcdf1945c14822e265bae91d5cbbcace92",
-  "version": "1.4.7",
-  "date": "2026-07-29",
+  "audited_commit": "f388c489bf5854972da77daf2fa6f0c52cb25d8e",
+  "version": "1.5.11",
+  "date": "2026-08-16",
   "covered_paths": [
     "plugins/playbook/commands",
     "plugins/playbook/skills",

@@ -126,13 +126,16 @@ Judge selection lives in `models.json`: the plugin ships defaults in `provider/m
 {
   "default_judge": "claude",
   "panel": ["opus", "claude:claude-sonnet-5", "codex:gpt-5.5:xhigh", "agy", "grok:grok-4.5"],
-  "aliases": {"opus": "claude:claude-opus-4-8"}
+  "aliases": {"opus": ["claude", "claude-opus-4-8", []]}
 }
 ```
 
 - `default_judge` — backend for bare `plan-review` / `impl-review`.
 - `panel` — the judge seats for `panel-review`; each spec is `backend[:model[:effort]]`.
-- `aliases` — shorthand names expanded before dispatch.
+- `aliases` — shorthand names expanded before dispatch. Each value is a
+  **three-element list** `[agent, canonical_model_or_null, [extra_args]]` (the
+  same schema as `provider/models.json`); a bare string is off-schema and is
+  silently dropped by the parser.
 
 ### Keeping pins alive
 

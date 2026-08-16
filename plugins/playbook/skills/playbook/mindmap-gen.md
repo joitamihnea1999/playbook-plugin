@@ -98,7 +98,10 @@ Before writing, outline the hierarchy:
 3. **Nodes 16-20 (Implementation):** Tech stack, development history, workflow, design principles
 4. **Nodes 21+ (Deep dives):** Specific algorithms, performance, specialized topics
 
-Target: 20-50 nodes. Under 20 is too shallow. Over 50 means you're documenting, not mapping.
+Target scales with the codebase (see mindmap.md's Scale table): simple topics
+15-30, standard projects 30-60, complex systems 60-150, large codebases 150+.
+Under ~15 is usually too shallow; if a node is documenting rather than mapping
+(exhaustive detail that belongs in overflow or the code), push it to overflow.
 
 ### 3.2 Write Nodes
 

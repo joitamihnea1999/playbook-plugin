@@ -9,7 +9,7 @@ tasks new sp-eval my-eval-task    # uses .agent/playbooks/sp-eval.md
 tasks new feature my-feature      # uses built-in Python template (no .md needed)
 ```
 
-If `.agent/playbooks/<type>.md` exists, it's used instead of the base template. If not, the built-in template from `src/tasks/template.py` is used.
+If `.agent/playbooks/<type>.md` exists, it's used instead of the base template. If not, the built-in template from `tasks/template.py` is used.
 
 ## Substitution variables
 
@@ -40,7 +40,9 @@ A playbook template **must** have:
 
 ```markdown
 > **Gate discipline:** One gate → do work → check box → next gate.
-> Never batch. Never backfill. The document IS the execution trace.
+> Close several ALREADY-DONE gates in one edit only with a per-line outcome
+> note (hook-enforced, max 5); never backfill invented work. The document IS
+> the execution trace.
 ```
 
 **End with a direction note for dynamic expansion.** If agents will add gates during execution:
