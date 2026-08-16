@@ -2,6 +2,41 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.11] — 2026-08-16
+
+Closes the two residuals the independent analyst pass found in 1.5.10
+(`verification-report-1.5.10.md`) — both incomplete fixes from that batch, each
+reproduced by hand and now fixed red-first.
+
+### Security
+
+- **The session-id sanitization now covers the codex resolver too (N1).** 1.5.10's
+  C4 fix sanitized the bash and `tasks.core` resolvers but not
+  `provider/codex_hooks.resolve_session_id`, which returned `PLAYBOOK_SESSION_ID`
+  verbatim — reached on every codex user prompt and composing hook paths that are
+  written (`counters`, turn-baseline, stop-marker). `PLAYBOOK_SESSION_ID=../tasks/…`
+  escaped `sessions/` and wrote inside the task dir (a path-traversal write
+  primitive; no `rm` on the codex side, so not the task-DB deletion C4 was, but the
+  same vector). All three resolvers now share the whitelist, making the "one
+  resolver contract" true. Not exposed on all-Claude deployments.
+- **The code-edit gate resolves the pointer as a number, not a glob (N2).** 1.5.10's
+  I2 hardening resolved `current_state` through `find -path "*/${TASK}-*/*"`, so a
+  glob metacharacter (`current_state=*`) matched a real task and self-authorized a
+  code edit. Task pointers are numeric: a non-digit pointer is now rejected before
+  the glob in the task-gate (the auth decision), the stop/state-echo hooks, and the
+  lifecycle close path (where `*` would otherwise close the wrong task).
+
+### Deferred
+
+- **N3 (Low) — non-UTF-8 task.md prose is normalized to U+FFFD on write-back.** I10's
+  `errors="replace"` reads heal a corrupt (non-UTF-8) task.md to valid UTF-8 but lose
+  the original non-ASCII bytes when a status/close/reopen write rewrites the file.
+  `errors="surrogateescape"` would round-trip, but it relocates the crash to every
+  *encode* site (print to stdout, `json`, subprocess argv) — the opposite of the
+  crash-safety I10 exists to provide. Status/gates/structure are ASCII and preserved;
+  only free-text in an already-corrupt file is affected. Kept as a documented
+  tradeoff, consistent with the accepted `claude-md-merge` U+FFFD class.
+
 ## [1.5.10] — 2026-08-15
 
 The fit-for-autonomy hardening batch. A fresh-eyes cross-vendor inspection (`verification-report-1.5.9.md`) found five CONFIRMED criticals plus a tier of Important defects that an 852-green suite missed — because they lived in the exact paths the suite did not execute. Every item here is a localized bug fix or a coverage hole; no new gates, no new seats. Each fix ships with a test that watched the bug fail first (for the criticals, the test is the report's own reproduction) plus a negative control.
