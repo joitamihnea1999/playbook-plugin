@@ -54,6 +54,17 @@ class CodexActiveTaskStatus(unittest.TestCase):
             "## Status\nin_progress\n...\n## Status\ndone\n", encoding="utf-8")
         self.assertTrue(_task_status_is_done(self.task_dir / "task.md"))
 
+    def test_done_with_suffix_is_done(self):
+        # 1.5.20: parity with the CLI `_is_done` (startswith "done").
+        self._write_status("done (2026-08-15)")
+        self.assertFalse(has_active_task(self.root, SID))
+        self.assertTrue(_task_status_is_done(self.task_dir / "task.md"))
+
+    def test_indented_status_header_recognized(self):
+        (self.task_dir / "task.md").write_text(
+            "# x\n  ## Status\n  done\n", encoding="utf-8")
+        self.assertTrue(_task_status_is_done(self.task_dir / "task.md"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -73,7 +73,8 @@ _BUILTIN_CMDS = frozenset({
 })
 # Control operators that start a new command position. Redirections (`>`/`<`)
 # are deliberately NOT here — their target is an argument, not a command.
-_OPERATORS = frozenset({"&&", "||", "|", "|&", "&", ";", ";;", "\n", "(", ")"})
+# (Newlines are handled by splitting the input per line in _command_words.)
+_OPERATORS = frozenset({"&&", "||", "|", "|&", "&", ";", ";;", "(", ")"})
 
 
 def _item(name: str, category: str, present: bool, severity: str,
@@ -160,37 +161,44 @@ def _command_words(command: str) -> list[str]:
     emits nothing rather than invent a tool — a false "missing tool" warning is
     worse than a missed exotic one.
     """
-    try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars="();<>|&;")
-        lex.whitespace_split = True
-        tokens = list(lex)
-    except ValueError:
-        return []  # unbalanced quotes etc. — don't guess
     words: list[str] = []
-    at_cmd = True        # are we at a command position (start / after operator)?
-    skip_loop_var = False  # the token right after `for`/`select` is a loop var
-    for tok in tokens:
-        if tok in _OPERATORS:
-            at_cmd, skip_loop_var = True, False
-            continue
-        if not at_cmd:
-            continue
-        if skip_loop_var:
-            skip_loop_var, at_cmd = False, False
-            continue
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
-            continue  # VAR=val assignment prefix — stay at command position
-        if tok in ("for", "select"):
-            skip_loop_var = True  # next token is the loop variable, not a cmd
-            continue
-        if tok in _TRANSPARENT:
-            continue  # keyword/prefix — the real command follows
-        if tok in _BUILTIN_CMDS:
-            at_cmd = False  # a real no-op command, but not a tool to install
-            continue
-        if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*", tok):
-            words.append(tok)
-        at_cmd = False
+    # Each newline is a command separator (a multi-line verify script runs a
+    # command per line); shlex would otherwise fold newlines into whitespace and
+    # miss every command after the first.
+    for line in command.splitlines():
+        try:
+            lex = shlex.shlex(line, posix=True, punctuation_chars="();<>|&;")
+            lex.whitespace_split = True
+            tokens = list(lex)
+        except ValueError:
+            continue  # unbalanced quotes on this line — don't guess
+        at_cmd = True        # command position (start / after an operator)?
+        skip_loop_var = False  # the token right after `for`/`select` is a loop var
+        for tok in tokens:
+            if tok in _OPERATORS:
+                at_cmd, skip_loop_var = True, False
+                continue
+            if not at_cmd:
+                continue
+            if skip_loop_var:
+                skip_loop_var, at_cmd = False, False
+                continue
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+                continue  # VAR=val assignment prefix — stay at command position
+            if tok in ("for", "select"):
+                skip_loop_var = True  # next token is the loop variable, not a cmd
+                continue
+            if tok in _TRANSPARENT:
+                continue  # keyword/prefix — the real command follows
+            if tok in _BUILTIN_CMDS:
+                at_cmd = False  # a real no-op command, but not a tool to install
+                continue
+            # A command name, but never a pure-digit token — that is a
+            # redirection fd (`2>&1` tokenizes to `2`), not a tool. Tools that
+            # start with a digit (7z, 2to3) still pass (.isdigit() is false).
+            if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*", tok) and not tok.isdigit():
+                words.append(tok)
+            at_cmd = False
     return words
 
 

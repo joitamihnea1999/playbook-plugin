@@ -125,6 +125,24 @@ class CommandWordsTest(unittest.TestCase):
     def test_unbalanced_quotes_yield_nothing_not_a_crash(self):
         self.assertEqual(env._command_words('pytest "unterminated'), [])
 
+    def test_redirection_fd_digits_are_not_tools(self):
+        # 1.5.20 F-1: `2>&1` tokenizes to a bare `2` at a command position — a
+        # redirection fd, never a tool. Must not be emitted as `verify tool: 2`.
+        self.assertEqual(env._command_words("2>&1"), [])
+        self.assertEqual(env._command_words("1>out"), [])
+        self.assertEqual(env._command_words("pytest 2>&1 | tee log"), ["pytest", "tee"])
+
+    def test_digit_led_tool_names_still_pass(self):
+        # A real tool that merely starts with a digit (7z, 2to3) is not dropped.
+        self.assertEqual(env._command_words("7z x archive.zip"), ["7z"])
+        self.assertEqual(env._command_words("2to3 -w ."), ["2to3"])
+
+    def test_multiline_command_covers_every_line(self):
+        # 1.5.20 F-1: each newline is a command separator — a command on line 2+
+        # is no longer folded into whitespace and missed.
+        self.assertEqual(env._command_words("pytest\nmypy .\nruff check ."),
+                         ["pytest", "mypy", "ruff"])
+
 
 class VerifyItemsTest(unittest.TestCase):
     def setUp(self):

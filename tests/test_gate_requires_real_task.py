@@ -92,6 +92,26 @@ class GateRequiresRealTask(unittest.TestCase):
         self.assertEqual(r.returncode, 2,
                          f"pointer to a DONE task self-authorized a code edit (rc={r.returncode})")
 
+    def test_done_with_suffix_does_not_authorize(self):
+        # 1.5.20: F3 matches the CLI's `_is_done` (status STARTS WITH "done"),
+        # so a "done (2026-…)" status blocks like a bare "done".
+        (self.project / ".agent/tasks/001-real/task.md").write_text(
+            "# 001 - real\n## Status\ndone (2026-08-15)\n## Work Plan\n- [x] g\n", encoding="utf-8")
+        self.pointer.write_text("001\n", encoding="utf-8")
+        r = self.run_gate(self.project / "src" / "main.py")
+        self.assertEqual(r.returncode, 2,
+                         f"'done (suffix)' pointer self-authorized (rc={r.returncode})")
+
+    def test_indented_status_header_is_recognized(self):
+        # 1.5.20: an indented `## Status` header (as core._extract_status
+        # tolerates) is still read — a done task behind it stays blocked.
+        (self.project / ".agent/tasks/001-real/task.md").write_text(
+            "# 001 - real\n  ## Status\n  done\n## Work Plan\n- [x] g\n", encoding="utf-8")
+        self.pointer.write_text("001\n", encoding="utf-8")
+        r = self.run_gate(self.project / "src" / "main.py")
+        self.assertEqual(r.returncode, 2,
+                         f"indented done-status pointer self-authorized (rc={r.returncode})")
+
     def test_unparsable_status_still_authorizes(self):
         # F3 must never turn a parse failure into a NEW block: a task.md with no
         # ## Status line is not "done" → the real active task still allows.

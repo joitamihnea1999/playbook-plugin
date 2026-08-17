@@ -317,7 +317,7 @@ read_counter_int() {
 # is_code_file_path FILE_PATH
 # Returns 0 for source code paths that should require an active task.
 #
-# F2 (1.5.17): this MUST agree in behavior with the Python `_is_code_file_path`
+# F2 (1.5.18): this MUST agree in behavior with the Python `_is_code_file_path`
 # in provider/policy.py — the default Claude path enforces via this bash hook,
 # the opt-in codex apply_patch gate enforces via that Python one, and "no code
 # without a task" has to mean the same thing under every provider.
@@ -334,14 +334,19 @@ is_code_file_path() {
     local file_path="$1"
     local norm="${file_path//\\//}"          # backslashes -> slashes (Python parity)
     local base="${norm##*/}"                 # basename
+    # Strip LEADING dots before finding the extension, so a dots-then-name
+    # basename (".gitignore", "..py", "...toml") has NO extension — matching
+    # Python's os.path.splitext, which ignores leading dots (1.5.20 parity fix).
+    local stripped="$base"
+    while [ "${stripped#.}" != "$stripped" ]; do stripped="${stripped#.}"; done
     local ext=""
-    case "$base" in
-        ?*.*) ext=".$(printf '%s' "${base##*.}" | tr '[:upper:]' '[:lower:]')" ;;
+    case "$stripped" in
+        *.*) ext=".$(printf '%s' "${stripped##*.}" | tr '[:upper:]' '[:lower:]')" ;;
     esac
 
     case "$ext" in
-        # Code — union of both prior lists + the strict config/markup set.
-        .py|.ts|.js|.tsx|.jsx|.sh|.bash|.go|.rs|.rb|.java|.c|.cpp|.h|.hpp|.swift|.kt|.kts|.dart|.cs|.php|.r|.m|.mm|.scala|.zig|.lua|.ex|.exs|.ml|.mli|.tf|.vue|.svelte|.ipynb|.css|.html|.sql|.yaml|.yml|.toml)
+        # Code — languages (both prior lists ∪ common extras) + strict config/markup.
+        .py|.ts|.js|.mjs|.cjs|.tsx|.jsx|.sh|.bash|.go|.rs|.rb|.java|.c|.cpp|.h|.hpp|.swift|.kt|.kts|.dart|.cs|.php|.r|.m|.mm|.scala|.zig|.lua|.ex|.exs|.ml|.mli|.tf|.vue|.svelte|.ipynb|.css|.scss|.less|.html|.sql|.yaml|.yml|.toml|.proto|.graphql|.gradle)
             return 0 ;;
         # Docs / data / binaries — never code, even inside a code dir.
         .md|.txt|.json|.png|.svg|.jpg|.jpeg|.gif|.ico|.webp|.pdf|.lock|.csv)

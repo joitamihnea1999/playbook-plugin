@@ -407,8 +407,9 @@ def current_state_file(project_root: Path, session_id: str) -> Path:
 
 def _task_status_is_done(task_file: Path) -> bool:
     """True iff the task.md's ## Status (last one wins, matching tasks.core
-    `_extract_status`) reads `done`. An unreadable/absent status is NOT done —
-    F3 must never turn a parse failure into a new block."""
+    `_extract_status`) STARTS WITH `done` — the same rule as the CLI authority
+    tasks.core `_is_done`, so "done (2026-…)" counts. An unreadable/absent
+    status is NOT done — F3 must never turn a parse failure into a new block."""
     try:
         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
@@ -417,7 +418,7 @@ def _task_status_is_done(task_file: Path) -> bool:
     for i, line in enumerate(lines):
         if line.strip() == "## Status" and i + 1 < len(lines):
             status = lines[i + 1].strip()
-    return status == "done"
+    return status.startswith("done")
 
 
 def has_active_task(project_root: Path, session_id: str) -> bool:

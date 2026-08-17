@@ -130,14 +130,15 @@ def _is_management_path(file_path: str) -> bool:
 
 
 _CODE_EXTENSIONS = {
-    # Programming languages (union of both prior lists — closes the codex hole
-    # where .php/.vue/.swift/… went ungated).
-    ".py", ".ts", ".js", ".tsx", ".jsx", ".sh", ".bash", ".go", ".rs", ".rb",
-    ".java", ".c", ".cpp", ".h", ".hpp", ".swift", ".kt", ".kts", ".dart",
-    ".cs", ".php", ".r", ".m", ".mm", ".scala", ".zig", ".lua", ".ex", ".exs",
-    ".ml", ".mli", ".tf", ".vue", ".svelte", ".ipynb",
-    # Config / markup treated as code (strict, owner decision 1.5.17).
-    ".css", ".html", ".sql", ".yaml", ".yml", ".toml",
+    # Programming languages (union of both prior lists ∪ common extras — closes
+    # the codex hole where .php/.vue/.swift/… went ungated).
+    ".py", ".ts", ".js", ".mjs", ".cjs", ".tsx", ".jsx", ".sh", ".bash", ".go",
+    ".rs", ".rb", ".java", ".c", ".cpp", ".h", ".hpp", ".swift", ".kt", ".kts",
+    ".dart", ".cs", ".php", ".r", ".m", ".mm", ".scala", ".zig", ".lua", ".ex",
+    ".exs", ".ml", ".mli", ".tf", ".vue", ".svelte", ".ipynb",
+    # Config / markup / schema treated as code (strict, owner decision 1.5.18).
+    ".css", ".scss", ".less", ".html", ".sql", ".yaml", ".yml", ".toml",
+    ".proto", ".graphql", ".gradle",
 }
 # Docs / data / binaries — never code, even inside a code dir. (.json/.yaml
 # split is deliberate: .yaml/.toml drive behavior and are gated; .json stays
@@ -152,8 +153,8 @@ _CODE_DIRS = {"scripts", "bin", "src", "hooks", "lib", "cmd"}
 def _is_code_file_path(file_path: str) -> bool:
     """Return True if path looks like a code file (should require active task).
 
-    F2 (1.5.17): this MUST agree with the bash `is_code_file_path` in
-    scripts/task-gate-hook — the default Claude path enforces via that hook, the
+    F2 (1.5.18): this MUST agree with the bash `is_code_file_path` in
+    scripts/gate-echo-lib.sh — the default Claude path enforces via that hook, the
     opt-in codex apply_patch gate enforces via this, and "no code without a task"
     has to mean the same thing under every provider.
     tests/test_gate_classifier_parity.py pins the agreement over a shared vector
@@ -168,7 +169,9 @@ def _is_code_file_path(file_path: str) -> bool:
     import os
     if not file_path:
         return False
-    norm = file_path.replace("\\", "/")
+    # rstrip trailing CR/LF so a malformed path ending in a newline classifies
+    # like the bash side (whose `$(…)` ext extraction drops it) — 1.5.20 parity.
+    norm = file_path.replace("\\", "/").rstrip("\r\n")
     _, ext = os.path.splitext(norm)
     ext = ext.lower()
     if ext in _CODE_EXTENSIONS:

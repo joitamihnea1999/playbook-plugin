@@ -62,6 +62,14 @@ VECTORS = [
     ("STYLES.CSS", True), ("a/b/c.JSON", False), ("X.Py", True),
     # Backslash paths normalize to forward slashes on both.
     ("src\\main.py", True), ("data\\notes.md", False),
+    # 1.5.20 extension additions (strict-consistent: preprocessors/modules/schema).
+    ("app.mjs", True), ("m.cjs", True), ("style.scss", True), ("style.less", True),
+    ("api.proto", True), ("q.graphql", True), ("build.gradle", True),
+    # 1.5.20 leading-dot parity: a dots-then-name basename has NO extension on
+    # both surfaces (matches Python os.path.splitext), so it falls to the dir
+    # rule — these used to diverge (bash saw ".py"/".toml", python saw none).
+    ("..py", False), ("...toml", False), ("weird/...css", False),
+    ("src/...css", True), ("bin/..js", True),
 ]
 
 

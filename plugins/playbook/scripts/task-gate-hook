@@ -243,12 +243,17 @@ MSG
                     STATUS=$(awk '
                         {gsub(/\r/,"")}
                         flag {status=$0; flag=0}
-                        /^## Status[[:space:]]*$/ {flag=1}
+                        /^[[:space:]]*## Status[[:space:]]*$/ {flag=1}
                         END {print status}
                     ' "$RESOLVED" | tr -d '[:space:]')
-                    if [ "$STATUS" != "done" ]; then
-                        exit 0
-                    fi
+                    # Match the CLI authority core._is_done (status STARTS WITH
+                    # "done", so "done (2026-…)" counts) and tolerate an indented
+                    # ## Status header like core._extract_status. Empty/unparsable
+                    # or any active status → authorize (never a new false block).
+                    case "$STATUS" in
+                        done*) ;;      # done task → fall through to BLOCK
+                        *) exit 0 ;;   # active (or unreadable) → authorize
+                    esac
                 fi
                 ;;
         esac

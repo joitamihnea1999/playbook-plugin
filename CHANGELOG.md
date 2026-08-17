@@ -2,6 +2,53 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.20] — 2026-08-17
+
+Hardening from an independent 3-way verification pass over 1.5.16–1.5.19 (every
+finding re-reproduced by hand). The audit confirmed the enforcement core (F2/F3),
+the dead-mirror deletion, and the doctor hermeticity are all correct/safe — no
+High/Med enforcement holes. These are the Med/Low edges it surfaced.
+
+### Fixed
+
+- **`tasks detect-verify` crashed on a valid-but-non-object `package.json`**
+  (a bare list/string/number/bool → `AttributeError`), violating its "never
+  raises" contract on the init path. Guarded with an `isinstance(dict)` check.
+- **`tasks detect-verify` mistook a Makefile `:=` variable for a target.**
+  `test := build/out` yielded a suggested `make test` that fails at verify time
+  ("No rule to make target"). Immediate-assignment (`:=`/`::=`) variables are no
+  longer read as targets.
+- **`tasks environment` emitted a redirection fd digit as a bogus tool.**
+  A verify command like `2>&1` produced a spurious `verify tool: 2` warning
+  ("close will fail"). Pure-digit tokens are dropped (real digit-led tools like
+  `7z`/`2to3` still pass). Also: newlines in a verify string are now real command
+  separators, so a multi-line verify no longer silently misses every line but
+  the first.
+- **Gate classifier parity held only on realistic paths.** bash and Python
+  disagreed on dots-then-name basenames (`..py`, `...toml`) — bash saw an
+  extension, Python's `os.path.splitext` ignores leading dots. bash now strips
+  leading dots to match, and Python `rstrip`s a trailing newline to match bash's
+  ext extraction. Added parity vectors so the guard covers this class.
+- **F3 done-detection was stricter than the CLI authority.** The gate checked
+  `status == "done"` while `tasks`'s own `_is_done` uses `startswith("done")`,
+  so a `done (2026-…)` status let a stale pointer authorize an edit. Both gate
+  surfaces (bash + codex) now use `startswith("done")` and tolerate an indented
+  `## Status` header, matching `core._extract_status`/`_is_done`.
+
+### Changed
+
+- **Gate now also treats `.mjs .cjs .scss .less .proto .graphql .gradle` as code**
+  (consistent with the strict 1.5.18 decision — module/preprocessor/schema/build
+  files that were previously ungated outside a code dir).
+
+### Docs
+
+- Corrected the stale "no-network" description of `tasks models detect` in
+  `cli.md` / `configuration.md` (grok's listing is login-aware). Documented
+  `tasks audit` / `blocked` / `parked` in the CLI reference. Fixed comments that
+  attributed F2 to 1.5.17 (it shipped in 1.5.18). Refreshed the README drift
+  baseline (`docs/readme-audit-baseline.json`) from 1.5.13 to this release.
+
 ## [1.5.19] — 2026-08-17
 
 Closes the last backlog item: the interactive init's verify-command detection is

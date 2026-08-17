@@ -66,9 +66,12 @@ def _node_components(root: Path) -> list[dict]:
     if not pkg.is_file():
         return []
     try:
-        scripts = (json.loads(_read(pkg)) or {}).get("scripts") or {}
+        parsed = json.loads(_read(pkg))
     except ValueError:
-        scripts = {}
+        parsed = None
+    # A valid-but-non-object package.json (a bare list/string/number/bool) must
+    # not crash `.get` — honor the module's "never raises" contract.
+    scripts = parsed.get("scripts") if isinstance(parsed, dict) else None
     if not isinstance(scripts, dict):
         scripts = {}
     out: list[dict] = []
@@ -111,10 +114,18 @@ def _make_targets(root: Path) -> set[str]:
         if not text:
             continue
         for line in text.splitlines():
-            # a target line is `name:` (or `name: deps`) at column 0, not a
-            # variable assignment or a recipe (recipes are tab-indented).
-            if line[:1].isalpha() and ":" in line and "=" not in line.split(":", 1)[0]:
-                targets.add(line.split(":", 1)[0].strip())
+            # A target line is `name:` (or `name: deps`) at column 0 — not a
+            # recipe (tab-indented), not a variable assignment. Reject both
+            # `name = …` (`=` in the name) and `name := …`/`name ::= …` (an `=`
+            # immediately after the colon), so a `test := build/out` variable is
+            # not mistaken for a `test:` target (which would suggest a `make
+            # test` that fails at verify time).
+            if not (line[:1].isalpha() and ":" in line):
+                continue
+            name, _, rest = line.partition(":")
+            if "=" in name or rest.lstrip(":").startswith("="):
+                continue
+            targets.add(name.strip())
     return targets
 
 

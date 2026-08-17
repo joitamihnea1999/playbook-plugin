@@ -59,6 +59,21 @@ class DetectVerify(unittest.TestCase):
         d = _mk({"package.json": "{ not json"})
         self.assertEqual(detect_verify(d)["command"], "")  # no crash, no command
 
+    def test_node_non_object_json_does_not_crash(self):
+        # 1.5.20 BUG-1: a valid-but-non-object package.json (list/string/number/
+        # bool) must not AttributeError on `.get` — the module never raises.
+        for content in ("[1,2,3]", '"hello"', "42", "true", "null"):
+            with self.subTest(content=content):
+                d = _mk({"package.json": content})
+                self.assertEqual(detect_verify(d)["command"], "")
+
+    def test_makefile_immediate_assignment_is_not_a_target(self):
+        # 1.5.20 BUG-2: `test := build/out` is a variable, not a `test:` target,
+        # so it must NOT yield a `make test` that fails at verify time.
+        for var in ("test := build/out\n", "check ::= foo\n", "lint := x\n"):
+            with self.subTest(var=var.strip()):
+                self.assertEqual(detect_verify(_mk({"Makefile": var}))["command"], "")
+
     def test_rust_and_go(self):
         self.assertEqual(detect_verify(_mk({"Cargo.toml": "[package]\n"}))["command"],
                          "cargo test && cargo clippy -- -D warnings")

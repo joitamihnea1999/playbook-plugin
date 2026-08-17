@@ -10,6 +10,12 @@ Everything the `tasks` CLI does. In a playbook-managed project the agent calls i
 
 **`tasks freehand`** — freehand mode: you drive, the agent executes, and the hooks stop pressuring for gates until the next task is activated. For exploration, quick experiments, and pairing sessions where the task ceremony would get in the way.
 
+**`tasks blocked "<reason>"`** — pause the active task in an honest `blocked` state while it waits on an owner decision or an external dependency. Not a faked checkbox — the reason is recorded, and `tasks work <N>` clears the block (flipping status back to `in_progress`) when work resumes.
+
+**`tasks parked`** — list the out-of-scope findings parked during earlier tasks (`## Parked` sections), so a finding noticed mid-task isn't lost when it's deliberately deferred. Prints "No open parked items." when there are none.
+
+**`tasks audit`** — run the pre-panel sweeps against the active task and record a receipt into its `task.md`; exits non-zero on error-severity findings so it can gate a panel review. Part of the close machinery, not the daily loop.
+
 ## Create
 
 **`tasks new <type> <name> [intent]`** — create `.agent/tasks/<N>-<type>-<name>/task.md` from the base template, with the intent text filled in if given. The type selects the workflow pattern the plan will follow: `feature`/`build`/`refactor`/`ops`→Build, `bugfix`/`cleanup`→Fix, `research`→Investigate, `audit`/`eval`→Evaluate. Two standalone small shapes exist besides the patterns: **`quick`** (3 gates, no review machinery — declared-reversible trivia only) and **`light`** (~6 gates: risk classified FIRST with a written why, review routed by risk — the shape for a small change that touches docs, claims, data, or publishing; ceremony is compressed but an `assertive`/`irreversible` classification still requires implementation-review evidence at close, exactly like any other shape). Projects adopting `light` should set `panel_required_for: ["assertive", "irreversible"]` (or `"all"`) in `.agent/config.json` — panel evidence is structural (parsed from judge.md rounds), so a checked box can never stand in for a review that didn't run. Recent chat messages are captured into the task's References so the plan can be checked against what you actually said. Creation does **not** activate — the agent should immediately run `tasks work <N>`. On a fresh clone of a multi-user repo (per-user lanes present but the gitignored `.agent/current_user` missing) this refuses rather than create a phantom root lane — set the marker first.
@@ -34,7 +40,7 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 **`tasks models check [--no-probe]`** — audit every judge pin against live availability. Pinned model ids rot as providers retire models; this catches it before a review silently degrades. Probes cost a few tiny model calls; `--no-probe` is the free degraded audit. Exits 1 when a pin can't run as configured.
 
-**`tasks models detect [--json]`** — fast, no-network inventory of the installed agent CLIs (claude / codex / agy / grok / pi) and each one's selectable models plus supported reasoning-effort levels (codex/grok). Reads local caches and cheap listing commands only — nothing is live-probed. This is what `/playbook:init` reads to offer a panel menu; `--json` emits the machine-readable form.
+**`tasks models detect [--json]`** — fast inventory of the installed agent CLIs (claude / codex / agy / grok / pi) and each one's selectable models plus supported reasoning-effort levels (codex/grok). Reads local caches and the cheap listing commands only — no model is live-probed. (Not strictly offline: `grok models` is login-aware, a server call — but each listing is time-bounded.) This is what `/playbook:init` reads to offer a panel menu; `--json` emits the machine-readable form.
 
 **`tasks models select`** — guided (interactive) refresh of the panel: shows the availability report, takes the new seat list, writes `.agent/models.json` (creating it on fresh installs, preserving keys it doesn't manage).
 
