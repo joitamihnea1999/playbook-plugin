@@ -20,6 +20,23 @@ from tasks.mindmap import _parse_nodes
 from tasks.shared import find_project_root
 
 
+def _read_text_lossy(path: Path) -> tuple[str, bool]:
+    """Read UTF-8 text, tolerating non-UTF-8 bytes, and report whether the
+    decode was lossy (N3).
+
+    A chat_log/task file rewritten from an `errors="replace"` decode silently
+    turns any non-UTF-8 byte into U+FFFD. Switching to `surrogateescape` would
+    only relocate the failure to the next strict-encode site (a crash instead of
+    a corruption) — a worse trade for a merge that must not blow up. So the
+    behavior stays crash-safe, but the caller can now WARN instead of losing
+    bytes silently. Returns (text, was_lossy)."""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8"), False
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace"), True
+
+
 def _cmd_prepare_merge(project_path: Path, target: str, dry_run: bool) -> None:
     """Prepare current branch's Playbook state to merge cleanly into target."""
     import subprocess
@@ -247,9 +264,12 @@ def _rewrite_task_refs(project_path: Path, agent_dir: Path, rename_map: dict[int
     # Rewrite chat_log.md
     chat_log = agent_dir / "chat_log.md"
     if chat_log.exists():
-        original = chat_log.read_text(encoding="utf-8", errors="replace")
+        original, lossy = _read_text_lossy(chat_log)
         updated = _apply(original)
         if updated != original:
+            if lossy:
+                print(f"[playbook] warning: {chat_log} has non-UTF-8 bytes; the "
+                      f"rewrite normalizes them to U+FFFD (N3).", file=sys.stderr)
             chat_log.write_text(updated, encoding="utf-8")
 
     # Rewrite current_state in dead sessions; live sessions were already rejected upstream
@@ -298,7 +318,7 @@ def _prepare_merge_chatlog(project_path: Path, agent_dir: Path, target: str,
         print("Chat log: not found — skipping.")
         return
 
-    current_text = chat_log.read_text(encoding="utf-8", errors="replace")
+    current_text, _chat_lossy = _read_text_lossy(chat_log)
     new_mids = [int(m) for m in re.findall(r"\*\*\[M(\d+)\]\*\*", current_text) if int(m) > base_last]
 
     if not new_mids:
@@ -331,6 +351,9 @@ def _prepare_merge_chatlog(project_path: Path, agent_dir: Path, target: str,
     if dry_run:
         return
 
+    if _chat_lossy:
+        print(f"[playbook] warning: {chat_log} has non-UTF-8 bytes; the "
+              f"re-sequence normalizes them to U+FFFD (N3).", file=sys.stderr)
     chat_log.write_text(updated, encoding="utf-8")
     (agent_dir / "chat_log_counter").write_text(str(new_highest) + "\n", encoding="utf-8")
 

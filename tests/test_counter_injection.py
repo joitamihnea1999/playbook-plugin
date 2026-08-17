@@ -91,5 +91,36 @@ class ChatLogCounterInjection(CounterInjectionBase):
                          "chat_log_counter injection executed (C5)")
 
 
+class SafeIntContract(unittest.TestCase):
+    """`_safe_int` coerces untrusted bytes to a NON-NEGATIVE decimal int (C5/F10)."""
+
+    def _safe_int(self, value: str) -> str:
+        lib = SCRIPTS / "gate-echo-lib.sh"
+        r = subprocess.run(
+            ["bash", "-c", f"source '{lib.as_posix()}' && _safe_int \"$1\"", "_", value],
+            capture_output=True, text=True)
+        return r.stdout
+
+    def test_contract_cases(self):
+        cases = {
+            "": "0", "5": "5", "008": "8",          # base-10, no octal
+            "-5": "0",                               # negative → 0
+            "x[$(echo hi)]": "0",                    # injection → 0 (C5)
+            "123456789012345678": "123456789012345678",  # 18 digits: OK
+        }
+        for value, want in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(self._safe_int(value), want)
+
+    def test_overlong_all_digit_input_clamps_not_wraps(self):
+        # F10: >18 all-digit chars would overflow bash signed 64-bit `$(( ))`
+        # and print a NEGATIVE number — violating the non-negative contract.
+        for value in ("99999999999999999999", "1" * 25):
+            with self.subTest(value=value):
+                out = self._safe_int(value)
+                self.assertEqual(out, "0")
+                self.assertFalse(out.startswith("-"), "wrapped to a negative")
+
+
 if __name__ == "__main__":
     unittest.main()

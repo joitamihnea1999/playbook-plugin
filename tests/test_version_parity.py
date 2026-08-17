@@ -85,22 +85,26 @@ class TestVersionParity(unittest.TestCase):
             "an audit of a version that no longer exists",
         )
 
-    def test_dead_mirror_is_known_stale_not_silently_diverging(self):
-        """Documents a divergence instead of pretending it isn't there.
+    def test_dead_mirror_stays_deleted(self):
+        """`scripts/lib/tasks/` was a dead 7k-line copy pinned at 1.4.1 (the
+        Codex hooks bootstrap from `scripts/lib/provider/`, never `tasks/`; the
+        provider adapters that `from tasks.*` only run under the canonical CLI
+        path). It was deleted in 1.5.17 to kill the "which tree runs?" question.
 
-        `scripts/lib/tasks/` is unreachable for this fork (the Codex hooks
-        bootstrap from `scripts/lib/provider/`) and is parked for deletion, so
-        its VERSION is deliberately NOT kept in sync. This test fails if it ever
-        changes — at which point the tree is being maintained again and needs to
-        join `test_manifest_and_cli_agree` instead.
+        This guard keeps it gone: a wholesale re-copy of `tasks/` into
+        `scripts/lib/` would silently reintroduce a shadow tree that shells out
+        stale code on the enforcement path. If it comes back deliberately, it
+        must join `test_manifest_and_cli_agree`, not sit here unversioned.
         """
-        if not DEAD_MIRROR_CORE.exists():
-            self.skipTest("mirror deleted — the parked cleanup happened")
-        self.assertEqual(
-            core_version(DEAD_MIRROR_CORE), "1.4.1",
-            "the dead scripts/lib/tasks/ mirror's VERSION moved. Either it is "
-            "live again (then include it in the parity assertion) or it should be "
-            "deleted, but it must not drift quietly.",
+        self.assertFalse(
+            DEAD_MIRROR_CORE.exists(),
+            f"{DEAD_MIRROR_CORE.relative_to(REPO_ROOT)} reappeared — the dead "
+            f"scripts/lib/tasks/ mirror was deleted in 1.5.17 and must stay gone "
+            f"(the Codex bootstrap uses scripts/lib/provider/, not tasks/).",
+        )
+        self.assertFalse(
+            DEAD_MIRROR_CORE.parent.exists(),
+            "scripts/lib/tasks/ reappeared — must stay deleted (see above).",
         )
 
 

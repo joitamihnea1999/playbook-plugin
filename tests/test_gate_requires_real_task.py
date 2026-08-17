@@ -81,6 +81,27 @@ class GateRequiresRealTask(unittest.TestCase):
         self.assertEqual(r.returncode, 0,
                          f"real active task was blocked: {r.stderr}")
 
+    def test_pointer_to_done_task_does_not_authorize(self):
+        # F3 (1.5.17): a stale/hand-written pointer to a CLOSED task must not
+        # keep the gate open — normal close clears the pointer, and `tasks work`
+        # reopens (status → in_progress) before editing.
+        (self.project / ".agent/tasks/001-real/task.md").write_text(
+            "# 001 - real\n## Status\ndone\n## Work Plan\n- [x] g\n", encoding="utf-8")
+        self.pointer.write_text("001\n", encoding="utf-8")
+        r = self.run_gate(self.project / "src" / "main.py")
+        self.assertEqual(r.returncode, 2,
+                         f"pointer to a DONE task self-authorized a code edit (rc={r.returncode})")
+
+    def test_unparsable_status_still_authorizes(self):
+        # F3 must never turn a parse failure into a NEW block: a task.md with no
+        # ## Status line is not "done" → the real active task still allows.
+        (self.project / ".agent/tasks/001-real/task.md").write_text(
+            "# 001 - real\n(no status heading)\n## Work Plan\n- [ ] g\n", encoding="utf-8")
+        self.pointer.write_text("001\n", encoding="utf-8")
+        r = self.run_gate(self.project / "src" / "main.py")
+        self.assertEqual(r.returncode, 0,
+                         f"missing-status task wrongly blocked (rc={r.returncode}): {r.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()

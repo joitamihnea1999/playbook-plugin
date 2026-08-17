@@ -95,6 +95,38 @@ class F7F18CustomStubExpansion(_Proj):
         self.assertIn("ONLY_CUSTOM_GATE", txt)
 
 
+class F8CustomPlaybookIntent(_Proj):
+    """1.5.17: the `[intent]` arg reaches a custom playbook via `{{INTENT}}`."""
+
+    def _mk_playbook(self, body):
+        pb = self.p / ".agent" / "playbooks"
+        pb.mkdir(parents=True, exist_ok=True)
+        (pb / "speval.md").write_text(body, encoding="utf-8")
+
+    def test_intent_token_is_filled(self):
+        self._mk_playbook("# {{NNN}} - {{TITLE}}\n\n## Status\npending\n\n"
+                          "## Intent\n{{INTENT}}\n\n- [ ] G\n")
+        _run(["new", "speval", "demo", "SHIP_THE_EXPORT"], self.p)
+        txt = (self.p / ".agent/tasks/001-demo/task.md").read_text()
+        self.assertIn("SHIP_THE_EXPORT", txt, "intent did not reach the custom playbook")
+        self.assertNotIn("{{INTENT}}", txt, "token left unsubstituted")
+
+    def test_no_intent_arg_clears_the_token(self):
+        self._mk_playbook("# {{NNN}} - {{TITLE}}\n\n## Status\npending\n\n"
+                          "## Intent\n{{INTENT}}\n\n- [ ] G\n")
+        _run(["new", "speval", "demo"], self.p)
+        txt = (self.p / ".agent/tasks/001-demo/task.md").read_text()
+        self.assertNotIn("{{INTENT}}", txt, "token left unsubstituted when no intent given")
+
+    def test_playbook_without_token_is_unchanged(self):
+        # Backwards-compatible: a custom playbook that never opts into {{INTENT}}
+        # is untouched (NNN/TITLE still stamped).
+        self._mk_playbook("# {{NNN}} - {{TITLE}}\n\n## Status\npending\n\n- [ ] G\n")
+        _run(["new", "speval", "demo", "SOME_INTENT"], self.p)
+        txt = (self.p / ".agent/tasks/001-demo/task.md").read_text()
+        self.assertIn("001 - Demo", txt)
+
+
 class F5PanelRequiredCaseFold(_Proj):
     def test_case_variant_all_still_requires_panel(self):
         """A near-miss like "ALL" must not silently disable the seeded panel gate."""

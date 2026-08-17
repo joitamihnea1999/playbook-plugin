@@ -13,7 +13,33 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
-from tasks.merge_prep import _renumbered_dir_name, _rewrite_task_refs  # noqa: E402
+from tasks.merge_prep import (  # noqa: E402
+    _read_text_lossy, _renumbered_dir_name, _rewrite_task_refs,
+)
+
+
+class ReadTextLossy(unittest.TestCase):
+    """N3 (1.5.17): a rewrite that decodes with errors='replace' loses non-UTF-8
+    bytes. The behavior stays crash-safe (surrogateescape would just move the
+    crash to encode sites), but the read now REPORTS lossiness so the caller can
+    warn instead of silently corrupting."""
+
+    def _write(self, data: bytes) -> Path:
+        d = tempfile.mkdtemp()
+        p = Path(d) / "chat_log.md"
+        p.write_bytes(data)
+        return p
+
+    def test_clean_utf8_is_not_lossy(self):
+        text, lossy = _read_text_lossy(self._write("hi ünïcode ✓\n".encode("utf-8")))
+        self.assertFalse(lossy)
+        self.assertIn("ünïcode", text)
+
+    def test_non_utf8_bytes_flagged_lossy(self):
+        # 0xFF is invalid UTF-8 (e.g. a stray cp1252 byte).
+        text, lossy = _read_text_lossy(self._write(b"ok \xff bad\n"))
+        self.assertTrue(lossy)
+        self.assertIn("�", text)  # replacement char, never a crash
 
 
 class RenumberedDirName(unittest.TestCase):

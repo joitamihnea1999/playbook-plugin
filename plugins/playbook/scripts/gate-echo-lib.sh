@@ -298,10 +298,14 @@ read_counter() {
 # operand: `tools=x[$(touch PWNED)]` ran `touch` inside `$(( TOOLS + 1 ))` (C5).
 # NEVER feed raw file bytes to `$(( ))`; run them through this first. `10#`
 # forces base-10 so a leading-zero counter ("008") doesn't trip octal parsing.
+# An all-digit but absurdly long value (>18 digits) would overflow bash's signed
+# 64-bit `$(( ))` and print a NEGATIVE number, breaking the "non-negative"
+# contract (F10). Real counters never approach 10^18, so clamp overlong input
+# to 0 rather than return a wrapped negative.
 _safe_int() {
     case "$1" in
         ''|*[!0-9]*) printf '0' ;;
-        *) printf '%d' "$((10#$1))" ;;
+        *) if [ "${#1}" -gt 18 ]; then printf '0'; else printf '%d' "$((10#$1))"; fi ;;
     esac
 }
 

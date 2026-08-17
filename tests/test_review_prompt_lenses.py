@@ -1,13 +1,8 @@
 """Judge prompts and the shipped task template must not drift between copies.
 
-Two copies exist for each of these, and both are hand-maintained (there is no
-build step):
-
-  * `tasks/template.py` is canonical; `scripts/lib/tasks/template.py` is the
-    mirror. The mirror as a whole HAS diverged (task 022's lane wording was
-    never propagated), but the judge/review prompt region is the part that is
-    kept in lockstep — a judge reached through one entry point must not get
-    different review instructions than one reached through the other.
+  * `tasks/template.py` is the single source for the judge/review prompts. (The
+    old `scripts/lib/tasks/template.py` mirror was deleted in 1.5.17 — the Codex
+    hooks never loaded it — so there is only one copy to check now.)
   * `scripts/base-template.md` and `skills/tasks/base-template.md` are two
     copies of one file; new tasks would otherwise differ depending on which
     surface loaded the template.
@@ -28,7 +23,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLAYBOOK = REPO_ROOT / "plugins" / "playbook"
 CANONICAL = PLAYBOOK / "tasks" / "template.py"
-MIRROR = PLAYBOOK / "scripts" / "lib" / "tasks" / "template.py"
 TEMPLATE_COPIES = (
     PLAYBOOK / "scripts" / "base-template.md",
     PLAYBOOK / "skills" / "tasks" / "base-template.md",
@@ -44,22 +38,15 @@ PROMPT_BUILDERS = (
 
 
 def load_template_module(path: Path, name: str = ""):
-    """Load one `tasks/template.py` copy, faithfully and in isolation.
+    """Load a `tasks/template.py` copy, faithfully and in isolation.
 
-    The mirror cannot be reached with a plain `from tasks import template`:
-    both copies live in a package called `tasks`, so whichever parent directory
-    is on sys.path first wins and the other never executes. Nor can it be
-    loaded by file path alone — `template.py` does `from tasks.core import
-    PLAYBOOKS`, so it needs its OWN package root importable.
-
-    So: put this copy's package root first on sys.path, purge any already
-    imported `tasks*` modules, import fresh, then restore both. The returned
-    module keeps working after the purge (its globals are already bound), and
-    the next call gets a clean slate — which is what makes "render the mirror"
-    mean the mirror and not a cached canonical.
-
-    Rendering the mirror is the point: count-and-substring checks pass on a
-    mirror whose rendered numbering is broken.
+    It can't be loaded by file path alone — `template.py` does `from tasks.core
+    import PLAYBOOKS`, so it needs its OWN package root importable. So: put this
+    copy's package root first on sys.path, purge any already-imported `tasks*`
+    modules, import fresh, then restore both. The returned module keeps working
+    after the purge (its globals are already bound) and the next call gets a
+    clean slate. (Written when a second `tasks` package copy still existed; now
+    there's one, but isolated loading is still the honest way to render it.)
     """
     package_root = path.parent.parent  # the dir containing the `tasks` package
     saved_path = list(sys.path)
@@ -85,8 +72,8 @@ def load_template_module(path: Path, name: str = ""):
 
 
 class TestHostileSequenceLens(unittest.TestCase):
-    def test_present_at_all_four_sites_in_both_copies(self):
-        for path in (CANONICAL, MIRROR):
+    def test_present_at_all_four_sites(self):
+        for path in (CANONICAL,):
             text = path.read_text(encoding="utf-8")
             self.assertEqual(
                 text.count("Hostile sequences"), 4,
@@ -96,7 +83,7 @@ class TestHostileSequenceLens(unittest.TestCase):
 
     def test_each_named_builder_contains_the_lens(self):
         """Count alone can't tell you WHICH four sites got it."""
-        for path in (CANONICAL, MIRROR):
+        for path in (CANONICAL,):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             funcs = {
                 n.name: ast.unparse(n)
@@ -116,19 +103,19 @@ class TestHostileSequenceLens(unittest.TestCase):
         The contributed patch left "five lenses" in place while inserting a
         sixth — a prompt that contradicts its own list.
         """
-        for path in (CANONICAL, MIRROR):
+        for path in (CANONICAL,):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("five lenses", text, f"{path.name}: stale lens count")
             self.assertEqual(text.count("six lenses"), 4, f"{path.name}")
 
     def test_lenses_are_numbered_one_to_six_in_rendered_prompts(self):
-        """Render the real prompts — in BOTH copies — and check the numbering.
+        """Render the real prompts and check the numbering.
 
-        Rendering the mirror is not redundant: a mirror with a duplicated "(5)",
-        a gap in the sequence, or a missing escape hatch satisfies every
-        count-and-substring check above while handing judges a malformed prompt.
+        A duplicated "(5)", a gap in the sequence, or a missing escape hatch
+        satisfies every count-and-substring check above while handing judges a
+        malformed prompt, so render and verify the actual numbering.
         """
-        for label, path in (("canonical", CANONICAL), ("mirror", MIRROR)):
+        for label, path in (("canonical", CANONICAL),):
             module = load_template_module(path, f"_tmpl_{label}")
             for name in PROMPT_BUILDERS:
                 rendered = getattr(module, name)("task.md")
@@ -170,8 +157,8 @@ class TestPreReviewGateReachesRealTasks(unittest.TestCase):
     GATE = "update the OWNING subsystem node"
     OLD_GATE = "MIND_MAP.md updated if new insights emerged"
 
-    def test_rendered_task_carries_the_gate_in_both_copies(self):
-        for label, path in (("canonical", CANONICAL), ("mirror", MIRROR)):
+    def test_rendered_task_carries_the_gate(self):
+        for label, path in (("canonical", CANONICAL),):
             module = load_template_module(path, f"_tmpl_gate_{label}")
             with self.subTest(copy=label, surface="pre_review"):
                 self.assertIn(self.GATE, module.pre_review())

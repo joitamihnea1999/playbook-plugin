@@ -2,6 +2,54 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.17] — 2026-08-17
+
+Backlog cleanup: retire the dead source mirror, make one doctor check hermetic,
+and close the small accepted-design nits (F3/F10/F8/N3). No feature changes.
+
+### Removed
+
+- **The dead `scripts/lib/tasks/` mirror (7,329 lines, pinned at 1.4.1).** It
+  was never on any live path — the Codex hooks bootstrap `scripts/lib/` but only
+  import `provider.*` (all stdlib at hook time); the adapters that `from tasks.*`
+  only run under the canonical CLI. Deleting it ends the "which tree actually
+  runs?" ambiguity. `provider/paths.py` docstring updated; the version-parity
+  guard now asserts the mirror STAYS gone (a wholesale re-copy would silently
+  reintroduce a shadow tree). The "both copies" prompt/template drift tests drop
+  their mirror arm.
+
+### Fixed
+
+- **F3 — the code-edit gate authorized a pointer resolving to a DONE task.**
+  Defense-in-depth: a stale/hand-written pointer to a closed task no longer
+  keeps the gate open. Added on BOTH surfaces (bash `task-gate-hook` + Codex
+  `has_active_task`) so it doesn't create a new parity gap. `tasks work <N>`
+  reopens a done task (status → in_progress) before editing, so a real resume is
+  unaffected; an unparsable status is never treated as "done" (no new false
+  block). Mirror re-synced.
+- **F10 — `_safe_int` could return a negative** for an absurdly long all-digit
+  input (>18 digits overflow bash's signed 64-bit `$(( ))`). Clamped to 0, so
+  the "non-negative" contract holds. (Negatives were already rejected.)
+- **N3 — a merge renumber silently normalized non-UTF-8 bytes in `chat_log.md`
+  to U+FFFD.** Behavior stays crash-safe on purpose (surrogateescape would only
+  relocate the failure to the next strict-encode site — worse for a merge), but
+  the rewrite now WARNS when it is about to normalize bytes, instead of losing
+  them silently. New `_read_text_lossy` reports lossiness.
+- **`tasks doctor`'s Python≡bash resolver-parity check false-FAILed when the
+  suite ran detached** (background CI). With no agent process on the ancestry,
+  both resolvers legitimately fall back to a process-LOCAL `pid-<ppid>` that
+  differs; the check now requires exact equality only when a real agent root
+  exists (both converge on it) and structural (`pid-…`) agreement otherwise.
+  The production guarantee (env-authoritative via PLAYBOOK_SESSION_ID) is
+  unchanged.
+
+### Added
+
+- **`{{INTENT}}` token for custom playbooks (F8).** The `[intent]` argument to
+  `tasks new` now reaches a custom `.agent/playbooks/<type>.md` template via an
+  explicit `{{INTENT}}` token (alongside `{{NNN}}`/`{{TITLE}}`); a playbook that
+  doesn't use it is unchanged. Documented in the playbooks README.
+
 ## [1.5.16] — 2026-08-17
 
 Verification-pass fixes for 1.5.14/1.5.15. An independent three-way adversarial

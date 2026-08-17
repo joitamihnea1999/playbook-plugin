@@ -405,13 +405,34 @@ def current_state_file(project_root: Path, session_id: str) -> Path:
     return resolve_agent_dir(project_root) / "sessions" / session_id / "current_state"
 
 
+def _task_status_is_done(task_file: Path) -> bool:
+    """True iff the task.md's ## Status (last one wins, matching tasks.core
+    `_extract_status`) reads `done`. An unreadable/absent status is NOT done —
+    F3 must never turn a parse failure into a new block."""
+    try:
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    status = ""
+    for i, line in enumerate(lines):
+        if line.strip() == "## Status" and i + 1 < len(lines):
+            status = lines[i + 1].strip()
+    return status == "done"
+
+
 def has_active_task(project_root: Path, session_id: str) -> bool:
-    """True iff current_state names a task and its task.md exists.
+    """True iff current_state names a task, its task.md exists, and it is not
+    closed.
 
     The task.md existence check (panel impl-review #J) prevents a split-brain
     where current_state points at a task whose directory was deleted —
     apply_patch_pre_decision would allow but apply_patch_post_context would
     say "no active task", giving the model contradictory signals.
+
+    F3 (parity with the bash gate): a pointer that resolves to a DONE task does
+    NOT count as active — normal close clears the pointer, so this only fires on
+    a stale/hand-written pointer to a closed task; `tasks work <N>` reopens it
+    (status → in_progress) before editing, so a real resume is unaffected.
     """
     state_file = current_state_file(project_root, session_id)
     if not state_file.exists():
@@ -422,7 +443,10 @@ def has_active_task(project_root: Path, session_id: str) -> bool:
         return False
     if not task_num:
         return False
-    return _find_task_file(project_root, task_num) is not None
+    task_file = _find_task_file(project_root, task_num)
+    if task_file is None:
+        return False
+    return not _task_status_is_done(task_file)
 
 
 def apply_patch_pre_decision(

@@ -13,12 +13,13 @@ If `.agent/playbooks/<type>.md` exists, it's used instead of the base template. 
 
 ## Substitution variables
 
-Two variables are replaced when stamping a template into a new task:
+These variables are replaced when stamping a template into a new task:
 
 | Variable | Replaced with | Example |
 |----------|--------------|---------|
 | `{{NNN}}` | Zero-padded task number | `077` |
 | `{{TITLE}}` | Title-cased task name | `My Eval Task` |
+| `{{INTENT}}` | The `[intent]` argument to `tasks new` (empty string if none) | `Ship the CSV export` |
 
 ## Required sections
 

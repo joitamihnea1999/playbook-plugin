@@ -21,6 +21,30 @@ from tasks.shared import (
 )
 
 
+def _resolver_parity_verdict(has_root: bool, py_sid: str, bash_sid: str) -> tuple[bool, str]:
+    """Decide whether the Python and bash session-id resolvers agree — the
+    split-brain guard, made hermetic (1.5.17).
+
+    `has_root` True means a real agent ancestor is on the process tree, so both
+    resolvers walk it and MUST converge on the same pid → require exact equality.
+    False (a detached/background run with no agent ancestry) means each falls
+    back to a process-LOCAL `pid-<getppid()>` that legitimately differs between
+    the Python process and the bash subprocess; requiring exact equality there
+    false-FAILed under a detached suite (Obs-A). In that case the meaningful
+    invariant is that both produce the same fallback SHAPE (`pid-…`) — the
+    production split-brain guarantee is env-authoritative (both honor
+    PLAYBOOK_SESSION_ID, always set by the launchers) and is unaffected here.
+    """
+    if has_root:
+        agree = py_sid == bash_sid and py_sid.startswith("pid-")
+        return agree, (f"both → {py_sid}" if agree
+                       else f"MISMATCH py={py_sid!r} bash={bash_sid!r}")
+    agree = py_sid.startswith("pid-") and bash_sid.startswith("pid-")
+    return agree, (f"both → pid- fallback (py={py_sid}, bash={bash_sid}); no agent "
+                   f"ancestry, so exact pid is process-local"
+                   if agree else f"non-pid fallback py={py_sid!r} bash={bash_sid!r}")
+
+
 def cmd_audit(cmd_args):
     """The `tasks audit` arm — body moved verbatim from cli.py (1.5.9 split)."""
     # P6: mechanical pre-panel sweeps — catch the stale/zombie/half-merged
@@ -503,6 +527,7 @@ def cmd_doctor(cmd_args):
         saved = os.environ.pop("PLAYBOOK_SESSION_ID", None)
         try:
             find_agent_root_pid.cache_clear()
+            has_root = find_agent_root_pid() is not None
             py_sid = resolve_session_id()
             env = {k: v for k, v in os.environ.items() if k != "PLAYBOOK_SESSION_ID"}
             r = _sub.run(["bash", "-c", f"source '{gate_lib.as_posix()}' && resolve_session_id"],
@@ -511,8 +536,7 @@ def cmd_doctor(cmd_args):
         finally:
             if saved is not None:
                 os.environ["PLAYBOOK_SESSION_ID"] = saved
-        agree = py_sid == bash_sid and py_sid.startswith("pid-")
-        detail = f"both → {py_sid}" if agree else f"MISMATCH py={py_sid!r} bash={bash_sid!r}"
+        agree, detail = _resolver_parity_verdict(has_root, py_sid, bash_sid)
         check("session-id: Python ≡ bash resolver", agree, detail)
     else:
         check("session-id: Python ≡ bash resolver", False, "gate-echo-lib.sh not found")

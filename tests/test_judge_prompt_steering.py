@@ -13,12 +13,11 @@ Both must reach all four builders. There are four rather than one because the
 task.md-editing pair and the stdout-only panel pair are separate functions, and a
 paragraph added to "the review prompt" has historically landed in two of them.
 
-Why this file asserts on source text as well as rendered output: the canonical
-`tasks/template.py` carries the full timeout API, while
-`scripts/lib/tasks/template.py` is the dead mirror (pinned at VERSION 1.4.1 by
-test_version_parity, documented as parked for deletion in provider/paths.py) and
-deliberately carries only the prompt text. So the depth block is checked in both
-copies by text, and the time paragraph is rendered only from the canonical copy.
+Why this file asserts on source text as well as rendered output: it lets an
+assertion name WHICH builder is short (via the unparsed AST) rather than only
+seeing a rendered string. (Until 1.5.17 a second `scripts/lib/tasks/template.py`
+mirror also existed and was checked here; it was deleted — the Codex hooks never
+loaded it — so there is one copy now.)
 
 Pure stdlib unittest — honors the stdlib-only runtime invariant.
 Run: python3 tests/test_judge_prompt_steering.py
@@ -34,7 +33,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLAYBOOK = REPO_ROOT / "plugins" / "playbook"
 CANONICAL = PLAYBOOK / "tasks" / "template.py"
-MIRROR = PLAYBOOK / "scripts" / "lib" / "tasks" / "template.py"
 
 PLAN_BUILDERS = ("plan_review_prompt", "panel_plan_review_prompt")
 IMPL_BUILDERS = ("impl_review_prompt", "panel_impl_review_prompt")
@@ -55,7 +53,7 @@ def builder_sources(path: Path) -> dict[str, str]:
 
 
 class DepthBlockTest(unittest.TestCase):
-    """Theme B: reason deeply, report tersely — in every builder, both copies."""
+    """Theme B: reason deeply, report tersely — in every builder."""
 
     # Phrases distinctive enough that they cannot pass by accident on upstream.
     SHARED = (
@@ -69,8 +67,8 @@ class DepthBlockTest(unittest.TestCase):
     IMPL_ONLY = "independent hypotheses about how this code could be wrong"
     TEST_CLAIM = "check the test would actually fail if the behavior regressed"
 
-    def test_shared_depth_phrases_in_every_builder_of_both_copies(self):
-        for path in (CANONICAL, MIRROR):
+    def test_shared_depth_phrases_in_every_builder(self):
+        for path in (CANONICAL,):
             funcs = builder_sources(path)
             for name in ALL_BUILDERS:
                 self.assertIn(name, funcs, f"{path.name}: {name} missing")
@@ -84,7 +82,7 @@ class DepthBlockTest(unittest.TestCase):
     def test_plan_and_impl_flavours_do_not_cross_over(self):
         """The two flavours ask for different hypotheses; pasting one everywhere
         would tell a plan reviewer to hunt for races in code that doesn't exist."""
-        for path in (CANONICAL, MIRROR):
+        for path in (CANONICAL,):
             funcs = builder_sources(path)
             for name in PLAN_BUILDERS:
                 with self.subTest(copy=path.name, builder=name):

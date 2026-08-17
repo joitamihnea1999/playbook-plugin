@@ -259,7 +259,22 @@ MSG
                 RESOLVED=$(find "$AGENT_DIR/tasks" -maxdepth 2 -name "task.md" \
                     -path "*/${TASK}-*/*" 2>/dev/null | head -1)
                 if [ -n "$RESOLVED" ]; then
-                    exit 0
+                    # F3 (defense in depth): a pointer that resolves to a DONE
+                    # task must not keep the gate open. Normal close clears the
+                    # pointer, so this only fires on a stale/hand-written pointer
+                    # to a closed task — `tasks work <N>` reopens it (status →
+                    # in_progress) before any edit, so a real resume is unaffected.
+                    # An unparsable/absent status is NOT "done" → authorize (fail
+                    # toward today's behavior, never a new false block).
+                    STATUS=$(awk '
+                        {gsub(/\r/,"")}
+                        flag {status=$0; flag=0}
+                        /^## Status[[:space:]]*$/ {flag=1}
+                        END {print status}
+                    ' "$RESOLVED" | tr -d '[:space:]')
+                    if [ "$STATUS" != "done" ]; then
+                        exit 0
+                    fi
                 fi
                 ;;
         esac

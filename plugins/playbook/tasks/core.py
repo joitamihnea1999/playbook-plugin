@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.16"
+VERSION = "1.5.17"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -1579,6 +1579,10 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
         content = custom.read_text(encoding="utf-8", errors="replace")
         content = content.replace("{{NNN}}", f"{task_num:03d}")
         content = content.replace("{{TITLE}}", _display_title(name))
+        # F8: let the [intent] arg reach a custom playbook too, via an explicit
+        # `{{INTENT}}` token (built-in templates use prose placeholders, matched
+        # below; a custom author opts in with this token). No token → unchanged.
+        content = content.replace("{{INTENT}}", intent_text or "")
     else:
         # Fall back to base Python template
         from tasks.template import render_template
