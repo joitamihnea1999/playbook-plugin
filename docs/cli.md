@@ -101,7 +101,7 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 ## Skills (agent-loaded)
 
-Five skill bundles are discovered by the agent harness's plugin skill mechanism (each carries a `SKILL.md`: playbook, judge, monitor, merge, stack). A sixth directory, `skills/tasks/`, is not a harness-discoverable skill — it holds the canonical task template the `new` command copies. (None are printed by `tasks bootstrap`, which prints the mind map, pending tasks, and CLI reference.)
+Six skill bundles are discovered by the agent harness's plugin skill mechanism (each carries a `SKILL.md`: playbook, judge, monitor, merge, stack, testing). A further directory, `skills/tasks/`, is not a harness-discoverable skill — it holds the canonical task template the `new` command copies. (None are printed by `tasks bootstrap`, which prints the mind map, pending tasks, and CLI reference.)
 
 | Skill | What it does |
 |---|---|

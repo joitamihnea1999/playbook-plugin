@@ -54,7 +54,7 @@ Because state lives in the file and not in memory, execution survives context co
 
 **Shared repos.** Several people — or several workstations — can drive the same repo without trampling each other: agent runtime state is namespaced per user under `.agent/<user>/`, and a dedicated merge skill keeps those lanes from cross-contaminating when branches meet. ([Per-user lanes](docs/architecture.md#per-user-lanes).)
 
-**Skills** for recurring maneuvers: `/playbook:freehand` (you drive, no gate pressure), `/playbook:intent` (blind vertical retro of a finished task), a merge skill for multi-user repos, and default tech-stack picks for fresh projects. ([Full list](docs/cli.md).)
+**Skills** for recurring maneuvers: `/playbook:freehand` (you drive, no gate pressure), `/playbook:intent` (blind vertical retro of a finished task), a merge skill for multi-user repos, a testing skill that derives tests from spec + human corrections + architecture risk, and default tech-stack picks for fresh projects. ([Full list](docs/cli.md).)
 
 <p align="center"><img src="assets/reactive_test_environment.png" width="600" alt="An AI agent in a go-kart racing inside concentric tire barriers labeled Unit Tests, Integration Tests, and E2E Tests, with a Safe Zone in the center"></p>
 
@@ -143,4 +143,4 @@ Not everything needs a task. Questions, shell commands, docs, git - just ask. Th
 
 Works on macOS, Linux, and Windows (Git Bash / MSYS).
 
-<!-- readme-audit: v1.5.26 @ 2026-08-17 -->
+<!-- readme-audit: v1.5.27 @ 2026-08-17 -->

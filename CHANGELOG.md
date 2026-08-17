@@ -2,7 +2,25 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.26] — 2026-08-17
+## [1.5.27] — 2026-08-17
+
+### Added
+
+- **`testing` skill** — a method for the doctrine the plugin already preaches
+  ("expand test coverage every task"; the template puts a test gate after every
+  work gate). The skill derives test needs from three frozen ledgers —
+  specification, human-signal (mined from `.agent/chat_log.md` via `tasks context`
+  / `tasks log`), and architecture-risk — challenges them against a portable
+  `culture.md` of cross-project testing lessons, classifies the existing suite
+  (STRONG / PARTIAL / WRONG_BOUNDARY / MISSING / …), and reports ≤5 ranked
+  confidence upgrades. Its core habits (preserve the betrayal not just the fix;
+  assert forbidden effects; prove at the owning boundary; calibrate a
+  consequential test by making it fail for the intended reason first) are exactly
+  the discipline the playbook's own suite follows. This is the sixth
+  harness-discoverable skill (docs/cli.md + architecture.md updated). Adapted from
+  `horiacristescu/playbook-harness` (same lineage/author).
+
+
 
 Verification pass over the 1.5.21–1.5.25 context-economy arc: an independent
 3-way adversarial audit (recall/bootstrap, the map audit-checks, compact/

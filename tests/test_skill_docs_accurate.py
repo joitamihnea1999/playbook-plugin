@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = REPO_ROOT / "plugins" / "playbook"
 JUDGE = PLUGIN / "skills" / "judge" / "SKILL.md"
 MONITOR = PLUGIN / "skills" / "monitor" / "SKILL.md"
+TESTING = PLUGIN / "skills" / "testing" / "SKILL.md"
 MONITOR_LIB = PLUGIN / "scripts" / "monitor-lib"
 CONFIG_DOC = REPO_ROOT / "docs" / "configuration.md"
 CMD_PLAYBOOK = PLUGIN / "commands" / "playbook.md"
@@ -55,6 +56,30 @@ class JudgeSkillCliPath(unittest.TestCase):
                       "judge skill never warns that Task is on the deny-list (I15)")
         self.assertIn("plan-review", text,
                       "judge skill never names the sanctioned vendor-judge CLI (I15)")
+
+
+class TestingSkillShipsAndIsAccurate(unittest.TestCase):
+    """The testing skill (adapted from playbook-harness) must ship its companion
+    and name only real surfaces — same I15/I19 discipline as judge/monitor."""
+
+    def test_skill_and_companion_ship(self):
+        self.assertTrue(TESTING.is_file(), "testing SKILL.md is missing")
+        self.assertTrue((TESTING.parent / "culture.md").is_file(),
+                        "testing skill references culture.md but it does not ship")
+
+    def test_skill_has_frontmatter_and_links_the_companion(self):
+        text = TESTING.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\nname: testing\n"),
+                        "testing SKILL.md lacks the name: testing frontmatter")
+        self.assertIn("[culture.md](culture.md)", text,
+                      "testing skill does not link its culture.md companion")
+
+    def test_names_real_cli_surfaces_not_ghosts(self):
+        text = TESTING.read_text(encoding="utf-8")
+        # Ties into the real chat-log tooling, not an invented command.
+        self.assertIn(".agent/chat_log.md", text)
+        for real in ("tasks context", "tasks log"):
+            self.assertIn(real, text, f"testing skill omits the real surface {real!r}")
 
 
 class MonitorSkillMatchesReality(unittest.TestCase):

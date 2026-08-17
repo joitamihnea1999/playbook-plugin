@@ -168,12 +168,23 @@ class DocReconcile(unittest.TestCase):
         self.assertNotIn("Run /init", src)
 
     def test_docs_skill_bundle_count_matches_reality(self):
-        """F15: docs must not claim six discoverable SKILL.md bundles when five ship."""
+        """F15: the docs' claimed count of discoverable SKILL.md bundles must
+        equal how many actually ship — a stale number (either direction) is the
+        bug. Checked generically so adding a skill can't silently drift the docs."""
         skill_dirs = sorted(d.name for d in (PLUGIN / "skills").iterdir()
                             if (d / "SKILL.md").exists())
-        self.assertEqual(len(skill_dirs), 5, skill_dirs)
+        words = {5: "Five", 6: "Six", 7: "Seven", 8: "Eight"}
+        word = words.get(len(skill_dirs))
+        self.assertIsNotNone(word, f"add a count word for {len(skill_dirs)} skills")
         cli = (REPO_ROOT / "docs" / "cli.md").read_text(encoding="utf-8")
-        self.assertNotIn("Six skill bundles", cli)
+        arch = (REPO_ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+        self.assertIn(f"{word} skill bundles", cli,
+                      f"docs/cli.md must say '{word} skill bundles' ({skill_dirs})")
+        self.assertIn(f"{word.lower()} harness-discoverable skill bundles", arch,
+                      f"docs/architecture.md count is stale ({skill_dirs})")
+        # And every shipped skill must be named in the cli.md list.
+        for name in skill_dirs:
+            self.assertIn(name, cli, f"docs/cli.md never names the '{name}' skill")
 
 
 if __name__ == "__main__":
