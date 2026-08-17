@@ -26,7 +26,7 @@ Then **ask the user** what they want to work on. Don't autonomously pick a task.
 
 ## Mind Map
 
-Read `MIND_MAP.md` at project root before starting any work. It's the project's institutional memory — architecture, decisions, history, and reasoning. Consult it before each task, update it after completing one.
+Read `MIND_MAP.md` at project root before starting any work. It's the project's institutional memory — architecture, decisions, and reasoning. Consult it before each task, update it after completing one. `tasks bootstrap` prints it (an index of routing nodes + titles once it's large); pull a node's full content — across `MIND_MAP.md` and the `MIND_MAP_OVERFLOW.md` deep-detail tier — with `.claude/bin/tasks recall <N>`, or locate nodes by topic with `tasks recall <keyword>`.
 
 ## Task Lifecycle
 
@@ -73,6 +73,7 @@ The close is **earned, not asserted** — these are enforced by the CLI, not con
 .claude/bin/tasks blocked "<reason>"         # honest pause: awaiting the user's decision
 .claude/bin/tasks parked [--all]             # surface parked items before they rot
 .claude/bin/tasks compact <N>                # move <!-- archive:start/end --> narrative to task-archive.md
+.claude/bin/tasks recall <id|words>          # fetch a mind-map node (main+overflow) or locate nodes by keyword
 .claude/bin/tasks bootstrap                  # orientation: mind map (indexed if large) + skills + pending
 ```
 

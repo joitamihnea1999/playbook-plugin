@@ -329,11 +329,14 @@ def _bootstrap_mind_map(project_path: Path,
     first_id, last_id = starts[0][1], starts[routing - 1][1]
     indexed = starts[routing:]
     toc = "\n".join(f"[{nid}] {_node_title(lines[idx])[1]}" for idx, nid in indexed)
+    has_overflow = (project_path / "MIND_MAP_OVERFLOW.md").exists()
+    fetch = ("`tasks recall <N>` (spans MIND_MAP.md + the fuller MIND_MAP_OVERFLOW.md)"
+             if has_overflow else "`tasks recall <N>` or grep '^\\[N\\]' MIND_MAP.md")
     notice = (
         f"[... MIND MAP INDEX — routing nodes [{first_id}]-[{last_id}] shown in "
         f"full above; the {len(indexed)} nodes below are listed by TITLE ONLY. "
-        f"This is NOT their content. Read any one with: "
-        f"grep '^\\[N\\]' MIND_MAP.md ...]\n\n"
+        f"This is NOT their content. Fetch any one with: {fetch}. "
+        f"Locate a node by topic: `tasks recall <keyword>` ...]\n\n"
     )
     return f"{preamble}{routed}\n{notice}{toc}\n"
 
@@ -810,3 +813,103 @@ def cmd_mindmap_sync(cmd_args):
     elif drifted or main_only:
         fixable = len(drifted) + len(main_only)
         print(f"\n{fixable} node(s) can be auto-synced main→overflow. Run: tasks mindmap-sync --fix")
+
+
+# ─── Retrieval: `tasks recall` ────────────────────────────────────────────────
+# The completion of the bootstrap INDEX: the index (routing nodes + titled TOC)
+# tells an agent WHICH node it wants; `recall` FETCHES it — across BOTH tiers.
+# A two-tier map (MIND_MAP.md holds full + `↗` summary nodes, MIND_MAP_OVERFLOW.md
+# holds the deep detail) otherwise forces the agent to know that a summarized node
+# has a fuller twin in a second file and to grep it by hand. `recall <N>` pulls
+# both; `recall <keyword>` locates the node ids to pull. This is "know exactly
+# where to look, load exactly what you need" as one command.
+
+def _iter_map_nodes(content: str) -> "list[tuple[int, str, str]]":
+    """`(node_id, title, full_text)` for every fence-aware node, in file order.
+    Shares `_node_starts`, so a `[N]` inside a code fence is never a node."""
+    lines = content.splitlines(keepends=True)
+    starts, _in_fence = _node_starts(lines)
+    out = []
+    for k, (idx, nid) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+        text = "".join(lines[idx:end])
+        out.append((nid, _node_title(lines[idx])[1], text))
+    return out
+
+
+def _read_map(path: Path) -> "str | None":
+    try:
+        return path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
+    except OSError:
+        return None
+
+
+def cmd_recall(cmd_args) -> None:
+    """`tasks recall <id|keyword...>` — fetch mind-map content across both tiers.
+
+    - `recall 12` (all-digits): print node [12] from MIND_MAP.md AND from
+      MIND_MAP_OVERFLOW.md (the fuller detail), each labeled; note when one tier
+      lacks it.
+    - `recall auth policy` (words): print `[N] Title` for every node in either
+      file whose text contains ALL the words (case-insensitive) — a locator, so
+      the next step is `recall <N>` for the full node.
+    """
+    positional = [a for a in cmd_args if not a.startswith("-")]
+    if not positional:
+        print("'recall' requires a node id or keyword(s) "
+              "(e.g. `tasks recall 12`, `tasks recall auth policy`).", file=sys.stderr)
+        sys.exit(1)
+
+    project_path = find_project_root()
+    main = _read_map(project_path / "MIND_MAP.md")
+    overflow = _read_map(project_path / "MIND_MAP_OVERFLOW.md")
+    if main is None:
+        print("Error: MIND_MAP.md not found — nothing to recall.", file=sys.stderr)
+        sys.exit(1)
+
+    # ── node-id mode ──
+    if len(positional) == 1 and positional[0].isdigit():
+        nid = int(positional[0])
+        main_nodes = {n: (t, x) for n, t, x in _iter_map_nodes(main)}
+        over_nodes = {n: (t, x) for n, t, x in _iter_map_nodes(overflow)} if overflow else {}
+        if nid not in main_nodes and nid not in over_nodes:
+            print(f"No node [{nid}] in MIND_MAP.md"
+                  f"{' or MIND_MAP_OVERFLOW.md' if overflow else ''}. "
+                  "Run `tasks recall <keyword>` or `tasks bootstrap` to see the index.")
+            return
+        if nid in main_nodes:
+            print(f"=== [{nid}] from MIND_MAP.md ===")
+            print(main_nodes[nid][1].rstrip())
+        if nid in over_nodes:
+            print(f"\n=== [{nid}] from MIND_MAP_OVERFLOW.md (fuller detail) ===")
+            print(over_nodes[nid][1].rstrip())
+        elif overflow is not None and nid in main_nodes:
+            print(f"\n(no [{nid}] in overflow — MIND_MAP.md holds the full node)")
+        return
+
+    # ── keyword mode ──
+    needles = [w.lower() for w in positional]
+
+    def _matches(text: str) -> bool:
+        low = text.lower()
+        return all(w in low for w in needles)
+
+    def _hits(content):
+        return [(n, t) for n, t, x in _iter_map_nodes(content) if _matches(x)]
+
+    main_hits = _hits(main)
+    over_hits = _hits(overflow) if overflow else []
+    if not main_hits and not over_hits:
+        print(f"No node matched {' + '.join(needles)!r}. "
+              "Try fewer/broader words, or `tasks bootstrap` for the full index.")
+        return
+    if main_hits:
+        print("MIND_MAP.md:")
+        for n, t in main_hits:
+            print(f"  [{n}] {t}")
+    if over_hits:
+        print("MIND_MAP_OVERFLOW.md (fuller detail):")
+        for n, t in over_hits:
+            print(f"  [{n}] {t}")
+    total = len({n for n, _ in main_hits} | {n for n, _ in over_hits})
+    print(f"→ {total} node(s) matched. Fetch one in full: tasks recall <N>")

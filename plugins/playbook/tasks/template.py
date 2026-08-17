@@ -55,7 +55,7 @@ def intent_why_refs(playbook: str) -> str:
 (why this matters now \u2014 urgency, context, what breaks if delayed)
 
 ## References
-- [ ] Context: `grep -Ein "keyword1|keyword2" MIND_MAP.md` \u2192 paste relevant excerpts below
+- [ ] Context: `.claude/bin/tasks recall keyword1 keyword2` (locates matching nodes across MIND_MAP.md + overflow), then `tasks recall <N>` for each \u2192 paste relevant excerpts below
 - Playbook: {playbook}
 - Note: Don't hardcode task numbers in plans \u2014 `.claude/bin/tasks new` auto-increments.
 
@@ -736,6 +736,7 @@ Tasks CLI:
   Info:
     tasks list [--pending]     show tasks
     tasks status               current gate position
+    tasks recall <id|words>    fetch a mind-map node (main+overflow) by id, or locate by keyword
     tasks compact <N>          move <!-- archive:start/end --> narrative to task-archive.md"""
 
 
@@ -910,7 +911,9 @@ Commands:
   doctor              Harness health check
   environment         Advisory: optional tools that improve the setup + install hints [--json] [--suggest-only]
   detect-verify       Suggest a full verify command (typecheck+tests+lint) from the toolchains present [--json]
-  bootstrap           Load mind map + skills + pending tasks
+  bootstrap           Load mind map (indexed if large) + skills + pending tasks
+  recall <id|words>   Fetch a mind-map node by id (main + overflow), or locate
+                      nodes by keyword — the fetch half of the bootstrap index
   init                Create CLAUDE.md for this project
 
 Sandboxed subagents (separate CLI):

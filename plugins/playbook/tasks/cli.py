@@ -30,7 +30,7 @@ COMMANDS = (
     "models", "plan-review", "impl-review", "judge", "context", "intent",
     "timeline", "tagger", "tag", "retro", "status", "audit", "blocked",
     "parked", "freehand", "doctor", "environment", "detect-verify", "merge-doctor",
-    "mindmap-sync", "log", "prepare-merge", "compact",
+    "mindmap-sync", "log", "prepare-merge", "compact", "recall",
 )
 
 
@@ -177,6 +177,12 @@ def main():
         # task-archive.md (verbatim), keeping the hot trace reviewable (1.5.21).
         from tasks.compact import cmd_compact
         cmd_compact(cmd_args)
+
+    elif cmd == "recall":
+        # Cross-tier mind-map retrieval: fetch a node (main + overflow) by id, or
+        # locate node ids by keyword — the fetch half of the bootstrap index (1.5.22).
+        from tasks.mindmap import cmd_recall
+        cmd_recall(cmd_args)
 
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)

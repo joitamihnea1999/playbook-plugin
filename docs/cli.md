@@ -75,6 +75,8 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 ## Orientation
 
+**`tasks recall <id | keyword…>`** — the fetch half of the bootstrap index, across both mind-map tiers. `tasks recall 12` prints node [12] from `MIND_MAP.md` **and** from `MIND_MAP_OVERFLOW.md` (the deep-detail tier a summarized `↗` node points into) — so pulling a node's full content is one command, not "remember the overflow file exists and grep it by hand." `tasks recall auth policy` lists `[N] Title` for every node in either file whose text contains all the words, so a topic resolves to node ids you then `recall <N>` in full. This is the "load exactly the node you need, nothing else" retrieval the index was built to feed.
+
 **`tasks bootstrap`** — session-start orientation: prints the mind map (the project's memory), pending tasks, and the CLI reference. The agent runs this as its first action in every session — it's how session thirty picks up from session one. A small mind map prints in full; once it grows past the bootstrap budget (~8 KB) it prints as an **index** — routing nodes [1]-[5] in full plus a one-line titled TOC of every other node — so orientation loads the map's shape, not thousands of tokens of subsystem prose the task never reads. The agent greps the two or three nodes its task touches (`grep '^\[18\]' MIND_MAP.md`). The judge/review path keeps the fuller whole-node trim, since auditing needs whole nodes.
 
 **`tasks list [--pending]`** (alias `ls`) — task overview table; `--pending` hides finished work.

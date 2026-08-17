@@ -2,7 +2,35 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.21] — 2026-08-17
+## [1.5.22] — 2026-08-17
+
+Context-economy pass, part 2: complete the retrieval loop. 1.5.21 gave bootstrap
+a mind-map INDEX (routing nodes + titled TOC) but only for `MIND_MAP.md` — a
+summarized `↗` node's deep detail lives in `MIND_MAP_OVERFLOW.md`, which had no
+index and no retrieval path, so "find exactly the node you need" broke at the
+overflow boundary.
+
+### Added
+
+- **`tasks recall <id | keyword…>`** — the fetch half of the index, across both
+  tiers. `tasks recall 12` prints node [12] from `MIND_MAP.md` **and** from
+  `MIND_MAP_OVERFLOW.md` (labeled), so a node's full content is one command
+  instead of "know the overflow file exists and grep it by hand." `tasks recall
+  auth policy` lists `[N] Title` for every node in either file containing all the
+  words (AND, case-insensitive) — a topic resolves to node ids you then recall in
+  full. New `_iter_map_nodes` / `cmd_recall` in `tasks/mindmap.py`, wired into
+  `cli.py` (COMMANDS + dispatch + baseline).
+
+### Changed
+
+- **Bootstrap index now points into the overflow tier.** When
+  `MIND_MAP_OVERFLOW.md` exists, the index notice says so and directs fetches to
+  `tasks recall <N>` (spans both files) instead of a main-only grep.
+- The task-template References gate, `CLAUDE.md` template, and CLI help/usage now
+  drive first-contact context-gathering through `tasks recall` rather than a raw
+  `grep MIND_MAP.md` that misses overflow.
+
+
 
 Context-economy pass: make the agent load the information it needs, retain what
 matters out of the way, and stop carrying what's of no use. Four levers around
