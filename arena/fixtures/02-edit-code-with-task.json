@@ -1,0 +1,7 @@
+{
+  "name": "edit-code-with-active-task → ALLOW",
+  "hook": "task-gate-hook",
+  "files": {"src/foo.py": "x = 1\n", ".agent/tasks/005-demo/task.md": "# 005 - demo\n## Status\nin_progress\n"},
+  "current_state": "005",
+  "payload": {"tool_name": "Edit", "tool_input": {"file_path": "src/foo.py"}}
+}

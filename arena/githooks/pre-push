@@ -1,0 +1,43 @@
+#!/bin/bash
+# arena pre-push hook — the "automatic, only when needed" trigger.
+#
+# Fires on every `git push`. For each ref being pushed, if the commits touch
+# harness files (the ones whose change can alter an agent-facing decision), it
+# runs the arena's free replay tier (baseline = what's on the remote, treatment =
+# what's being pushed) and prints the verdict. ADVISORY ONLY — it never blocks a
+# push; a behavioral change is often intended, and this is a heads-up, not a gate.
+#
+# Installed as .git/hooks/pre-push via arena/install-hooks.sh. Stdin (git's
+# pre-push protocol): "<local ref> <local sha> <remote ref> <remote sha>" lines.
+set -u
+ZERO=0000000000000000000000000000000000000000
+ROOT="$(git rev-parse --show-toplevel)"
+# Files whose change the replay can actually judge (the hook scripts + provider).
+HARNESS_RE='^plugins/playbook/(scripts|provider)/'
+
+ran_any=false
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ -z "${local_sha:-}" ] && continue
+    [ "$local_sha" = "$ZERO" ] && continue            # branch deletion — nothing to check
+
+    if [ "$remote_sha" = "$ZERO" ]; then
+        # New branch on the remote: baseline = divergence point from origin/main.
+        base="$(git merge-base origin/main "$local_sha" 2>/dev/null)"
+    else
+        base="$remote_sha"
+    fi
+    [ -z "${base:-}" ] && continue                    # no comparable baseline — skip quietly
+
+    # Only-when-needed: skip unless a harness file actually changed in the range.
+    if ! git diff --name-only "$base" "$local_sha" 2>/dev/null | grep -qE "$HARNESS_RE"; then
+        continue
+    fi
+
+    ran_any=true
+    echo "[arena] harness files changed in ${base:0:7}..${local_sha:0:7} — replaying decisions…" >&2
+    # Advisory: run in a subshell, never let its exit status fail the push.
+    python3 "$ROOT/arena/replay.py" --baseline "$base" --treatment "$local_sha" >&2 || true
+done
+
+$ran_any || echo "[arena] no harness changes in this push — skipped." >&2
+exit 0

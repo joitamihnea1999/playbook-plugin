@@ -1,0 +1,7 @@
+{
+  "name": "MultiEdit-code-without-task → BLOCK (the gate-coverage edge Marius misses)",
+  "hook": "task-gate-hook",
+  "files": {"src/foo.py": "x = 1\n"},
+  "current_state": "",
+  "payload": {"tool_name": "MultiEdit", "tool_input": {"file_path": "src/foo.py"}}
+}
