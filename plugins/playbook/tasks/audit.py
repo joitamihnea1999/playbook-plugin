@@ -494,6 +494,91 @@ def check_mindmap_dangling_links(project_path) -> "dict | None":
     }
 
 
+def check_mindmap_wellformed(project_path) -> "dict | None":
+    """Advisory: STRUCTURAL defects in how the map is written, caught mechanically
+    instead of hoping the author followed the /mindmap checklist. Three kinds, all
+    unambiguous against the documented format:
+
+      * duplicate node id — two `[5]` definitions; retrieval (`recall`, the index)
+        can only keep one, so the other is silently lost;
+      * missing title — a node with no `**Bold Title**`, so the index/TOC shows a
+        degenerate label and the node is hard to scan for;
+      * unreachable node — a non-routing node that NOTHING links to (the format's
+        own rule is "every node 2+ links"), so it is dead memory: surfaced by the
+        index but never arrived at by following links.
+
+    Fence-aware (shares `_node_starts`); routing nodes (the first five in file
+    order) are exempt from the unreachable check — they are entry points, not
+    link targets. Advisory; `audit.wellformed_severity` raises it."""
+    from tasks.mindmap import _node_starts, _FENCE_RE
+    project_path = Path(project_path)
+    mm = project_path / "MIND_MAP.md"
+    if not mm.exists():
+        return None
+    try:
+        text = mm.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = text.splitlines(keepends=True)
+    starts, _in_fence = _node_starts(lines)
+    if not starts:
+        return None
+
+    bold_re = re.compile(r"\*\*.+?\*\*")
+    link_re = re.compile(r"\[(\d+)\]")
+
+    # Duplicate ids (in file order of first offense).
+    seen, dups = set(), []
+    for _idx, nid in starts:
+        if nid in seen and nid not in dups:
+            dups.append(nid)
+        seen.add(nid)
+
+    # Missing titles: node line carries no **bold** span.
+    missing_title = [nid for idx, nid in starts
+                     if not bold_re.search(lines[idx].rstrip("\n"))]
+
+    # Link targets (fence-aware, excluding each node's own definition token).
+    defined = [nid for _idx, nid in starts]
+    routing = set(defined[:5])
+    linked_to = set()
+    infence = False
+    for k, (idx, nid) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+        for j in range(idx, end):
+            ln = lines[j]
+            if _FENCE_RE.match(ln):
+                infence = not infence
+                continue
+            if infence:
+                continue
+            body = ln[len(f"[{nid}]"):] if j == idx else ln  # skip self-def token
+            for m in link_re.finditer(body):
+                linked_to.add(int(m.group(1)))
+    unreachable = [nid for nid in dict.fromkeys(defined)
+                   if nid not in routing and nid not in linked_to]
+
+    findings = []
+    findings += [f"duplicate node id [{n}] — defined more than once; retrieval keeps only one" for n in dups]
+    findings += [f"node [{n}] has no **bold title** — index/TOC shows a degenerate label" for n in missing_title]
+    findings += [f"node [{n}] is unreachable — no other node links to it (dead memory; add a link or fold it in)" for n in unreachable]
+
+    cfg = load_config(project_path)
+    audit_cfg = cfg.get("audit") if isinstance(cfg.get("audit"), dict) else {}
+    severity = audit_cfg.get("wellformed_severity")
+    if severity not in _VALID_SEVERITY:
+        severity = "advisory"
+    return {
+        "name": "mindmap-wellformed",
+        "severity": severity,
+        "why": "structural defects in the map make nodes unfindable or unreachable",
+        "command": "(built-in)",
+        "rc": 0 if findings else 1,
+        "status": "findings" if findings else "clean",
+        "output": "\n".join(findings),
+    }
+
+
 def run_audit(project_path) -> dict:
     """Run every resolved sweep plus the built-in mind-map staleness check.
     Returns {results, passed}. The audit FAILS when any sweep ERRORED (a broken
@@ -521,6 +606,9 @@ def run_audit(project_path) -> dict:
     dl = check_mindmap_dangling_links(project_path)
     if dl is not None:
         results.append(dl)
+    wf = check_mindmap_wellformed(project_path)
+    if wf is not None:
+        results.append(wf)
     passed = not any(
         r["status"] == "error" or (r["status"] == "findings" and r["severity"] == "error")
         for r in results

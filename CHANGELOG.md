@@ -2,7 +2,33 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.24] — 2026-08-17
+## [1.5.25] — 2026-08-17
+
+Context-economy pass, part 5: the map's *structure* is now checked mechanically,
+not just its content — so "how the map is written" stops depending on the author
+remembering the checklist. Pure-benefit (advisory, fires only on real defects).
+
+### Added
+
+- **`mindmap-wellformed` audit check** — three structural defects, all
+  unambiguous against the documented format: a **duplicate node id** (retrieval
+  can only keep one), a node with **no `**bold title**`** (the index shows a
+  degenerate label), and an **unreachable node** — a non-routing node nothing
+  links to, i.e. dead memory the index surfaces but navigation never reaches.
+  Fence-aware; routing nodes (first five) are exempt from the reachability check;
+  a node's own definition token doesn't count as a link to itself. Advisory;
+  `audit.wellformed_severity` raises it. New `check_mindmap_wellformed` in
+  `tasks/audit.py`. This is the fourth built-in mind-map check (with stale-refs,
+  node-freshness, dangling-links).
+
+### Changed
+
+- **`/mindmap` writing guidance tightened** — a system node should cite the
+  files it owns (those citations are its freshness *anchor*), add a keyword alias
+  when its search terms differ from its title, and earn its place with at least
+  one incoming link. The guidance now names the mechanical checks that enforce it.
+
+
 
 Context-economy pass, part 4: sharper retrieval — "better than grep" within the
 plugin's stdlib-only, offline, portable contract (no embeddings/vector index by

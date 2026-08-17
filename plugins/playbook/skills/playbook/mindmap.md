@@ -61,9 +61,11 @@ Every node links to 2-3+ others; important nodes link to 5-10. Bidirectional: if
 
 - Use specific names: "The PCAVisualizer class in pcaVisualizer.ts" not "the visualizer"
 - Include numbers: "5-10 features", "23,000+ lines"
-- Reference actual filenames, function names, variable names
+- **Cite the files the node owns.** A system/implementation node should name its actual path(s) — `src/store.py`, `tasks/mindmap.py`. This is not just precision: those citations are the node's *anchor*, so `tasks audit` can tell you when the node has drifted from the code (the `mindmap-node-freshness` check), and `recall` lands you on the right node. A node that owns code but cites no path can't be checked for staleness.
 - Explain WHY decisions were made, not just WHAT exists
+- **Add a keyword alias when the search terms differ from the title.** If people would look for a node by a word its title doesn't contain, put `<!-- keywords: login, credentials, sso -->` on it so `recall` finds it by meaning (see Retrieval).
 - When information changes, update existing nodes — don't create duplicates
+- **Well-formedness is checked mechanically** — `tasks audit` flags duplicate ids, a node with no `**Title**`, and any node nothing links to (dead memory). Every node earns its place by being reachable: give a new node at least one incoming link from the subsystem it belongs under.
 
 ## Examples
 
