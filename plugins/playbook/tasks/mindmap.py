@@ -16,9 +16,11 @@ command module. Consumers: review/bootstrap (context), merge_prep
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from tasks.shared import find_project_root
 
@@ -844,15 +846,99 @@ def _read_map(path: Path) -> "str | None":
         return None
 
 
+_WORD_RE = re.compile(r"[a-z0-9_]+")
+# A node may declare synonyms the prose doesn't spell out, so a lexical search
+# still finds it by meaning: `<!-- keywords: auth, login, identity -->` on any
+# line of the node. These are weighted heavily in ranking (author intent).
+_KEYWORDS_RE = re.compile(r"<!--\s*keywords?:\s*(.*?)\s*-->", re.IGNORECASE)
+_RECALL_TOP = 12
+
+
+def _stem(w: str) -> str:
+    """Strip a single plural `s` (gate/gates, hook/hooks) — the reliable case.
+    Deliberately NOT a full stemmer: aggressive suffix rules (`-ing`/`-ed`) merge
+    unrelated words (gate/gating), and a wrong merge is worse than a missed one in
+    a search an agent trusts. `ss` is preserved (class stays class)."""
+    if len(w) >= 4 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _tokenize(text: str) -> "list[str]":
+    return [_stem(w) for w in _WORD_RE.findall(text.lower())]
+
+
+def _build_corpus(main: str, overflow: "str | None") -> "dict[int, dict]":
+    """{node_id: {title, tokens, sources}} merging both tiers per id. A node's
+    `<!-- keywords -->` synonyms are folded in at 3× weight (author intent)."""
+    docs: "dict[int, dict]" = {}
+
+    def add(content: str, src: str):
+        for nid, title, text in _iter_map_nodes(content):
+            kw = " ".join(_KEYWORDS_RE.findall(text))
+            toks = _tokenize(text) + _tokenize(kw) * 3
+            if nid in docs:
+                docs[nid]["tokens"].extend(toks)
+                docs[nid]["sources"].add(src)
+                if not docs[nid]["title"]:
+                    docs[nid]["title"] = title
+            else:
+                docs[nid] = {"title": title, "tokens": toks, "sources": {src}}
+
+    add(main, "main")
+    if overflow:
+        add(overflow, "overflow")
+    return docs
+
+
+def _rank_nodes(docs: "dict[int, dict]", query_terms: "list[str]") -> "list[tuple[int, float]]":
+    """BM25 relevance ranking of nodes against the (stemmed) query terms.
+
+    OR by nature — a node matching any term scores — but a node matching MORE of
+    the terms, and rarer ones, ranks higher, so multi-word queries still favour
+    the node that has all of them without excluding partial matches (the failure
+    mode of the old hard-AND: `policy storage` returned nothing). Pure stdlib,
+    offline — no embeddings, no index to rebuild — chosen to keep the plugin
+    portable; this is 'better than grep' within that contract, not a vector DB."""
+    n = len(docs)
+    if n == 0:
+        return []
+    df: "dict[str, int]" = {}
+    tfs: "dict[int, Counter]" = {}
+    total_len = 0
+    for nid, d in docs.items():
+        tf = Counter(d["tokens"])
+        tfs[nid] = tf
+        total_len += sum(tf.values())
+        for t in tf:
+            df[t] = df.get(t, 0) + 1
+    avgdl = (total_len / n) or 1.0
+    k1, b = 1.5, 0.75
+    scored = []
+    for nid, tf in tfs.items():
+        dl = sum(tf.values()) or 1
+        score = 0.0
+        for q in query_terms:
+            f = tf.get(q, 0)
+            if not f:
+                continue
+            idf = math.log(1 + (n - df[q] + 0.5) / (df[q] + 0.5))
+            score += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl))
+        if score > 0:
+            scored.append((nid, score))
+    scored.sort(key=lambda p: (-p[1], p[0]))
+    return scored
+
+
 def cmd_recall(cmd_args) -> None:
     """`tasks recall <id|keyword...>` — fetch mind-map content across both tiers.
 
     - `recall 12` (all-digits): print node [12] from MIND_MAP.md AND from
       MIND_MAP_OVERFLOW.md (the fuller detail), each labeled; note when one tier
       lacks it.
-    - `recall auth policy` (words): print `[N] Title` for every node in either
-      file whose text contains ALL the words (case-insensitive) — a locator, so
-      the next step is `recall <N>` for the full node.
+    - `recall auth policy` (words): a RANKED relevance search (BM25 + plural
+      stemming + node `<!-- keywords -->` synonyms) over both files — best match
+      first — so a topic resolves to the node ids to `recall <N>` in full.
     """
     positional = [a for a in cmd_args if not a.startswith("-")]
     if not positional:
@@ -887,29 +973,21 @@ def cmd_recall(cmd_args) -> None:
             print(f"\n(no [{nid}] in overflow — MIND_MAP.md holds the full node)")
         return
 
-    # ── keyword mode ──
-    needles = [w.lower() for w in positional]
-
-    def _matches(text: str) -> bool:
-        low = text.lower()
-        return all(w in low for w in needles)
-
-    def _hits(content):
-        return [(n, t) for n, t, x in _iter_map_nodes(content) if _matches(x)]
-
-    main_hits = _hits(main)
-    over_hits = _hits(overflow) if overflow else []
-    if not main_hits and not over_hits:
-        print(f"No node matched {' + '.join(needles)!r}. "
-              "Try fewer/broader words, or `tasks bootstrap` for the full index.")
+    # ── keyword mode (ranked) ──
+    query = " ".join(positional)
+    qterms = _tokenize(query)
+    docs = _build_corpus(main, overflow)
+    ranked = _rank_nodes(docs, qterms) if qterms else []
+    if not ranked:
+        print(f"No node matched {query!r}. "
+              "Try broader/fewer words, or `tasks bootstrap` for the full index.")
         return
-    if main_hits:
-        print("MIND_MAP.md:")
-        for n, t in main_hits:
-            print(f"  [{n}] {t}")
-    if over_hits:
-        print("MIND_MAP_OVERFLOW.md (fuller detail):")
-        for n, t in over_hits:
-            print(f"  [{n}] {t}")
-    total = len({n for n, _ in main_hits} | {n for n, _ in over_hits})
-    print(f"→ {total} node(s) matched. Fetch one in full: tasks recall <N>")
+    print(f"{len(ranked)} node(s) matched {query!r}, best first:")
+    for nid, _score in ranked[:_RECALL_TOP]:
+        src = docs[nid]["sources"]
+        tag = ("main+overflow" if len(src) > 1
+               else "overflow" if "overflow" in src else "main")
+        print(f"  [{nid}] {docs[nid]['title']}  ({tag})")
+    if len(ranked) > _RECALL_TOP:
+        print(f"  … and {len(ranked) - _RECALL_TOP} more")
+    print("Fetch one in full: tasks recall <N>")

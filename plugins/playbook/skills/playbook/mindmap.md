@@ -96,13 +96,23 @@ Every node links to 2-3+ others; important nodes link to 5-10. Bidirectional: if
 
 **No history node.** Resist the urge to add a "Development History" node full of commit hashes and dates — that is a log, and it bloats the resident map for information git already holds. When the *evolution* of a subsystem carries a design lesson, fold that lesson (the decision and its reason, not the hash) into the owning subsystem node: "Storage moved from SQLite to flat JSON so tasks stay hand-editable" — not "commit a1b2c3d (2024-03) switched to JSON".
 
-## Grep-Friendly
+## Retrieval — `tasks recall` (preferred) and grep
+
+`tasks recall` is the sharpest way in, because it spans both tiers and ranks by relevance:
+
+```bash
+tasks recall 5             # node 5 in FULL — from MIND_MAP.md AND MIND_MAP_OVERFLOW.md
+tasks recall auth policy   # ranked relevance search (BM25 + plural stemming), best node first
+```
+
+Plain grep still works on the single-line format:
 
 ```bash
 grep "^\[5\]" MIND_MAP.md         # Returns entire node 5 (one line)
 grep "\[5\]" MIND_MAP.md          # All lines referencing node 5
-grep "authentication" MIND_MAP.md # Find by keyword
 ```
+
+**Keyword aliases (optional):** a node can declare synonyms its prose doesn't spell out, so a search finds it by *meaning*, not just wording. Put `<!-- keywords: login, credentials, sso -->` on any line of the node; `tasks recall` weights those terms heavily. Use this for a node whose common search terms differ from its title (an "Identity" node people look for as "auth"/"login").
 
 ## Quality Checklist
 

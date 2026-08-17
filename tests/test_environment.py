@@ -27,6 +27,38 @@ def _which(installed):
     return lambda name: ("/usr/bin/" + name) if name in installed else None
 
 
+class SearchItemsTest(unittest.TestCase):
+    def _items(self, installed):
+        with mock.patch.object(env.shutil, "which", side_effect=_which(installed)):
+            return {i["name"]: i for i in env._search_items()}
+
+    def test_reports_rg_astgrep_fd(self):
+        items = self._items(set())
+        self.assertEqual(
+            set(items), {"search: rg", "search: ast-grep", "search: fd"})
+        for i in items.values():
+            self.assertEqual(i["category"], "search")
+
+    def test_missing_tool_recommended_with_concrete_hint(self):
+        items = self._items(set())
+        rg = items["search: rg"]
+        self.assertFalse(rg["present"])
+        self.assertEqual(rg["severity"], env.SEV_RECOMMENDED)
+        self.assertIn("ripgrep", rg["hint"])
+
+    def test_astgrep_present_under_either_binary_name(self):
+        # ast-grep ships as `ast-grep` OR `sg`; either satisfies it.
+        self.assertTrue(self._items({"ast-grep"})["search: ast-grep"]["present"])
+        self.assertTrue(self._items({"sg"})["search: ast-grep"]["present"])
+        self.assertFalse(self._items(set())["search: ast-grep"]["present"])
+
+    def test_present_tool_is_ok_no_hint(self):
+        rg = self._items({"rg"})["search: rg"]
+        self.assertTrue(rg["present"])
+        self.assertEqual(rg["severity"], env.SEV_OK)
+        self.assertEqual(rg["hint"], "")
+
+
 class ProviderItemsTest(unittest.TestCase):
     def _items(self, installed):
         with mock.patch.object(env.shutil, "which", side_effect=_which(installed)):
@@ -236,14 +268,14 @@ class ReportAndCliTest(unittest.TestCase):
         self.assertIn("logging", cats)
 
     def test_suggestions_are_only_absent_items(self):
-        report = self._report({"bwrap", "codex", "grok", "agy", "pi"})
+        report = self._report({"bwrap", "codex", "grok", "agy", "pi", "rg", "ast-grep", "fd"})
         sug = env.suggestions(report)
         self.assertTrue(all(not i["present"] for i in sug))
         # everything present except logging (home is nonexistent) → 1 suggestion
         self.assertEqual([i["category"] for i in sug], ["logging"])
 
     def test_render_suggest_only_hides_ok(self):
-        report = self._report({"bwrap", "codex", "grok", "agy", "pi"})
+        report = self._report({"bwrap", "codex", "grok", "agy", "pi", "rg", "ast-grep", "fd"})
         text = env.render_environment(report, show_ok=False)
         self.assertNotIn("✓", text)
         self.assertIn("Environment recommendations", text)
@@ -279,7 +311,7 @@ class ReportAndCliTest(unittest.TestCase):
                 self.assertEqual(env.cli_environment([], Path("/tmp")), 0)  # no crash
 
     def test_json_suggest_only_filters_the_json(self):
-        report = self._report({"bwrap", "codex", "grok", "agy", "pi"})  # only logging absent
+        report = self._report({"bwrap", "codex", "grok", "agy", "pi", "rg", "ast-grep", "fd"})  # only logging absent
         with mock.patch.object(env, "environment_report", return_value=report):
             buf = io.StringIO()
             with redirect_stdout(buf):

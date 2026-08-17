@@ -52,6 +52,23 @@ _PROVIDER_HINTS: dict[str, tuple[str, str]] = {
               ""),
 }
 
+# Optional search/navigation tools that make an agent faster over a file-heavy
+# playbook repo than plain `grep`. Advisory only — the workflow runs without
+# them (the harness Grep tool is already ripgrep-backed), they just help.
+# (why it helps, concrete install hint or "").
+_SEARCH_HINTS: dict[str, tuple[str, str]] = {
+    "rg": ("ripgrep — fast, .gitignore-aware search; the standalone binary for "
+           "ad-hoc `rg` in bash (the harness Grep tool already uses it)",
+           "e.g. `apt install ripgrep` / `brew install ripgrep` / `cargo install ripgrep`"),
+    "ast-grep": ("ast-grep (`sg`) — STRUCTURAL code search by AST pattern; finds "
+                 "code by shape (`except:` with no body, calls missing an arg) "
+                 "where grep only matches text",
+                 "e.g. `npm i -g @ast-grep/cli` / `brew install ast-grep` / `cargo install ast-grep`"),
+    "fd": ("fd — fast, .gitignore-aware file finder; friendlier than `find` for "
+           "locating files by name",
+           "e.g. `apt install fd-find` / `brew install fd` / `cargo install fd-find`"),
+}
+
 # Command-word parsing vocabulary (see _command_words). Kept conservative on
 # purpose: a false "this tool is missing, close will fail" warning is worse than
 # silently missing an exotic one, so anything we can't confidently read as a
@@ -94,6 +111,22 @@ def _provider_items() -> list[dict]:
                 else f"install the {name} CLI (see the vendor's docs)")
         items.append(_item(f"agent CLI: {name}", "provider", present,
                            SEV_RECOMMENDED, why, hint))
+    return items
+
+
+# ── search / navigation tools ─────────────────────────────────────────────────
+
+def _search_items() -> list[dict]:
+    """Optional 'faster than grep' tools. Advisory: the workflow never depends
+    on them (the Grep tool is ripgrep-backed and `tasks recall` handles the mind
+    map), so a miss is a nicety, not a failure."""
+    items: list[dict] = []
+    for name, (why, cmd) in _SEARCH_HINTS.items():
+        # ast-grep ships as either `ast-grep` or `sg`; either counts.
+        present = shutil.which(name) is not None or (
+            name == "ast-grep" and shutil.which("sg") is not None)
+        items.append(_item(f"search: {name}", "search", present,
+                           SEV_RECOMMENDED, why, cmd or ""))
     return items
 
 
@@ -262,6 +295,7 @@ def environment_report(project_root: Optional[Path] = None) -> dict:
     hint} ]}. Never raises — an unreadable surface degrades to "recommend it"."""
     items: list[dict] = []
     items.extend(_provider_items())
+    items.extend(_search_items())
     items.append(_sandbox_item())
     items.extend(_verify_items(project_root))
     items.append(_logging_item())
@@ -273,9 +307,10 @@ def suggestions(report: dict) -> list[dict]:
     return [i for i in report["items"] if not i["present"]]
 
 
-_CATEGORY_ORDER = ["provider", "sandbox", "verify", "logging"]
+_CATEGORY_ORDER = ["provider", "search", "sandbox", "verify", "logging"]
 _CATEGORY_TITLE = {
     "provider": "Agent CLIs (extra panel vendors)",
+    "search": "Search / navigation (faster than grep)",
     "sandbox": "Sandbox containment",
     "verify": "Verify-command tooling",
     "logging": "Shell command logging",

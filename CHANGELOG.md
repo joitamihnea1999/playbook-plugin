@@ -2,7 +2,36 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.23] — 2026-08-17
+## [1.5.24] — 2026-08-17
+
+Context-economy pass, part 4: sharper retrieval — "better than grep" within the
+plugin's stdlib-only, offline, portable contract (no embeddings/vector index by
+design; those would trade away portability).
+
+### Changed
+
+- **`tasks recall <keyword…>` is now a RANKED relevance search** (BM25 + plural
+  stemming), best node first, across both map tiers — replacing the old
+  substring-AND that returned nothing for cross-node queries like `policy
+  storage`. A node matching more terms (and rarer ones) ranks higher without
+  excluding partial matches. New `_tokenize` / `_build_corpus` / `_rank_nodes`
+  in `tasks/mindmap.py`; node-id mode unchanged.
+- **Mind-map nodes can declare keyword aliases** — `<!-- keywords: login,
+  credentials -->` on any line of a node — so `recall` finds it by meaning, not
+  just its wording (weighted 3× in ranking). Documented in the `/mindmap` skill.
+
+### Added
+
+- **`tasks environment` suggests faster-than-grep search tools** — a new
+  "Search / navigation" category recommends `rg` (ripgrep), `ast-grep`/`sg`
+  (structural code search), and `fd`, with install hints. Advisory; the harness
+  Grep tool is already ripgrep-backed, so a miss is a nicety not a failure.
+- **"Finding things fast" guidance** in the `/playbook` skill: reach for the
+  language server (go-to-def / find-refs) and `ast-grep` for CODE, `tasks recall`
+  for the mind map, and `grep`/`rg` for plain text — the sharpest tool per job,
+  not always grep.
+
+
 
 Context-economy pass, part 3: internal-consistency check for the map.
 

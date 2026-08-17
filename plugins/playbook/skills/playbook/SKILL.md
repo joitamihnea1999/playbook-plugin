@@ -9,6 +9,17 @@ argument-hint: [pattern-name]
 
 # Playbook
 
+## Finding things fast
+
+Reach for the sharpest tool, not always `grep`:
+
+- **Project memory (mind map):** `tasks recall <keyword>` — a ranked relevance search across `MIND_MAP.md` + `MIND_MAP_OVERFLOW.md` (better than grepping one file for an exact word); then `tasks recall <N>` pulls that node's full content across both tiers. `tasks bootstrap` prints the index.
+- **Code by meaning:** use the language server (go-to-definition, find-references, rename) to answer "where is X defined / who calls X" — it returns the real definition and callers, not string matches. This is the right tool for tracing code, not `grep <symbol>`.
+- **Code by shape:** `ast-grep`/`sg` (if installed) finds code by AST pattern — "every bare `except:`", "calls to X missing an arg" — where grep only matches text.
+- **Plain text / logs / cleanup-verify:** `grep`/`rg` is still right (the harness Grep tool is already ripgrep-backed). `grep -r 'removed_thing'` returning zero remains the universal cleanup test.
+
+`tasks environment` lists which of these are installed and how to add the missing ones.
+
 ## Rhythm
 
 Every task follows a rhythm: **push → stop → push → stop → close**.
