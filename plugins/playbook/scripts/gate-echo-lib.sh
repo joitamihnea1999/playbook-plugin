@@ -314,6 +314,54 @@ read_counter_int() {
     _safe_int "$(read_counter "$1" "$2")"
 }
 
+# is_code_file_path FILE_PATH
+# Returns 0 for source code paths that should require an active task.
+#
+# F2 (1.5.17): this MUST agree in behavior with the Python `_is_code_file_path`
+# in provider/policy.py — the default Claude path enforces via this bash hook,
+# the opt-in codex apply_patch gate enforces via that Python one, and "no code
+# without a task" has to mean the same thing under every provider.
+# tests/test_gate_classifier_parity.py pins the agreement over a shared vector
+# table; edit BOTH together. The one deliberate asymmetry is the shebang branch
+# below — bash can read the working tree, the codex pre-decision sees a patch and
+# not always a file, so it is a bash-only superset, never a hole.
+#
+# Algorithm: extension decides first (code ext -> gate; doc/data ext -> exempt);
+# an undecided extension gates iff a path component is a known code dir.
+# Extension match is case-insensitive (parity with Python's .lower()); use `tr`
+# not `${x,,}` so macOS's bash 3.2 is fine.
+is_code_file_path() {
+    local file_path="$1"
+    local norm="${file_path//\\//}"          # backslashes -> slashes (Python parity)
+    local base="${norm##*/}"                 # basename
+    local ext=""
+    case "$base" in
+        ?*.*) ext=".$(printf '%s' "${base##*.}" | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+
+    case "$ext" in
+        # Code — union of both prior lists + the strict config/markup set.
+        .py|.ts|.js|.tsx|.jsx|.sh|.bash|.go|.rs|.rb|.java|.c|.cpp|.h|.hpp|.swift|.kt|.kts|.dart|.cs|.php|.r|.m|.mm|.scala|.zig|.lua|.ex|.exs|.ml|.mli|.tf|.vue|.svelte|.ipynb|.css|.html|.sql|.yaml|.yml|.toml)
+            return 0 ;;
+        # Docs / data / binaries — never code, even inside a code dir.
+        .md|.txt|.json|.png|.svg|.jpg|.jpeg|.gif|.ico|.webp|.pdf|.lock|.csv)
+            return 1 ;;
+    esac
+
+    # Undecided by extension -> code iff a path component is a known code dir.
+    case "/$norm/" in
+        */scripts/*|*/bin/*|*/src/*|*/hooks/*|*/lib/*|*/cmd/*)
+            return 0 ;;
+    esac
+
+    # bash-only superset: an extensionless EXISTING file with a shebang.
+    if [ -z "$ext" ] && [ -f "$file_path" ] && head -1 "$file_path" 2>/dev/null | grep -q '^#!'; then
+        return 0
+    fi
+
+    return 1
+}
+
 # write_counter FILE KEY VALUE
 # Set a key=value in the counter file. Creates file if missing, updates in-place if key exists.
 # Uses grep-filter-append instead of sed to avoid delimiter collisions with gate text

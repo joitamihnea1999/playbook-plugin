@@ -20,34 +20,8 @@ fi
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$HOOK_DIR/gate-echo-lib.sh"
 
-# is_code_file_path FILE_PATH
-# Returns 0 for source code paths that should require an active task.
-# Covers both extension-based code files and extensionless executable/script paths
-# that live in known code directories.
-is_code_file_path() {
-    local file_path="$1"
-    case "$file_path" in
-        *.py|*.ts|*.js|*.tsx|*.jsx|*.sh|*.bash|*.go|*.rs|*.rb|*.java|*.c|*.cpp|*.h|*.hpp|*.swift|*.kt|*.kts|*.dart|*.cs|*.php|*.r|*.R|*.m|*.mm|*.scala|*.zig|*.lua|*.ex|*.exs|*.ml|*.mli|*.tf|*.vue|*.svelte|*.ipynb)
-            return 0
-            ;;
-        */.claude/bin/*|*/bin/*|*/src/hooks/*)
-            return 0
-            ;;
-        */scripts/*)
-            case "$file_path" in
-                *.md|*.txt|*.json|*.png|*.svg|*.css|*.html) return 1 ;;
-                *) return 0 ;;
-            esac
-            ;;
-    esac
-
-    # Existing extensionless script with shebang outside the common directories.
-    if [ -f "$file_path" ] && head -1 "$file_path" 2>/dev/null | grep -q '^#!'; then
-        return 0
-    fi
-
-    return 1
-}
+# is_code_file_path is defined in gate-echo-lib.sh (sourced above) so the codex
+# parity test can source it in isolation — see tests/test_gate_classifier_parity.py.
 
 # Find project root
 PROJECT_DIR=$(find_project_root)

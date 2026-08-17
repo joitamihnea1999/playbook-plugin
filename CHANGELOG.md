@@ -2,6 +2,45 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.18] — 2026-08-17
+
+F2: the code-file gate classifier now means the same thing under every provider.
+The bash gate (default Claude path) and the Python gate (opt-in codex apply_patch
+path) had diverged in **both** directions; they are now reconciled onto one
+definition, pinned by a shared parity test.
+
+### Fixed
+
+- **Codex under-gated real source languages.** The Python `_is_code_file_path`
+  omitted ~20 extensions the bash gate has always covered — `.php .vue .svelte
+  .swift .kt .kts .dart .cs .scala .zig .lua .ex .exs .ml .mli .tf .hpp .r .m
+  .mm` — so under the codex apply_patch gate, editing e.g. a `.php` or `.vue`
+  file with no active task was silently ALLOWED. All are gated now.
+- Directory + doc/data handling reconciled: a doc/data file (`.md .txt .json
+  .png .svg .jpg .jpeg .gif .ico .webp .pdf .lock .csv`) is never code, even
+  inside a code dir; an undecided/extensionless path is code iff a component is
+  a known code dir (`scripts bin src hooks lib cmd`). Extension matching is
+  case-insensitive on both surfaces.
+
+### Changed — behavior
+
+- **`.css .html .sql .yaml .yml .toml` now require an active task on the default
+  Claude path too** (strict reconciliation — they were already gated under
+  codex). Editing a stylesheet, a SQL/migration file, or a YAML/TOML config
+  without an active task will now be blocked by the gate. `.json` stays exempt
+  as data (deliberate — it is not in the strict set). If a quick config tweak is
+  blocked, start a `quick`/`light` task or edit via a raw shell redirection (the
+  documented honest-agent boundary).
+
+### Internal
+
+- `is_code_file_path` moved from `scripts/task-gate-hook` into the sourced
+  `scripts/gate-echo-lib.sh` so the parity test can exercise it in isolation.
+- New `tests/test_gate_classifier_parity.py` asserts the bash and Python
+  classifiers agree with an expected verdict over a 60-case vector table (the
+  same "one property over a fixture table" guard used for gate-parser and
+  resolver parity). Edit the two lists together or it fails loudly.
+
 ## [1.5.17] — 2026-08-17
 
 Backlog cleanup: retire the dead source mirror, make one doctor check hermetic,

@@ -129,33 +129,52 @@ def _is_management_path(file_path: str) -> bool:
     return ".agent" in parts or ".claude" in parts
 
 
+_CODE_EXTENSIONS = {
+    # Programming languages (union of both prior lists — closes the codex hole
+    # where .php/.vue/.swift/… went ungated).
+    ".py", ".ts", ".js", ".tsx", ".jsx", ".sh", ".bash", ".go", ".rs", ".rb",
+    ".java", ".c", ".cpp", ".h", ".hpp", ".swift", ".kt", ".kts", ".dart",
+    ".cs", ".php", ".r", ".m", ".mm", ".scala", ".zig", ".lua", ".ex", ".exs",
+    ".ml", ".mli", ".tf", ".vue", ".svelte", ".ipynb",
+    # Config / markup treated as code (strict, owner decision 1.5.17).
+    ".css", ".html", ".sql", ".yaml", ".yml", ".toml",
+}
+# Docs / data / binaries — never code, even inside a code dir. (.json/.yaml
+# split is deliberate: .yaml/.toml drive behavior and are gated; .json stays
+# data, matching the pre-1.5.17 exemption.)
+_DOC_DATA_EXTENSIONS = {
+    ".md", ".txt", ".json", ".png", ".svg", ".jpg", ".jpeg", ".gif", ".ico",
+    ".webp", ".pdf", ".lock", ".csv",
+}
+_CODE_DIRS = {"scripts", "bin", "src", "hooks", "lib", "cmd"}
+
+
 def _is_code_file_path(file_path: str) -> bool:
     """Return True if path looks like a code file (should require active task).
 
-    NOTE (panel finding F2): this classifier is NOT byte-for-byte identical to
-    the bash `is_code_file_path` in scripts/task-gate-hook. It additionally
-    treats `.css/.html/.sql/.yaml/.yml/.toml` as code and keys directories off a
-    `_CODE_DIRS` set rather than the hook's path globs + `scripts/` markup
-    special-case. On the default all-Claude path only the bash hook enforces, so
-    the divergence surfaces only under the opt-in codex apply_patch gate (where
-    this IS live, via provider.codex_hooks.apply_patch_pre_decision). Reconciling
-    the two lists is tracked for a codex-parity pass; do not assume they agree.
+    F2 (1.5.17): this MUST agree with the bash `is_code_file_path` in
+    scripts/task-gate-hook — the default Claude path enforces via that hook, the
+    opt-in codex apply_patch gate enforces via this, and "no code without a task"
+    has to mean the same thing under every provider.
+    tests/test_gate_classifier_parity.py pins the agreement over a shared vector
+    table; edit both together. The one deliberate asymmetry: the bash hook adds a
+    shebang check for an extensionless EXISTING file (it can read the working
+    tree; this pre-decision sees a patch, not always a file) — a bash-only
+    superset, never a hole.
+
+    Algorithm: extension decides first (code -> gate; doc/data -> exempt); an
+    undecided extension gates iff a path component is a known code dir.
     """
     import os
-    _CODE_EXTENSIONS = {
-        ".py", ".ts", ".js", ".tsx", ".jsx", ".sh", ".bash",
-        ".go", ".rs", ".rb", ".java", ".c", ".cpp", ".h",
-        ".css", ".html", ".sql", ".yaml", ".yml", ".toml",
-        ".ipynb",  # I13: notebooks are code (parity with task-gate-hook)
-    }
-    _CODE_DIRS = {"scripts", "bin", "src", "hooks", "lib", "cmd"}
-
     if not file_path:
         return False
     norm = file_path.replace("\\", "/")
     _, ext = os.path.splitext(norm)
-    if ext.lower() in _CODE_EXTENSIONS:
+    ext = ext.lower()
+    if ext in _CODE_EXTENSIONS:
         return True
+    if ext in _DOC_DATA_EXTENSIONS:
+        return False
     parts = set(norm.split("/"))
     return bool(parts & _CODE_DIRS)
 
