@@ -49,7 +49,9 @@ Dive into specifics:
 
 ---
 
-## Phase 2: Git History
+## Phase 2: Git History — mine the *why*, not the *when*
+
+Read git history to **understand** how the architecture got its shape — but the map records the *decisions and their reasons*, never a timeline of hashes. The map is loaded every session; a "Development History" node full of `commit a1b2c3d (2024-03)` lines is log noise git already holds. What you extract here folds into the relevant subsystem node as a design lesson ("chose X over Y because Z"), not into a history node.
 
 ### 2.1 Timeline
 
@@ -83,7 +85,7 @@ git show <hash> --stat    # what changed
 git show <hash>           # how it changed
 ```
 
-Record: hash, date, what it did, files changed, which feature/system it relates to.
+Extract the **design lesson**, not the log line: *why* a significant change was made and what it teaches about the current architecture. Fold that reason into the owning subsystem node ("switched to flat JSON so tasks stay hand-editable"). Leave the hash and date in git — they do not belong in the resident map.
 
 ---
 
@@ -95,7 +97,7 @@ Before writing, outline the hierarchy:
 
 1. **Nodes 1-5 (Foundation):** Project overview, core concept/theory, data flow, major architectural layers
 2. **Nodes 6-15 (Systems):** One node per major subsystem or feature
-3. **Nodes 16-20 (Implementation):** Tech stack, development history, workflow, design principles
+3. **Nodes 16-20 (Implementation):** Tech stack, key design decisions (the *why*, not a commit timeline), workflow, design principles
 4. **Nodes 21+ (Deep dives):** Specific algorithms, performance, specialized topics
 
 Target scales with the codebase (see mindmap.md's Scale table): simple topics
@@ -130,7 +132,7 @@ Prepend the standard AI agent header (see [mindmap.md](mindmap.md)).
 
 - [ ] All major systems have nodes
 - [ ] Every significant file/component mentioned somewhere
-- [ ] Git history captured with commit hashes
+- [ ] Design decisions captured as reasons (no commit hashes / dates / history node — git holds the *when*)
 - [ ] Every node has 2+ links
 - [ ] Important nodes have 5+ links
 - [ ] Links are bidirectional where appropriate

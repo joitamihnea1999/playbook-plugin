@@ -2,6 +2,13 @@
 
 A mind map is a **read/write memory** for AI agents — a knowledge graph that speeds up bootstrapping and carries context across sessions. This is not a log. Nodes are living documents that evolve as understanding deepens.
 
+## What belongs (and what doesn't)
+
+The map answers **"how does this work, and where is it?"** — never **"what happened, and when?"**. It is loaded into context to orient an agent, so every line is resident cost: keep the signal, push the log elsewhere.
+
+- **Belongs:** the current shape — subsystems, data flow, boundaries, key files/functions, and the *why* behind a design that isn't obvious from the code.
+- **Does NOT belong:** commit hashes, dates, changelog entries, "added in v2.0" timelines, a "Development History" node. Git already holds the *when*; worklogs hold the narrative. A node that reads like a diff or a release note is log noise that bloats every session — cut it, or keep only the *decision* it taught ("chose JSON over SQLite for hand-editability"), never the timestamp. Bootstrap loads this map every session; the audit's `mindmap-node-freshness` check flags nodes whose cited code has moved on — so stale prose is a liability, not a keepsake.
+
 ## Node Format
 
 **Each node must be a single line** — no line breaks within a node. This makes grep trivial: `grep "^\[5\]" MIND_MAP.md` returns the entire node.
@@ -87,10 +94,7 @@ Every node links to 2-3+ others; important nodes link to 5-10. Bidirectional: if
 [N] **System Name** - Brief definition and purpose [parent-node]. The system consists of COMPONENT1 which handles TASK1 [detail-node], COMPONENT2 for TASK2 [detail-node]. Implementation resides in path/to/files using TECHNOLOGY [tech-node]. Integrates with EXTERNAL_SYSTEM [integration-node] through API_METHOD. Key parameters include PARAM1 (range, default) and PARAM2 (type, purpose) [parameter-node].
 ```
 
-**History node:**
-```
-[N] **Development History** - Evolved over TIMESPAN from DATE1 to DATE2 [overview-node]. Commit HASH1 (DATE) created initial structure with FRAMEWORK [theory-node]. Commit HASH2 (DATE) was the major milestone: N insertions creating SYSTEM1 [node], SYSTEM2 [node]. Commit HASH3 (DATE) introduced FEATURE [feature-node]. Total: N commits, ~N lines, transforming from STATE1 to STATE2 [principle-node].
-```
+**No history node.** Resist the urge to add a "Development History" node full of commit hashes and dates — that is a log, and it bloats the resident map for information git already holds. When the *evolution* of a subsystem carries a design lesson, fold that lesson (the decision and its reason, not the hash) into the owning subsystem node: "Storage moved from SQLite to flat JSON so tasks stay hand-editable" — not "commit a1b2c3d (2024-03) switched to JSON".
 
 ## Grep-Friendly
 
@@ -104,7 +108,7 @@ grep "authentication" MIND_MAP.md # Find by keyword
 
 - All major systems/features have nodes
 - Every significant file/component is mentioned
-- Development history captured with commit hashes
+- Design *decisions* and their reasons captured — but no commit hashes, dates, or a history node (git holds the *when*)
 - Every node has 2+ links, important nodes 5+
 - Links embedded naturally in text, bidirectional where appropriate
 - Each node has a clear title, first sentence defines the concept

@@ -310,6 +310,124 @@ def check_task_bloat(project_path) -> "dict | None":
     }
 
 
+def _git_lines(args, cwd) -> "list[str] | None":
+    """`git <args>` stdout as a line list, or None when git is absent/failed.
+
+    None vs [] matters: None = the instrument did not run (not a git repo, git
+    missing), so callers stay SILENT rather than certifying anything; [] = it ran
+    and found nothing."""
+    try:
+        r = subprocess.run(["git", *args], cwd=str(cwd),
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.splitlines()
+
+
+def check_mindmap_node_freshness(project_path) -> "dict | None":
+    """Advisory: a mind-map NODE whose cited code changed AFTER the node was last
+    written is describing a subsystem that has moved on — stale institutional
+    memory the agent will trust. Complements `check_mindmap_staleness` (that one
+    catches DELETED paths; this catches paths that still exist but EVOLVED).
+
+    Mechanism, git-only (returns None outside a git repo — nothing sound to
+    compare against): each node is a line span in MIND_MAP.md, so `git blame`
+    gives when the node itself was last edited (max committer-time over its
+    lines; an UNCOMMITTED edit blames as ~now, so touching a node clears it). For
+    each EXISTING path the node cites (reusing the node's own filename citations
+    as its anchor — the map format already mandates real paths, so no new syntax),
+    count commits to that path newer than the node. A node is flagged only when
+    some cited path has >= `audit.node_freshness_commits` (default 2) such
+    commits — one incidental edit is not drift, sustained change is. Advisory by
+    default; `audit.node_freshness: false` disables it, `audit.node_freshness_severity`
+    raises it. High-precision on purpose: a noisy staleness detector gets ignored,
+    which is worse than none."""
+    from tasks.mindmap import _node_starts, _node_title
+    project_path = Path(project_path)
+    cfg = load_config(project_path)
+    audit_cfg = cfg.get("audit") if isinstance(cfg.get("audit"), dict) else {}
+    if audit_cfg.get("node_freshness") is False:
+        return None
+    try:
+        threshold = int(audit_cfg["node_freshness_commits"])
+    except (KeyError, TypeError, ValueError):
+        threshold = 2
+    if threshold < 1:
+        threshold = 1
+
+    mm = project_path / "MIND_MAP.md"
+    if not mm.exists():
+        return None
+    # Git gate: no HEAD → not a git repo (or empty) → stay silent.
+    if _git_lines(["rev-parse", "HEAD"], project_path) is None:
+        return None
+    try:
+        text = mm.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = text.splitlines(keepends=True)
+    starts, in_fence = _node_starts(lines)
+    if in_fence or not starts:
+        return None
+
+    # Cache: path -> sorted list of that path's commit times (newest first), or
+    # None when the path is untracked/absent from history.
+    path_times: "dict[str, list[int] | None]" = {}
+
+    def _commit_times(path: str) -> "list[int] | None":
+        if path not in path_times:
+            out = _git_lines(["log", "--format=%ct", "--", path], project_path)
+            path_times[path] = ([int(x) for x in out if x.strip().isdigit()]
+                                if out else None)
+        return path_times[path]
+
+    findings = []
+    for k, (idx, nid) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+        node_text = "".join(lines[idx:end])
+        cited = sorted(set(_extract_mindmap_paths(node_text)))
+        if not cited:
+            continue
+        # When was THIS node last edited? Max committer-time over its blame span.
+        blame = _git_lines(
+            ["blame", "-L", f"{idx + 1},{end}", "--line-porcelain", "--", "MIND_MAP.md"],
+            project_path)
+        if blame is None:
+            continue
+        node_time = max((int(ln.split(" ", 1)[1]) for ln in blame
+                         if ln.startswith("committer-time ")), default=0)
+        if node_time == 0:
+            continue
+        worst = None
+        for cand in cited:
+            times = _commit_times(cand)
+            if not times:
+                continue  # untracked or deleted (deletion is the other check)
+            newer = sum(1 for t in times if t > node_time)
+            if newer >= threshold and (worst is None or newer > worst[1]):
+                worst = (cand, newer)
+        if worst is not None:
+            title = _node_title(lines[idx])[1]
+            findings.append(
+                f"node [{nid}] ({title}): {worst[0]} changed in {worst[1]} commits "
+                f"since the node was last edited — re-read and refresh, or confirm still accurate")
+
+    severity = audit_cfg.get("node_freshness_severity")
+    if severity not in _VALID_SEVERITY:
+        severity = "advisory"
+    return {
+        "name": "mindmap-node-freshness",
+        "severity": severity,
+        "why": "a mind-map node whose cited code evolved after the node is stale memory",
+        "command": "(built-in)",
+        "rc": 0 if findings else 1,
+        "status": "findings" if findings else "clean",
+        "output": "\n".join(findings),
+    }
+
+
 def run_audit(project_path) -> dict:
     """Run every resolved sweep plus the built-in mind-map staleness check.
     Returns {results, passed}. The audit FAILS when any sweep ERRORED (a broken
@@ -331,6 +449,9 @@ def run_audit(project_path) -> dict:
     tb = check_task_bloat(project_path)
     if tb is not None:
         results.append(tb)
+    nf = check_mindmap_node_freshness(project_path)
+    if nf is not None:
+        results.append(nf)
     passed = not any(
         r["status"] == "error" or (r["status"] == "findings" and r["severity"] == "error")
         for r in results

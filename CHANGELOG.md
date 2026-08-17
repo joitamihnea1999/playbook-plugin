@@ -2,7 +2,48 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.20] — 2026-08-17
+## [1.5.21] — 2026-08-17
+
+Context-economy pass: make the agent load the information it needs, retain what
+matters out of the way, and stop carrying what's of no use. Four levers around
+*find / use / retain / ignore*.
+
+### Added
+
+- **Bootstrap loads a mind-map INDEX, not a full dump** (*find*). Once
+  `MIND_MAP.md` grows past ~8 KB, `tasks bootstrap` prints routing nodes [1]-[5]
+  in full plus a one-line **titled** TOC of every other node and the grep to
+  fetch one — orientation now costs the map's *shape*, not thousands of tokens of
+  subsystem prose the task never reads (69% smaller on a real 18-node fixture; far
+  more on large maps). A small map still prints whole. The judge/review path
+  (`_load_mind_map`) is untouched — auditing needs whole nodes. New
+  `_bootstrap_mind_map` / `_mind_map_toc` in `tasks/mindmap.py`.
+- **`tasks compact <N>`** (*retain*) — the mechanical half of the sanctioned
+  task.md compaction. Wrap cold review-round narrative in
+  `<!-- archive:start -->` … `<!-- archive:end -->`; the command appends each
+  block VERBATIM to `task-archive.md` and leaves a pointer. It refuses to move a
+  gate, a `<!-- pin -->`, a protected section heading, or a block behind an
+  unmatched/nested marker — a mismark fails loud, never amputates the trace.
+  `--dry-run` previews. New `tasks/compact.py`.
+- **`mindmap-node-freshness` audit check** (*ignore*) — complements the existing
+  deleted-path check: a node whose cited code changed in ≥2 commits *since the
+  node was last edited* (via `git blame`) is flagged as stale institutional
+  memory. Nodes already cite real file paths, so their own citations are the
+  anchor — no new syntax. Git-only, advisory, high-precision on purpose; tunable
+  via `audit.node_freshness_commits` / `node_freshness_severity`, off with
+  `audit.node_freshness: false`.
+
+### Changed
+
+- **Mind map is a map, not a log** (*ignore*). The `/mindmap` skill and
+  generation guidance now say the map answers "how does this work / where is it,"
+  never "what happened when": no commit hashes, dates, changelog lines, or a
+  "Development History" node. When an evolution carries a design lesson, fold the
+  *reason* (not the hash) into the owning subsystem node. Git holds the *when*.
+- `mind_map_header()` is now honest about index-vs-full output; the bootstrap docs,
+  CLAUDE.md template CLI list, and task sticker document `tasks compact`.
+
+
 
 Hardening from an independent 3-way verification pass over 1.5.16–1.5.19 (every
 finding re-reproduced by hand). The audit confirmed the enforcement core (F2/F3),

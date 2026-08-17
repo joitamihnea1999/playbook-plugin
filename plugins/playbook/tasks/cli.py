@@ -30,7 +30,7 @@ COMMANDS = (
     "models", "plan-review", "impl-review", "judge", "context", "intent",
     "timeline", "tagger", "tag", "retro", "status", "audit", "blocked",
     "parked", "freehand", "doctor", "environment", "detect-verify", "merge-doctor",
-    "mindmap-sync", "log", "prepare-merge",
+    "mindmap-sync", "log", "prepare-merge", "compact",
 )
 
 
@@ -171,6 +171,12 @@ def main():
     elif cmd == "prepare-merge":
         from tasks.merge_prep import cmd_prepare_merge
         cmd_prepare_merge(cmd_args)
+
+    elif cmd == "compact":
+        # Move agent-marked cold review narrative out of a bloated task.md into
+        # task-archive.md (verbatim), keeping the hot trace reviewable (1.5.21).
+        from tasks.compact import cmd_compact
+        cmd_compact(cmd_args)
 
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)

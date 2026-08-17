@@ -4,7 +4,7 @@ Boundary: `init` prepares a PROJECT (lane-aware .agent/tasks, MIND_MAP.md,
 CLAUDE.md, duplicate-hook warnings, optional provider bootstrap files —
 mechanical merge work lives in scripts/claude-md-merge.py, invoked by
 scripts/init, not here); `bootstrap` briefs a SESSION (identity preamble,
-budgeted mind map via mindmap._load_mind_map, pending tasks, judge-pin and
+indexed mind map via mindmap._bootstrap_mind_map, pending tasks, judge-pin and
 README-drift nudges, CLI reference). Imports stdlib + tasks.core +
 tasks.shared + tasks.mindmap + tasks.template/readme_drift; never a command
 module (design-1.5.9.md §4).
@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from tasks.core import list_tasks, require_lane_marker, resolve_agent_dir
-from tasks.mindmap import _load_mind_map
+from tasks.mindmap import _bootstrap_mind_map
 from tasks.shared import find_project_root
 
 
@@ -137,8 +137,11 @@ def cmd_bootstrap(cmd_args):
     print(identity_preamble())
     print()
 
-    # Mind Map — full dump with navigation header
-    mm_content = _load_mind_map(project_path)
+    # Mind Map — index (routing nodes in full + a titled TOC of the rest) once
+    # the map is over the bootstrap budget, else the full map. Orientation reads
+    # an index and greps what the task touches; a judge (review.py) still gets
+    # the fuller `_load_mind_map` trim, because auditing needs whole nodes.
+    mm_content = _bootstrap_mind_map(project_path)
     if mm_content:
         print("=== MIND MAP (MIND_MAP.md) ===")
         print(mind_map_header())

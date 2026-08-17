@@ -59,7 +59,7 @@ The close is **earned, not asserted** — these are enforced by the CLI, not con
 - **Judges are advisors, not oracles.** Triage every finding (accept/park/reject with rationale). A clean panel does NOT clear correspondence (does it match the world? check the real artifact), disclosure (secrets/provenance — a grep's job), or blast radius (the `## Risk` gate's job).
 - **Test claims need executable proof.** A test you haven't watched fail is not evidence; assert against real output, not a mock you wrote.
 - **Judges can execute what you declare safe.** Add `"judge_verify": ["<command>"]` to `.agent/config.json` — commands that never write inside the repo (redirect caches, unique temp dirs, parallel-safe) — and reviewers may run them to check a specific suspicion. Write your tests to qualify.
-- **Keep task.md reviewable.** Judges read it through a bounded window (newest sections + Intent/Design survive trimming; receipts in judge.md say exactly what was delivered). When a task file grows past the budget, `tasks audit` nudges the sanctioned compaction: move old review-round narrative VERBATIM to `task-archive.md` — never gates, never Intent/Design/Parked. A section that must survive any trim gets `<!-- pin -->` on its own line right under the heading.
+- **Keep task.md reviewable.** Judges read it through a bounded window (newest sections + Intent/Design survive trimming; receipts in judge.md say exactly what was delivered). When a task file grows past the budget, `tasks audit` nudges the sanctioned compaction: wrap old review-round narrative in `<!-- archive:start -->` … `<!-- archive:end -->` and run `tasks compact <N>` — it moves each block VERBATIM to `task-archive.md` and refuses to touch gates, Intent/Design/Parked, or pins. A section that must survive any trim gets `<!-- pin -->` on its own line right under the heading.
 
 ## CLI
 
@@ -72,7 +72,8 @@ The close is **earned, not asserted** — these are enforced by the CLI, not con
 .claude/bin/tasks audit [<N>]                # mechanical pre-review sweeps + receipt
 .claude/bin/tasks blocked "<reason>"         # honest pause: awaiting the user's decision
 .claude/bin/tasks parked [--all]             # surface parked items before they rot
-.claude/bin/tasks bootstrap                  # orientation: mind map + skills + pending
+.claude/bin/tasks compact <N>                # move <!-- archive:start/end --> narrative to task-archive.md
+.claude/bin/tasks bootstrap                  # orientation: mind map (indexed if large) + skills + pending
 ```
 
 ## Don't

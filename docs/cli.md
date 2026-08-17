@@ -14,7 +14,7 @@ Everything the `tasks` CLI does. In a playbook-managed project the agent calls i
 
 **`tasks parked`** — list the out-of-scope findings parked during earlier tasks (`## Parked` sections), so a finding noticed mid-task isn't lost when it's deliberately deferred. Prints "No open parked items." when there are none.
 
-**`tasks audit`** — run the pre-panel sweeps against the active task and record a receipt into its `task.md`; exits non-zero on error-severity findings so it can gate a panel review. Part of the close machinery, not the daily loop.
+**`tasks audit`** — run the pre-panel sweeps against the active task and record a receipt into its `task.md`; exits non-zero on error-severity findings so it can gate a panel review. Part of the close machinery, not the daily loop. Two built-in mind-map checks run here: `mindmap-stale-refs` (a cited path that no longer exists) and `mindmap-node-freshness` (a node whose cited code has changed in ≥2 commits *since the node was last edited* — stale institutional memory; git-only, advisory, tunable via `audit.node_freshness_commits` / `node_freshness_severity`, disable with `audit.node_freshness: false`).
 
 ## Create
 
@@ -75,11 +75,13 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 ## Orientation
 
-**`tasks bootstrap`** — session-start orientation: prints the mind map (the project's memory), pending tasks, and the CLI reference. The agent runs this as its first action in every session — it's how session thirty picks up from session one.
+**`tasks bootstrap`** — session-start orientation: prints the mind map (the project's memory), pending tasks, and the CLI reference. The agent runs this as its first action in every session — it's how session thirty picks up from session one. A small mind map prints in full; once it grows past the bootstrap budget (~8 KB) it prints as an **index** — routing nodes [1]-[5] in full plus a one-line titled TOC of every other node — so orientation loads the map's shape, not thousands of tokens of subsystem prose the task never reads. The agent greps the two or three nodes its task touches (`grep '^\[18\]' MIND_MAP.md`). The judge/review path keeps the fuller whole-node trim, since auditing needs whole nodes.
 
 **`tasks list [--pending]`** (alias `ls`) — task overview table; `--pending` hides finished work.
 
 **`tasks status`** — the active task's current gate position: the fastest way to see where a long run actually is.
+
+**`tasks compact <N> [--dry-run]`** — the mechanical half of the sanctioned task.md compaction. An open task.md grows monotonically (every review round, every outcome note) until a judge reads it through a trimmed keyhole (`audit`'s `task-bloat` check flags it). Wrap each cold block — old review-round narrative, never gates or Intent/Design/Parked — in `<!-- archive:start -->` … `<!-- archive:end -->`, then run this: it appends every marked block **verbatim** to `task-archive.md` (same dir) and leaves a one-line pointer. The agent decides what's cold; the command guarantees the move is safe — an unmatched marker, or a block containing a gate checkbox, a `<!-- pin -->`, or a protected section heading, aborts the whole run and writes nothing. `--dry-run` previews. "Moving history is not deleting it."
 
 **`tasks init [--provider codex|antigravity|grok|pi] [--hooks]`** — creates the `.agent/` tasks structure, `CLAUDE.md`, and the `MIND_MAP.md` stub. With `--provider`, additionally writes that agent's bootstrap file (`AGENTS.md` / `GEMINI.md`) and, with `--hooks`, installs its hook integration — see [providers](providers.md). The FULL mechanical scaffolding — `.claude/bin/` wrappers, `.claude/settings.json` hook registrations, `.agent/config.json` (including the seeded `panel_required_for: "all"` close bar), and the `.gitignore` runtime-state block — is done by `scripts/init`, run via the `/playbook:init` slash command (the normal entry point). Running the bare `tasks init` CLI alone does not seed those. On a fresh clone of a multi-user repo (per-user lanes present but the gitignored `.agent/current_user` missing) this refuses rather than create a phantom root lane — set the marker first.
 

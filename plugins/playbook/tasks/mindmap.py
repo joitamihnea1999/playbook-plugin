@@ -3,7 +3,9 @@ node-parser family, and the `mindmap-sync` command.
 
 Boundary: everything that PARSES or BUDGETS a mind map lives here — the
 context loader (`_load_mind_map` + node-aware/line-based trims + the omitted-
-nodes notice), the fence-aware node-boundary family (`_node_starts` is THE
+nodes notice) and the bootstrap INDEX loader (`_bootstrap_mind_map` +
+`_mind_map_toc` — routing nodes in full plus a titled TOC of the rest, so
+orientation costs an index not a full dump), the fence-aware node-boundary family (`_node_starts` is THE
 shared detector; `_partition_overflow` / `sort_overflow_by_id` /
 `_scan_overflow_ids` / the unnumbered-tail notice build on it), `_parse_nodes`
 (the byte-exact collision-detector parser consumed by prepare-merge), and the
@@ -222,6 +224,118 @@ def _node_starts(lines: list[str]) -> tuple[list[tuple[int, int]], bool]:
             if m:
                 starts.append((i, int(m.group(1))))
     return starts, in_fence
+
+
+_NODE_TITLE_RE = re.compile(r"^\[(\d+)\]\s*(.*)")
+_BOLD_TITLE_RE = re.compile(r"\*\*(.+?)\*\*")
+
+# Bootstrap-only mind-map budget. Deliberately much smaller than
+# `_load_mind_map`'s 25000: bootstrap is ORIENTATION (the agent needs the shape
+# plus the entry nodes, then greps the 2-3 nodes its task touches), so a full
+# dump is resident cost paid every session for context the task never reads. A
+# map under this many chars is cheap enough to dump whole — the retrieval
+# round-trips an index would force are not worth saving a few hundred tokens.
+_BOOTSTRAP_MINDMAP_BUDGET = 8000
+
+
+def _node_title(line: str) -> tuple[int, str]:
+    """`(node_id, title)` for one `^[N]` node-definition line.
+
+    Title is the bold `**…**` when present (the format the /mindmap skill
+    mandates); otherwise the text up to the ` - ` body separator, capped, so a
+    node that skipped the bold convention still indexes as something legible
+    rather than a bare id.
+    """
+    m = _NODE_TITLE_RE.match(line.rstrip("\n"))
+    if m is None:                       # unreachable via _node_starts; defensive
+        return (-1, line.strip()[:60] or "node")
+    nid = int(m.group(1))
+    rest = m.group(2).strip()
+    bold = _BOLD_TITLE_RE.match(rest)
+    if bold:
+        title = bold.group(1).strip()
+    else:
+        title = rest.split(" - ", 1)[0].strip()[:60]
+    return nid, (title or f"node {nid}")
+
+
+def _mind_map_toc(content: str) -> str | None:
+    """One `[N] Title` line per node — the bootstrap INDEX of a mind map.
+
+    Fence-aware (shares `_node_starts`), so a `[9]` inside a code fence is an
+    example, never a phantom TOC entry. Returns None when the content has no
+    usable node markers (an open fence or none at all) so the caller keeps the
+    full text instead of emitting an empty index.
+
+    The titles are the whole point: `_omitted_nodes_notice` can only name dropped
+    ids (`[47]`), which tells a reader something is missing but not WHICH node to
+    fetch. A titled line (`[47] Sandbox containment`) turns "grep blindly" into
+    "grep the one node this task touches" — the difference between an index and a
+    hole.
+    """
+    lines = content.splitlines(keepends=True)
+    starts, in_fence = _node_starts(lines)
+    if in_fence or not starts:
+        return None
+    return "\n".join(f"[{nid}] {_node_title(lines[idx])[1]}"
+                     for idx, nid in starts)
+
+
+def _bootstrap_mind_map(project_path: Path,
+                        budget_chars: int = _BOOTSTRAP_MINDMAP_BUDGET,
+                        routing: int = 5) -> str | None:
+    """Bootstrap's mind-map loader: full text when small, else an INDEX.
+
+    Distinct from `_load_mind_map` (the judge/review path) ON PURPOSE. A judge is
+    AUDITING and may need many whole nodes at once, so that path keeps the 25k
+    whole-node trim. Bootstrap is ORIENTING a fresh agent, which needs the map's
+    SHAPE and its entry nodes, then greps the handful its task touches — so over
+    budget it returns the first `routing` nodes in full (the overview/routing
+    hubs the header says to read first) plus a TITLED one-line TOC of every other
+    node and the grep that fetches them. Resident cost drops from up-to-25k of
+    prose to a few routing nodes plus one line per subsystem.
+
+    Honours `PLAYBOOK_MINDMAP_MAX <= 0` as the global "no mind-map context"
+    suppression (same escape hatch as `_load_mind_map`); a positive value there
+    tunes the JUDGE budget only and does not change bootstrap's index threshold.
+
+    Falls back to `_load_mind_map` (the whole-node/line trim) when the map is not
+    node-shaped enough to index — no nodes, an open fence, or fewer nodes than
+    `routing` (a handful of nodes IS the overview; there is nothing to index).
+    """
+    env_max = os.environ.get("PLAYBOOK_MINDMAP_MAX")
+    if env_max is not None:
+        try:
+            if int(env_max) <= 0:
+                return None
+        except ValueError:
+            pass
+    mind_map = project_path / "MIND_MAP.md"
+    if not mind_map.exists():
+        return None
+    content = mind_map.read_text(encoding="utf-8")
+    if len(content) <= budget_chars:
+        return content
+
+    lines = content.splitlines(keepends=True)
+    starts, in_fence = _node_starts(lines)
+    if in_fence or len(starts) <= routing:
+        return _load_mind_map(project_path)
+
+    preamble = "".join(lines[: starts[0][0]])
+    if preamble and not preamble.endswith("\n"):
+        preamble += "\n"
+    routed = "".join(lines[starts[0][0]: starts[routing][0]])
+    first_id, last_id = starts[0][1], starts[routing - 1][1]
+    indexed = starts[routing:]
+    toc = "\n".join(f"[{nid}] {_node_title(lines[idx])[1]}" for idx, nid in indexed)
+    notice = (
+        f"[... MIND MAP INDEX — routing nodes [{first_id}]-[{last_id}] shown in "
+        f"full above; the {len(indexed)} nodes below are listed by TITLE ONLY. "
+        f"This is NOT their content. Read any one with: "
+        f"grep '^\\[N\\]' MIND_MAP.md ...]\n\n"
+    )
+    return f"{preamble}{routed}\n{notice}{toc}\n"
 
 
 def _partition_overflow(content: str):

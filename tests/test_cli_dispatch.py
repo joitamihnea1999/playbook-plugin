@@ -83,6 +83,7 @@ _BASELINE = {
     "mindmap-sync": (1, "MIND_MAP.md not found"),
     "log": (1, ".agent/chat_log.md not found"),
     "prepare-merge": (1, "could not compute merge base"),
+    "compact": (1, "'compact' requires a task number"),
 }
 
 

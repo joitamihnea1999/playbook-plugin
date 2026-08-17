@@ -25,7 +25,7 @@ def sticker() -> str:
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
 > Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).
 > **Closing a gate:** check the box, append your outcome. Never replace the original text.
-> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir), leaving a one-paragraph summary + pointer. Never gates, never Intent/Design/Parked/receipts \u2014 moving history is not deleting it.
+> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts \u2014 moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` \u2026 `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).
 > Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).
 > If you see the same gate 5+ times in the hook echo, you're drifting \u2014 STOP and update."""
 
@@ -693,7 +693,8 @@ def mind_map_header() -> str:
     """Navigation header shown before full mind map at bootstrap."""
     return (
         "Project knowledge graph. Nodes cross-reference with [N] IDs.\n"
-        "Full map below — drill into a node: grep '^\\[N\\]' MIND_MAP.md\n"
+        "Below is either the full map or an index (routing nodes + titles) —\n"
+        "drill into any node: grep '^\\[N\\]' MIND_MAP.md\n"
         "Format spec: /mindmap skill"
     )
 
@@ -734,7 +735,8 @@ Tasks CLI:
     tasks detect-verify        suggest a full verify command (typecheck+tests+lint) from the project's toolchains
   Info:
     tasks list [--pending]     show tasks
-    tasks status               current gate position"""
+    tasks status               current gate position
+    tasks compact <N>          move <!-- archive:start/end --> narrative to task-archive.md"""
 
 
 def agents_md_template() -> str:
@@ -886,6 +888,8 @@ Commands:
   new --stub <type> <name> [intent]   Create stub (expands on work)
   list [--pending]    List all tasks with status
   status              Show head position for active tasks
+  compact <N> [--dry-run]  Move <!-- archive:start/end --> narrative from a bloated
+                      task.md into task-archive.md (verbatim); refuses gates/pins
   plan-review <N>     Run blind plan review
   impl-review <N>     Run blind implementation review
   panel-review [<N>]  Multi-model judge panel
