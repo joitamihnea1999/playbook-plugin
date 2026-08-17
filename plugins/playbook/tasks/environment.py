@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import platform
 import re
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -51,12 +52,28 @@ _PROVIDER_HINTS: dict[str, tuple[str, str]] = {
               ""),
 }
 
-# Shell words that are builtins/no-ops, never a "tool to install".
-_SHELL_BUILTINS = {
+# Command-word parsing vocabulary (see _command_words). Kept conservative on
+# purpose: a false "this tool is missing, close will fail" warning is worse than
+# silently missing an exotic one, so anything we can't confidently read as a
+# real external command is dropped, never invented.
+#
+# Structural keywords + command PREFIXES that delegate to a following command
+# (`sudo pytest`, `env FOO=1 pytest`): transparent — the real command comes next.
+_TRANSPARENT = frozenset({
+    "if", "then", "elif", "else", "do", "while", "until", "!", "time", "fi",
+    "done", "esac", "{", "}", "in", "function", "case", "coproc",
+    "env", "sudo", "nohup", "command", "builtin", "exec", "nice", "stdbuf",
+})
+# Shell builtins / no-ops — real commands, but never "a tool to install".
+_BUILTIN_CMDS = frozenset({
     "cd", "echo", "true", "false", "set", "export", "unset", "test", "[", "[[",
-    ":", "exit", "return", "pwd", "source", ".", "env", "then", "else", "fi",
-    "do", "done", "wait", "time", "exec",
-}
+    "]]", ":", ".", "source", "pwd", "return", "exit", "read", "printf", "eval",
+    "trap", "shift", "local", "declare", "typeset", "alias", "wait", "umask",
+    "help", "let",
+})
+# Control operators that start a new command position. Redirections (`>`/`<`)
+# are deliberately NOT here — their target is an argument, not a command.
+_OPERATORS = frozenset({"&&", "||", "|", "|&", "&", ";", ";;", "\n", "(", ")"})
 
 
 def _item(name: str, category: str, present: bool, severity: str,
@@ -132,21 +149,48 @@ def _extract_verify_commands(verify) -> list[str]:
 
 
 def _command_words(command: str) -> list[str]:
-    """The leading executable of each pipeline segment of a shell command.
+    """The external command invoked at each command position of a shell string.
 
-    Best-effort: split on the shell control operators, skip leading `VAR=val`
-    env assignments, take the first token. `python3 -m pytest` yields
-    `python3` (which is on PATH), so we never false-warn on a stdlib module
-    invocation — we only flag a genuinely-absent leading binary.
+    Quote- and operator-aware (via `shlex`), so it does NOT split inside quotes
+    (`grep "a|b" .` → `grep`, not `b"`) or inside a `bash -c "…"` argument, and
+    it steps past subshell parens, `VAR=val` prefixes, `sudo`/`env` prefixes,
+    loop/conditional keywords, and shell builtins. `python3 -m pytest` yields
+    `python3` (on PATH), never the module. Conservative by design: on any parse
+    ambiguity (unbalanced quotes) or a token that isn't a clean command name it
+    emits nothing rather than invent a tool — a false "missing tool" warning is
+    worse than a missed exotic one.
     """
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars="();<>|&;")
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return []  # unbalanced quotes etc. — don't guess
     words: list[str] = []
-    for seg in re.split(r"&&|\|\||;|\||\n", command):
-        toks = seg.strip().split()
-        i = 0
-        while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
-            i += 1  # skip FOO=bar prefixes
-        if i < len(toks):
-            words.append(toks[i])
+    at_cmd = True        # are we at a command position (start / after operator)?
+    skip_loop_var = False  # the token right after `for`/`select` is a loop var
+    for tok in tokens:
+        if tok in _OPERATORS:
+            at_cmd, skip_loop_var = True, False
+            continue
+        if not at_cmd:
+            continue
+        if skip_loop_var:
+            skip_loop_var, at_cmd = False, False
+            continue
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            continue  # VAR=val assignment prefix — stay at command position
+        if tok in ("for", "select"):
+            skip_loop_var = True  # next token is the loop variable, not a cmd
+            continue
+        if tok in _TRANSPARENT:
+            continue  # keyword/prefix — the real command follows
+        if tok in _BUILTIN_CMDS:
+            at_cmd = False  # a real no-op command, but not a tool to install
+            continue
+        if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*", tok):
+            words.append(tok)
+        at_cmd = False
     return words
 
 
@@ -165,7 +209,7 @@ def _verify_items(project_root: Optional[Path]) -> list[dict]:
     items: list[dict] = []
     for command in _extract_verify_commands(verify):
         for word in _command_words(command):
-            if word in _SHELL_BUILTINS or "/" in word or word in seen:
+            if "/" in word or word in seen:  # builtins/keywords already dropped
                 continue
             seen.add(word)
             present = shutil.which(word) is not None
@@ -180,18 +224,21 @@ def _verify_items(project_root: Optional[Path]) -> list[dict]:
 # ── shell command logging ─────────────────────────────────────────────────────
 
 def _logging_item() -> dict:
-    home = Path.home()
-    bash_log = home / ".claude" / "bash-log.sh"
-    settings = home / ".claude" / "settings.json"
-    wired = False
+    # Path.home() raises when HOME is unset AND there's no passwd entry for the
+    # UID (containers run as an arbitrary UID) — keep it inside the guard so
+    # environment_report honors its "never raises" contract.
+    present = False
     try:
+        home = Path.home()
+        bash_log = home / ".claude" / "bash-log.sh"
+        settings = home / ".claude" / "settings.json"
         data = json.loads(settings.read_text(encoding="utf-8"))
         env = data.get("env") if isinstance(data, dict) else None
         be = env.get("BASH_ENV") if isinstance(env, dict) else None
         wired = bool(be) and be.replace("\\", "/").endswith("/.claude/bash-log.sh")
-    except (OSError, ValueError):
-        wired = False
-    present = bash_log.is_file() and wired
+        present = bash_log.is_file() and wired
+    except (OSError, ValueError, RuntimeError):
+        present = False
     return _item("shell command logging (BASH_ENV)", "logging", present,
                  SEV_RECOMMENDED,
                  "logs each bash command to the chat log, which feeds task "
@@ -267,7 +314,9 @@ def cli_environment(cmd_args: list[str], project_root: Path) -> int:
             return 2
     report = environment_report(project_root)
     if as_json:
-        print(json.dumps(report, indent=2))
+        out = report if show_ok else {"platform": report["platform"],
+                                      "items": suggestions(report)}
+        print(json.dumps(out, indent=2))
     else:
         print(render_environment(report, show_ok=show_ok))
     return 0

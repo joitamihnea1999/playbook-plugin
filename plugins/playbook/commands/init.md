@@ -67,7 +67,7 @@ Check the output. If it reports any failures, stop and fix before continuing.
 
 Everything else in playbook is set to the single correct value (the panel checks **all** closes, merges only ever run via `/playbook:merge`, standing gates stay at their optimal defaults). The one thing that genuinely varies per machine is **which agent CLIs are installed** — so this is where you ask.
 
-1. **Detect what's available** (fast, no network):
+1. **Detect what's available** (fast — no live model probe; note `grok models` is login-aware so it's not strictly offline, but each listing is time-bounded):
 
    ```bash
    .claude/bin/tasks models detect
@@ -81,15 +81,15 @@ Everything else in playbook is set to the single correct value (the panel checks
 
    **Recommended default if the user has no preference or only Claude is installed:** panel `opus, sonnet`, default judge `opus` — the shipped all-Claude baseline. In that case you may skip writing a file (the shipped default already is exactly this); only write when the user chooses something.
 
-3. **Offer an optional live availability check** before committing (fast-detect above only reads local caches — a codex model listed there can still 400 for this account). Ask the user whether to verify the chosen panel actually runs; it launches each CLI once and can take a minute or two.
+3. **Ask whether to live-verify the chosen panel** (detect only reads local caches — a codex model listed there can still 400 for this account). It launches each CLI once and can take a minute or two, so it's opt-in. Note the write in step 4 is safe either way: `set` runs its own cheap (no-probe) audit and refuses a dead pin before writing, so the live check is a *post-write* confirmation that catches per-account 400s the cheap audit can't.
 
-4. **Write the choice:**
+4. **Write the choice, then optionally live-verify:**
 
    ```bash
    .claude/bin/tasks models set --panel "<spec1,spec2,...>" --default-judge "<spec>"
    ```
 
-   `set` validates every spec and refuses a panel with a dead pin (re-run with `--force` only if the user insists). If the user opted into the live check in step 3, run it now and report the verdicts; a `GONE` pin means re-pick:
+   `set` validates every spec and refuses a panel with a dead pin (re-run with `--force` only if the user insists). If the user opted into the live check in step 3, run it now and report the verdicts; a `GONE` pin means re-pick and re-run `set`:
 
    ```bash
    .claude/bin/tasks models check

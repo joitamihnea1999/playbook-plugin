@@ -95,6 +95,36 @@ class CommandWordsTest(unittest.TestCase):
     def test_leading_env_assignment_skipped(self):
         self.assertEqual(env._command_words("FOO=bar BAZ=1 pytest"), ["pytest"])
 
+    # ── 1.5.16 hardening: no invented tokens on real-world verify strings ──────
+    def test_subshell_does_not_invent_paren_tokens(self):
+        # was ['(cd', 'pytest)'] — the close-paren even made an installed tool
+        # (grep) look absent.
+        self.assertEqual(env._command_words("(cd sub && pytest)"), ["pytest"])
+        self.assertEqual(env._command_words("(cd sub && grep -r x .)"), ["grep"])
+
+    def test_operator_inside_quotes_is_not_split(self):
+        self.assertEqual(env._command_words('grep "a|b" .'), ["grep"])
+
+    def test_bash_dash_c_body_is_not_parsed(self):
+        # was ['bash', 'ruff"'] — the && inside the quoted -c arg got split.
+        self.assertEqual(env._command_words('bash -c "pytest && ruff"'), ["bash"])
+
+    def test_shell_keywords_are_not_reported_as_tools(self):
+        self.assertEqual(env._command_words("if pytest; then echo ok; fi"), ["pytest"])
+        self.assertEqual(env._command_words("for f in a b; do pytest; done"), ["pytest"])
+        self.assertEqual(env._command_words("while pytest; do echo x; done"), ["pytest"])
+
+    def test_redirection_target_is_not_a_command(self):
+        self.assertEqual(env._command_words("pytest > log.txt"), ["pytest"])
+
+    def test_env_prefix_reaches_real_command(self):
+        # was ['env'] (a false negative — pytest never checked).
+        self.assertEqual(env._command_words("env FOO=1 pytest"), ["pytest"])
+        self.assertEqual(env._command_words("sudo pytest"), ["pytest"])
+
+    def test_unbalanced_quotes_yield_nothing_not_a_crash(self):
+        self.assertEqual(env._command_words('pytest "unterminated'), [])
+
 
 class VerifyItemsTest(unittest.TestCase):
     def setUp(self):
@@ -214,6 +244,31 @@ class ReportAndCliTest(unittest.TestCase):
     def test_cli_rejects_unknown_flag(self):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(env.cli_environment(["--bogus"], Path("/tmp")), 2)
+
+    def test_report_never_raises_when_home_undeterminable(self):
+        # HOME unset + no passwd entry (container as arbitrary UID): Path.home()
+        # raises RuntimeError. environment_report must still return, and the
+        # bare `tasks environment` CLI must not crash.
+        with mock.patch.object(env.shutil, "which", side_effect=_which(set())), \
+                mock.patch.object(env.platform, "system", return_value="Linux"), \
+                mock.patch.object(env.Path, "home",
+                                  side_effect=RuntimeError("Could not determine home directory.")):
+            report = env.environment_report(None)  # must not raise
+            self.assertIn("items", report)
+            log = [i for i in report["items"] if i["category"] == "logging"][0]
+            self.assertFalse(log["present"])
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(env.cli_environment([], Path("/tmp")), 0)  # no crash
+
+    def test_json_suggest_only_filters_the_json(self):
+        report = self._report({"bwrap", "codex", "grok", "agy", "pi"})  # only logging absent
+        with mock.patch.object(env, "environment_report", return_value=report):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = env.cli_environment(["--json", "--suggest-only"], Path("/tmp"))
+        self.assertEqual(rc, 0)
+        parsed = json.loads(buf.getvalue())
+        self.assertTrue(all(not i["present"] for i in parsed["items"]))
 
 
 if __name__ == "__main__":

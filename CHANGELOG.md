@@ -2,6 +2,54 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.16] — 2026-08-17
+
+Verification-pass fixes for 1.5.14/1.5.15. An independent three-way adversarial
+audit of those releases (each finding re-reproduced by hand in scratch dirs)
+turned up seven real defects the 1003-green suite missed — all fixed here
+red-first. The `run_select` refactor and the end-to-end wiring were audited
+CLEAN; these are the edges around the new `models detect/set` and `environment`
+surfaces.
+
+### Fixed
+
+- **`tasks environment` invented tool names from ordinary verify commands.** The
+  verify-tool detector split on shell operators with no awareness of quotes,
+  subshells, `bash -c`, or keywords, so `(cd sub && pytest)` warned about `(cd`
+  and `pytest)`, `grep "a|b" .` warned about `b"`, and an installed tool behind
+  a subshell close-paren (`grep)`) was reported *missing* — a false "close will
+  fail" advisory. `_command_words` is now `shlex`-based (quote/operator-aware),
+  steps past `VAR=val`/`sudo`/`env` prefixes and shell keywords, ignores
+  redirection targets, and emits nothing on a parse ambiguity rather than
+  invent a token.
+- **`tasks environment` could crash where `Path.home()` is undeterminable.**
+  `Path.home()` sat outside the guard in `_logging_item`, so on a container run
+  as an arbitrary UID with no `HOME` the "never raises" `environment_report`
+  raised and the bare `tasks environment` command exited non-zero with a
+  traceback. Moved inside the try. (`tasks doctor` was already safe — it wraps
+  the call.)
+- **`tasks models set --default-judge X` (no `--panel`) silently froze the
+  shipped panel** into `.agent/models.json`, so the project stopped tracking
+  future plugin-panel upgrades. `_write_panel` now leaves the `panel` key
+  untouched when no panel is passed; set validates/audits only the specs it's
+  actually changing.
+- **`tasks models set`/`select` crashed on a models.json that is valid JSON but
+  not an object** (e.g. a bare list) — `AttributeError` instead of the
+  documented "start fresh". Guarded in `_read_existing_models` and in
+  `provider/sandbox.py`'s `_parse_models_json` / `_parse_judge_config` (whose
+  own docstrings promise `{}` on any shape error). Mirror re-synced.
+- **`tasks models set --panel ""` cleared every judge with no warning.** It now
+  prints a loud warning that the panel is empty (panel-review will have no
+  seats).
+- **Misleading flag parsing.** `set --panel --force` silently consumed `--force`
+  as the panel value; a value-flag at end-of-args reported "unknown flag". Both
+  now report "missing value for <flag>".
+- **`tasks models detect` / `/playbook:init` over-claimed "no network."** `grok
+  models` is login-aware (a server call), so the docs now say "no live model
+  probe" and note the listing is time-bounded, not offline. `--json
+  --suggest-only` now filters the JSON too, and init.md's live-check step no
+  longer contradicts its own execution order.
+
 ## [1.5.15] — 2026-08-17
 
 `/playbook:init` and `tasks doctor` now tell you which optional tools would make

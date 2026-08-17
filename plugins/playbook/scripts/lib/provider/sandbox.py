@@ -87,6 +87,8 @@ def _parse_models_json(path: Path) -> dict[str, tuple[str, str | None, tuple[str
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(raw, dict):  # valid JSON but not an object (e.g. a bare list)
+        return {}
     aliases = raw.get("aliases", {})
     if not isinstance(aliases, dict):
         return {}
@@ -190,6 +192,8 @@ def _parse_judge_config(path: Path) -> dict:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):  # valid JSON but not an object → {} per contract
         return {}
     out: dict = {}
     dj = raw.get("default_judge")

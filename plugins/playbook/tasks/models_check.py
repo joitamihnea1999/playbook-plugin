@@ -772,9 +772,17 @@ def _read_existing_models(path: Path) -> dict:
     """
     if path.is_file():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             print(f"WARNING: existing {path} unreadable ({e}) — starting fresh", file=sys.stderr)
+            return {}
+        # Valid JSON but not an object (e.g. a bare list) is unusable — the
+        # writers do `existing[...]=...` / `.get(...)`. Start fresh, don't crash.
+        if not isinstance(data, dict):
+            print(f"WARNING: existing {path} is not a JSON object — starting fresh",
+                  file=sys.stderr)
+            return {}
+        return data
     return {}
 
 
@@ -794,14 +802,19 @@ def _audit_proposed(project_root: Path, new_panel: list[str],
     return [e for e in bad_pins(audit) if e["spec"] in proposed]
 
 
-def _write_panel(path: Path, existing: dict, new_panel: list[str],
+def _write_panel(path: Path, existing: dict, new_panel: Optional[list[str]],
                  default_judge: Optional[str]) -> None:
     """Atomically write panel/default_judge into `existing`, preserving the rest.
 
-    An interrupt can't truncate models.json — the write goes through a temp +
-    os.replace. Seeds a project-scoped `_doc` when the file had none.
+    `new_panel=None` leaves the existing `panel` key untouched — so a
+    `set --default-judge X` with no `--panel` does NOT silently freeze the
+    shipped default panel into the file (and keep it from tracking future
+    plugin-panel upgrades). `new_panel=[]` explicitly clears it. An interrupt
+    can't truncate models.json — the write goes through a temp + os.replace.
+    Seeds a project-scoped `_doc` when the file had none.
     """
-    existing["panel"] = new_panel
+    if new_panel is not None:
+        existing["panel"] = new_panel
     if default_judge:
         existing["default_judge"] = default_judge
     existing["_updated"] = datetime.now(timezone.utc).date().isoformat()
@@ -896,14 +909,15 @@ def run_set(project_root: Path, panel: Optional[list[str]] = None,
     run_select, used by `/playbook:init` (which asks the user in the
     conversation, then writes the answer here) and by scripts.
 
-    `panel=None` keeps the existing/shipped panel; `panel=[]` clears it.
-    `default_judge=None` leaves the existing default. Specs are validated the
-    same way select validates interactive input, then availability-audited
-    (no probe): a bad pin ABORTS with exit 1 and the list of offenders unless
-    `force=True` — the non-interactive analogue of select's "Write anyway?"
-    prompt (there is no one to ask, so refusing loudly is safer than writing a
-    dead panel). Returns 0 on write, 1 on validation/audit failure, 2 when
-    neither panel nor default_judge is given.
+    `panel=None` leaves the existing `panel` key untouched (so setting only the
+    default judge doesn't freeze the shipped panel into the file); `panel=[]`
+    explicitly clears it (with a warning — an empty panel means panel-review has
+    no seats). `default_judge=None` leaves the existing default. Only the specs
+    actually being changed are validated + availability-audited (no probe): a
+    bad pin ABORTS with exit 1 unless `force=True` — the non-interactive
+    analogue of select's "Write anyway?" (there's no one to ask, so refusing
+    loudly beats writing a dead panel). Returns 0 on write, 1 on validation/
+    audit failure, 2 when neither panel nor default_judge is given.
     """
     if panel is None and default_judge is None:
         print("Error: nothing to set — pass --panel and/or --default-judge",
@@ -913,13 +927,10 @@ def run_set(project_root: Path, panel: Optional[list[str]] = None,
     path = _project_models_path(project_root)
     existing = _read_existing_models(path)
 
-    if panel is None:
-        from provider.sandbox import load_judge_config
-        new_panel = existing.get("panel") or list(load_judge_config(project_root).get("panel") or [])
-    else:
-        new_panel = panel
-
-    for spec in new_panel:
+    # Validate + audit ONLY what's being changed. When panel is None we are not
+    # touching the panel, so its (shipped/existing) pins are not our concern here.
+    changed_panel = panel if panel is not None else []
+    for spec in changed_panel:
         err = spec_error(spec)
         if err:
             print(f"Error: {err}", file=sys.stderr)
@@ -930,7 +941,7 @@ def run_set(project_root: Path, panel: Optional[list[str]] = None,
             print(f"Error: {err}", file=sys.stderr)
             return 1
 
-    bad = _audit_proposed(project_root, new_panel, default_judge)
+    bad = _audit_proposed(project_root, changed_panel, default_judge)
     if bad and not force:
         print("Proposed pin(s) look unusable:", file=sys.stderr)
         for e in bad:
@@ -939,22 +950,28 @@ def run_set(project_root: Path, panel: Optional[list[str]] = None,
               file=sys.stderr)
         return 1
 
-    _write_panel(path, existing, new_panel, default_judge)
+    if panel == []:
+        print("WARNING: writing an EMPTY panel — panel-review will have no judge "
+              "seats. Pass judges to --panel if that wasn't intended.", file=sys.stderr)
+
+    _write_panel(path, existing, panel, default_judge)
     return 0
 
 
-# ── detect (fast, no-network provider/model inventory) ───────────────────────
+# ── detect (fast provider/model inventory — no live model probe) ─────────────
 
 def detect_providers(project_root: Optional[Path] = None) -> dict:
     """Which agent CLIs are installed on this machine + each one's candidate
     models and supported reasoning efforts — the menu `/playbook:init` offers
     before it writes a panel.
 
-    Fast by design: everything comes from `shutil.which` and LOCAL surfaces
-    (codex's models_cache.json, Claude Code's settings.json) plus the two cheap
-    listing commands that answer without a model turn (`agy models`,
-    `grok models`). No model is live-probed here — availability of a chosen pin
-    is confirmed separately by `tasks models check` (init's optional probe).
+    Fast because it runs NO live model turn: it reads `shutil.which` + local
+    surfaces (codex's models_cache.json, Claude Code's settings.json) and the
+    two cheap listing commands (`agy models`, `grok models`). Note `grok models`
+    is login-aware (it lists the account's server-side entitlements), so this is
+    not strictly offline — but each listing is bounded by a 60s timeout and no
+    model is prompt-probed. Availability of a chosen pin is confirmed separately
+    by `tasks models check` (init's optional probe).
 
     Returns {"providers": [ {name, installed, models, efforts, note} ]} where
     `models` is a list of {"id", "efforts"} (efforts is the per-model effort
@@ -1092,17 +1109,32 @@ def cli_models(cmd_args: list[str], project_root: Path) -> int:
         print(json.dumps(report, indent=2) if as_json else render_detect(report))
         return 0
 
+    def _value(flag: str, idx: int) -> Optional[str]:
+        """The value token after a value-taking flag, or None (with a printed
+        error) when it's absent or is itself another flag — so `--panel --force`
+        reports "missing value" instead of silently consuming `--force`."""
+        if idx + 1 >= len(args) or args[idx + 1].startswith("--"):
+            print(f"Error: missing value for {flag}", file=sys.stderr)
+            return None
+        return args[idx + 1]
+
     if sub == "set":
         panel: Optional[list[str]] = None
         default_judge: Optional[str] = None
         force = False
         i = 0
         while i < len(args):
-            if args[i] == "--panel" and i + 1 < len(args):
-                panel = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+            if args[i] == "--panel":
+                v = _value("--panel", i)
+                if v is None:
+                    return 2
+                panel = [s.strip() for s in v.split(",") if s.strip()]
                 i += 2
-            elif args[i] == "--default-judge" and i + 1 < len(args):
-                default_judge = args[i + 1].strip()
+            elif args[i] == "--default-judge":
+                v = _value("--default-judge", i)
+                if v is None:
+                    return 2
+                default_judge = v.strip()
                 i += 2
             elif args[i] == "--force":
                 force = True
@@ -1120,8 +1152,11 @@ def cli_models(cmd_args: list[str], project_root: Path) -> int:
         if args[i] == "--no-probe":
             probe = False
             i += 1
-        elif args[i] == "--claude-candidates" and i + 1 < len(args):
-            candidates = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+        elif args[i] == "--claude-candidates":
+            v = _value("--claude-candidates", i)
+            if v is None:
+                return 2
+            candidates = [s.strip() for s in v.split(",") if s.strip()]
             i += 2
         else:
             print(f"Error: unknown models flag '{args[i]}'", file=sys.stderr)
