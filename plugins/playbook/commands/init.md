@@ -117,7 +117,19 @@ Closing a task runs the project's declared `verify` command; if none is declared
 
    If the project is a brand-new empty repo with no checks yet, say so and leave `verify` unset rather than inventing a command — note that close will refuse until it is set.
 
-### 4. Review CLAUDE.md and enrich it
+### 4. Suggest tools that would round out the setup
+
+Playbook runs on Claude alone, but a few optional tools make it run *optimally*. Surface what's missing so the user can decide — **suggest, never install anything yourself**:
+
+```bash
+.claude/bin/tasks environment --suggest-only
+```
+
+This reports, advisory-only, four things and how to get each: (a) **other vendor agent CLIs** (`codex` / `agy` / `grok` / `pi`) that aren't installed — the biggest one, because a panel that spans vendors is the whole point of a panel (never trust one model; let them disagree), so if the user's panel is Claude-only, point out that installing e.g. `codex` lets a second vendor onto the panel; (b) **sandbox containment** (Linux `bubblewrap` / macOS seatbelt) that `.claude/bin/sandbox` needs; (c) **verify-command tooling** the verify command calls but that isn't on PATH (a missing one will make close fail — flag it clearly); (d) the **shell-command-logging** wiring.
+
+Relay the suggestions to the user with their install hints. Do **not** run any installer — these need the user's package manager and judgment. If the user installs a new agent CLI, offer to re-run step 2 so it can join the panel.
+
+### 5. Review CLAUDE.md and enrich it
 
 The base write already happened mechanically in step 1 (create-or-merge; a pre-existing CLAUDE.md keeps every byte of project-specific content, and template-owned sections are updated in place). Your job is the part that requires intelligence:
 
@@ -125,12 +137,12 @@ The base write already happened mechanically in step 1 (create-or-merge; a pre-e
 - Add project-specific content the template cannot know: what the project is, domain rules. Project content belongs in its own sections, not inside template-owned ones (those are refreshed on upgrade).
 - Check `.gitignore`: the playbook runtime-state block is present; add language/tooling ignores the project needs (`__pycache__/`, `node_modules/`, …) — those are deliberately not mechanical.
 
-### 5. Generate mind map if stub
+### 6. Generate mind map if stub
 
 If `MIND_MAP.md` contains only a stub (just a `# Mind Map` heading with no real content), run `/mindmap` to generate it from the codebase.
 
 If it already has substantive content, leave it alone.
 
-### 6. Verify
+### 7. Verify
 
-Run `.claude/bin/tasks bootstrap` to verify everything works. Report what was created or updated — including the panel you configured and the verify command you set.
+Run `.claude/bin/tasks bootstrap` to verify everything works. Report what was created or updated — including the panel you configured, the verify command you set, and any tools you suggested the user install.

@@ -55,7 +55,9 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 ## Health & merge
 
-**`tasks doctor`** — harness health check: project structure, config shape, judge pins, hook wiring, session state, per-lane gate-logging health, encoding. Advisory findings warn but never fail — doctor's contract is to inform, not block. In the plugin's own source checkout it additionally warns when shipped features have moved past the last README audit (silent everywhere else).
+**`tasks doctor`** — harness health check: project structure, config shape, judge pins, hook wiring, session state, per-lane gate-logging health, encoding, and (advisory) the environment recommendations below. Advisory findings warn but never fail — doctor's contract is to inform, not block. In the plugin's own source checkout it additionally warns when shipped features have moved past the last README audit (silent everywhere else).
+
+**`tasks environment [--json] [--suggest-only]`** — advisory report of the optional tools that make playbook run *optimally*, and how to install the ones you're missing: extra vendor agent CLIs (`codex`/`agy`/`grok`/`pi`) so the panel can span vendors, the sandbox containment primitive (Linux `bubblewrap` / macOS seatbelt), any verify-command tool not on PATH (a missing one fails close), and the shell-command-logging wiring. Never fails — it suggests, it doesn't install. `/playbook:init` and `tasks doctor` both surface it; `--suggest-only` hides what's already present.
 
 **`tasks merge-doctor`** — audit a multi-user repo before/after a merge for the three things plain `git merge` gets wrong in playbook repos: stranded conflict markers in prose files, per-user namespace cross-contamination, and legacy `.agent/` paths.
 

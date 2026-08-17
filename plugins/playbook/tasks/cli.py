@@ -29,7 +29,7 @@ COMMANDS = (
     "work", "new", "init", "bootstrap", "list", "ls", "panel-review",
     "models", "plan-review", "impl-review", "judge", "context", "intent",
     "timeline", "tagger", "tag", "retro", "status", "audit", "blocked",
-    "parked", "freehand", "doctor", "merge-doctor", "mindmap-sync", "log",
+    "parked", "freehand", "doctor", "environment", "merge-doctor", "mindmap-sync", "log",
     "prepare-merge",
 )
 
@@ -142,6 +142,13 @@ def main():
     elif cmd == "doctor":
         from tasks.diagnostics import cmd_doctor
         cmd_doctor(cmd_args)
+
+    elif cmd == "environment":
+        # Advisory: which optional tools would improve this setup + how to get
+        # them (extra panel vendors, sandbox containment, verify tooling,
+        # command logging). Never fails — informational (1.5.15).
+        from tasks.environment import cli_environment
+        sys.exit(cli_environment(cmd_args, find_project_root()))
 
     elif cmd == "merge-doctor":
         from tasks.merge_prep import cmd_merge_doctor

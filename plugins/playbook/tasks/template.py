@@ -730,6 +730,7 @@ Tasks CLI:
     tasks retro [--since N]    project retrospective
     tasks context <N>          extract chat messages for a task
     tasks doctor               harness health check
+    tasks environment          advisory: optional tools that improve the setup + how to install them
   Info:
     tasks list [--pending]     show tasks
     tasks status               current gate position"""
@@ -902,6 +903,7 @@ Commands:
                       Renumber tasks, re-sequence chat_log, report MIND_MAP collisions
                       so the branch merges cleanly into target (default: main)
   doctor              Harness health check
+  environment         Advisory: optional tools that improve the setup + install hints [--json] [--suggest-only]
   bootstrap           Load mind map + skills + pending tasks
   init                Create CLAUDE.md for this project
 

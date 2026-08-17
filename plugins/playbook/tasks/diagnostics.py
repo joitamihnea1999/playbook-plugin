@@ -270,6 +270,18 @@ def cmd_doctor(cmd_args):
     except Exception as e:  # advisory — doctor must never crash here
         warn("hooks: grok enforcement check ran", f"skipped ({e})")
 
+    # 1h. Environment recommendations (1.5.15) — the optional tools that make
+    # playbook run smoothly/optimally: extra panel vendors, sandbox containment,
+    # the verify command's own tooling, command logging. Suggest-only, never a
+    # FAIL — a thinner setup still works, it just isn't the full experience.
+    try:
+        from tasks.environment import environment_report, suggestions
+        for _i in suggestions(environment_report(project_path)):
+            hint = f" — {_i['hint']}" if _i["hint"] else ""
+            warn(f"env: {_i['name']}", f"{_i['why']}{hint}")
+    except Exception as e:  # advisory — doctor must never crash here
+        warn("env: recommendations check ran", f"skipped ({e})")
+
     # 2. Unicode
     stdout_enc = getattr(sys.stdout, "encoding", "unknown") or "unknown"
     check("unicode: stdout encoding", "utf" in stdout_enc.lower(), stdout_enc)

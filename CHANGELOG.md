@@ -2,6 +2,35 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.15] — 2026-08-17
+
+`/playbook:init` and `tasks doctor` now tell you which optional tools would make
+playbook run *optimally*, and how to get the ones you're missing. Suggest-only —
+nothing is ever auto-installed, and none of it fails a gate.
+
+### Added
+
+- **`tasks environment [--json] [--suggest-only]`.** Advisory inventory across
+  four categories, each with an install hint: (1) **extra vendor agent CLIs**
+  (`codex`/`agy`/`grok`/`pi`) not installed — the headline one, because a panel
+  that spans vendors is the whole reason a panel exists (never trust one model;
+  let them disagree); (2) **sandbox containment** (`.claude/bin/sandbox` needs
+  Linux `bubblewrap` / macOS seatbelt); (3) **verify-command tooling** — the
+  leading binary of each segment of the project's declared `verify` command that
+  isn't on PATH (a missing one fails close, so it's flagged as a warning);
+  (4) the **shell-command-logging** (`BASH_ENV`) wiring. Best-effort install
+  hints live in an editable table (`tasks/environment.py`) since package names
+  drift; where no reliable command is known, the hint points at the vendor's
+  docs rather than fabricating one.
+
+### Changed
+
+- **`tasks doctor`** gained an advisory environment section (never affects the
+  exit code — informational, like its other advisories).
+- **`/playbook:init`** now surfaces the suggestions as a step (after the panel
+  and verify steps), relaying them with install hints — and offers to re-run the
+  panel step if the user installs a new vendor CLI. It never installs anything.
+
 ## [1.5.14] — 2026-08-17
 
 Interactive `/playbook:init` — the panel becomes a per-machine choice instead of
