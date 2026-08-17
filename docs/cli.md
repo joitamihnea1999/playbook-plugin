@@ -59,6 +59,8 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 **`tasks environment [--json] [--suggest-only]`** — advisory report of the optional tools that make playbook run *optimally*, and how to install the ones you're missing: extra vendor agent CLIs (`codex`/`agy`/`grok`/`pi`) so the panel can span vendors, the sandbox containment primitive (Linux `bubblewrap` / macOS seatbelt), any verify-command tool not on PATH (a missing one fails close), and the shell-command-logging wiring. Never fails — it suggests, it doesn't install. `/playbook:init` and `tasks doctor` both surface it; `--suggest-only` hides what's already present.
 
+**`tasks detect-verify [--json]`** — deterministic suggestion of a project's full verify command (typecheck **and** tests **and** lint), assembled from the toolchains actually present (Python `pytest`/`mypy`/`pyright`/`ruff`/`flake8`, Node `package.json` scripts, Rust `cargo`, Go `go test`+`vet`, a `Makefile` `test`/`check`/`lint` target). A heuristic starting point that `/playbook:init` shows for you to confirm/correct before writing it to `.agent/config.json` — it never executes anything, and prints a note (no command) when it detects nothing.
+
 **`tasks merge-doctor`** — audit a multi-user repo before/after a merge for the three things plain `git merge` gets wrong in playbook repos: stranded conflict markers in prose files, per-user namespace cross-contamination, and legacy `.agent/` paths.
 
 **`tasks prepare-merge <source> [target]`** — merge preparation used by the merge skill: stages the cross-namespace merge so the verifier can prove it clean.

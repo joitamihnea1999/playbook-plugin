@@ -101,13 +101,15 @@ Everything else in playbook is set to the single correct value (the panel checks
 
 Closing a task runs the project's declared `verify` command; if none is declared, close loudly refuses to claim it verified. `scripts/init` does **not** guess one, so set it now. Verify must run **everything** — typecheck **and** tests **and** lint — not a subset.
 
-1. **Detect the project's checks.** Inspect the repo for its real tooling and assemble a single command that runs *all* of them, chained with `&&`. Look for, e.g.:
-   - Python: `pyproject.toml` / `setup.cfg` → `pytest`, `mypy`/`pyright`, `ruff`/`flake8` (or `python3 -m unittest discover` if that is how the suite runs).
-   - Node: `package.json` scripts → `npm test`, `npm run typecheck`/`tsc --noEmit`, `npm run lint`.
-   - Make/just: a `test`/`check`/`lint` target in `Makefile`/`justfile`.
-   - Rust: `cargo test && cargo clippy -- -D warnings`. Go: `go test ./... && go vet ./...`.
+1. **Detect the project's checks** with the deterministic helper:
 
-2. **Confirm with the user.** Show the assembled command and ask (via `AskUserQuestion` or plainly) whether it runs everything or if a check is missing. The confirm step exists to catch a **missed** check — not to let verification be narrowed. Correct it per their answer.
+   ```bash
+   .claude/bin/tasks detect-verify
+   ```
+
+   It inspects the repo's toolchains (Python `pytest`/`mypy`/`pyright`/`ruff`/`flake8`, Node `package.json` scripts, Rust `cargo`, Go `go test`+`vet`, a `Makefile` `test`/`check`/`lint` target) and prints a single command that runs *all* of them, chained with `&&`. If it detected nothing (a fresh/empty repo), it says so — then leave `verify` unset and tell the user close will refuse until it's set, rather than inventing a command.
+
+2. **Confirm with the user.** Show the suggested command and ask (via `AskUserQuestion` or plainly) whether it runs everything or if a check is missing — the helper is a heuristic starting point, so this step exists to catch a **missed** check, never to narrow the bar. Correct it per their answer. (If the project's real suite runs a way the helper can't detect — e.g. `python3 -m unittest discover -s tests` — replace the suggestion with that.)
 
 3. **Write it into `.agent/config.json`** under the `verify` key (a string that runs everything). Read the file, add/replace `verify`, keep every other key. Example result:
 

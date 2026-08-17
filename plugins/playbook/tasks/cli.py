@@ -29,8 +29,8 @@ COMMANDS = (
     "work", "new", "init", "bootstrap", "list", "ls", "panel-review",
     "models", "plan-review", "impl-review", "judge", "context", "intent",
     "timeline", "tagger", "tag", "retro", "status", "audit", "blocked",
-    "parked", "freehand", "doctor", "environment", "merge-doctor", "mindmap-sync", "log",
-    "prepare-merge",
+    "parked", "freehand", "doctor", "environment", "detect-verify", "merge-doctor",
+    "mindmap-sync", "log", "prepare-merge",
 )
 
 
@@ -149,6 +149,12 @@ def main():
         # command logging). Never fails — informational (1.5.15).
         from tasks.environment import cli_environment
         sys.exit(cli_environment(cmd_args, find_project_root()))
+
+    elif cmd == "detect-verify":
+        # Deterministic suggestion of a project's full verify command (typecheck
+        # AND tests AND lint) for /playbook:init to confirm with the user (1.5.19).
+        from tasks.verify_detect import cli_detect_verify
+        sys.exit(cli_detect_verify(cmd_args, find_project_root()))
 
     elif cmd == "merge-doctor":
         from tasks.merge_prep import cmd_merge_doctor

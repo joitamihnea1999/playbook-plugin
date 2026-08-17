@@ -731,6 +731,7 @@ Tasks CLI:
     tasks context <N>          extract chat messages for a task
     tasks doctor               harness health check
     tasks environment          advisory: optional tools that improve the setup + how to install them
+    tasks detect-verify        suggest a full verify command (typecheck+tests+lint) from the project's toolchains
   Info:
     tasks list [--pending]     show tasks
     tasks status               current gate position"""
@@ -904,6 +905,7 @@ Commands:
                       so the branch merges cleanly into target (default: main)
   doctor              Harness health check
   environment         Advisory: optional tools that improve the setup + install hints [--json] [--suggest-only]
+  detect-verify       Suggest a full verify command (typecheck+tests+lint) from the toolchains present [--json]
   bootstrap           Load mind map + skills + pending tasks
   init                Create CLAUDE.md for this project
 

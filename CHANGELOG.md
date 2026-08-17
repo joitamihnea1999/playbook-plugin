@@ -2,6 +2,28 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.19] — 2026-08-17
+
+Closes the last backlog item: the interactive init's verify-command detection is
+now a deterministic, tested helper instead of the agent free-form-guessing.
+
+### Added
+
+- **`tasks detect-verify [--json]`.** Inspects a project's toolchains and prints
+  a single full-verify command (typecheck **and** tests **and** lint) chained
+  with ` && ` — Python (`pytest`/`mypy`/`pyright`/`ruff`/`flake8`), Node
+  (`package.json` scripts), Rust (`cargo test` + `clippy`), Go (`go test` +
+  `vet`), and a `Makefile` `test`/`check`/`lint` target as a fallback. Reads
+  small config files only, never executes anything, and prints a note (not a
+  guessed command) when it detects nothing. New `tasks/verify_detect.py`.
+
+### Changed
+
+- **`/playbook:init` step 3** now runs `tasks detect-verify` and shows its
+  suggestion for the user to confirm/correct, instead of instructing the agent
+  to inspect the repo by hand — deterministic, and the same detection is now
+  reusable/tested. The confirm step still exists to catch a missed check.
+
 ## [1.5.18] — 2026-08-17
 
 F2: the code-file gate classifier now means the same thing under every provider.

@@ -78,6 +78,7 @@ _BASELINE = {
     # no CLAUDE.md/MIND_MAP.md, so doctor deterministically reports failures → 1.
     "doctor": (1, "tasks doctor"),
     "environment": (0, "Environment recommendations (advisory"),
+    "detect-verify": (0, "Detected verify command"),
     "merge-doctor": (2, "Usage: tasks merge-doctor"),
     "mindmap-sync": (1, "MIND_MAP.md not found"),
     "log": (1, ".agent/chat_log.md not found"),
