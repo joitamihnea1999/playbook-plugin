@@ -14,7 +14,7 @@ Everything the `tasks` CLI does. In a playbook-managed project the agent calls i
 
 **`tasks parked`** — list the out-of-scope findings parked during earlier tasks (`## Parked` sections), so a finding noticed mid-task isn't lost when it's deliberately deferred. Prints "No open parked items." when there are none.
 
-**`tasks audit`** — run the pre-panel sweeps against the active task and record a receipt into its `task.md`; exits non-zero on error-severity findings so it can gate a panel review. Part of the close machinery, not the daily loop. Two built-in mind-map checks run here: `mindmap-stale-refs` (a cited path that no longer exists) and `mindmap-node-freshness` (a node whose cited code has changed in ≥2 commits *since the node was last edited* — stale institutional memory; git-only, advisory, tunable via `audit.node_freshness_commits` / `node_freshness_severity`, disable with `audit.node_freshness: false`).
+**`tasks audit`** — run the pre-panel sweeps against the active task and record a receipt into its `task.md`; exits non-zero on error-severity findings so it can gate a panel review. Part of the close machinery, not the daily loop. Three built-in mind-map checks run here: `mindmap-stale-refs` (a cited path that no longer exists), `mindmap-node-freshness` (a node whose cited code has changed in ≥2 commits *since the node was last edited* — stale institutional memory; git-only, advisory, tunable via `audit.node_freshness_commits` / `node_freshness_severity`, disable with `audit.node_freshness: false`), and `mindmap-dangling-links` (a `[N]` cross-link pointing at a node id that isn't defined anywhere — a dead end the agent follows; fence-aware, names the source node, advisory, `audit.dangling_links_severity` raises it).
 
 ## Create
 

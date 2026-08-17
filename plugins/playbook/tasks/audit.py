@@ -428,6 +428,72 @@ def check_mindmap_node_freshness(project_path) -> "dict | None":
     }
 
 
+def check_mindmap_dangling_links(project_path) -> "dict | None":
+    """Advisory: a mind-map `[N]` cross-link that points at a node id which is
+    not DEFINED anywhere in the map is a dead link — the agent follows it (or
+    tries to `recall` it) and finds nothing. This is the internal-consistency
+    complement to the staleness checks (those compare the map to the code; this
+    compares the map to itself).
+
+    Fence-aware (a `[9]` inside a ``` example is neither a definition nor a link),
+    and precise by construction: only `[<digits>]` tokens are treated as node
+    links, so markdown checkboxes (`- [ ]`), `[text](url)` links, version tags
+    (`[1.5.0]`), and range tokens (`[1-5]`) never register. Each finding names the
+    SOURCE node so the drift is fixable, not just flagged. Advisory by default;
+    `audit.dangling_links_severity` raises it."""
+    from tasks.mindmap import _node_starts, _FENCE_RE
+    project_path = Path(project_path)
+    mm = project_path / "MIND_MAP.md"
+    if not mm.exists():
+        return None
+    try:
+        text = mm.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = text.splitlines(keepends=True)
+    starts, _in_fence = _node_starts(lines)
+    if not starts:
+        return None
+    defined = {nid for _idx, nid in starts}
+    start_at = {idx: nid for idx, nid in starts}
+    link_re = re.compile(r"\[(\d+)\]")
+
+    dangling = set()   # (source_node_id, missing_target)
+    cur = None
+    infence = False
+    for i, ln in enumerate(lines):
+        if _FENCE_RE.match(ln):
+            infence = not infence
+            continue
+        if i in start_at:
+            cur = start_at[i]
+        if infence:
+            continue
+        for m in link_re.finditer(ln):
+            tgt = int(m.group(1))
+            if tgt not in defined:
+                dangling.add((cur, tgt))
+
+    findings = [
+        f"MIND_MAP.md node [{src}] links to [{tgt}], which is not a defined node"
+        for src, tgt in sorted(dangling, key=lambda p: (p[0] if p[0] is not None else -1, p[1]))
+    ]
+    cfg = load_config(project_path)
+    audit_cfg = cfg.get("audit") if isinstance(cfg.get("audit"), dict) else {}
+    severity = audit_cfg.get("dangling_links_severity")
+    if severity not in _VALID_SEVERITY:
+        severity = "advisory"
+    return {
+        "name": "mindmap-dangling-links",
+        "severity": severity,
+        "why": "a mind-map [N] link to an undefined node is a dead end the agent follows",
+        "command": "(built-in)",
+        "rc": 0 if findings else 1,
+        "status": "findings" if findings else "clean",
+        "output": "\n".join(findings),
+    }
+
+
 def run_audit(project_path) -> dict:
     """Run every resolved sweep plus the built-in mind-map staleness check.
     Returns {results, passed}. The audit FAILS when any sweep ERRORED (a broken
@@ -452,6 +518,9 @@ def run_audit(project_path) -> dict:
     nf = check_mindmap_node_freshness(project_path)
     if nf is not None:
         results.append(nf)
+    dl = check_mindmap_dangling_links(project_path)
+    if dl is not None:
+        results.append(dl)
     passed = not any(
         r["status"] == "error" or (r["status"] == "findings" and r["severity"] == "error")
         for r in results

@@ -2,7 +2,23 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.22] — 2026-08-17
+## [1.5.23] — 2026-08-17
+
+Context-economy pass, part 3: internal-consistency check for the map.
+
+### Added
+
+- **`mindmap-dangling-links` audit check** — a `[N]` cross-link that points at a
+  node id defined nowhere in `MIND_MAP.md` is a dead end the agent follows (or
+  tries to `recall`). This is the internal-consistency complement to the
+  staleness checks (those compare the map to the code; this compares the map to
+  itself). Fence-aware and precise by construction — only `[<digits>]` tokens
+  count, so markdown checkboxes (`- [ ]`), `[text](url)` links, version tags
+  (`[1.5.0]`), and range tokens (`[1-5]`) never register — and each finding names
+  the SOURCE node so the drift is fixable. Advisory; `audit.dangling_links_severity`
+  raises it. New `check_mindmap_dangling_links` in `tasks/audit.py`.
+
+
 
 Context-economy pass, part 2: complete the retrieval loop. 1.5.21 gave bootstrap
 a mind-map INDEX (routing nodes + titled TOC) but only for `MIND_MAP.md` — a
