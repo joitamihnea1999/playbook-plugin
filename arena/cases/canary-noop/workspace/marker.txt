@@ -1,0 +1,1 @@
+canary — both arms are identical; the trial must return RETEST.

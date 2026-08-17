@@ -1,0 +1,8 @@
+{
+  "name": "canary-noop",
+  "agent": "claude",
+  "prompt": "(canary — no work expected)",
+  "workspace": "workspace",
+  "check": "test -f marker.txt",
+  "reps": 2
+}

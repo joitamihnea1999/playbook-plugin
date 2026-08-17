@@ -62,14 +62,44 @@ seeds a throwaway project (`.agent/tasks/` makes it a playbook project);
 `current_state` is the active-task pointer; `payload` is the hook's stdin JSON.
 Add a fixture for every decision worth protecting from silent drift.
 
-## Tier 2 — live A/B trial (expensive, explicit): *are outcomes better?* (not built yet)
+## Tier 2 — live A/B trial (expensive, explicit): *are outcomes better?*
 
-Tier 1 only says a decision *changed*, not that it's *better*. Tier 2 answers
-efficacy: run a real agent (via the existing `scripts/sandbox` one-shot headless
-runner) on a frozen case under the baseline vs the changed harness, score with the
-judge panel, aggregate → ADOPT / REJECT / RETEST. Budget-capped and never
-auto-invoked — it prints an estimated cost and waits for an explicit go. Planned,
-not yet implemented.
+Tier 1 only says a decision *changed*, not that it's *better*. `arena/trial.py`
+answers efficacy: run a real agent on a frozen **case** under the baseline
+harness and the treatment harness, N reps each, score each run by the case's own
+deterministic `check`, and apply a **frozen decision rule** → `ADOPT` (treatment
+passes more), `REJECT` (fewer), or `RETEST` (equal / an arm never executed).
+
+```
+python3 arena/trial.py <case-dir> [--baseline REF] [--treatment REF] \
+        [--reps N] [--max-runs M] [--runner sandbox|null] [--agent A] [--ledger F] --yes
+```
+
+It **spends real tokens and wall-clock, so it is never automatic**: without
+`--yes` it only prints the run estimate and stops; `--max-runs` (default 6) is a
+hard budget ceiling; every run is appended to a `--ledger` JSONL.
+
+Where the agent work comes from is a **runner**, so the verdict logic is
+provable without an agent:
+- `--runner null` — does nothing; the shipped `cases/canary-noop` case returns
+  `RETEST` (identical arms), proving the whole pipeline runs offline and free.
+- `SandboxRunner` (default) — the live path: wires each arm's workspace hooks to
+  that arm's extracted harness variant and launches `scripts/sandbox` headless.
+  Validate on first real use (agents must be configured); its ADOPT/REJECT/RETEST
+  logic is exactly what the tests exercise via a scripted `FakeRunner`.
+
+### Cases
+
+`cases/<name>/`: a `case.json` (`{name, agent, prompt, workspace, check, reps}`)
+plus a `workspace/` template copied fresh into every run. `check` is a shell
+command run in the resulting workspace; exit 0 = success. A good case is small,
+deterministic, and exercises the behavior the harness change is meant to affect.
+
+## Tests
+
+`python3 arena/test_replay.py` (Tier 1) and `python3 arena/test_trial.py`
+(Tier 2) — 13 self-tests, all offline/free, incl. the negative control (replay
+detects the real 1.5.10 MultiEdit change) and the full ADOPT/REJECT/RETEST rule.
 
 ## Why it's structured this way
 
