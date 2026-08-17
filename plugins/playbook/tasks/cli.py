@@ -83,9 +83,11 @@ def main():
         cmd_panel_review(cmd_args)
 
     elif cmd == "models":
-        # Model-availability discovery + panel selection (task 012).
+        # Model-availability discovery + panel selection (task 012; detect/set 1.5.14).
         # `tasks models check [--no-probe]` audits every models.json pin;
-        # `tasks models select [--no-probe]` interactively rewrites the panel.
+        # `tasks models detect [--json]` inventories installed agents + models;
+        # `tasks models select [--no-probe]` interactively rewrites the panel;
+        # `tasks models set --panel … --default-judge …` writes it non-interactively.
         from tasks.models_check import cli_models
         sys.exit(cli_models(cmd_args, find_project_root()))
 

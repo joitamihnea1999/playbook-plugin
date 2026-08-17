@@ -723,7 +723,9 @@ Tasks CLI:
     tasks impl-review <N>      blind impl review
     tasks panel-review [<N>]   multi-model judge panel; task optional — use --prompt alone for any question, --bare to strip all context
     tasks models check         audit models.json judge pins against live availability (--no-probe skips claude probes)
+    tasks models detect        list installed agent CLIs + their selectable models/efforts (fast, no probe)
     tasks models select        interactively refresh the panel in .agent/models.json
+    tasks models set           write the panel non-interactively (--panel a,b --default-judge c [--force])
   Analysis:
     tasks retro [--since N]    project retrospective
     tasks context <N>          extract chat messages for a task
@@ -889,7 +891,9 @@ Commands:
                       --no-mind-map      strip mind map from context
                       --bare             no context at all; --prompt is the entire prompt
   models check        Audit models.json judge pins against live availability (--no-probe: skip claude probes)
+  models detect       List installed agent CLIs + selectable models/efforts (fast, no probe) [--json]
   models select       Interactively refresh the panel in .agent/models.json
+  models set          Write the panel non-interactively: --panel a,b --default-judge c [--force]
   retro [--since N]   Project retrospective
                       Collect Playbook artifacts for a global retro archive
   context <N>         Extract chat messages for a task

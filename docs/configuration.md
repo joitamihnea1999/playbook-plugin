@@ -1,6 +1,6 @@
 # Configuration
 
-Two JSON files, both under `.agent/` in your project and hand-editable: `config.json` is created by `/playbook:init`; `models.json` is deliberately NOT — create it with `tasks models select` (or by hand). `models.json` holds machine-specific judge pins and is gitignored by design.
+Two JSON files, both under `.agent/` in your project and hand-editable: `config.json` is created by `/playbook:init` (which also seeds its `verify` command after confirming it with you); `models.json` is created by `/playbook:init` when you pick a panel other than the shipped all-Claude default — or any time via `tasks models select` / `tasks models set` (or by hand). `models.json` holds machine-specific judge pins and is gitignored by design.
 
 `config.json` carries two kinds of setting, and the difference decides whether you commit it:
 
@@ -142,7 +142,9 @@ Judge selection lives in `models.json`: the plugin ships defaults in `provider/m
 Pinned model ids rot as providers ship and retire models, so the pins have a maintenance loop:
 
 - `tasks models check` audits every pin against **live availability**: codex pins are probed with a tiny prompt (the `~/.codex/models_cache.json` catalog alone doesn't prove your account can use a model), claude pins are probed budget-capped (claude has no list command — new ids enter via `--claude-candidates`), grok pins are checked against `grok models` (a login-aware entitlement list, so a listed pin is OK without a live turn), agy is unverifiable (`--model` is inert in `--print` mode; the judge always runs whatever model is selected in the agy UI). `--no-probe` is the free/fast degraded audit. Exits 1 when any pin can't run as configured.
+- `tasks models detect [--json]` is the fast, no-network inventory: which agent CLIs are installed and each one's selectable models + reasoning-effort levels. It reads local caches and cheap listing commands only, so it never proves availability the way `check` does — it lists *choices*. `/playbook:init` reads it to build the panel menu.
 - `tasks models select` refreshes interactively: shows the report, takes the new panel + default judge, writes `.agent/models.json` — creating it on fresh installs and preserving keys it doesn't manage.
+- `tasks models set --panel a,b --default-judge c [--force]` is the non-interactive twin — same validation and no-probe audit, flag-driven. A dead pin aborts unless `--force`; this is how `/playbook:init` persists the panel it asked you about.
 - `tasks doctor` warns (never fails) on a missing models.json or dead pins, using the cheap checks only.
 
 ### Failure semantics

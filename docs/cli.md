@@ -34,7 +34,11 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 **`tasks models check [--no-probe]`** — audit every judge pin against live availability. Pinned model ids rot as providers retire models; this catches it before a review silently degrades. Probes cost a few tiny model calls; `--no-probe` is the free degraded audit. Exits 1 when a pin can't run as configured.
 
-**`tasks models select`** — guided refresh of the panel: shows the availability report, takes the new seat list, writes `.agent/models.json` (creating it on fresh installs, preserving keys it doesn't manage).
+**`tasks models detect [--json]`** — fast, no-network inventory of the installed agent CLIs (claude / codex / agy / grok / pi) and each one's selectable models plus supported reasoning-effort levels (codex/grok). Reads local caches and cheap listing commands only — nothing is live-probed. This is what `/playbook:init` reads to offer a panel menu; `--json` emits the machine-readable form.
+
+**`tasks models select`** — guided (interactive) refresh of the panel: shows the availability report, takes the new seat list, writes `.agent/models.json` (creating it on fresh installs, preserving keys it doesn't manage).
+
+**`tasks models set --panel a,b --default-judge c [--force]`** — the non-interactive twin of `select`: same spec validation and no-probe availability audit, driven by flags. A dead pin aborts (exit 1) unless `--force` is passed; `--panel` alone leaves the default judge untouched (and vice-versa); `--panel ""` clears the panel. `/playbook:init` uses it to persist the user's chosen panel.
 
 ## Analysis & retro
 

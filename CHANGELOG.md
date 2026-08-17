@@ -2,6 +2,46 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.14] — 2026-08-17
+
+Interactive `/playbook:init` — the panel becomes a per-machine choice instead of
+a fixed shipped default. Everything else stays the single correct value on
+purpose: the panel still gates **every** close (`panel_required_for: "all"`),
+merges run only via `/playbook:merge`, and standing gates keep their optimal
+defaults. The only thing that genuinely varies from machine to machine is *which
+agent CLIs are installed*, so that — and the project's verify command — is all
+init now asks about.
+
+### Added
+
+- **`tasks models detect [--json]`.** Fast, no-network inventory of the installed
+  agent CLIs (claude / codex / agy / grok / pi) with each one's selectable models
+  and — for codex and grok — the reasoning-effort levels each model accepts. Reads
+  only local surfaces (`~/.codex/models_cache.json`, Claude Code's `settings.json`)
+  and the two cheap listing commands (`agy models`, `grok models`); no model is
+  live-probed. This is the menu `/playbook:init` offers before it writes a panel.
+- **`tasks models set --panel a,b --default-judge c [--force]`.** Non-interactive
+  twin of `tasks models select`: writes `.agent/models.json` with the *same* spec
+  validation and no-probe availability audit, but driven by flags instead of
+  prompts. A dead pin aborts (exit 1) rather than prompting "write anyway?" —
+  `--force` overrides. `/playbook:init` uses it to persist the user's panel choice.
+
+### Changed
+
+- **`/playbook:init` is now interactive.** After the mechanical setup it (1) runs
+  `models detect`, asks the user which models + effort go on the review panel
+  (recommending ≥2, cross-vendor when available; all-Claude `opus, sonnet` is the
+  default when only Claude is installed), optionally live-verifies the chosen panel
+  with `models check`, and writes it with `models set`; and (2) auto-detects the
+  project's full verify command (typecheck **and** tests **and** lint), confirms it
+  with the user — the confirm step catches a *missed* check, never narrows the bar —
+  and writes it to `.agent/config.json`. A headless run keeps the shipped
+  all-Claude defaults and leaves `verify` unset rather than guessing.
+- `models_check.py` internals refactored so `select` and `set` share one spec
+  validator (`spec_error`), one no-probe audit (`_audit_proposed`), and one atomic
+  writer (`_write_panel`) — no behavior change to `select`, whose tests are
+  unchanged.
+
 ## [1.5.13] — 2026-08-17
 
 The final-acceptance batch: a five-model review panel (opus, sonnet, two codex
