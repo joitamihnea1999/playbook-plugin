@@ -402,9 +402,15 @@ def check_mindmap_node_freshness(project_path) -> "dict | None":
             continue
         worst = None
         for cand in cited:
+            # A path that no longer exists on disk is the STALENESS check's job
+            # (`check_mindmap_staleness`), not freshness — skip it so a git-rm'd
+            # file (whose `git log` history survives) can't be double-reported
+            # here as "changed since the node".
+            if not (project_path / cand).exists():
+                continue
             times = _commit_times(cand)
             if not times:
-                continue  # untracked or deleted (deletion is the other check)
+                continue  # untracked (no history to compare against)
             newer = sum(1 for t in times if t > node_time)
             if newer >= threshold and (worst is None or newer > worst[1]):
                 worst = (cand, newer)
@@ -475,7 +481,10 @@ def check_mindmap_dangling_links(project_path) -> "dict | None":
                 dangling.add((cur, tgt))
 
     findings = [
-        f"MIND_MAP.md node [{src}] links to [{tgt}], which is not a defined node"
+        (f"MIND_MAP.md node [{src}] links to [{tgt}], which is not a defined node"
+         if src is not None else
+         f"MIND_MAP.md preamble (before the first node) links to [{tgt}], "
+         "which is not a defined node")
         for src, tgt in sorted(dangling, key=lambda p: (p[0] if p[0] is not None else -1, p[1]))
     ]
     cfg = load_config(project_path)
@@ -552,9 +561,13 @@ def check_mindmap_wellformed(project_path) -> "dict | None":
                 continue
             if infence:
                 continue
-            body = ln[len(f"[{nid}]"):] if j == idx else ln  # skip self-def token
-            for m in link_re.finditer(body):
-                linked_to.add(int(m.group(1)))
+            for m in link_re.finditer(ln):
+                tgt = int(m.group(1))
+                # A node referencing its OWN id (the definition token, or a
+                # self-mention in its body) does not make it reachable from
+                # elsewhere — else a self-citing island hides from this check.
+                if tgt != nid:
+                    linked_to.add(tgt)
     unreachable = [nid for nid in dict.fromkeys(defined)
                    if nid not in routing and nid not in linked_to]
 

@@ -77,6 +77,12 @@ class Wellformed(unittest.TestCase):
         r = self._run(body)
         self.assertIn("node [6] is unreachable", r["output"])
 
+    def test_self_referencing_island_is_still_unreachable(self):
+        # A node that cites its OWN id must not count as reaching itself, or a
+        # self-citing island hides from the check (1.5.26 audit finding).
+        r = self._run(CLEAN + "[8] **Self Island** - see myself [8], nothing else.\n")
+        self.assertIn("node [8] is unreachable", r["output"])
+
     def test_no_map_returns_none(self):
         self.assertIsNone(check_mindmap_wellformed(self.d))
 

@@ -2,7 +2,41 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.25] — 2026-08-17
+## [1.5.26] — 2026-08-17
+
+Verification pass over the 1.5.21–1.5.25 context-economy arc: an independent
+3-way adversarial audit (recall/bootstrap, the map audit-checks, compact/
+environment), every finding re-reproduced by hand before fixing. No high/medium
+defects, no crashes on the enforcement path, advisory-never-fails intact. Fixed
+the surfaced edges red-first.
+
+### Fixed
+
+- **`tasks recall <unicode-digit>` crashed** — `str.isdigit()` is true for `²`/`⁵`/`₃`
+  but `int()` rejects them, so node-id mode threw an uncaught `ValueError`. Now
+  ASCII-guarded; a superscript falls through to keyword search.
+- **`compact` silently folded a CRLF `task.md` to LF** (whole file) and archived
+  the block non-verbatim — it now reads/writes with newline preservation, so a
+  Windows task.md keeps its line endings and the archive is byte-exact.
+- **`compact` wrote `task.md` non-atomically** — a failed write could leave the
+  block in BOTH files (a retry double-appended) and surfaced a raw traceback.
+  Now: append archive → **atomic** task.md write (temp + `os.replace`) → on
+  failure, roll the archive back and exit with a clean message. All-or-nothing.
+- **`compact` treated markers inside a ``` fence as real** and skipped empty
+  blocks poorly — `_blocks` is now fence-aware, and an empty block is left in
+  place instead of writing a hollow archive entry.
+- **`mindmap-wellformed` missed a self-referencing island** — a node citing its
+  own id counted as reaching itself. Self-links no longer count toward
+  reachability.
+- **`mindmap-node-freshness` could flag a git-rm'd path** (its `git log` history
+  survives), overlapping the staleness check — it now skips paths absent from
+  disk, matching its contract.
+- **`recall` gave no signal on an unbalanced code fence** (unlike the rest of the
+  module) and **silently showed the last of a duplicate id** — both now warn.
+  A dangling link in the map preamble reads as "preamble", not "node [None]".
+  The bootstrap index notice is grammatical for a single indexed node.
+
+
 
 Context-economy pass, part 5: the map's *structure* is now checked mechanically,
 not just its content — so "how the map is written" stops depending on the author

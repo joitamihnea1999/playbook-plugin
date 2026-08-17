@@ -176,5 +176,58 @@ class Compact(unittest.TestCase):
         self.assertIn("something precious", self.task_md.read_text(encoding="utf-8"))
 
 
+    # --- 1.5.26 hardening (audit findings) --------------------------------
+
+    def test_crlf_task_md_is_preserved_byte_for_byte(self):
+        crlf = ("# 012\r\nlive line\r\n<!-- archive:start -->\r\n"
+                "cold1\r\ncold2\r\n<!-- archive:end -->\r\ntail\r\n")
+        self.task_md.write_text(crlf, encoding="utf-8", newline="")
+        code, _, err = self._run("12")
+        self.assertEqual(code, 0, err)
+        with self.task_md.open(encoding="utf-8", newline="") as fh:
+            after = fh.read()
+        # Unmarked lines keep their CRLF (read_text-based code folded them to LF).
+        self.assertIn("live line\r\n", after)
+        self.assertIn("tail\r\n", after)
+        self.assertNotIn("live line\n\r", after)
+        # And the archived block is byte-verbatim CRLF.
+        with (self.task_dir / "task-archive.md").open(encoding="utf-8", newline="") as fh:
+            arch = fh.read()
+        self.assertIn("cold1\r\ncold2\r\n", arch)
+
+    def test_markers_inside_a_fence_are_ignored(self):
+        body = ("# 012\n- [x] gate\n```\n<!-- archive:start -->\n"
+                "an example of the ritual\n<!-- archive:end -->\n```\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, _ = self._run("12")
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to compact", out)   # the fenced markers are not real
+        self.assertIn("an example of the ritual", self.task_md.read_text(encoding="utf-8"))
+        self.assertFalse((self.task_dir / "task-archive.md").exists())
+
+    def test_empty_block_is_skipped_not_hollow_archived(self):
+        body = ("# 012\n- [x] gate\n<!-- archive:start -->\n<!-- archive:end -->\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, _ = self._run("12")
+        self.assertEqual(code, 0)
+        self.assertIn("empty", out)
+        self.assertFalse((self.task_dir / "task-archive.md").exists())
+
+    def test_write_failure_rolls_back_archive_and_exits_clean(self):
+        # Force the atomic task.md write to fail AFTER the archive append; the
+        # block must not be left in the archive (else a retry double-appends),
+        # task.md must be untouched, and there must be no traceback.
+        from unittest import mock
+        import tasks.compact as C
+        with mock.patch.object(C.os, "replace", side_effect=OSError("boom")):
+            code, _, err = self._run("12")
+        self.assertEqual(code, 1)
+        self.assertIn("rolled back", err)
+        self.assertNotIn("Traceback", err)
+        # task.md still has the block; archive was rolled back (never created).
+        self.assertIn("Round 1 findings", self.task_md.read_text(encoding="utf-8"))
+        self.assertFalse((self.task_dir / "task-archive.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

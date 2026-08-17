@@ -134,6 +134,15 @@ class TestBootstrapLoader(unittest.TestCase):
         # Every node is still reachable: routing (full) + indexed (titled) == all.
         self.assertEqual(sorted(set(ids_in(out))), list(range(1, 41)))
 
+    def test_index_notice_is_grammatical_for_a_single_node(self):
+        # 6 fat nodes over budget → routing 5 + exactly ONE indexed → singular.
+        content = map_of(range(1, 7), node_chars=1600)
+        self.assertGreater(len(content), 8000)
+        self._write(content)
+        out = _bootstrap_mind_map(self.root)
+        self.assertIn("1 node below is", out)
+        self.assertNotIn("1 nodes below are", out)
+
     def test_index_is_far_smaller_than_the_full_dump(self):
         content = map_of(range(1, 41), node_chars=400)
         self._write(content)

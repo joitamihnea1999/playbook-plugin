@@ -154,6 +154,19 @@ class NodeFreshness(unittest.TestCase):
         self._commit("init", "2020-01-01T00:00:00")
         self.assertIsNone(self._out(node_freshness=False))
 
+    def test_deleted_cited_path_is_left_to_the_staleness_check(self):
+        # A git-rm'd file keeps its `git log` history, so freshness must NOT
+        # count it as "changed since the node" — deletion is the staleness
+        # check's job (1.5.26 audit finding). Even at threshold 1.
+        self._write("MIND_MAP.md",
+                    "[1] **Overview** - x.\n\n[2] **Gone** - lived in src/gone.py [1].\n")
+        self._write("src/gone.py", "x=1\n")
+        self._commit("init", "2020-01-01T00:00:00")
+        self._git("rm", "-q", "src/gone.py")
+        self._commit("remove gone", "2020-02-01T00:00:00")
+        r = self._out(node_freshness_commits=1)
+        self.assertEqual(r["status"], "clean", r["output"])
+
     def test_severity_is_advisory_by_default(self):
         self._write("MIND_MAP.md", MAP)
         self._write("src/store.py", "cache = {}\n")

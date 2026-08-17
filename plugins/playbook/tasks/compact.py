@@ -25,8 +25,10 @@ Leaf imports only (core/shared); never a command module.
 from __future__ import annotations
 
 import datetime
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 from tasks.core import resolve_agent_dir
@@ -34,6 +36,24 @@ from tasks.shared import find_project_root
 
 _START = "<!-- archive:start -->"
 _END = "<!-- archive:end -->"
+_FENCE = "```"
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write `text` to `path` all-or-nothing (temp file in the same dir, then
+    os.replace) and WITHOUT newline translation, so a CRLF task.md is preserved
+    byte-for-byte and a crash mid-write can never leave a truncated trace."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".compact-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 _GATE_RE = re.compile(r"^\s*- \[[ xX]\]")
 _PROTECTED_HEADING_RE = re.compile(
     r"^##\s+(Intent|Why|Design|Work Plan|Parked|Status|Risk|References)\b", re.IGNORECASE)
@@ -52,11 +72,18 @@ def _blocks(lines: "list[str]") -> "tuple[list[tuple[int, int]], str | None]":
     or (…, error) when the markers do not nest cleanly. Nesting is not allowed —
     a second start before an end, an end with no open start, or an unclosed start
     are all refused, because guessing the intent is exactly how a wrong region
-    gets moved."""
+    gets moved. Markers inside a ``` code fence are ignored — a task that quotes
+    the ritual in an example must not have its example moved."""
     spans: "list[tuple[int, int]]" = []
     open_at = None
+    infence = False
     for i, ln in enumerate(lines):
         s = ln.strip()
+        if s.startswith(_FENCE):
+            infence = not infence
+            continue
+        if infence:
+            continue
         if s == _START:
             if open_at is not None:
                 return spans, f"nested {_START} at line {i + 1} (previous opened at line {open_at + 1})"
@@ -99,7 +126,11 @@ def cmd_compact(cmd_args) -> None:
         print(f"Error: no task {task_num} found under .agent/tasks/.", file=sys.stderr)
         sys.exit(1)
 
-    text = task_md.read_text(encoding="utf-8", errors="replace")
+    # newline="" preserves the file's real line endings (read_text would fold
+    # CRLF→LF and silently rewrite every line of a Windows task.md).
+    with task_md.open(encoding="utf-8", errors="replace", newline="") as _fh:
+        text = _fh.read()
+    nl = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines(keepends=True)
     spans, err = _blocks(lines)
     if err:
@@ -125,39 +156,67 @@ def cmd_compact(cmd_args) -> None:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     moved_blocks = []
     total_lines = 0
-    # Rebuild task.md, replacing each span (markers included) with a pointer.
+    # Rebuild task.md, replacing each NON-EMPTY span (markers included) with a
+    # pointer. An empty block (start immediately followed by end) has nothing to
+    # move — leave it untouched rather than writing a hollow archive entry.
     out: "list[str]" = []
     cursor = 0
     for start, end in spans:
         out.extend(lines[cursor:start])
         inner = lines[start + 1:end]
+        if not inner:
+            out.extend(lines[start:end + 1])   # keep the empty marker pair as-is
+            cursor = end + 1
+            continue
         total_lines += len(inner)
         moved_blocks.append("".join(inner))
-        pointer = f"> _[compacted {len(inner)} lines → task-archive.md ({stamp})]_\n"
-        out.append(pointer)
+        out.append(f"> _[compacted {len(inner)} lines → task-archive.md ({stamp})]_{nl}")
         cursor = end + 1
     out.extend(lines[cursor:])
     new_task_text = "".join(out)
 
+    if not moved_blocks:
+        print(f"Nothing to compact in {task_md.parent.name}/task.md — "
+              f"the {_START} … {_END} block(s) are empty.")
+        return
+
     archive_path = task_md.parent / "task-archive.md"
     archive_add = "".join(
-        f"## Compacted {stamp}\n\n{blk.rstrip()}\n\n---\n\n" for blk in moved_blocks)
+        f"## Compacted {stamp}{nl}{nl}{blk.rstrip()}{nl}{nl}---{nl}{nl}"
+        for blk in moved_blocks)
 
     if dry_run:
-        print(f"[dry-run] {len(spans)} block(s), {total_lines} line(s) would move "
+        print(f"[dry-run] {len(moved_blocks)} block(s), {total_lines} line(s) would move "
               f"from {task_md.parent.name}/task.md → task-archive.md.")
         return
 
-    # Append to archive first; only rewrite task.md if that succeeded, so a
-    # failure can never delete the trace without preserving it.
-    with archive_path.open("a", encoding="utf-8") as fh:
-        if archive_path.stat().st_size == 0:
-            fh.write(f"# Task {task_num} — Archived Narrative\n\n"
-                     "> Moved verbatim from task.md by `tasks compact`. "
-                     "History, not deletion.\n\n")
-        fh.write(archive_add)
-    task_md.write_text(new_task_text, encoding="utf-8")
+    # A MOVE must be all-or-nothing. Append to the archive first, remembering its
+    # prior size; then write task.md ATOMICALLY. If that write fails, roll the
+    # archive back to its prior size so the block is neither lost nor
+    # double-archived on a retry — and report cleanly instead of a traceback.
+    existed = archive_path.exists()
+    pre_size = archive_path.stat().st_size if existed else 0
+    header = ("" if (existed and pre_size) else
+              f"# Task {task_num} — Archived Narrative{nl}{nl}"
+              f"> Moved verbatim from task.md by `tasks compact`. "
+              f"History, not deletion.{nl}{nl}")
+    try:
+        with archive_path.open("a", encoding="utf-8", newline="") as fh:
+            fh.write(header + archive_add)
+        _atomic_write(task_md, new_task_text)
+    except OSError as e:
+        try:
+            if existed:
+                with open(archive_path, "rb+") as fh:
+                    fh.truncate(pre_size)
+            else:
+                archive_path.unlink()
+        except OSError:
+            pass
+        print(f"Error: could not write task.md ({e}). Archive rolled back — "
+              "nothing moved.", file=sys.stderr)
+        sys.exit(1)
 
-    print(f"Compacted {len(spans)} block(s), {total_lines} line(s) → "
+    print(f"Compacted {len(moved_blocks)} block(s), {total_lines} line(s) → "
           f"{archive_path.parent.name}/task-archive.md. "
-          f"task.md is now {len(new_task_text):,} bytes.")
+          f"task.md is now {len(new_task_text.encode('utf-8')):,} bytes.")

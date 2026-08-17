@@ -334,10 +334,12 @@ def _bootstrap_mind_map(project_path: Path,
     has_overflow = (project_path / "MIND_MAP_OVERFLOW.md").exists()
     fetch = ("`tasks recall <N>` (spans MIND_MAP.md + the fuller MIND_MAP_OVERFLOW.md)"
              if has_overflow else "`tasks recall <N>` or grep '^\\[N\\]' MIND_MAP.md")
+    n_indexed = len(indexed)
+    node_word = "node" if n_indexed == 1 else "nodes"
     notice = (
         f"[... MIND MAP INDEX — routing nodes [{first_id}]-[{last_id}] shown in "
-        f"full above; the {len(indexed)} nodes below are listed by TITLE ONLY. "
-        f"This is NOT their content. Fetch any one with: {fetch}. "
+        f"full above; the {n_indexed} {node_word} below {'is' if n_indexed == 1 else 'are'} "
+        f"listed by TITLE ONLY. This is NOT their content. Fetch any one with: {fetch}. "
         f"Locate a node by topic: `tasks recall <keyword>` ...]\n\n"
     )
     return f"{preamble}{routed}\n{notice}{toc}\n"
@@ -953,16 +955,32 @@ def cmd_recall(cmd_args) -> None:
         print("Error: MIND_MAP.md not found — nothing to recall.", file=sys.stderr)
         sys.exit(1)
 
-    # ── node-id mode ──
-    if len(positional) == 1 and positional[0].isdigit():
+    # Fail loud (as the rest of the module does) when a map has an unbalanced
+    # ``` code fence: node boundaries after it are unreliable, so retrieval may
+    # miss or misattribute nodes. Warn, then answer best-effort.
+    for _label, _content in (("MIND_MAP.md", main), ("MIND_MAP_OVERFLOW.md", overflow)):
+        if _content and _node_starts(_content.splitlines(keepends=True))[1]:
+            print(f"⚠ {_label} has an unbalanced ``` code fence — node boundaries "
+                  "after it are unreliable; results may be incomplete. Run `tasks audit`.",
+                  file=sys.stderr)
+
+    # ── node-id mode ── (ASCII digits only: str.isdigit() also passes for '²'/'⁵'
+    # etc., which int() then rejects — guard so a superscript falls to keyword
+    # search instead of crashing).
+    if len(positional) == 1 and positional[0].isascii() and positional[0].isdigit():
         nid = int(positional[0])
-        main_nodes = {n: (t, x) for n, t, x in _iter_map_nodes(main)}
+        main_list = _iter_map_nodes(main)
+        main_nodes = {n: (t, x) for n, t, x in main_list}
         over_nodes = {n: (t, x) for n, t, x in _iter_map_nodes(overflow)} if overflow else {}
+        dup = sum(1 for n, _, _ in main_list if n == nid) > 1
         if nid not in main_nodes and nid not in over_nodes:
             print(f"No node [{nid}] in MIND_MAP.md"
                   f"{' or MIND_MAP_OVERFLOW.md' if overflow else ''}. "
                   "Run `tasks recall <keyword>` or `tasks bootstrap` to see the index.")
             return
+        if dup:
+            print(f"⚠ node [{nid}] is defined more than once in MIND_MAP.md — "
+                  "showing the last; run `tasks audit` to fix the duplicate.")
         if nid in main_nodes:
             print(f"=== [{nid}] from MIND_MAP.md ===")
             print(main_nodes[nid][1].rstrip())

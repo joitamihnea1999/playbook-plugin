@@ -148,6 +148,32 @@ class Recall(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("MIND_MAP.md not found", err)
 
+    # --- 1.5.26 hardening (audit findings) --------------------------------
+
+    def test_unicode_digit_does_not_crash(self):
+        # str.isdigit() is True for '⁵'/'²'/'₃' but int() rejects them — must not
+        # crash; falls through to keyword search (which finds nothing).
+        for ch in ("⁵", "²", "₃"):
+            code, out, err = self._run(ch)
+            self.assertEqual(code, 0, f"{ch!r}: {err}")
+            self.assertNotIn("Traceback", err)
+            self.assertIn("No node matched", out)
+
+    def test_unbalanced_fence_warns(self):
+        (self.root / "MIND_MAP.md").write_text(
+            "[1] **Real** - x.\n\n```\nopen fence never closed\n\n[2] **Two** - lost.\n",
+            encoding="utf-8")
+        code, out, err = self._run("2")
+        self.assertEqual(code, 0)
+        self.assertIn("unbalanced", err)      # the signal the module owed the agent
+
+    def test_duplicate_id_is_flagged(self):
+        (self.root / "MIND_MAP.md").write_text(
+            "[5] **First** - alpha [1].\n[5] **Second** - beta [1].\n", encoding="utf-8")
+        code, out, _ = self._run("5")
+        self.assertEqual(code, 0)
+        self.assertIn("defined more than once", out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

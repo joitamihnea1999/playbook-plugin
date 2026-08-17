@@ -63,6 +63,14 @@ class DanglingLinks(unittest.TestCase):
         # [1.5.0] and [1-5] must not register as links to undefined nodes.
         self.assertEqual(r["status"], "clean", r["output"])
 
+    def test_preamble_dangling_link_labeled_not_none(self):
+        # A dangling [N] before the first node was reported as "node [None]";
+        # it should read as preamble (1.5.26 audit finding).
+        r = self._map("intro links to [42]\n\n[1] **A** - a node.\n")
+        self.assertEqual(r["status"], "findings")
+        self.assertIn("preamble", r["output"])
+        self.assertNotIn("[None]", r["output"])
+
     def test_no_map_returns_none(self):
         self.assertIsNone(check_mindmap_dangling_links(self.d))
 
