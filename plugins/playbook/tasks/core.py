@@ -1,6 +1,7 @@
 """Task management operations for .agent/tasks/ directories."""
 from __future__ import annotations
 
+import datetime
 import functools
 import json
 import math
@@ -8,9 +9,10 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-VERSION = "1.4.7"
+VERSION = "1.5.32"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -62,15 +64,38 @@ def find_agent_root_pid() -> int | None:
     return last_agent_pid
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _sanitize_session_id(sid: str) -> str:
+    """Accept an externally-supplied session id ONLY if it is a safe single
+    directory component; otherwise return "" so the caller falls back to the
+    derived pid (C4).
+
+    This value becomes a path component in `rm -rf .agent/sessions/<id>` and in
+    EVERY hook's path composition, so an unsanitized `PLAYBOOK_SESSION_ID=../tasks`
+    deleted the task DB. Allow the canonical `pid-*` ids AND the sanctioned
+    `judge` session id (both match the charset); reject anything with a slash,
+    whitespace, control char, or the traversal components `.`/`..`. Neutralize
+    (not hard-reject) because this resolver is shared by non-enforcing hooks
+    that must keep working (fail-open decree) — a bad value simply loses its
+    override, it does not abort the session.
+    """
+    if sid in (".", ".."):
+        return ""
+    return sid if _SESSION_ID_RE.fullmatch(sid) else ""
+
+
 def resolve_session_id() -> str:
     """Resolve session_id used to namespace .agent/sessions/<id>/.
 
-    Order: PLAYBOOK_SESSION_ID env → ancestor scan (root agent PID) →
-    immediate-parent PID. The ancestor scan is the robust path: it survives
+    Order: PLAYBOOK_SESSION_ID env (sanitized) → ancestor scan (root agent PID)
+    → immediate-parent PID. The ancestor scan is the robust path: it survives
     env-propagation failures (VSCode CLAUDE_ENV_FILE quirks, missing wrappers,
-    subprocess loss). Bash hooks mirror this resolver in gate-echo-lib.sh.
+    subprocess loss). Bash hooks mirror this resolver — including the
+    sanitization — in gate-echo-lib.sh.
     """
-    sid = os.environ.get("PLAYBOOK_SESSION_ID", "")
+    sid = _sanitize_session_id(os.environ.get("PLAYBOOK_SESSION_ID", ""))
     if sid:
         return sid
     # On Windows the ancestor scan is skipped (see find_agent_root_pid) and a
@@ -178,10 +203,14 @@ def resolve_agent_dir(project_path: Path) -> Path:
     Legacy mode:     .agent/current_user absent  → .agent/  (unchanged)
     Invalid content: print error and exit(1).
     """
+    # str accepted — this is THE path chokepoint every helper funnels through,
+    # and a str caller crashed scan_parked live in the 1.5.3 gauntlet (same
+    # str/Path disease fixed in audit at F7a).
+    project_path = Path(project_path)
     marker = project_path / ".agent" / "current_user"
     if not marker.exists():
         return project_path / ".agent"
-    name = marker.read_text(encoding="utf-8").strip()
+    name = marker.read_text(encoding="utf-8", errors="replace").strip()
     _validate_username(name)
     return project_path / ".agent" / name
 
@@ -273,6 +302,120 @@ def _parse_budget(raw: str) -> str:
     if not math.isfinite(value) or value < 0:
         raise ValueError(raw)
     return raw
+
+
+# A verify command with no ceiling can hang `tasks work done` forever — in
+# headless use that is a silent deadlock, and a guard that can hang is a guard
+# that gets bypassed. Same _parse_timeout grammar as the review knobs, so
+# 0/"none"/"unlimited" opts back into no ceiling deliberately.
+DEFAULT_VERIFY_TIMEOUT_SECS = 1200
+
+
+def resolve_verify_timeout(project_path: Path, cli_value: "str | None" = None) -> "int | None":
+    """Hard ceiling for ONE declared verify command at close (seconds; None =
+    unlimited). Precedence: cli > PLAYBOOK_VERIFY_TIMEOUT_SECS env > config.json
+    verify_timeout_secs > DEFAULT_VERIFY_TIMEOUT_SECS."""
+    return _first_valid(
+        (
+            (cli_value, "--verify-timeout"),
+            (os.environ.get("PLAYBOOK_VERIFY_TIMEOUT_SECS"), "PLAYBOOK_VERIFY_TIMEOUT_SECS"),
+            (load_config(project_path).get("verify_timeout_secs"), "config.json verify_timeout_secs"),
+        ),
+        _parse_timeout,
+        DEFAULT_VERIFY_TIMEOUT_SECS,
+    )
+
+
+# Context budgets are transport-relative (1.5.3): stdin seats (claude/codex)
+# have no OS argv limit — their ceiling is model context and attention, so they
+# get a HIGH budget; argv seats (grok/agy/pi) stay under the byte-guarded
+# default. Raising a ceiling is honest only alongside the receipts that report
+# what was actually delivered per seat.
+DEFAULT_REVIEW_CONTEXT_CHARS = 100_000
+DEFAULT_REVIEW_CONTEXT_CHARS_STDIN = 200_000
+
+
+def _parse_context_chars(raw) -> int:
+    if isinstance(raw, bool):
+        raise ValueError(raw)
+    value = int(str(raw).strip())
+    if value < 10_000:
+        # Below ~10k the payload can't even hold orientation — a config typo,
+        # not a choice.
+        raise ValueError(raw)
+    return value
+
+
+def resolve_review_context_chars(project_path: Path, stdin: bool = False) -> int:
+    """Per-transport judge context budget (chars). Precedence: env > config >
+    default. Keys: review_context_chars / review_context_chars_stdin."""
+    key = "review_context_chars_stdin" if stdin else "review_context_chars"
+    env = "PLAYBOOK_REVIEW_CONTEXT_CHARS_STDIN" if stdin else "PLAYBOOK_REVIEW_CONTEXT_CHARS"
+    default = DEFAULT_REVIEW_CONTEXT_CHARS_STDIN if stdin else DEFAULT_REVIEW_CONTEXT_CHARS
+    return _first_valid(
+        (
+            (os.environ.get(env), env),
+            (load_config(project_path).get(key), f"config.json {key}"),
+        ),
+        _parse_context_chars,
+        default,
+    )
+
+
+# A panel that reports "N/M succeeded" and exits 0 is a report, not a gate: a
+# 1/7 panel and a 7/7 panel are the same exit code (C4/P7). resolve_panel_quorum
+# turns that count into a verdict. Default is strict majority of the judges that
+# actually launched — a defensible floor that flags the real incident (a panel
+# shipping at 4/7 because three seats were silently 401) without demanding a
+# perfect run. Projects tighten or loosen it with `panel_quorum` in config.json.
+DEFAULT_PANEL_QUORUM = "majority"
+
+
+def _parse_quorum(raw, launched: int) -> int:
+    """Parse a panel_quorum value into a required-success count. Accepts:
+      * "majority" → floor(launched/2)+1 (strict majority);
+      * "all"      → every launched judge;
+      * an int ≥ 1 → that many judges (NOT clamped up: requiring more than
+        launched is a legitimate way to say "a full panel was expected", and it
+        correctly fails a degraded run rather than hiding the shortfall);
+      * a float in (0, 1] → that fraction of launched, rounded up.
+    Raises ValueError on anything else (bools, ≤0, out-of-range fractions)."""
+    if isinstance(raw, bool):
+        raise ValueError(raw)
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s == "majority":
+            return launched // 2 + 1
+        if s == "all":
+            return launched
+        raw = float(s) if ("." in s or "e" in s) else int(s)
+    if isinstance(raw, float):
+        if not math.isfinite(raw) or not (0.0 < raw <= 1.0):
+            raise ValueError(raw)
+        return max(1, min(launched, math.ceil(raw * launched)))
+    if isinstance(raw, int):
+        if raw < 1:
+            raise ValueError(raw)
+        return raw
+    raise ValueError(raw)
+
+
+def resolve_panel_quorum(project_path: Path, launched: int) -> int:
+    """Minimum succeeding judges for a panel PASS. Precedence:
+    PLAYBOOK_PANEL_QUORUM env > config.json panel_quorum > DEFAULT_PANEL_QUORUM.
+    Never raises — a bad value warns once and falls back to strict majority."""
+    launched = max(1, int(launched))
+    for raw, source in (
+        (os.environ.get("PLAYBOOK_PANEL_QUORUM"), "PLAYBOOK_PANEL_QUORUM"),
+        (load_config(project_path).get("panel_quorum"), "config.json panel_quorum"),
+    ):
+        if raw is None:
+            continue
+        try:
+            return _parse_quorum(raw, launched)
+        except (TypeError, ValueError):
+            _warn_bad_config_value_once(source, str(raw))
+    return _parse_quorum(DEFAULT_PANEL_QUORUM, launched)
 
 
 def _parse_timeout(raw) -> "int | None":
@@ -504,6 +647,821 @@ def resolve_review_soft_timeout(
     return soft
 
 
+# ── Multi-user lane discovery ─────────────────────────────────────────────────
+# Lived in global_retro_collect.py until that command was removed from this fork
+# (projects are islands here — nothing collects across them). doctor still needs
+# lane enumeration, so the helper moved to core rather than dying with its old
+# host.
+
+# Reserved `.agent/` children that are never user lanes.
+_RESERVED_AGENT_DIRS = {"tasks", "sessions", "monitor", "playbooks"}
+
+
+def _agent_lanes(project: Path) -> "list[tuple[str | None, Path]]":
+    """Return the task-bearing lanes of a project, each as (user, agent_reldir).
+
+    A lane is a directory holding a `tasks/` subdir:
+      - the root lane          → (None, Path('.agent'))
+      - a per-user lane [30]   → ('<user>', Path('.agent/<user>'))
+
+    Reserved `.agent/` children (tasks, sessions, monitor, playbooks) are never
+    treated as user lanes. Root single-user repos yield exactly [(None, .agent)].
+    """
+    agent = project / ".agent"
+    lanes: "list[tuple[str | None, Path]]" = []
+    if (agent / "tasks").is_dir():
+        lanes.append((None, Path(".agent")))
+    if agent.is_dir():
+        for child in sorted(agent.iterdir(), key=lambda p: p.name):
+            if (child.is_dir() and child.name not in _RESERVED_AGENT_DIRS
+                    and (child / "tasks").is_dir()):
+                lanes.append((child.name, Path(".agent") / child.name))
+    return lanes
+
+
+# ── Context selection for reviews (structure-aware, receipted) ───────────────
+# A task.md is append-ordered: Intent and Design sit at the top, the CURRENT
+# round's fixes at the very bottom. A naive head-slice (content[:budget]) keeps
+# the orientation and throws away exactly the evidence a review needs — a judge
+# then reviews the design four times and never sees a single fix (C3). Two rules
+# fix this: keep BOTH ends (orientation sections always, then the MOST RECENT
+# sections that fit), and NEVER truncate silently — return a receipt naming what
+# was dropped so the operator can compensate. Pure + unit-tested.
+
+# Sections that orient a reviewer regardless of age. Matched against the heading
+# text (already stripped of leading '#'). Handoff is here so a resume note is
+# never the thing that gets dropped (P12 depends on this).
+_ORIENTATION_HEADING = re.compile(r'^(intent|design|handoff)\b', re.IGNORECASE)
+
+
+def split_md_sections(text: str) -> "list[tuple[str | None, str]]":
+    """Split markdown into (heading, chunk) at level-1/2 headings ('# ', '## ').
+
+    The chunk includes its own heading line. Content before the first heading is
+    a leading chunk with heading None. Level-3+ headings stay inside their parent
+    section — task.md's structure is level-2 sections with level-3 subsections."""
+    sections: "list[tuple[str | None, str]]" = []
+    cur_heading: "str | None" = None
+    cur: list[str] = []
+    started = False
+    for ln in text.splitlines(keepends=True):
+        if re.match(r'^#{1,2}\s', ln):
+            if started:
+                sections.append((cur_heading, "".join(cur)))
+            cur_heading = ln.lstrip('#').strip()
+            cur = [ln]
+            started = True
+        else:
+            cur.append(ln)
+            started = True
+    if started:
+        sections.append((cur_heading, "".join(cur)))
+    return sections
+
+
+def select_task_context(text: str, budget: int) -> "tuple[str, str]":
+    """Fit a task.md into `budget` chars, keeping both ends, and describe the cut.
+
+    Returns (selected_text, receipt). The receipt is '' when nothing was dropped;
+    otherwise it is a single human line naming the kept and dropped sections, e.g.
+    'task.md 169,036 → 49,210 chars · kept: Intent, Design, Debrief · dropped:
+    Work Plan, Plan Review'. Elisions are also marked inline in selected_text so a
+    reader of the payload itself sees the gap.
+
+    Selection: (1) always keep any leading preamble and the orientation sections
+    (Intent / Design / Handoff); (2) then fill from the MOST RECENT section
+    backwards until the budget is spent. Order is preserved on output."""
+    if len(text) <= budget:
+        return text, ""
+
+    sections = split_md_sections(text)
+    n = len(sections)
+    keep = [False] * n
+    used = 0
+
+    def _pinned(chunk: str) -> bool:
+        # `<!-- pin -->` on its own line within the first 3 lines UNDER the
+        # heading marks an author-pinned section: the selection heuristic can't
+        # know which old section is load-bearing this time, so the author says
+        # so. The marker deliberately lives BELOW the heading, never inside it —
+        # heading text is parsed exactly by receipts/evidence/selection, and a
+        # decorated heading would break that family (the 1.5.1 accretion bug's
+        # shape).
+        for ln in chunk.splitlines()[1:4]:
+            if ln.strip() == "<!-- pin -->":
+                return True
+        return False
+
+    for i, (heading, chunk) in enumerate(sections):
+        if heading is None or _ORIENTATION_HEADING.match(heading) or _pinned(chunk):
+            keep[i] = True
+            used += len(chunk)
+
+    for i in range(n - 1, -1, -1):
+        if keep[i]:
+            continue
+        if used + len(sections[i][1]) <= budget:
+            keep[i] = True
+            used += len(sections[i][1])
+
+    out: list[str] = []
+    dropped: list[str] = []
+    run = 0
+    for i, (heading, chunk) in enumerate(sections):
+        name = heading if heading else "(preamble)"
+        if keep[i]:
+            if run:
+                out.append(
+                    f"\n\n[... {run} section(s) elided to fit context budget ...]\n\n"
+                )
+                run = 0
+            out.append(chunk)
+        else:
+            dropped.append(name)
+            run += 1
+    if run:
+        out.append(f"\n\n[... {run} section(s) elided to fit context budget ...]\n\n")
+
+    selected = "".join(out)
+    # Safety floor: orientation alone can exceed the budget. Keep it (orientation
+    # wins) but bound the payload so it can never overflow an argv limit, and say
+    # so in the receipt — silence is the one thing forbidden here.
+    overflowed = False
+    if len(selected) > budget:
+        selected = selected[:budget] + "\n\n[... hard-truncated: orientation exceeded budget ...]"
+        overflowed = True
+
+    kept_names = [
+        (sections[i][0] or "(preamble)") for i in range(n) if keep[i]
+    ]
+    receipt = (
+        f"task.md {len(text):,} → {len(selected):,} chars"
+        f" · kept: {', '.join(kept_names) or '(none)'}"
+        f" · dropped: {', '.join(dropped) or '(none)'}"
+    )
+    if overflowed:
+        receipt += (" · WARNING: orientation+pinned sections exceed the budget, "
+                    "hard-truncated — unpin something or raise the budget")
+    return selected, receipt
+
+
+# ── Consequence classification + evidence contract at close (P1 / P2) ────────
+# The playbook had no concept of EVIDENCE (close wrote the string "done" and
+# checked nothing) and no concept of CONSEQUENCE (review depth followed diff
+# shape, so a docs-only diff that upgraded "uncalibrated" to "audited accurate"
+# got a light close). These helpers add both, as pure/testable policy.
+
+def append_standing_gates(content: str, cfg: dict, task_num: int) -> "tuple[str, list[str]]":
+    """Append project-declared standing gates as the FINAL gates of a task.
+
+    `standing_gates` in .agent/config.json: a list of {title, text} objects.
+    Field evidence (F8, StrataDB batches 2/2b): the project's journal gate was
+    hand-relocated below Pre-review VERBATIM on consecutive tasks — a gate a
+    project wants on EVERY task should come from generation, not from the
+    agent remembering to re-add it. Opt-in: key absent/empty → content
+    returned byte-identical.
+
+    Each valid entry becomes `## <title>` + one `- [ ] <text>` gate, appended
+    at the very END of the assembled content (after any custom playbook
+    append) in declared order — the last gates of the document. `{{NNN}}` in
+    title/text substitutes the zero-padded task number (the journal use case:
+    `journal/{{NNN}}.md`).
+
+    Returns (content, issues). Malformed entries and titles colliding with an
+    existing section heading are SKIPPED and named in `issues` (callers print
+    them) — never silently written, never silently dropped. Title and text are
+    whitespace-collapsed to one line, so a config value cannot open a new
+    heading line or gate line of its own (the #09 multi-heading disease, via
+    config).
+    """
+    raw = cfg.get("standing_gates")
+    if raw is None:
+        return content, []
+    if not isinstance(raw, list):
+        return content, [
+            f"standing_gates must be a list of {{title, text}} objects, "
+            f"got {type(raw).__name__} — ignored"]
+    issues: "list[str]" = []
+    nnn = f"{int(task_num):03d}"
+    existing = {ln.strip()[3:].strip().lower()
+                for ln in content.splitlines() if ln.strip().startswith("## ")}
+    blocks: "list[str]" = []
+    seen: "set[str]" = set()
+    for i, entry in enumerate(raw):
+        label = f"standing_gates[{i}]"
+        if not isinstance(entry, dict):
+            issues.append(f"{label}: not a {{title, text}} object — skipped")
+            continue
+        title = " ".join(str(entry.get("title", "")).replace("{{NNN}}", nnn).split())
+        title = title.lstrip("#").strip()
+        text = " ".join(str(entry.get("text", "")).replace("{{NNN}}", nnn).split())
+        if not title or not text:
+            issues.append(f"{label}: needs non-empty 'title' and 'text' — skipped")
+            continue
+        if title.lower() in existing or title.lower() in seen:
+            issues.append(
+                f"{label}: title {title!r} collides with an existing section "
+                "— skipped (a duplicate heading breaks the receipt/evidence parsers)")
+            continue
+        seen.add(title.lower())
+        blocks.append(f"## {title}\n- [ ] {text}")
+    if not blocks:
+        return content, issues
+    return content.rstrip("\n") + "\n\n" + "\n\n".join(blocks) + "\n", issues
+
+
+RISK_CLASSES = ("reversible", "irreversible", "assertive")
+# assertive = changes a CLAIM about the world (docs, a calibration, a measurement,
+# a "verified accurate"). irreversible = deletes/migrates data, rotates a secret,
+# rewrites history, or publishes. Both are high-consequence: they cannot be
+# light-closed for being small.
+HIGH_CONSEQUENCE = frozenset({"irreversible", "assertive"})
+DEFAULT_RISK = "unclassified"
+
+
+def _as_command_list(value) -> "list[str]":
+    """Coerce a verify-contract value (str | list) into a clean command list."""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [s for s in value if isinstance(s, str) and s.strip()]
+    return []
+
+
+def extract_risk(task_file) -> str:
+    """Read the `## Risk` classification from a task.md — the token on the line
+    after the heading. Returns one of RISK_CLASSES, or 'unclassified' if the
+    section is absent, blank, or holds an unrecognized value."""
+    try:
+        lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return DEFAULT_RISK
+    for i, ln in enumerate(lines):
+        if ln.strip() == "## Risk" and i + 1 < len(lines):
+            raw = lines[i + 1].strip().strip("`*_").lower()
+            token = raw.split()[0] if raw else ""
+            return token if token in RISK_CLASSES else DEFAULT_RISK
+    return DEFAULT_RISK
+
+
+def has_risk_section(task_file) -> bool:
+    """True when the task.md carries a `## Risk` HEADING at all.
+
+    This is the discriminator that lets `unclassified` fail closed without
+    breaking history, and it needs no new metadata: pre-1.5.0 templates have no
+    Risk section, so a missing heading means the gate was never offered to
+    whoever wrote the task, while a present-but-unset heading means it was
+    offered and skipped. Those are different facts and the close gate treats
+    them differently (see close_decision).
+
+    Deliberately LOOSER than extract_risk's exact `## Risk` match: any `## Risk…`
+    heading counts as offered, so the malformed one-liner `## Risk: assertive`
+    — which extract_risk correctly degrades to `unclassified` — lands on the
+    strict side rather than being mistaken for a pre-1.5.0 task. A skipped gate
+    and a botched gate are the same fact for this purpose. Erring toward strict
+    costs one word or a `--force --reason`; erring the other way is the fail-open
+    this function exists to remove.
+
+    Heading-only by design, and only THIS heading: prose that mentions risk must
+    not silently promote a task to the strict bar, `### Risk` is a different
+    level, and `## Risk Routing` is the light template's gate checklist rather
+    than the classification field. Unreadable file → False: fail toward the
+    documented legacy behavior, never toward inventing a block from an I/O error.
+    """
+    try:
+        lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    return any(re.match(r"^##\s+Risk\s*(:|$)", ln.strip()) for ln in lines)
+
+
+def tree_state_fingerprint(project_path: Path) -> str:
+    """Content fingerprint of the CODE STATE: sha256 over HEAD + porcelain status
+    + working diff, 12 hex chars. Names *what state* a panel reviewed or a close
+    certified — deterministic, unlike mtimes, and sensitive to uncommitted work
+    (which is the normal state at review time). Empty string when git is absent:
+    no fingerprint beats a fabricated one."""
+    import hashlib
+    # `.agent/` is EXCLUDED: triaging findings edits task.md between the panel
+    # and the close by design — the fingerprint must answer "did the CODE
+    # change?", not "did the workflow record change?" (else the advisory fires
+    # on every single close and gets ignored). Projects can extend the
+    # exclusion for owner-declared bookkeeping (`fingerprint_exclude` in
+    # .agent/config.json, git pathspec strings — e.g. "journal/"): a standing
+    # journal gate writes project-side files after the last panel by
+    # construction, and F18's irreversible gate must not tax that.
+    exclude = [":(exclude).agent"]
+    try:
+        _cfg = load_config(Path(project_path))
+    except Exception:
+        _cfg = {}
+    _raw_ex = _cfg.get("fingerprint_exclude")
+    if _raw_ex is not None:
+        if not isinstance(_raw_ex, list):
+            print("[playbook] fingerprint_exclude: must be a list of git "
+                  "pathspec strings — ignored", file=sys.stderr)
+        else:
+            for _i, _p in enumerate(_raw_ex):
+                if isinstance(_p, str) and _p.strip() and "\x00" not in _p:
+                    exclude.append(f":(exclude){_p.strip()}")
+                else:
+                    print(f"[playbook] fingerprint_exclude[{_i}]: needs a "
+                          "non-empty pathspec string — skipped", file=sys.stderr)
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project_path,
+                              capture_output=True, text=True).stdout.strip()
+        if not head:
+            return ""
+        # -uall enumerates untracked files INDIVIDUALLY (a bare `?? dir/`
+        # hides everything inside the directory from the hash below).
+        porcelain = subprocess.run(
+            ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
+            cwd=project_path, capture_output=True, text=True).stdout
+        diff = subprocess.run(
+            ["git", "diff", "HEAD", "--", ".", *exclude],
+            cwd=project_path, capture_output=True, text=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    # Untracked CONTENT is hashed explicitly (F18 judge C1, verified
+    # empirically): porcelain names an untracked file but never its bytes,
+    # and `diff HEAD` covers tracked paths only — so the pre-1.5.6
+    # fingerprint was blind to edits inside new files, which is exactly
+    # where post-panel fixes land (batches 4 and 5 both did). NOTE: this
+    # changes fingerprint values across the 1.5.5→1.5.6 upgrade; a stamp
+    # from an older round reads STALE once and self-heals at the next panel.
+    untracked_digest = hashlib.sha256()
+    for line in sorted(porcelain.splitlines()):
+        if not line.startswith("?? "):
+            continue
+        rel = line[3:].strip().strip('"')
+        try:
+            content = (Path(project_path) / rel).read_bytes()
+            fhash = hashlib.sha256(content).hexdigest()
+        except OSError:
+            fhash = "unreadable"
+        untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
+    return hashlib.sha256(
+        (head + porcelain + diff + untracked_digest.hexdigest())
+        .encode("utf-8", "replace")).hexdigest()[:12]
+
+
+# One round per `# Panel {Plan|Impl} Review` H1. judge.md stacks rounds NEWEST
+# FIRST (stack_judge_round), so rounds[0] is the round that decides anything.
+_ROUND_HEAD_RE = re.compile(r"^# Panel (Plan|Impl) Review\b", re.MULTILINE)
+_ROUND_VERDICT_RE = re.compile(r"\*\*PANEL VERDICT: (PASS|FAIL)\*\*")
+_ROUND_TREE_RE = re.compile(r"\*\*Tree-state:\*\* ([0-9a-f]{6,64})")
+JUDGE_MD_MAX_ROUNDS = 5
+
+
+def parse_judge_rounds(text: str) -> "list[dict]":
+    """Structural parse of judge.md into rounds, file order (newest first under
+    the stacking convention). Each round: {mode: 'plan'|'impl', verdict:
+    'PASS'|'FAIL'|None, tree_state: str, body: str}. Substring checks over the
+    whole file are how a stale or wrong-mode PASS satisfies a gate — the #09
+    disease; this parser exists so verdicts are read per-round, never per-file."""
+    matches = list(_ROUND_HEAD_RE.finditer(text))
+    rounds: "list[dict]" = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[m.start():end]
+        vm = _ROUND_VERDICT_RE.search(body)
+        tm = _ROUND_TREE_RE.search(body)
+        rounds.append({
+            "mode": m.group(1).lower(),
+            "verdict": vm.group(1) if vm else None,
+            "tree_state": tm.group(1) if tm else "",
+            "body": body,
+        })
+    return rounds
+
+
+def stack_judge_round(judge_md: Path, round_text: str,
+                      max_rounds: int = JUDGE_MD_MAX_ROUNDS) -> None:
+    """Prepend a panel round to judge.md, newest first — a re-run must never
+    clobber the previous round's verdicts (they are paid work and the record).
+    Retention keeps the newest `max_rounds`; older rounds live on in git history,
+    and the trim is announced in the file rather than silent."""
+    old_bodies: "list[str]" = []
+    if judge_md.exists():
+        try:
+            old_text = judge_md.read_text(encoding="utf-8", errors="replace")
+            old_rounds = parse_judge_rounds(old_text)
+            if old_rounds:
+                old_bodies = [r["body"].rstrip() for r in old_rounds]
+            elif old_text.strip():
+                # Legacy / taskless content that predates round headings: keep it
+                # as one opaque block — stacking must never silently destroy a
+                # prior record it merely cannot parse.
+                old_bodies = [old_text.strip()]
+        except OSError:
+            old_bodies = []
+    kept = [round_text.rstrip()] + old_bodies
+    trimmed = len(kept) - max_rounds
+    kept = kept[:max_rounds]
+    out = "\n\n".join(kept) + "\n"
+    if trimmed > 0:
+        out += (f"\n[... {trimmed} older round(s) trimmed — the full history is "
+                "in git ...]\n")
+    _atomic_write(judge_md, out)
+
+
+def resolve_panel_required(project_path: Path, risk: str) -> bool:
+    """Owner policy: does a close of a task with this risk class demand
+    PANEL-grade review evidence (all available judges), not just a single judge?
+
+    config.json `panel_required_for`: "all", or a list of risk classes
+    (["irreversible", "assertive"]). Absent/malformed → False (single-judge
+    evidence suffices, the pre-1.5.2 behavior). Rationale: another pair of eyes
+    is nearly free insurance when tokens are not the constraint — and a policy
+    that lives in config is enforced, where one that lives in memory decays."""
+    raw = load_config(project_path).get("panel_required_for")
+    if isinstance(raw, str):
+        # F5 (panel finding): the seeded default is "all". A near-miss like
+        # "ALL"/"All" used to fall through to False and SILENTLY disable the
+        # close gate — a case typo quietly downgrading the safety posture. Match
+        # case-insensitively, and WARN (never silently) on any other unrecognized
+        # scalar so a real typo is loud rather than a hidden fail-open.
+        rv = raw.strip().lower()
+        if rv == "all":
+            return True
+        if rv in ("", "none"):
+            return False
+        import sys as _sys
+        print(f"[playbook] config.json panel_required_for={raw!r} is not "
+              "recognized (use \"all\", a risk-class list like "
+              "[\"assertive\",\"irreversible\"], or omit) — treating as NO panel "
+              "requirement; fix it to restore the close gate.", file=_sys.stderr)
+        return False
+    if isinstance(raw, list):
+        return risk in raw or "all" in raw
+    return False
+
+
+def has_panel_impl_evidence(task_file) -> bool:
+    """PANEL-grade implementation evidence: judge.md's NEWEST round must be an
+    IMPL panel that reached quorum (PANEL VERDICT: PASS). Parsed structurally —
+    a stale impl-PASS buried under a newer FAIL (or under a newer PLAN round,
+    which implies replanning and new work) must never satisfy the close gate.
+    A FAIL-verdict panel is a degraded panel; a plan panel cannot vouch for what
+    was BUILT."""
+    p = Path(task_file)
+    jm = p.parent / "judge.md"
+    try:
+        if not jm.exists():
+            return False
+        rounds = parse_judge_rounds(jm.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+    if not rounds:
+        return False
+    newest = rounds[0]
+    return newest["mode"] == "impl" and newest["verdict"] == "PASS"
+
+
+def has_review_evidence(task_file, impl_only: bool = False) -> bool:
+    """True when a task carries evidence that a review actually ran: a judge.md
+    in its directory, or a checked plan/impl/panel-review gate in task.md. Used
+    by the close policy — an assertive/irreversible task with no such evidence
+    cannot light-close (the 056 fix).
+
+    impl_only=True demands IMPLEMENTATION-grade evidence: a plan review examines
+    intent before the work exists, so it cannot vouch for what was actually
+    built or claimed — a plan-phase judge.md must not satisfy the
+    high-consequence close gate forever after."""
+    p = Path(task_file)
+    try:
+        jm = p.parent / "judge.md"
+        if jm.exists():
+            if not impl_only:
+                return True
+            if "impl review" in jm.read_text(encoding="utf-8", errors="replace").lower():
+                return True
+        for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = ln.strip().lower()
+            if not s.startswith("- [x]"):
+                continue
+            if "impl-review" in s:
+                return True
+            if impl_only:
+                if "panel-review" in s and "impl" in s:
+                    return True
+            elif "panel-review" in s or "plan-review" in s:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def resolve_verify_commands(project_path: Path, risk: str = DEFAULT_RISK) -> "list[tuple[str, str]]":
+    """Ordered (source_label, command) list to run at close for a task of `risk`.
+
+    Config `verify` in .agent/config.json:
+        "verify": "npm run check"                 → one always-run command
+        "verify": {"_always": ["check", "test"],  → base bar for every close
+                   "assertive": ["check:claims"]}  → extra for that risk class
+    Values are a string or a list of strings. With no `verify` key, fall back to
+    the legacy `merge_verify.command` as the base bar (the seed this generalizes).
+    Returns [] when nothing is declared — the caller warns and allows the close."""
+    cfg = load_config(project_path)
+    v = cfg.get("verify")
+    out: "list[tuple[str, str]]" = []
+    if isinstance(v, str):
+        out += [("verify", c) for c in _as_command_list(v)]
+    elif isinstance(v, dict):
+        out += [("verify._always", c) for c in _as_command_list(v.get("_always"))]
+        if risk in RISK_CLASSES:
+            out += [(f"verify.{risk}", c) for c in _as_command_list(v.get(risk))]
+    elif v is None:
+        mv = cfg.get("merge_verify")
+        if isinstance(mv, dict):
+            out += [("merge_verify.command", c) for c in _as_command_list(mv.get("command"))]
+    return out
+
+
+def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
+                   has_review_evidence: bool, force: bool, reason: "str | None",
+                   panel_required: bool = False,
+                   risk_section_present: bool = False) -> "tuple[bool, str]":
+    """Pure close policy → (allowed, block_reason). block_reason is '' when allowed.
+
+    1. --force ALWAYS requires a non-empty reason: a forced close must be
+       self-documenting (task 046 was force-closed with 25 open gates and left no
+       trace). With a reason, force allows the close.
+    2. otherwise a FAILING declared verify blocks — the evidence bar.
+    3. panel_required (owner policy `panel_required_for`): EVERY close in scope
+       needs the evidence the caller passed — which the caller has resolved as
+       PANEL-grade (all available judges, quorum PASS). Another pair of eyes is
+       cheap insurance; the policy is enforced here so it cannot decay into a
+       habit someone forgets.
+    4. otherwise an assertive/irreversible task with NO review evidence blocks —
+       high-consequence work cannot be light-closed for being small (056).
+    5. an UNSET risk gate is held to that same bar. `unclassified` is in no risk
+       class, so the whole risk-keyed requirement used to evaluate to nothing and
+       the close proceeded on a warning — making "leave the field blank" the
+       cheapest path through the strictest gate in the system, chosen by the very
+       agent the gate constrains. `risk_section_present` separates the two facts
+       the old code conflated: no `## Risk` heading = a pre-1.5.0 task that was
+       never offered the gate (warn and pass, unchanged), heading present but
+       unset = offered and skipped (block). Default False so a caller that cannot
+       tell gets the lenient legacy path rather than an invented block."""
+    if force:
+        if not (reason and reason.strip()):
+            return False, '--force requires --reason "why" — a forced close must record why.'
+        return True, ""
+    if verify_declared and verify_failed:
+        return False, "declared verification failed — fix it, or override with --force --reason."
+    if panel_required and not has_review_evidence:
+        return False, (
+            "panel review required by policy (`panel_required_for`): close needs a "
+            "quorum-PASS panel IMPL review in judge.md — run `tasks panel-review <N> "
+            "--mode impl`, or override with --force --reason."
+        )
+    if risk in HIGH_CONSEQUENCE and not has_review_evidence:
+        return False, (
+            f"{risk} task cannot light-close: it changes "
+            + ("a claim about the world" if risk == "assertive" else "state that is hard to undo")
+            + " — run impl-review/panel-review first, or override with --force --reason."
+        )
+    if (risk == DEFAULT_RISK and risk_section_present
+            and not has_review_evidence):
+        return False, (
+            "## Risk was left unclassified, so the risk-keyed review requirement "
+            "cannot be evaluated — an unset gate is held to the high-consequence "
+            "bar rather than skipped. Set ## Risk to exactly one word "
+            "(reversible / irreversible / assertive), or supply impl-review "
+            "evidence, or override with --force --reason."
+        )
+    return True, ""
+
+
+def freshness_gate_decision(*, risk: str, panel_required: bool,
+                            evidence_carries: bool, round_fp: str, now_fp: str,
+                            force: bool, stale_ok: bool,
+                            stale_reason: "str | None") -> "tuple[bool, str]":
+    """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built):
+    an IRREVERSIBLE close resting on panel evidence must not silently rest on
+    a verdict that predates the closed code. Pure policy → (allowed, block_reason).
+
+    The gate is deliberately narrow (judge C3): it applies only when the panel
+    evidence would actually CARRY this close — rounds[0] is an impl round with
+    verdict PASS (`evidence_carries`) — so a FAIL round or a replan on top
+    falls through to the panel-evidence block instead of double-blocking, and
+    only when both fingerprints exist and disagree. --force bypasses close
+    policy wholesale as always (A8 — one blunt hatch, unchanged semantics);
+    `--stale-panel-ok --reason "..."` is the narrow exit, and the reason is
+    recorded in the receipt's freshness clause. Advisory (console note +
+    receipt clause, no block) remains the behavior for every other risk:
+    batch 5 showed re-panels happen voluntarily when the delta is material —
+    the block is reserved for the one place a wrong close cannot be undone."""
+    if force:
+        return True, ""
+    if risk != "irreversible" or not panel_required or not evidence_carries:
+        return True, ""
+    if not round_fp or not now_fp or round_fp == now_fp:
+        return True, ""
+    if stale_ok:
+        if stale_reason and stale_reason.strip():
+            return True, ""
+        return False, ('--stale-panel-ok requires --reason "why the post-panel '
+                       "delta doesn't need a re-panel\" — the acceptance must "
+                       "be on the record.")
+    return False, (
+        "risk is irreversible and the code state changed after the newest impl "
+        f"panel (tree-state {round_fp} → {now_fp}) — the panel's verdict "
+        "predates the code being closed.\n"
+        "  Either re-run:  tasks panel-review <N> --mode impl\n"
+        "  or record the delta judgment:  tasks work done --stale-panel-ok "
+        '--reason "..."\n'
+        "  (run `git status` / `git diff` to see what changed since the panel)"
+    )
+
+
+def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=None,
+                          dirty_files=0, freshness=None) -> str:
+    """Render ONE receipt ENTRY for the `## Verification Receipt` section (the
+    heading itself belongs to upsert_task_section, which keeps entries
+    newest-first). `entries` is a list of (source_label, command, rc, output);
+    an empty list means nothing was declared. Never raises.
+
+    `dirty_files`: modified/untracked count at close. The normal flow closes THEN
+    commits, so the stamped commit predates the verified code — observed live
+    (StrataDB task 005 closed with 100% of its work uncommitted). The receipt
+    must say so, or 'commit X' claims a state X does not contain."""
+    ts = timestamp or datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    commit_label = head_sha or "(unknown)"
+    if dirty_files:
+        commit_label += f" (+{dirty_files} uncommitted file(s) — verified code is NOT in this commit)"
+    out = [f"### {ts} · risk {risk} · commit {commit_label}"]
+    if reason:
+        out.append(f"- **Forced close, reason:** {reason.strip()}")
+    # F18 Leg 1: panel freshness is part of the durable record for EVERY close
+    # where an impl round exists (the F17 advisory was console-only and its
+    # firing at task 010 stayed unwitnessable forever). `freshness` is a dict:
+    # {verdict: "FRESH"|"STALE"|"NO-STAMP", round_fp, now_fp, accepted_reason}.
+    if freshness:
+        v = freshness.get("verdict")
+        if v == "NO-STAMP":
+            out.append("- **Panel tree-state:** no stamp recorded on the "
+                       "newest impl round — freshness unverifiable")
+        elif v in ("FRESH", "STALE"):
+            line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} "
+                    f"vs close {freshness.get('now_fp', '?')} — {v}")
+            if v == "STALE":
+                line += " (code changed after newest impl panel)"
+                ar = freshness.get("accepted_reason")
+                if ar:
+                    line += f', accepted: "{ar.strip()}"'
+            out.append(line)
+    if not entries:
+        out.append("- **Verification:** NONE DECLARED — nothing was verified at close. "
+                   "Declare `verify` in `.agent/config.json` to make close self-verifying.")
+    else:
+        out.append("- **Commands:**")
+        for label, command, rc, output in entries:
+            first = ""
+            for ln in (output or "").splitlines():
+                if ln.strip():
+                    first = ln.strip()
+                    break
+            status = "PASS" if rc == 0 else f"FAIL(exit {rc})"
+            cmd1 = command.strip().splitlines()[0] if command.strip() else command
+            out.append(f"    - [{status}] `{cmd1}` ({label})" + (f" — {first[:160]}" if first else ""))
+    out.append("")
+    return "\n".join(out)
+
+
+# ── Parked lifecycle (P9) + learning-loop triggers (P4) ──────────────────────
+# 48 of 68 executed tasks parked something and no command ever surfaced a parked
+# item again — one collision was parked three rounds running and stayed open. And
+# the two learning mechanisms (retro, intent) never fired in 79 tasks because
+# nothing triggered them. These helpers give parked items a lifecycle and give
+# the retro a trigger, as pure/testable functions.
+
+PARKED_PLACEHOLDER = (
+    "(Findings or ideas that emerged during work but are out of scope. "
+    "Describe each with enough context for a future task to pick it up.)"
+)
+
+
+def _parked_item_status(item: str) -> str:
+    """Classify a parked bullet as open / promoted / dismissed by its resolution
+    marker. Convention: `[promoted → NNN]` (or `→ task NNN`) = promoted;
+    `[dismissed: reason]` or a `~~struck~~` line = dismissed; otherwise open."""
+    stripped = item.strip()
+    low = stripped.lower()
+    if stripped.startswith("~~") or "[dismissed" in low:
+        return "dismissed"
+    if "[promoted" in low or "→ task" in low or "-> task" in low:
+        return "promoted"
+    return "open"
+
+
+def extract_parked_items(task_md_text: str) -> "list[str]":
+    """Return the '- ' bullets under EVERY ## Parked section, skipping the
+    template placeholder. Same shape retro.py parses, kept here so `tasks parked`
+    and the close-time surface share one definition of 'a parked item'.
+
+    ALL sections, not the first: the template ships a ## Parked section, so an
+    agent (or a receipt upsert reordering the file) can easily produce a second
+    one — and a first-match read makes every later section invisible. Found live
+    by the 1.5.3 gauntlet; the multi-heading hazard, same family as #09."""
+    in_section = False
+    body: "list[str]" = []
+    for line in task_md_text.splitlines():
+        if line.strip() == "## Parked":
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("## "):
+                in_section = False  # keep scanning — there may be another section
+                continue
+            body.append(line)
+    items: "list[str]" = []
+    for line in body:
+        s = line.strip()
+        if s.startswith("- "):
+            text = s[2:].strip()
+            if text and text != PARKED_PLACEHOLDER:
+                items.append(text)
+    return items
+
+
+def open_parked_items(task_md_text: str) -> "list[str]":
+    """Parked bullets still awaiting resolution (open, not promoted/dismissed)."""
+    return [i for i in extract_parked_items(task_md_text)
+            if _parked_item_status(i) == "open"]
+
+
+def _iter_task_dirs(project_path: Path):
+    """Yield (number, slug, task_md_path) for every `<NNN>-<slug>/task.md`."""
+    tasks_dir = resolve_agent_dir(project_path) / "tasks"
+    if not tasks_dir.exists():
+        return
+    for d in sorted(tasks_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        m = re.match(r'^(\d+)-(.*)$', d.name)
+        if not m:
+            continue
+        tf = d / "task.md"
+        if tf.exists():
+            yield int(m.group(1)), m.group(2), tf
+
+
+def scan_parked(project_path: Path, open_only: bool = True) -> "list[dict]":
+    """Every parked item across all tasks: {task, slug, item, status}. Ordered by
+    task number (oldest first) — the debt that has waited longest reads first."""
+    out: "list[dict]" = []
+    for num, slug, tf in _iter_task_dirs(project_path):
+        try:
+            text = tf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for item in extract_parked_items(text):
+            status = _parked_item_status(item)
+            if open_only and status != "open":
+                continue
+            out.append({"task": num, "slug": slug, "item": item, "status": status})
+    return out
+
+
+def count_tasks_since_retro(project_path: Path) -> "tuple[int, int | None]":
+    """Return (closed non-retro tasks since the last retro, last_retro_number).
+    last_retro_number is None when no retro has ever run."""
+    dirs = list(_iter_task_dirs(project_path))
+    last_retro = None
+    for num, slug, _tf in dirs:
+        if slug.startswith("retro"):
+            last_retro = num if last_retro is None else max(last_retro, num)
+    closed = 0
+    for num, slug, tf in dirs:
+        if slug.startswith("retro"):
+            continue
+        if last_retro is not None and num <= last_retro:
+            continue
+        try:
+            if _extract_status(tf).startswith("done"):
+                closed += 1
+        except OSError:
+            pass
+    return closed, last_retro
+
+
+def retro_proposal(project_path: Path, threshold: int = 10) -> "str | None":
+    """A close-time nudge to run `tasks retro`, or None. Fires once the number of
+    tasks closed since the last retro reaches `threshold` — the mechanism the
+    report says never fired because nothing triggered it (C7)."""
+    closed, last_retro = count_tasks_since_retro(project_path)
+    if closed < threshold:
+        return None
+    anchor = f"since retro T{last_retro:03d}" if last_retro is not None else "and no retro has ever run"
+    return (
+        f"{closed} tasks closed {anchor}. Consider `tasks retro` — the horizontal "
+        "learning pass (intent-health, garbage, parked-item triage). A lesson paid "
+        "for twice should become a script, not a note you must remember to apply."
+    )
+
+
 # Task type → pattern name in playbook skill
 PLAYBOOKS = {
     "feature": "Build",
@@ -582,7 +1540,7 @@ def _load_playbook(task_type: str, project_path: Path | None = None) -> str | No
     if not skill_path:
         return None
 
-    content = skill_path.read_text(encoding="utf-8")
+    content = skill_path.read_text(encoding="utf-8", errors="replace")
 
     # Extract the ```markdown ... ``` block under ### <pattern_name>
     in_section = False
@@ -616,7 +1574,7 @@ def _find_custom_playbook(project_path: Path, task_type: str) -> Path | None:
 
 def list_all_types(project_path: Path) -> list[str]:
     """Return sorted list of all available task types (built-in + custom)."""
-    types = set(PLAYBOOKS.keys()) | {"quick"}
+    types = set(PLAYBOOKS.keys()) | {"quick", "light"}
     playbooks_dir = resolve_agent_dir(project_path) / "playbooks"
     if playbooks_dir.exists():
         for f in playbooks_dir.glob("*.md"):
@@ -668,9 +1626,13 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
             task_type=task_type,
         )
     elif custom:
-        content = custom.read_text(encoding="utf-8")
+        content = custom.read_text(encoding="utf-8", errors="replace")
         content = content.replace("{{NNN}}", f"{task_num:03d}")
         content = content.replace("{{TITLE}}", _display_title(name))
+        # F8: let the [intent] arg reach a custom playbook too, via an explicit
+        # `{{INTENT}}` token (built-in templates use prose placeholders, matched
+        # below; a custom author opts in with this token). No token → unchanged.
+        content = content.replace("{{INTENT}}", intent_text or "")
     else:
         # Fall back to base Python template
         from tasks.template import render_template
@@ -688,10 +1650,23 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
         for placeholder in [
             "(what we want to achieve \u2014 the outcome, not the activity)",
             "(one line \u2014 what to do and how to verify)",
+            # B1: the `light` template's Intent placeholder \u2014 was missing here, so
+            # `tasks new light <name> <intent>` silently discarded the intent.
+            "(one line \u2014 what to do and what proves it worked)",
         ]:
             if placeholder in content:
                 content = content.replace(placeholder, intent_text)
                 break
+
+    # F8: standing gates — project-declared gates appended LAST, whatever
+    # branch assembled the content (base template, custom playbook, role
+    # append). Stubs are skipped: they carry no gates until activation, and
+    # the expansion path applies the same helper then.
+    if not stub:
+        content, _sg_issues = append_standing_gates(
+            content, load_config(project_path), task_num)
+        for _msg in _sg_issues:
+            print(f"[playbook] standing_gates: {_msg}", file=sys.stderr)
 
     task_file = task_dir / "task.md"
     task_file.write_text(content, encoding="utf-8")
@@ -702,7 +1677,7 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
 def _extract_status(task_file: Path) -> str:
     """Extract status from task file (line after last ## Status)."""
     try:
-        lines = task_file.read_text(encoding="utf-8").splitlines()
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
         status_idx = None
         for i, line in enumerate(lines):
             if line.strip() == "## Status":
@@ -717,7 +1692,7 @@ def _extract_status(task_file: Path) -> str:
 def _extract_problem(task_file: Path) -> str:
     """Extract first line of Problem/Intent section from task file."""
     try:
-        lines = task_file.read_text(encoding="utf-8").splitlines()
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
         in_section = False
         for line in lines:
             if line.strip() in ("## Problem", "## Intent"):
@@ -740,7 +1715,7 @@ def _extract_problem(task_file: Path) -> str:
 def _extract_head_position(task_file: Path) -> str:
     """Find the first unchecked checkbox or empty required field."""
     try:
-        lines = task_file.read_text(encoding="utf-8").splitlines()
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
         for line in lines:
             stripped = line.strip()
             # Unchecked checkbox
@@ -759,19 +1734,151 @@ def _is_done(task_file: Path) -> bool:
     return _extract_status(task_file).startswith("done")
 
 
+def _is_blocked(task_file: Path) -> bool:
+    """A task paused awaiting the owner's decision (issue #08). Distinct from
+    pending/in_progress: it is NOT waiting on the agent, so it must not read as
+    work in progress or be auto-adopted as the active task."""
+    return _extract_status(task_file).startswith("blocked")
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """All task.md writers route here: write to a same-directory temp file, then
+    os.replace. A concurrent reader never sees a sheared file, and interleaved
+    writers lose whole versions rather than producing half-merged lines —
+    multi-user repos are a supported layout, so this is load-bearing, not
+    ceremony. Same-directory temp keeps the replace on one filesystem."""
+    p = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, str(p))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _set_status(task_file: Path, value: str) -> None:
+    """Rewrite the line after the LAST ## Status (matching _extract_status).
+    The single writer of task status."""
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    target = None
+    for i, line in enumerate(lines):
+        if line.strip() == "## Status" and i + 1 < len(lines):
+            target = i
+    if target is not None:
+        lines[target + 1] = value + "\n"
+        _atomic_write(task_file, "".join(lines))
+
+
+def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
+    """ONE `## {heading}` per task.md, newest entry FIRST beneath it.
+
+    Receipts used to append a whole new `## …` section per close/audit, so a
+    reopened task accumulated duplicate headings — and section parsers that take
+    the first match then read a STALE receipt as current. One heading with
+    newest-first `###` entries keeps the full history AND makes the first thing
+    under the heading the truth."""
+    p = Path(task_file)
+    text = p.read_text(encoding="utf-8", errors="replace")
+    marker = f"## {heading}"
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.strip() == marker:
+            new = lines[:i + 1] + ["", *entry.rstrip("\n").splitlines()] + lines[i + 1:]
+            _atomic_write(p, "\n".join(new) + "\n")
+            return
+    _atomic_write(p, text.rstrip("\n") + f"\n\n{marker}\n\n{entry.rstrip()}\n")
+
+
+def set_task_blocked(task_file: Path, reason: str) -> None:
+    """Mark a task BLOCKED with a self-documenting reason (#08). Sets status to
+    `blocked` and writes a `## Blocked` section. Does NOT touch a single gate.
+
+    The reason is collapsed to one line and rendered as a blockquote, so a reason
+    containing `- [ ]`, backticks, or a `## ` heading can never become a phantom
+    gate or section for the line-anchored parsers (the #09 hazard)."""
+    clean = " ".join(reason.split()) or "(no reason given)"
+    ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
+    _set_status(task_file, "blocked")
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    # Drop any prior ## Blocked section (idempotent re-block), then append fresh.
+    out, skip = [], False
+    for line in lines:
+        if line.strip() == "## Blocked":
+            skip = True
+            continue
+        if skip:
+            if line.startswith("## "):
+                skip = False
+                out.append(line)
+            continue
+        out.append(line)
+    while out and out[-1].strip() == "":
+        out.pop()
+    out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
+    _atomic_write(task_file, "\n".join(out) + "\n")
+
+
+def resume_blocked_task(task_file: Path) -> None:
+    """Clear a block: status → in_progress, and stamp the ## Blocked section with a
+    resume line so the history stays true and current rather than stale (#08)."""
+    _set_status(task_file, "in_progress")
+    ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    out, i, n, stamped = [], 0, len(lines), False
+    while i < n:
+        out.append(lines[i])
+        if lines[i].strip() == "## Blocked":
+            i += 1
+            while i < n and not lines[i].startswith("## "):
+                out.append(lines[i])
+                i += 1
+            out.append(f"> Resumed {ts}")
+            stamped = True
+            continue
+        i += 1
+    if stamped:
+        _atomic_write(task_file, "\n".join(out) + "\n")
+
+
+def _folder_matches_filter(folder_name: str, name_filter: str) -> bool:
+    """Does a task folder name match the activation filter?
+
+    A numeric filter is a task NUMBER — it must match ONLY the exact `NNN-`
+    prefix, never a substring (C1b: `tasks work 100` must not resolve to
+    `1000-bar`; the old `name_filter not in folder` substring test let it,
+    then wrote the raw pointer `100`, which fed the C1 non-resolving-pointer
+    crash on close). A non-numeric filter keeps the substring behaviour for
+    slug-style lookups.
+    """
+    if not name_filter:
+        return True
+    if name_filter.isdigit():
+        return (folder_name == name_filter
+                or folder_name.startswith(name_filter + "-"))
+    return name_filter in folder_name
+
+
 def _find_active_task(project_path: Path, name_filter: str = "") -> Path | None:
     """Find the active task: earliest non-done task with unchecked gates.
 
-    If name_filter is given, only match tasks whose folder name contains it.
+    If name_filter is given, only match tasks whose folder name matches it
+    (exact `NNN-` prefix for a numeric filter, substring otherwise).
     """
     tasks_dir = resolve_agent_dir(project_path) / "tasks"
     if not tasks_dir.exists():
         return None
     for task_file in sorted(tasks_dir.glob("*/task.md")):
-        if name_filter and name_filter not in task_file.parent.name:
+        if name_filter and not _folder_matches_filter(task_file.parent.name, name_filter):
             continue
         if _is_done(task_file):
             continue
+        if _is_blocked(task_file):
+            continue  # #08: a blocked task waits on the owner, not the agent
         head = _extract_head_position(task_file)
         if not head.startswith("("):
             return task_file
@@ -793,7 +1900,7 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
     for state_file in state_files:
         if not state_file.exists():
             continue
-        task_num = state_file.read_text(encoding="utf-8").strip()
+        task_num = state_file.read_text(encoding="utf-8", errors="replace").strip()
         if not task_num:
             continue
         matches = sorted((agent_dir / "tasks").glob(f"{task_num}-*/task.md"))
@@ -815,7 +1922,7 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
         return {"error": "No active task with open gates"}
 
     task_name = task_file.parent.name
-    lines = task_file.read_text(encoding="utf-8").splitlines()
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
 
     # Find and check off the first unchecked gate
     checked_text = None
@@ -856,12 +1963,30 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
     }
 
 
+# One line-anchored definition of "a gate marker", shared by the count and the
+# head-position parser so they cannot disagree about what a gate is (issue #09).
+# A `- [ ]` in mid-line PROSE ("the convention is `- [ ]` until…") is NOT a gate
+# — the old substring count treated it as one, so a task could close at 71/74
+# while `status` said "(all gates checked)": the count that does not gate, and the
+# gate that does not count. Matches the Stop hook's `^[[:space:]]*- \[ \]` and
+# retro.py's gate scan. NOT fence-aware — a fenced ` - [ ]` template example is
+# still counted, consistently, by all three consumers; making the whole family
+# fence-aware (as `_node_starts` is on the mind-map side) needs the bash Stop hook
+# to agree too and is a separate design decision.
+_GATE_LINE_RE = re.compile(r"^[ \t]*- \[([ xX])\]", re.MULTILINE)
+
+
+def _gate_counts(content: str) -> "tuple[int, int]":
+    """Return (checked, total) line-anchored gate markers in `content`."""
+    marks = _GATE_LINE_RE.findall(content)
+    checked = sum(1 for m in marks if m in ("x", "X"))
+    return checked, len(marks)
+
+
 def _extract_progress(task_file: Path) -> str:
-    """Count checked/total checkboxes in a task file."""
+    """Count checked/total gates in a task file (line-anchored, prose-safe)."""
     try:
-        content = task_file.read_text(encoding="utf-8")
-        checked = content.count("- [x]") + content.count("- [X]")
-        total = checked + content.count("- [ ]")
+        checked, total = _gate_counts(task_file.read_text(encoding="utf-8", errors="replace"))
         return f"{checked}/{total}" if total > 0 else "-"
     except Exception:
         return "-"
@@ -872,7 +1997,9 @@ def list_tasks(project_path: Path, pending_only: bool = False) -> None:
     tasks_dir = resolve_agent_dir(project_path) / "tasks"
 
     if not tasks_dir.exists():
-        print("No .agent/tasks/ directory found")
+        # Lane-aware (genesis finding): name the path this command RESOLVED —
+        # single-user repos reproduce the old ".agent/tasks/" literal exactly.
+        print(f"No {tasks_dir.relative_to(project_path).as_posix()}/ directory found")
         return
 
     task_files = sorted(tasks_dir.glob("*/task.md"))
@@ -887,14 +2014,14 @@ def list_tasks(project_path: Path, pending_only: bool = False) -> None:
 
     # Collect rows first to compute dynamic name column width
     rows = []
-    counts = {"done": 0, "pending": 0, "other": 0}
+    counts = {"done": 0, "pending": 0, "blocked": 0, "other": 0}
 
     for task_file in task_files:
         name = task_file.parent.name
         status = _extract_status(task_file)
         status_key = status.split()[0] if status else "unknown"
 
-        if status_key in ("done", "pending"):
+        if status_key in ("done", "pending", "blocked"):
             counts[status_key] += 1
         else:
             counts["other"] += 1
@@ -927,13 +2054,18 @@ def list_tasks(project_path: Path, pending_only: bool = False) -> None:
         parts.append(f"{counts['done']} done")
     if counts["pending"]:
         parts.append(f"{counts['pending']} pending")
+    if counts["blocked"]:
+        parts.append(f"{counts['blocked']} blocked")
     if counts["other"]:
         parts.append(f"{counts['other']} other")
     summary = f"Summary: {', '.join(parts)}"
     if pending_only:
         summary += f" (showing {len(rows)} open)"
     print(summary)
-    print("Task files: .agent/tasks/<name>/task.md — activate with: tasks work <number>")
+    # Lane-aware: <lane>/tasks/<name>/task.md, where <lane> is what this very
+    # listing read — ".agent" single-user (byte-identical to the old literal),
+    # ".agent/<user>" on a multi-user repo (the genesis-gauntlet cosmetic).
+    print(f"Task files: {tasks_dir.relative_to(project_path).as_posix()}/<name>/task.md — activate with: tasks work <number>")
 
 
 def task_status(project_path: Path) -> None:
@@ -941,7 +2073,9 @@ def task_status(project_path: Path) -> None:
     tasks_dir = resolve_agent_dir(project_path) / "tasks"
 
     if not tasks_dir.exists():
-        print("No .agent/tasks/ directory found")
+        # Lane-aware (genesis finding): name the path this command RESOLVED —
+        # single-user repos reproduce the old ".agent/tasks/" literal exactly.
+        print(f"No {tasks_dir.relative_to(project_path).as_posix()}/ directory found")
         return
 
     task_files = sorted(tasks_dir.glob("*/task.md"))
@@ -957,9 +2091,14 @@ def task_status(project_path: Path) -> None:
         if status == "done":
             continue
 
-        head = _extract_head_position(task_file)
         progress = _extract_progress(task_file)
+        # #08: a blocked task is not waiting on the agent — show that, not a gate
+        # it cannot complete. It should not read like ordinary work in progress.
+        if _is_blocked(task_file):
+            print(f"{name:<40} | {progress:<8} | BLOCKED (awaiting decision — `tasks work {name.split('-')[0]}` to resume)")
+            continue
 
+        head = _extract_head_position(task_file)
         print(f"{name:<40} | {progress:<8} | {head}")
 
 

@@ -1,0 +1,7 @@
+{
+  "name": "edit-doc-without-task → ALLOW (docs exempt)",
+  "hook": "task-gate-hook",
+  "files": {"README.md": "# readme\n"},
+  "current_state": "",
+  "payload": {"tool_name": "Edit", "tool_input": {"file_path": "README.md"}}
+}

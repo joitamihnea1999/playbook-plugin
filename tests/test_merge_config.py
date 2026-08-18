@@ -34,7 +34,7 @@ _HERE = Path(__file__).resolve().parent
 _PLUGIN = _HERE.parent / "plugins/playbook"
 sys.path.insert(0, str(_PLUGIN))
 
-from tasks.cli import _merge_verify_issues, _merge_verify_untracked  # noqa: E402
+from tasks.shared import _merge_verify_issues, _merge_verify_untracked  # noqa: E402
 from tasks.core import SHARED_POLICY_PATHS, run_merge_doctor  # noqa: E402
 
 _SKILL_DIR = _PLUGIN / "skills" / "merge"
@@ -339,7 +339,7 @@ class TestDoctorAdvisory(unittest.TestCase):
     def test_a_corrupt_shipped_runner_does_not_crash_doctor(self):
         # The advisory loads merge-verify.py to reuse its rules; a corrupt or
         # half-written copy must degrade to a warning, not abort the whole run.
-        import tasks.cli as cli
+        import tasks.shared as cli
         with unittest.mock.patch.object(
             cli, "_merge_verify_module",
             side_effect=SyntaxError("invalid syntax"),
@@ -349,7 +349,7 @@ class TestDoctorAdvisory(unittest.TestCase):
         self.assertIn("could not be validated", issues[0])
 
     def test_missing_runner_is_silent(self):
-        import tasks.cli as cli
+        import tasks.shared as cli
         with unittest.mock.patch.object(cli, "_merge_verify_module", return_value=None):
             self.assertEqual(_merge_verify_issues({"merge_verify": {"command": "x"}}), [])
 

@@ -39,11 +39,50 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
 
 from tasks import template  # noqa: E402
-from tasks.cli import (  # noqa: E402
+from tasks.review import (  # noqa: E402
     _findings_markers,
     _neutralise_markers,
+    _panel_triage_frame,
     _write_review_findings,
 )
+
+
+class NewTemplatePlaceholderAnchor(unittest.TestCase):
+    """Gauntlet regression (1.5.2): the panel-first template renamed the section
+    placeholder to '…triage appears here', and the single-judge FALLBACK's
+    write-back only anchored on the old text — a live judge's findings could not
+    land in a new-template task.md. Both generations must anchor."""
+
+    def _tf(self, placeholder):
+        import tempfile
+        from pathlib import Path as _P
+        tf = _P(tempfile.mkdtemp()) / "task.md"
+        tf.write_text(f"# 1 - t\n\n## Implementation Review\n- [ ] gate\n\n{placeholder}\n\n---\n")
+        return tf
+
+    def test_old_placeholder_still_anchors(self):
+        tf = self._tf("(implementation review findings appear here)")
+        self.assertIsNone(_write_review_findings(tf, "impl", "finding"))
+        self.assertIn("finding", tf.read_text())
+
+    def test_new_triage_placeholder_anchors(self):
+        tf = self._tf("(implementation review triage appears here)")
+        self.assertIsNone(_write_review_findings(tf, "impl", "finding"))
+        self.assertIn("finding", tf.read_text())
+
+
+class PanelTriageFrameLimits(unittest.TestCase):
+    """P11: the panel's own judge.md must name what a panel structurally cannot
+    catch, so a clean panel is never read as 'all clear' on these classes."""
+
+    def test_frame_names_the_three_limits(self):
+        text = "\n".join(_panel_triage_frame()).lower()
+        self.assertIn("correspondence", text)
+        self.assertIn("disclosure", text)
+        self.assertIn("irreversib", text)  # irreversibility / irreversible
+        # and points each at its real (non-panel) check
+        self.assertIn("screenshot", text)     # correspondence → the real artifact
+        self.assertIn("risk", text)           # irreversibility → the ## Risk gate
 
 TASK_MD = """# 007 - Demo
 
@@ -292,17 +331,17 @@ class AtomicityTest(unittest.TestCase):
         _write_review_findings(f, "plan", "good findings")
         intact = f.read_bytes()
 
-        import tasks.cli as cli_mod
-        orig_replace = cli_mod.os.replace
+        import tasks.review as review_mod
+        orig_replace = review_mod.os.replace
 
         def boom(src, dst):
             raise OSError("simulated interrupt")
 
-        cli_mod.os.replace = boom
+        review_mod.os.replace = boom
         try:
             reason = _write_review_findings(f, "plan", "should not land")
         finally:
-            cli_mod.os.replace = orig_replace
+            review_mod.os.replace = orig_replace
 
         self.assertIsNotNone(reason)
         self.assertEqual(intact, f.read_bytes())

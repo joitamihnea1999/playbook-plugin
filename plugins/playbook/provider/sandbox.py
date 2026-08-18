@@ -87,6 +87,8 @@ def _parse_models_json(path: Path) -> dict[str, tuple[str, str | None, tuple[str
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(raw, dict):  # valid JSON but not an object (e.g. a bare list)
+        return {}
     aliases = raw.get("aliases", {})
     if not isinstance(aliases, dict):
         return {}
@@ -190,6 +192,8 @@ def _parse_judge_config(path: Path) -> dict:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):  # valid JSON but not an object → {} per contract
         return {}
     out: dict = {}
     dj = raw.get("default_judge")
@@ -448,16 +452,19 @@ def build_bwrap_argv(
     rw_paths = _normalize_rw(extra_rw)
 
     argv = ["bwrap", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"]
-    project_bind = "--bind" if project_writable else "--ro-bind"
-    argv += [project_bind, project, project, "--bind", "/tmp", "/tmp"]
+
+    # ORDER IS LOAD-BEARING: in bwrap, later binds stack over earlier ones.
+    # The broad read-write mounts (/tmp, the write log, per-agent home subpaths)
+    # go FIRST, and the project bind goes AFTER them — so a project that happens
+    # to live UNDER one of those paths (a /tmp checkout, a scratch clone) is
+    # still governed by its own bind. The original order bound the project
+    # first and /tmp second, which silently re-exposed a /tmp-resident project
+    # read-write in judge mode — found by an empirical spike, 2026-08-13.
+    argv += ["--bind", "/tmp", "/tmp"]
 
     write_log_dir = home / ".local" / "share" / "playbook"
     write_log_dir.mkdir(parents=True, exist_ok=True)
     argv += ["--bind", str(write_log_dir), str(write_log_dir)]
-
-    if git_dir:
-        git_resolved = str(Path(git_dir).resolve())
-        argv += ["--ro-bind", git_resolved, git_resolved]
 
     # Pre-create + bind per-agent home subpaths.
     for sub in (".claude", *_HOME_RW_SUBPATHS):
@@ -465,6 +472,17 @@ def build_bwrap_argv(
         target.mkdir(parents=True, exist_ok=True)
         argv += ["--bind", str(target), str(target)]
 
+    project_bind = "--bind" if project_writable else "--ro-bind"
+    argv += [project_bind, project, project]
+
+    # .git stays read-only even when the project is writable — after the
+    # project bind so it wins the overlap.
+    if git_dir:
+        git_resolved = str(Path(git_dir).resolve())
+        argv += ["--ro-bind", git_resolved, git_resolved]
+
+    # extra_rw (the judge workspace / outdir) deliberately LAST: it must stay
+    # writable even when it lives inside a read-only project.
     for rw in rw_paths:
         Path(rw).mkdir(parents=True, exist_ok=True)
         argv += ["--bind", rw, rw]
@@ -828,6 +846,13 @@ def _main(argv: list[str]) -> int:
                         help="Print seatbelt profile to stdout and exit")
     parser.add_argument("--rw", action="append", default=[],
                         help="Extra read-write path (repeatable)")
+    parser.add_argument("--ro-project", action="store_true",
+                        help="Bind the project read-only; only --rw paths stay "
+                             "writable project-side (contained-observer mode, "
+                             "e.g. the conversation monitor)")
+    parser.add_argument("--print-argv", action="store_true",
+                        help="Print the fully wrapped argv (one arg per line) "
+                             "instead of executing — inspectable containment")
     parser.add_argument("--project-root", default=None,
                         help="Project root (default: cwd)")
     parser.add_argument("--prompt", default=None,
@@ -858,7 +883,8 @@ def _main(argv: list[str]) -> int:
     project = Path(args.project_root or Path.cwd()).resolve()
 
     if args.print_profile:
-        print(build_seatbelt_profile(project, _git_dir_of(project), args.rw))
+        print(build_seatbelt_profile(project, _git_dir_of(project), args.rw,
+                                     project_writable=not args.ro_project))
         return 0
 
     forwarded = list(args.agent_args)
@@ -894,6 +920,15 @@ def _main(argv: list[str]) -> int:
         spec = _subagent.SubagentSpec(
             agent=agent, model=model_for_spec, prompt=args.prompt, bare=args.bare,
         )
+        # --print-argv is a DRY RUN and must short-circuit BEFORE the run — and
+        # it has to print THIS path's argv (the adapter's headless invocation),
+        # not the empty raw-passthrough one, or the inspection would be a lie.
+        if args.print_argv:
+            _inv = _subagent.build_invocation(spec, project_root=project)
+            for a in _wrapped_argv(agent, _inv.argv, project, args.rw,
+                                   project_writable=not args.ro_project):
+                print(a)
+            return 0
         if args.stream:
             for ev in _subagent.stream_subagent(spec, project_root=project):
                 if ev.text:
@@ -905,7 +940,14 @@ def _main(argv: list[str]) -> int:
         print(res.text)
         return res.returncode
 
-    result = run(agent, forwarded, project, extra_rw=args.rw)
+    if args.print_argv:
+        for a in _wrapped_argv(agent, forwarded, project, args.rw,
+                               project_writable=not args.ro_project):
+            print(a)
+        return 0
+
+    result = run(agent, forwarded, project, extra_rw=args.rw,
+                 project_writable=not args.ro_project)
     return result.returncode
 
 

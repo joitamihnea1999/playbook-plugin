@@ -16,6 +16,37 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/gate-echo-lib.sh"
 
 PROJECT_DIR="$PWD"
+
+# $1 is a free-text display name, so an unrecognised FLAG would otherwise be
+# adopted as the project's name and written into MIND_MAP.md — while init went
+# ahead and provisioned, including the global touches (~/.profile, ~/.claude).
+# An inspection flag must never mutate anything: answer it and exit.
+case "${1-}" in
+    -h|--help)
+        cat <<'USAGE'
+Usage: init [project-display-name]
+
+Mechanical project setup for the playbook plugin. Operates on the current
+directory (assumed to be the project root) and is safe to re-run — existing
+files are reported as skipped, not overwritten.
+
+  project-display-name   Title used in MIND_MAP.md (default: basename of cwd).
+
+Provisions: .agent/ state dirs (or .agent/<user>/ in a multi-user repo),
+.claude/bin/ wrappers, settings.json permissions, CLAUDE.md, MIND_MAP.md stub,
+the monitor scaffold, and the shell bash-log hookup.
+
+Normally invoked for you by /playbook:init.
+USAGE
+        exit 0
+        ;;
+    -*)
+        echo "init: unknown option '$1'" >&2
+        echo "The only argument is an optional project display name. See: init --help" >&2
+        exit 2
+        ;;
+esac
+
 PROJECT_NAME="${1:-$(basename "$PWD")}"
 
 # Everything init provisions is per-user runtime state, so it belongs in the
@@ -83,10 +114,11 @@ if [ ! -f "$CONFIG_JSON" ]; then
     mkdir -p "$PROJECT_DIR/.agent"
     cat > "$CONFIG_JSON" <<'CONFIG'
 {
-  "_doc": "Playbook settings. Precedence: CLI flag > env var > this file > default. REVIEW KNOBS (naturally per-install; committing them just sets a default others can override via env): judge_budget_usd caps the claude judge's --max-budget-usd (claude backend only; codex/agy/grok/pi have no budget knob); review_soft_timeout_secs is the SOFT deadline the judge is told to wind down against (finish the current thought, then write findings); review_timeout_secs is the HARD wall-clock kill, hang safety only — keep it above soft so there is room to wind down (900 + 300 grace = 1200 here). Either timeout accepts 0 or \"unlimited\" to disable it; a hard kill salvages the judge's partial output to judge-*.partial.log instead of discarding it. NOTE review_timeout_secs is also a FLOOR: once set here, --timeout and the env var may only RAISE it, never undercut it, so an agent cannot reintroduce a kill window you removed. Env overrides: PLAYBOOK_JUDGE_BUDGET_USD, PLAYBOOK_REVIEW_TIMEOUT_SECS, PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS. PROJECT POLICY — commit this file if you set it: merge_verify {command} is the post-merge soundness command the merge skill runs before it will auto-push, e.g. {\"merge_verify\": {\"command\": \"make test\"}}. Every clone must see the same declaration, so an untracked config leaves that check permanently skipped. Absent or empty means the merge reports SKIPPED and hands the push back to you; a malformed declaration BLOCKS the merge's verify step rather than being ignored. See docs/configuration.md.",
+  "_doc": "Playbook settings. Precedence: CLI flag > env var > this file > default. REVIEW KNOBS (naturally per-install; committing them just sets a default others can override via env): judge_budget_usd caps the claude judge's --max-budget-usd (claude backend only; codex/agy/grok/pi have no budget knob); review_soft_timeout_secs is the SOFT deadline the judge is told to wind down against (finish the current thought, then write findings); review_timeout_secs is the HARD wall-clock kill, hang safety only — keep it above soft so there is room to wind down (900 + 300 grace = 1200 here). Either timeout accepts 0 or \"unlimited\" to disable it; a hard kill salvages the judge's partial output to judge-*.partial.log instead of discarding it. NOTE review_timeout_secs is also a FLOOR: once set here, --timeout and the env var may only RAISE it, never undercut it, so an agent cannot reintroduce a kill window you removed. Env overrides: PLAYBOOK_JUDGE_BUDGET_USD, PLAYBOOK_REVIEW_TIMEOUT_SECS, PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS. PROJECT POLICY — commit this file if you set it: merge_verify {command} is the post-merge soundness command the merge skill runs before it will auto-push, e.g. {\"merge_verify\": {\"command\": \"make test\"}}. Every clone must see the same declaration, so an untracked config leaves that check permanently skipped. Absent or empty means the merge reports SKIPPED and hands the push back to you; a malformed declaration BLOCKS the merge's verify step rather than being ignored. panel_required_for controls which closes require a quorum-PASS panel impl review in judge.md: the seeded default [\"assertive\",\"irreversible\"] requires it only for changes to claims-about-the-world (assertive) and data/publish/irreversible work — reversible work (the common case, incl. quick/light) closes on verify+single-judge evidence with no panel wait; set \"all\" to require a panel on EVERY close (max strictness); omit or set [] to disable the panel bar. See docs/configuration.md.",
   "judge_budget_usd": 10,
   "review_soft_timeout_secs": 900,
-  "review_timeout_secs": 1200
+  "review_timeout_secs": 1200,
+  "panel_required_for": ["assertive", "irreversible"]
 }
 CONFIG
     CREATED+=(".agent/config.json")
@@ -117,10 +149,13 @@ SETTINGS_FILE="$PROJECT_DIR/.claude/settings.json"
 mkdir -p "$PROJECT_DIR/.claude"
 SETTINGS_FILE_PY="$(to_native_path "$SETTINGS_FILE")"
 
-SETTINGS_RESULT=$(python3 -c "
+SETTINGS_RESULT=$(PB_SETTINGS_PATH="$SETTINGS_FILE_PY" python3 -c "
 import json, sys, os
 
-path = '$SETTINGS_FILE_PY'
+# I4: read the path from the environment, never interpolate it into the source
+# — a project path with a single quote otherwise breaks python's string literal
+# (SyntaxError → set -e abort).
+path = os.environ['PB_SETTINGS_PATH']
 required = ['TodoWrite', 'Task', 'EnterPlanMode']
 
 try:
@@ -279,9 +314,10 @@ if [ -f "$BASH_LOG_SRC" ]; then
     # This is the reliable path — CC reads settings.json env key and injects vars before tool calls.
     CC_SETTINGS="$HOME/.claude/settings.json"
     CC_SETTINGS_PY="$(to_native_path "$CC_SETTINGS")"
-    BASH_ENV_RESULT=$(python3 -c "
+    BASH_ENV_RESULT=$(PB_CC_SETTINGS_PATH="$CC_SETTINGS_PY" python3 -c "
 import json, os, tempfile
-path = '$CC_SETTINGS_PY'
+# I4: path via env, not interpolated (single-quote paths would SyntaxError).
+path = os.environ['PB_CC_SETTINGS_PATH']
 # Always bash-log.sh — CC's Bash tool is /bin/bash regardless of user's login shell.
 # Forward-slash the path: on Windows expanduser yields backslashes, but BASH_ENV
 # is read by Git-Bash which needs a POSIX-sourceable path (C:/Users/... works).
@@ -377,10 +413,12 @@ if [ -n "$MONITOR_LIB_DIR" ] && [ -d "$MONITOR_LIB_DIR" ]; then
 
     # Register PostToolUse hook for monitor-nudge in .claude/settings.json
     NUDGE_HOOK_CMD='bash "$CLAUDE_PROJECT_DIR/.claude/hooks/monitor-nudge.sh"'
-    HOOK_RESULT=$(python3 -c "
+    HOOK_RESULT=$(PB_SETTINGS_PATH="$SETTINGS_FILE_PY" PB_NUDGE_CMD="$NUDGE_HOOK_CMD" python3 -c "
 import json, os
-path = '$SETTINGS_FILE_PY'
-target_cmd = '''$NUDGE_HOOK_CMD'''
+# I4: path AND command via env, never interpolated — a single quote in either
+# broke the python literal (SyntaxError → set -e abort mid-install).
+path = os.environ['PB_SETTINGS_PATH']
+target_cmd = os.environ['PB_NUDGE_CMD']
 try:
     data = json.loads(open(path).read()) if os.path.exists(path) else {}
     hooks = data.setdefault('hooks', {})
@@ -405,6 +443,41 @@ except Exception as e:
     esac
 else
     SKIPPED+=("$AGENT_REL/monitor/ (monitor-lib not found in plugin)")
+fi
+
+# --- (h) CLAUDE.md + .gitignore — mechanical doctrine files (F15) ---
+# These were the AGENT half of /playbook:init: the doctrine (CLAUDE.md teaches
+# the correctness contract; .gitignore keeps runtime state out of the record)
+# held only if the agent performed it. Written mechanically now — MERGING,
+# never clobbering: a seeded CLAUDE.md keeps its content, template-owned
+# sections update in place, custom sections survive byte-for-byte, and the
+# .gitignore block is marker-guarded so re-runs are no-ops. The agent half
+# shrinks to project-specific enrichment.
+# I4: guard the assignment — `set -e` aborts on a bare `VAR=$(cmd)` when cmd
+# fails, which would kill init here (before the FAILED handler + summary) on any
+# CLAUDE.md merge failure. The `if` form captures output AND rc without aborting.
+if MERGE_OUT=$(python3 "$(to_native_path "$SCRIPT_DIR/claude-md-merge.py")" \
+    "$(to_native_path "$SCRIPT_DIR/CLAUDE.md.template")" \
+    "$(to_native_path "$PROJECT_DIR")" "$PROJECT_NAME" 2>&1); then
+    MERGE_RC=0
+else
+    MERGE_RC=$?
+fi
+while IFS= read -r line; do
+    case "$line" in
+        CLAUDE.md:CREATED)    CREATED+=("CLAUDE.md (from template)") ;;
+        CLAUDE.md:MERGED)     CREATED+=("CLAUDE.md (template sections merged — project content preserved)") ;;
+        CLAUDE.md:UNCHANGED)  SKIPPED+=("CLAUDE.md (already current)") ;;
+        .gitignore:CREATED)   CREATED+=(".gitignore (playbook runtime-state block)") ;;
+        .gitignore:APPENDED)  CREATED+=(".gitignore playbook runtime-state block (appended)") ;;
+        .gitignore:UNCHANGED) SKIPPED+=(".gitignore (playbook block present)") ;;
+        ERROR:*)              FAILED+=("CLAUDE.md/.gitignore: ${line#ERROR:}") ;;
+        "") ;;
+        *)                    FAILED+=("CLAUDE.md/.gitignore: unexpected output: $line") ;;
+    esac
+done <<< "$MERGE_OUT"
+if [ $MERGE_RC -ne 0 ] && [ ${#FAILED[@]} -eq 0 ]; then
+    FAILED+=("CLAUDE.md/.gitignore: claude-md-merge.py exited $MERGE_RC")
 fi
 
 # --- (f) Summary ---

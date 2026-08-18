@@ -103,6 +103,13 @@ def read_new_events(jsonl_path: Path, since_offset: int,
                     d = json.loads(raw_line.decode("utf-8", errors="replace"))
                 except json.JSONDecodeError:
                     continue
+                # I18: a JSONL line can decode to null/[]/a string, not just a
+                # dict. `.get()` on those raised AttributeError — and the crash
+                # happened BEFORE this offset returned, so every poll re-read the
+                # poison line and the monitor was PERMANENTLY WEDGED. Skip
+                # non-dict records (the offset has already advanced past them).
+                if not isinstance(d, dict):
+                    continue
 
                 ts = d.get("timestamp", "")
                 msg_type = d.get("type", "")
@@ -110,7 +117,8 @@ def read_new_events(jsonl_path: Path, since_offset: int,
                 if msg_type == "user":
                     if d.get("isMeta"):
                         continue
-                    content = d.get("message", {}).get("content", "")
+                    _msg = d.get("message")
+                    content = _msg.get("content", "") if isinstance(_msg, dict) else ""
                     if not content:
                         content = d.get("content", "")
                     if isinstance(content, list):
@@ -213,17 +221,35 @@ def format_compact(events: list[dict]) -> str:
 
 
 def load_offset(offset_file: Path) -> int | None:
-    """Load saved byte offset, or None if not found."""
+    """Load saved byte offset, or None if not found.
+
+    Two formats (F19): legacy single-line `<int>`, and path-aware
+    `<jsonl-path>\\n<int>` — the offset's meaning is bound to a file, so a
+    transcript switch (rollover/compaction) can be detected instead of
+    carrying a stale offset onto a different file."""
     try:
-        return int(offset_file.read_text().strip())
-    except (OSError, ValueError):
+        lines = offset_file.read_text().strip().splitlines()
+        return int(lines[-1]) if lines else None
+    except (OSError, ValueError, IndexError):
         return None
 
 
-def save_offset(offset_file: Path, offset: int) -> None:
-    """Atomically save byte offset."""
+def load_offset_path(offset_file: Path) -> "str | None":
+    """The jsonl path a saved offset belongs to (None for legacy/int-only)."""
+    try:
+        lines = offset_file.read_text().strip().splitlines()
+        return lines[0] if len(lines) >= 2 else None
+    except OSError:
+        return None
+
+
+def save_offset(offset_file: Path, offset: int, jsonl_path: "Path | str | None" = None) -> None:
+    """Atomically save byte offset (path-aware when jsonl_path is given)."""
     tmp = offset_file.with_suffix(".tmp")
-    tmp.write_text(str(offset))
+    if jsonl_path is not None:
+        tmp.write_text(f"{jsonl_path}\n{offset}")
+    else:
+        tmp.write_text(str(offset))
     tmp.rename(offset_file)
 
 
@@ -254,7 +280,7 @@ def wait_once(jsonl_path: Path, offset_file: Path, pid: int | None = None,
                 persisted_offset = jsonl_path.stat().st_size
             except OSError:
                 persisted_offset = 0
-        save_offset(offset_file, persisted_offset)
+        save_offset(offset_file, persisted_offset, jsonl_path)
 
     # Internal offset advances as we read, but persisted_offset only updates on flush
     internal_offset = persisted_offset
@@ -281,7 +307,7 @@ def wait_once(jsonl_path: Path, offset_file: Path, pid: int | None = None,
                 buffer.extend(new_events)
                 # Turn boundary — flush and persist
                 if any(e["type"] == "turn_end" for e in new_events):
-                    save_offset(offset_file, internal_offset)
+                    save_offset(offset_file, internal_offset, jsonl_path)
                     return buffer, internal_offset
 
         # Stall flush: buffer non-empty but no events for a while = crashed agent
@@ -292,7 +318,7 @@ def wait_once(jsonl_path: Path, offset_file: Path, pid: int | None = None,
                 f"[sensor] stall_flush: agent silent {stall_flush_seconds:.0f}s, "
                 f"flushing partial turn ({len(buffer)} events)\n"
             )
-            save_offset(offset_file, internal_offset)
+            save_offset(offset_file, internal_offset, jsonl_path)
             return buffer, internal_offset
 
         # PID liveness
@@ -301,14 +327,14 @@ def wait_once(jsonl_path: Path, offset_file: Path, pid: int | None = None,
                 os.kill(pid, 0)
             except OSError:
                 if buffer:
-                    save_offset(offset_file, internal_offset)
+                    save_offset(offset_file, internal_offset, jsonl_path)
                 return buffer, internal_offset
 
         time.sleep(interval)
 
     # Max wait elapsed
     if buffer:
-        save_offset(offset_file, internal_offset)
+        save_offset(offset_file, internal_offset, jsonl_path)
     return buffer, internal_offset
 
 
@@ -332,7 +358,7 @@ def poll_loop(jsonl_path: Path, offset_file: Path, pid: int | None = None,
                 offset = jsonl_path.stat().st_size
             except OSError:
                 offset = 0
-        save_offset(offset_file, offset)
+        save_offset(offset_file, offset, jsonl_path)
 
     idle_since = time.monotonic()
 
@@ -347,13 +373,13 @@ def poll_loop(jsonl_path: Path, offset_file: Path, pid: int | None = None,
             events, new_offset = read_new_events(jsonl_path, offset)
             if events:
                 offset = new_offset
-                save_offset(offset_file, offset)
+                save_offset(offset_file, offset, jsonl_path)
                 idle_since = time.monotonic()
                 yield events
             elif new_offset > offset:
                 # Bytes read but no events extracted (noise)
                 offset = new_offset
-                save_offset(offset_file, offset)
+                save_offset(offset_file, offset, jsonl_path)
 
         # PID liveness check on idle timeout
         if time.monotonic() - idle_since > idle_timeout:
@@ -399,6 +425,22 @@ def main():
             trace_file = Path(args[idx + 1])
             trace_file.parent.mkdir(parents=True, exist_ok=True)
 
+    # F19: --pointer-file — the hooks record the front session's OWN
+    # transcript path into .agent/sessions/<id>/transcript_path; re-reading it
+    # on every invocation makes the sensor FOLLOW the session across rollovers
+    # instead of tailing whichever file was newest at bootstrap (the batch-6
+    # defect: 40 minutes waiting at the EOF of a stale conversation while the
+    # real session streamed into another file).
+    if "--pointer-file" in args:
+        idx = args.index("--pointer-file")
+        if idx + 1 < len(args):
+            try:
+                _target = Path(args[idx + 1]).read_text().strip()
+            except OSError:
+                _target = ""
+            if _target and Path(_target).is_file():
+                jsonl_path = Path(_target)
+
     # Caller must always pass --offset-file explicitly. Dropping the old
     # --session-id fallback (which wrote into pids/<id>/.offset under the
     # plugin tree) — T121 flat layout: offset lives at MONITOR_DIR/.offset,
@@ -409,6 +451,14 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
+
+    # F19: a stored offset is only meaningful for the file it was measured on.
+    # If the offset file names a DIFFERENT transcript than the one we're about
+    # to read (pointer moved: rollover/compaction), restart at byte 0 — the
+    # new file is a fresh continuation, not a tail of the old one.
+    _stored_path = load_offset_path(offset_file)
+    if _stored_path is not None and _stored_path != str(jsonl_path):
+        save_offset(offset_file, 0, jsonl_path)
 
     def _emit(events: list[dict]):
         """Print compact events to stdout and optionally append to trace file."""
@@ -444,7 +494,7 @@ def main():
         events, new_offset = read_new_events(jsonl_path, offset)
         if events:
             _emit(events)
-            save_offset(offset_file, new_offset)
+            save_offset(offset_file, new_offset, jsonl_path)
 
 
 if __name__ == "__main__":

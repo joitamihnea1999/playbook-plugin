@@ -148,7 +148,12 @@ def build_enforcement_hooks_payload(plugin_root: Path) -> dict:
                 {
                     "matcher": _GROK_PRETOOL_MATCHER,
                     "hooks": [entry("task-gate-hook")],
-                }
+                },
+                {
+                    # Destructive-command interlock (same guard Claude/Codex get).
+                    "matcher": "Bash|Shell|run_terminal_command",
+                    "hooks": [entry("command-guard-hook")],
+                },
             ],
             "UserPromptSubmit": [
                 {
@@ -257,6 +262,12 @@ class GrokAdapter(ProviderAdapter):
                 return (f"(error: grok judge prompt+context is ~{payload} chars on argv; "
                         "Windows caps the command line at 32,767 chars and grok reads its "
                         "prompt from argv — shrink the context or use another backend)")
+        # POSIX per-element BYTE cap (#10): the char budget can't bound a
+        # byte-limited channel. Fail loud before dispatch instead of a cryptic E2BIG.
+        from provider.argv_guard import argv_byte_error
+        _argv_err = argv_byte_error(agent_args, "grok")
+        if _argv_err:
+            return _argv_err
         env = os.environ.copy()
         env["PLAYBOOK_SESSION_ID"] = self._session_id or "judge"
         from provider import sandbox as _sandbox

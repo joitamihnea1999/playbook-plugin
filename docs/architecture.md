@@ -7,8 +7,8 @@ How the plugin is put together, and how the enforcement actually works.
 The plugin (`plugins/playbook/` in this repo) has four user-visible parts plus two engine directories:
 
 - `commands/` — seven `/playbook:*` slash commands (markdown the agent executes as instructions).
-- `skills/` — six skill bundles loaded at `tasks bootstrap` (playbook patterns, judge, monitor, merge, stack, task template).
-- `hooks/hooks.json` — six lifecycle hook registrations (below).
+- `skills/` — six harness-discoverable skill bundles, each with a `SKILL.md` (playbook patterns, judge, monitor, merge, stack, testing), plus `skills/tasks/` which holds the canonical task template the `new` command copies (not a discoverable skill).
+- `hooks/hooks.json` — the lifecycle hook registrations (below).
 - `scripts/` — executable entry points: the `tasks` dispatcher, hook scripts, `sandbox`, `monitor`, `init`, the `playbook-*` provider launchers.
 - `tasks/` — the Python package behind the `tasks` CLI (dispatcher sets `PYTHONPATH` here).
 - `provider/` — provider adapters and judge-dispatch machinery ([providers](providers.md)).
@@ -17,12 +17,13 @@ Everything is plain files — bash entry points, Python 3 stdlib, markdown as th
 
 ## Hooks & enforcement
 
-Six hooks enforce the structure at the OS level, because warnings don't stick — blocking does:
+Hooks enforce the structure at the OS level, because warnings don't stick — blocking does:
 
 | Hook | What it does |
 |---|---|
 | `SessionStart` | Runs bootstrap orientation (mind map + pending tasks + CLI reference). |
 | `PreToolUse` (matcher `Edit\|Write\|search_replace\|write\|Bash\|Shell\|StrReplace\|run_terminal_command`) | The **task gate**: BLOCKS code edits when no task is active. Grok names (`write`, `search_replace`, `run_terminal_command`, `Shell`, `StrReplace`) map to Claude Edit/Write/Bash via the normalizer — same gate, every provider. |
+| `PreToolUse` on shell tools (`command-guard-hook`) | The **destructive-command interlock**: BLOCKS a high-blast/irreversible command (`rm -rf` a dangerous path, `git push --force`, `git reset --hard`, `curl\|sh`, a DB `DROP`/`TRUNCATE`) until acknowledged (`PLAYBOOK_ALLOW_DANGEROUS=1`, or run inside an `irreversible`-classified task). Conservative (matches only at a command position, so `echo "rm -rf /"` is fine), fails OPEN on any internal error, config-extensible (`dangerous_commands`) / disable (`command_guard: false`). All three providers: Claude via `hooks.json`, grok via its always-trusted enforcement, codex via a `PreToolUse ^exec_command$` hook. |
 | `UserPromptSubmit` | Appends every user message to `.agent/chat_log.md` (timestamped, agent-tagged — feeds task attribution and `tasks log`). |
 | `PostToolUse` | Echoes gate state after every tool call, keeping the current gate in the agent's face. |
 | `Stop` / `SessionEnd` | Finalize session state. SessionEnd removes the session directory only when the process is really exiting — `/clear` keeps it, because the same process continues and the active task has to survive it. |

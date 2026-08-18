@@ -53,7 +53,9 @@ classify_tool() {
         Edit|Write|NotebookEdit)
             # Reflect: editing task.md in .agent/tasks/
             local fpath
+            if [ -n "$PB_FUSED" ]; then fpath="$PB_PATH"; else
             fpath=$(echo "$input" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('tool_input',{}).get('file_path',''))" 2>/dev/null || echo "")
+            fi
             if echo "$fpath" | grep -qE '\.agent(/[^/]+)?/tasks/.*/task\.md'; then
                 echo "reflect"
             else
@@ -62,7 +64,9 @@ classify_tool() {
             ;;
         Bash)
             local cmd
+            if [ -n "$PB_FUSED" ]; then cmd="$PB_CMD"; else
             cmd=$(echo "$input" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('tool_input',{}).get('command',''))" 2>/dev/null || echo "")
+            fi
             if echo "$cmd" | grep -qE 'pytest|python.*-m\s+pytest|test_|grep\s+-c|assert'; then
                 echo "test"
             else
@@ -103,13 +107,44 @@ INPUT=$(cat)
 # Normalize provider payload dialects (grok camelCase + renamed tools →
 # claude snake_case; identity for claude payloads; fail-open on any error).
 # One shot — every parse site below reads the normalized $INPUT (task 014).
-NORMALIZED=$(printf '%s' "$INPUT" | python3 "$HOOK_DIR/hook-payload-normalize.py" 2>/dev/null || true)
-if [ -n "$NORMALIZED" ]; then
-    INPUT="$NORMALIZED"
+# One process for the normalize AND every field this hook reads (tool_name, the
+# edited path, the command, the transcript path) — see hook-payload-normalize.py
+# `--emit-fields`. Each used to be its own `python3 -c`: four interpreter starts
+# per tool call, on a hook bound to `.*`. NUL-delimited because commands contain
+# newlines; the sentinel distinguishes "fused read ran" from "the script died",
+# in which case the original per-field extraction below still applies.
+PB_FUSED=""
+PB_SENTINEL=""
+PB_PAYLOAD=""
+TOOL_NAME=""
+PB_PATH=""
+PB_NORM=""
+PB_CMD=""
+PB_TRANSCRIPT=""
+{
+    IFS= read -r -d '' PB_SENTINEL   || true
+    IFS= read -r -d '' TOOL_NAME     || true
+    IFS= read -r -d '' PB_PATH       || true
+    IFS= read -r -d '' PB_NORM       || true
+    IFS= read -r -d '' PB_CMD        || true
+    IFS= read -r -d '' PB_TRANSCRIPT || true
+    IFS= read -r -d '' PB_PAYLOAD    || true
+} < <(printf '%s' "$INPUT" | python3 "$HOOK_DIR/hook-payload-normalize.py" --emit-fields 2>/dev/null) || true
+
+if [ "$PB_SENTINEL" = "pb-fields-v2" ]; then
+    PB_FUSED=1
+    INPUT="$PB_PAYLOAD"
+else
+    TOOL_NAME=""; PB_PATH=""; PB_NORM=""; PB_CMD=""; PB_TRANSCRIPT=""
+    NORMALIZED=$(printf '%s' "$INPUT" | python3 "$HOOK_DIR/hook-payload-normalize.py" 2>/dev/null || true)
+    if [ -n "$NORMALIZED" ]; then
+        INPUT="$NORMALIZED"
+    fi
+    TOOL_NAME=$(echo "$INPUT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('tool_name',''))" 2>/dev/null || echo "")
 fi
+export PB_FUSED PB_PATH PB_CMD
 
 SESSION_ID="$(resolve_session_id)"
-TOOL_NAME=$(echo "$INPUT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('tool_name',''))" 2>/dev/null || echo "")
 
 # --- Eval mode: read config flags if PLAYBOOK_EVAL_CONFIG is set ---
 EVAL_GATE_ECHO="on"
@@ -134,14 +169,38 @@ mkdir -p "$SESSION_DIR" 2>/dev/null || PLAYBOOK_WRITE_FAILED=true
 STATE_FILE="$SESSION_DIR/current_state"
 COUNTER_FILE="$SESSION_DIR/counters"
 
+# F19: record this session's OWN transcript path (hook payloads carry it) so
+# the monitor binds to the exact file instead of guessing by mtime — the
+# batch-6 defect: the monitor tailed a stale conversation for 40 minutes while
+# the real session streamed into another file. Refreshed every tool call, so a
+# rollover (compaction hands the session a new transcript file) updates the
+# pointer and the sensor's --pointer-file re-resolve follows it. A value with
+# a newline is refused (one path, one line — no pointer-file injection).
+if [ -n "$PB_FUSED" ]; then
+    # The fused extraction carries the same sanitization: a value with a newline
+    # is dropped there, so it can never reach the one-line pointer file.
+    TRANSCRIPT_PATH="$PB_TRANSCRIPT"
+else
+TRANSCRIPT_PATH=$(echo "$INPUT" | python3 -c "
+import sys, json
+t = json.loads(sys.stdin.read()).get('transcript_path', '')
+print(t if isinstance(t, str) and t and '\n' not in t and '\r' not in t else '')
+" 2>/dev/null || echo "")
+fi
+if [ -n "$TRANSCRIPT_PATH" ] && [ "$AGENT_WRITABLE" = true ]; then
+    printf '%s\n' "$TRANSCRIPT_PATH" > "$SESSION_DIR/transcript_path" 2>/dev/null || true
+fi
+
 # Increment tool/write counters
 if [ "$AGENT_WRITABLE" = true ]; then
-    TOOLS_VAL=$(read_counter "$COUNTER_FILE" tools)
-    write_counter "$COUNTER_FILE" tools $(( ${TOOLS_VAL:-0} + 1 ))
+    # read_counter_int (not read_counter): the counter bytes are untrusted and
+    # `$(( ))` executes command substitution embedded in an operand (C5).
+    TOOLS_VAL=$(read_counter_int "$COUNTER_FILE" tools)
+    write_counter "$COUNTER_FILE" tools $(( TOOLS_VAL + 1 ))
     case "$TOOL_NAME" in
         Edit|Write|Bash)
-            WRITES_VAL=$(read_counter "$COUNTER_FILE" writes)
-            write_counter "$COUNTER_FILE" writes $(( ${WRITES_VAL:-0} + 1 ))
+            WRITES_VAL=$(read_counter_int "$COUNTER_FILE" writes)
+            write_counter "$COUNTER_FILE" writes $(( WRITES_VAL + 1 ))
             ;;
     esac
     # Write log: persist file content after Write/Edit
@@ -159,6 +218,9 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
+# N2: a non-digit pointer (incl. a glob metachar) is not a valid task number;
+# blank it so it reads as "no active task" rather than glob-matching a real one.
+case "$TASK" in *[!0-9]*) TASK="" ;; esac
 
 if [ -z "$TASK" ]; then
     echo '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"# No active task (.claude/bin/tasks work <N> to activate)"}}'
@@ -232,7 +294,8 @@ if [ -n "$GATE_LINE" ] && [ "$IS_FREEHAND" = true ]; then
 elif [ -n "$GATE_LINE" ]; then
     GATE_KEY="${TASK}:${GATE_LINE}"
     PREV_KEY=$(read_counter "$COUNTER_FILE" gate_key)
-    PREV_COUNT=$(read_counter "$COUNTER_FILE" gate_count)
+    # gate_count feeds `$((PREV_COUNT + 1))` — coerce it (C5).
+    PREV_COUNT=$(read_counter_int "$COUNTER_FILE" gate_count)
     PREV_TEXT=$(read_counter "$COUNTER_FILE" gate_text)
     if [ -n "$PREV_KEY" ] && [ "$PREV_KEY" = "$GATE_KEY" ]; then
         NEW_COUNT=$((PREV_COUNT + 1))
@@ -279,7 +342,7 @@ else
     # All gates done — log final gate if exists, clean up gate_* counters
     PREV_KEY=$(read_counter "$COUNTER_FILE" gate_key)
     if [ -n "$PREV_KEY" ] && [ "$AGENT_WRITABLE" = true ]; then
-        PREV_COUNT=$(read_counter "$COUNTER_FILE" gate_count)
+        PREV_COUNT=$(read_counter_int "$COUNTER_FILE" gate_count)
         PREV_TEXT=$(read_counter "$COUNTER_FILE" gate_text)
         PREV_TASK="${PREV_KEY%%:*}"
         PREV_LINE="${PREV_KEY##*:}"

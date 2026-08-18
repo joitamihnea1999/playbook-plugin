@@ -1,0 +1,7 @@
+{
+  "name": "edit-.agent-file-without-task → ALLOW (state exempt)",
+  "hook": "task-gate-hook",
+  "files": {".agent/config.json": "{}\n"},
+  "current_state": "",
+  "payload": {"tool_name": "Edit", "tool_input": {"file_path": ".agent/config.json"}}
+}

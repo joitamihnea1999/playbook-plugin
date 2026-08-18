@@ -45,15 +45,18 @@ mkdir -p "$AGENT_DIR"
 # Get next message ID (flock for atomicity where available, plain fallback on macOS)
 get_next_id() {
     local counter_file="$1"
+    # _safe_int on the file content: chat_log_counter lives under .agent/
+    # (gate-exempt, untrusted), and `$(( n + 1 ))` executes command
+    # substitution embedded in `n` (C5). Coerce before any arithmetic.
     if command -v flock &>/dev/null; then
         (
             flock -x 200
-            local n=$(cat "$counter_file" 2>/dev/null || echo 0)
+            local n=$(_safe_int "$(cat "$counter_file" 2>/dev/null)")
             echo $((n + 1)) > "$counter_file"
             printf "M%03d" $((n + 1))
         ) 200>"$counter_file.lock"
     else
-        local n=$(cat "$counter_file" 2>/dev/null || echo 0)
+        local n=$(_safe_int "$(cat "$counter_file" 2>/dev/null)")
         echo $((n + 1)) > "$counter_file"
         printf "M%03d" $((n + 1))
     fi

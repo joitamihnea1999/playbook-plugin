@@ -119,6 +119,13 @@ class PiAdapter(ProviderAdapter):
                 return (f"(error: pi judge prompt+context is ~{payload} chars on argv; "
                         "Windows caps the command line at 32,767 chars and pi reads its "
                         "prompt from argv only — shrink the context or use another backend)")
+        # POSIX per-element BYTE cap (#10). pi puts prompt and context in SEPARATE
+        # elements, so this only trips if one element alone exceeds the cap — the
+        # max-over-elements check handles that correctly.
+        from provider.argv_guard import argv_byte_error
+        _argv_err = argv_byte_error(inv.argv, "pi")
+        if _argv_err:
+            return _argv_err
         env = os.environ.copy()
         env["PLAYBOOK_SESSION_ID"] = self._session_id or "judge"
         from provider import sandbox as _sandbox

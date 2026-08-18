@@ -50,7 +50,23 @@ def _strip_code(text: str) -> str:
             continue
         if not in_fence:
             out.append(line)
-    return re.sub(r'`[^`]*`', '', '\n'.join(out))
+    # `[^`\n]*` (not `[^`]*`): an inline-code span must not cross a newline, so
+    # two STRAY backticks on different lines can't swallow every `[N]` between
+    # them (C3 vector 2). Real inline code in these files is always single-line.
+    return re.sub(r'`[^`\n]*`', '', '\n'.join(out))
+
+
+def _fence_open_at_eof(text: str) -> bool:
+    """True if a ``` code fence is opened but never closed. An unbalanced fence
+    makes every node/ref after it invisible to the fence-aware scans, so the
+    verifier would report CLEAN on a file whose tail it cannot even see — the
+    worst failure class (C3 vector 1). Callers fail CLOSED on True (mirrors
+    tasks.mindmap._node_starts's `in_fence_at_eof`)."""
+    in_fence = False
+    for line in text.split('\n'):
+        if line.lstrip().startswith('```'):
+            in_fence = not in_fence
+    return in_fence
 
 
 def _node_start_lines(text: str) -> list[tuple[int, int]]:
@@ -184,6 +200,12 @@ def check(main_path: Path, overflow_path: Path,
     notes: list[str] = []
 
     main_text = main_path.read_text(encoding='utf-8', errors='replace')
+    # Fail CLOSED on an unbalanced fence: the scans below are blind past it, so
+    # a "clean" verdict here would certify a file the verifier cannot see (C3).
+    if _fence_open_at_eof(main_text):
+        findings.append(
+            f"{main_path.name}: unterminated ``` code fence — the structural "
+            "scan is blind past it (failing closed; balance the fence and re-run)")
     main_ids_list = _node_ids(main_text)
     main_ids = set(main_ids_list)
     main_bodies = _node_bodies(main_text)
@@ -210,6 +232,10 @@ def check(main_path: Path, overflow_path: Path,
     overflow_bodies: dict[int, str] = {}
     if overflow_path.exists():
         overflow_text = overflow_path.read_text(encoding='utf-8', errors='replace')
+        if _fence_open_at_eof(overflow_text):
+            findings.append(
+                f"{overflow_path.name}: unterminated ``` code fence — the "
+                "structural scan is blind past it (failing closed)")
         ov_ids_list = _node_ids(overflow_text)
         overflow_ids = set(ov_ids_list)
         overflow_bodies = _node_bodies(overflow_text)

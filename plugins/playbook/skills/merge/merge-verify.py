@@ -124,6 +124,57 @@ def resolve_command(project_root):
     return command_from_config(cfg)
 
 
+def _write_script(command):
+    """Write `command` to a temp bash script under the fail-fast preamble and
+    return its path. Shared by the streaming runner (main) and the capturing
+    runner (run_command_capture) so both honor the SAME discipline: set -e makes
+    an early failing step fail; pipefail stops a trailing `| tail` swallowing the
+    real status. Caller unlinks."""
+    fd, script = tempfile.mkstemp(prefix="verify-", suffix=".sh")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(PREAMBLE)
+        fh.write(command)
+        if not command.endswith("\n"):
+            fh.write("\n")
+    return script
+
+
+def run_command_capture(command, project_root=".", timeout_secs=None):
+    """Run one declared command and return (rc, combined_output).
+
+    Same execution contract as `main`'s runner (temp script, set -e/pipefail, exit
+    status can't be forged) but CAPTURES stdout+stderr instead of streaming, so a
+    caller — the `tasks work done` evidence gate — can put a line of output into a
+    receipt. This is the one runner both the merge push-gate and the close gate
+    share; the shape of "what green means" lives here and nowhere else.
+
+    `timeout_secs` (None = unlimited) is a hard ceiling: a hung suite must not
+    hang the close forever — in headless use that is a silent deadlock. A timeout
+    returns rc 124 (the conventional timeout code, non-zero, so the gate reads
+    FAILED) with the marker FIRST in the output so a receipt's first line names
+    the timeout, then whatever the command had written."""
+    script = _write_script(command)
+    try:
+        proc = subprocess.run(
+            ["bash", script], cwd=project_root or ".",
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace", timeout=timeout_secs,
+        )
+        return proc.returncode, (proc.stdout or "")
+    except subprocess.TimeoutExpired as exc:
+        raw = exc.stdout or ""
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        marker = (f"(timed out after {timeout_secs}s — command killed; a verify "
+                  "that cannot finish is FAILED, not verified)")
+        return 124, marker + ("\n" + raw if raw else "")
+    finally:
+        try:
+            os.unlink(script)
+        except OSError:
+            pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Run the project's declared post-merge verify command.")
@@ -157,20 +208,12 @@ def main(argv=None):
         return CONFIGURED
 
     # Run via a temp script rather than `bash -c <command>`: the command is
-    # arbitrary project-owned text and may contain any quoting.
-    fd, script = tempfile.mkstemp(prefix="merge-verify-", suffix=".sh")
+    # arbitrary project-owned text and may contain any quoting. _write_script
+    # applies the fail-fast preamble (set -e / pipefail) so an early failing step
+    # fails the gate — a green stamp on a red tree is the whole defect this
+    # prevents.
+    script = _write_script(command)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            # Fail on the FIRST failing step, not just the last one. Bash
-            # reports the exit status of the final command, so without this a
-            # multi-step command like "typecheck\ntest" (or anything ending in
-            # a pipe) reports success when an early step failed — a green stamp
-            # on a red tree, which is the whole defect this tool exists to
-            # prevent. `pipefail` covers the `suite | tail` shape specifically.
-            fh.write(PREAMBLE)
-            fh.write(command)
-            if not command.endswith("\n"):
-                fh.write("\n")
         print(f"merge-verify: running — {command}", flush=True)
         rc = subprocess.call(["bash", script], cwd=root or ".")
     finally:

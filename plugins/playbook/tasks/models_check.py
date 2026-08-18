@@ -731,6 +731,106 @@ def _project_models_path(project_root: Path) -> Path:
     return project_root / ".agent" / "models.json"
 
 
+def spec_error(spec: str) -> Optional[str]:
+    """Syntactic validation shared by panel entries and default_judge.
+
+    Empty variants and codex/grok effort suffixes are checked here because
+    resolve_judge_spec accepts both (``codex:`` → default model,
+    ``codex:gpt-5.5:bogus`` → effort unvalidated until review time). Returns an
+    error string, or None when the spec is syntactically usable. Availability
+    (does the model actually run) is a separate, probe-backed question — see
+    _audit_proposed.
+    """
+    from provider.adapters.codex import _split_reasoning_effort
+    from provider.sandbox import resolve_judge_spec
+    if spec.endswith(":"):
+        return f"pin '{spec}' has an empty variant"
+    try:
+        provider, variant = resolve_judge_spec(spec)
+    except ValueError as e:
+        return str(e)
+    if provider == "codex" and variant:
+        try:
+            _split_reasoning_effort(variant)
+        except ValueError as e:
+            return str(e)
+    if provider == "grok" and variant:
+        from provider.adapters.grok import _split_reasoning_effort as _grok_split
+        try:
+            _grok_split(variant)
+        except ValueError as e:
+            return str(e)
+    return None
+
+
+def _read_existing_models(path: Path) -> dict:
+    """Round-trip the RAW models.json so hand-authored keys survive a rewrite.
+
+    load_judge_config would drop everything but two keys; select/set mutate
+    panel/default_judge/_updated in place and leave _doc, aliases, … intact.
+    An unreadable file starts fresh (a warning goes to stderr).
+    """
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"WARNING: existing {path} unreadable ({e}) — starting fresh", file=sys.stderr)
+            return {}
+        # Valid JSON but not an object (e.g. a bare list) is unusable — the
+        # writers do `existing[...]=...` / `.get(...)`. Start fresh, don't crash.
+        if not isinstance(data, dict):
+            print(f"WARNING: existing {path} is not a JSON object — starting fresh",
+                  file=sys.stderr)
+            return {}
+        return data
+    return {}
+
+
+def _audit_proposed(project_root: Path, new_panel: list[str],
+                    default_judge: Optional[str]) -> list[dict]:
+    """Cheap (no-probe) availability audit of the PROPOSED pins.
+
+    Without this, select/set can immediately re-create a rotten panel
+    (impl-panel I8) — a syntactically-valid pin to a retired model. Returns the
+    bad_pins entries that belong to the proposed specs; empty when all look
+    usable.
+    """
+    proposed = list(new_panel) + ([default_judge] if default_judge else [])
+    if not proposed:
+        return []
+    audit = check_pins(project_root, probe=False, extra_specs=proposed)
+    return [e for e in bad_pins(audit) if e["spec"] in proposed]
+
+
+def _write_panel(path: Path, existing: dict, new_panel: Optional[list[str]],
+                 default_judge: Optional[str]) -> None:
+    """Atomically write panel/default_judge into `existing`, preserving the rest.
+
+    `new_panel=None` leaves the existing `panel` key untouched — so a
+    `set --default-judge X` with no `--panel` does NOT silently freeze the
+    shipped default panel into the file (and keep it from tracking future
+    plugin-panel upgrades). `new_panel=[]` explicitly clears it. An interrupt
+    can't truncate models.json — the write goes through a temp + os.replace.
+    Seeds a project-scoped `_doc` when the file had none.
+    """
+    if new_panel is not None:
+        existing["panel"] = new_panel
+    if default_judge:
+        existing["default_judge"] = default_judge
+    existing["_updated"] = datetime.now(timezone.utc).date().isoformat()
+    existing.setdefault(
+        "_doc",
+        "Project override for playbook judge selection (shadows the plugin's "
+        "provider/models.json per key). Refresh with `tasks models select` or "
+        "`tasks models set`; audit with `tasks models check`.",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)  # atomic — an interrupt can't truncate models.json
+    print(f"Wrote {path}")
+
+
 def run_select(project_root: Path, probe: bool = True,
                claude_candidates: Optional[list[str]] = None) -> int:
     """Interactive panel refresh: show availability, take picks, write models.json.
@@ -744,12 +844,7 @@ def run_select(project_root: Path, probe: bool = True,
     print(render_report(report))
 
     path = _project_models_path(project_root)
-    existing: dict = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            print(f"WARNING: existing {path} unreadable ({e}) — starting fresh", file=sys.stderr)
+    existing = _read_existing_models(path)
     # Fallback = the effective (shipped) panel, NOT report entries — the
     # report also lists default_judge and extra specs, which aren't pins.
     from provider.sandbox import load_judge_config
@@ -768,35 +863,8 @@ def run_select(project_root: Path, probe: bool = True,
         raw = ""
     new_panel = [s.strip() for s in raw.split(",") if s.strip()] if raw else current_panel
 
-    from provider.adapters.codex import _split_reasoning_effort
-    from provider.sandbox import resolve_judge_spec
-
-    def _spec_error(spec: str) -> Optional[str]:
-        """Syntactic validation shared by panel entries and default_judge:
-        empty variants and codex effort suffixes are checked here because
-        resolve_judge_spec accepts both (`codex:` → default model,
-        `codex:gpt-5.5:bogus` → effort unvalidated until review time)."""
-        if spec.endswith(":"):
-            return f"pin '{spec}' has an empty variant"
-        try:
-            provider, variant = resolve_judge_spec(spec)
-        except ValueError as e:
-            return str(e)
-        if provider == "codex" and variant:
-            try:
-                _split_reasoning_effort(variant)
-            except ValueError as e:
-                return str(e)
-        if provider == "grok" and variant:
-            from provider.adapters.grok import _split_reasoning_effort as _grok_split
-            try:
-                _grok_split(variant)
-            except ValueError as e:
-                return str(e)
-        return None
-
     for spec in new_panel:
-        err = _spec_error(spec)
+        err = spec_error(spec)
         if err:
             print(f"Error: {err}", file=sys.stderr)
             return 1
@@ -807,7 +875,7 @@ def run_select(project_root: Path, probe: bool = True,
     except EOFError:
         dj_raw = ""
     if dj_raw:
-        err = _spec_error(dj_raw)
+        err = spec_error(dj_raw)
         if err:
             print(f"Error: {err}", file=sys.stderr)
             return 1
@@ -816,9 +884,7 @@ def run_select(project_root: Path, probe: bool = True,
     # Audit the PROPOSED pins (cheap checks) before writing — otherwise select
     # can immediately re-create a rotten panel (impl-panel I8). Bad verdicts
     # need an explicit confirmation.
-    proposed = list(new_panel) + ([default_judge] if default_judge else [])
-    audit = check_pins(project_root, probe=False, extra_specs=proposed)
-    bad = [e for e in bad_pins(audit) if e["spec"] in proposed]
+    bad = _audit_proposed(project_root, new_panel, default_judge)
     if bad:
         print("\nProposed pin(s) look unusable:", file=sys.stderr)
         for e in bad:
@@ -831,30 +897,254 @@ def run_select(project_root: Path, probe: bool = True,
             print("Aborted — nothing written.", file=sys.stderr)
             return 1
 
-    existing["panel"] = new_panel
-    if default_judge:
-        existing["default_judge"] = default_judge
-    existing["_updated"] = datetime.now(timezone.utc).date().isoformat()
-    existing.setdefault(
-        "_doc",
-        "Project override for playbook judge selection (shadows the plugin's "
-        "provider/models.json per key). Refresh with `tasks models select`; "
-        "audit with `tasks models check`.",
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)  # atomic — an interrupt can't truncate models.json
-    print(f"Wrote {path}")
+    _write_panel(path, existing, new_panel, default_judge)
     return 0
+
+
+# ── set (non-interactive panel writer) ────────────────────────────────────────
+
+def run_set(project_root: Path, panel: Optional[list[str]] = None,
+            default_judge: Optional[str] = None, force: bool = False) -> int:
+    """Non-interactive `.agent/models.json` writer — the flag-driven twin of
+    run_select, used by `/playbook:init` (which asks the user in the
+    conversation, then writes the answer here) and by scripts.
+
+    `panel=None` leaves the existing `panel` key untouched (so setting only the
+    default judge doesn't freeze the shipped panel into the file); `panel=[]`
+    explicitly clears it (with a warning — an empty panel means panel-review has
+    no seats). `default_judge=None` leaves the existing default. Only the specs
+    actually being changed are validated + availability-audited (no probe): a
+    bad pin ABORTS with exit 1 unless `force=True` — the non-interactive
+    analogue of select's "Write anyway?" (there's no one to ask, so refusing
+    loudly beats writing a dead panel). Returns 0 on write, 1 on validation/
+    audit failure, 2 when neither panel nor default_judge is given.
+    """
+    if panel is None and default_judge is None:
+        print("Error: nothing to set — pass --panel and/or --default-judge",
+              file=sys.stderr)
+        return 2
+
+    path = _project_models_path(project_root)
+    existing = _read_existing_models(path)
+
+    # Validate + audit ONLY what's being changed. When panel is None we are not
+    # touching the panel, so its (shipped/existing) pins are not our concern here.
+    changed_panel = panel if panel is not None else []
+    for spec in changed_panel:
+        err = spec_error(spec)
+        if err:
+            print(f"Error: {err}", file=sys.stderr)
+            return 1
+    if default_judge:
+        err = spec_error(default_judge)
+        if err:
+            print(f"Error: {err}", file=sys.stderr)
+            return 1
+
+    bad = _audit_proposed(project_root, changed_panel, default_judge)
+    if bad and not force:
+        print("Proposed pin(s) look unusable:", file=sys.stderr)
+        for e in bad:
+            print(f"  {e['spec']}: {e['verdict']} — {e['detail']}", file=sys.stderr)
+        print("Refusing to write a dead panel — re-run with --force to override.",
+              file=sys.stderr)
+        return 1
+
+    if panel == []:
+        print("WARNING: writing an EMPTY panel — panel-review will have no judge "
+              "seats. Pass judges to --panel if that wasn't intended.", file=sys.stderr)
+
+    _write_panel(path, existing, panel, default_judge)
+    return 0
+
+
+# ── detect (fast provider/model inventory — no live model probe) ─────────────
+
+def detect_providers(project_root: Optional[Path] = None) -> dict:
+    """Which agent CLIs are installed on this machine + each one's candidate
+    models and supported reasoning efforts — the menu `/playbook:init` offers
+    before it writes a panel.
+
+    Fast because it runs NO live model turn: it reads `shutil.which` + local
+    surfaces (codex's models_cache.json, Claude Code's settings.json) and the
+    two cheap listing commands (`agy models`, `grok models`). Note `grok models`
+    is login-aware (it lists the account's server-side entitlements), so this is
+    not strictly offline — but each listing is bounded by a 60s timeout and no
+    model is prompt-probed. Availability of a chosen pin is confirmed separately
+    by `tasks models check` (init's optional probe).
+
+    Returns {"providers": [ {name, installed, models, efforts, note} ]} where
+    `models` is a list of {"id", "efforts"} (efforts is the per-model effort
+    vocabulary, [] when the provider has none) and `efforts` is the provider's
+    whole effort vocabulary for quick reference.
+    """
+    from provider.adapters.grok import _REASONING_EFFORTS as GROK_EFFORTS
+    from provider.sandbox import MODEL_ALIASES
+
+    providers: list[dict] = []
+
+    # claude — no list command; assemble from Claude Code's configured model ∪
+    # the shipped claude alias targets. No reasoning-effort knob.
+    claude_installed = shutil.which("claude") is not None
+    claude_models: list[str] = []
+    if claude_installed:
+        claude_models.extend(_claude_configured_models(project_root))
+        for agent, model, _extras in MODEL_ALIASES.values():
+            if agent == "claude" and model:
+                claude_models.append(model)
+    seen: set[str] = set()
+    claude_models = [m for m in claude_models if not (m in seen or seen.add(m))]
+    providers.append({
+        "name": "claude", "installed": claude_installed,
+        "models": [{"id": m, "efforts": []} for m in claude_models], "efforts": [],
+        "note": ("Claude Code's configured model + shipped ids; no effort knob."
+                 if claude_installed else "claude CLI not on PATH."),
+    })
+
+    # codex — models + per-model effort levels from the local cache (a catalog,
+    # not this account's entitlements, so a listed model can still 400 at run).
+    codex_installed = shutil.which("codex") is not None
+    codex_models: list[dict] = []
+    codex_note = "codex CLI not on PATH."
+    if codex_installed:
+        cache = load_codex_cache()
+        if cache:
+            codex_models = [{"id": slug, "efforts": efforts}
+                            for slug, efforts in cache["models"].items()]
+            codex_note = ("from ~/.codex/models_cache.json (a catalog — a listed "
+                          "model can still 400 per-account; init's probe confirms).")
+        else:
+            codex_note = "codex installed but models cache unreadable."
+    providers.append({
+        "name": "codex", "installed": codex_installed,
+        "models": codex_models, "efforts": [], "note": codex_note,
+    })
+
+    # agy — `agy models` lists display names; `-m` is inert (the UI selects the
+    # real model), so pins are unverifiable and there is no effort knob.
+    agy_installed = shutil.which("agy") is not None
+    agy_names = list_agy_models() if agy_installed else None
+    if not agy_installed:
+        agy_note = "agy CLI not on PATH."
+    elif agy_names is None:
+        agy_note = "agy installed but `agy models` returned nothing."
+    else:
+        agy_note = "`agy models` names — pin is NOT selectable from the CLI (set it in the agy UI)."
+    providers.append({
+        "name": "agy", "installed": agy_installed,
+        "models": [{"id": n, "efforts": []} for n in (agy_names or [])], "efforts": [],
+        "note": agy_note,
+    })
+
+    # grok — `grok models` is login-aware (the list IS the entitlements);
+    # --reasoning-effort accepts low/medium/high.
+    grok_installed = shutil.which("grok") is not None
+    grok_names = list_grok_models() if grok_installed else None
+    grok_efforts = sorted(GROK_EFFORTS)
+    if not grok_installed:
+        grok_note = "grok CLI not on PATH."
+    elif grok_names is None:
+        grok_note = "grok installed but `grok models` failed (logged in?)."
+    else:
+        grok_note = "account-entitled ids from `grok models`; effort suffix low|medium|high."
+    providers.append({
+        "name": "grok", "installed": grok_installed,
+        "models": [{"id": n, "efforts": grok_efforts} for n in (grok_names or [])],
+        "efforts": grok_efforts,
+        "note": grok_note,
+    })
+
+    # pi — no model-discovery surface; the adapter takes an explicit model id.
+    pi_installed = shutil.which("pi") is not None
+    providers.append({
+        "name": "pi", "installed": pi_installed, "models": [], "efforts": [],
+        "note": ("installed — no discovery surface; specify a model id explicitly "
+                 "(e.g. pi:deepseek/deepseek-v4-flash)." if pi_installed
+                 else "pi CLI not on PATH."),
+    })
+
+    return {"providers": providers}
+
+
+def render_detect(report: dict) -> str:
+    """Human-readable inventory for `tasks models detect` stdout."""
+    lines = ["=== Installed agents & selectable models (fast detect — no live probe) ==="]
+    for p in report["providers"]:
+        mark = "installed" if p["installed"] else "not installed"
+        lines.append(f"\n[{p['name']}] {mark} — {p['note']}")
+        if not p["installed"]:
+            continue
+        if not p["models"]:
+            continue
+        for m in p["models"]:
+            eff = f"  (efforts: {', '.join(m['efforts'])})" if m["efforts"] else ""
+            lines.append(f"    {m['id']}{eff}")
+    lines.append("\nPanel spec syntax: provider:variant[:effort] / bare provider / alias")
+    lines.append("  e.g.  opus, sonnet, codex:gpt-5.5:high, grok:grok-build:medium, agy")
+    return "\n".join(lines)
 
 
 # ── CLI entry ────────────────────────────────────────────────────────────────
 
 def cli_models(cmd_args: list[str], project_root: Path) -> int:
-    """`tasks models check|select [--no-probe] [--claude-candidates a,b]`."""
+    """`tasks models check|select|detect|set [flags]`.
+
+      check  [--no-probe] [--claude-candidates a,b]   audit configured pins
+      select [--no-probe] [--claude-candidates a,b]   interactive panel rewrite
+      detect [--json]                                 installed agents + models
+      set    --panel a,b --default-judge c [--force]  non-interactive write
+    """
     args = list(cmd_args)
     sub = args.pop(0) if args and not args[0].startswith("--") else "check"
+
+    if sub == "detect":
+        as_json = False
+        for a in args:
+            if a == "--json":
+                as_json = True
+            else:
+                print(f"Error: unknown detect flag '{a}'", file=sys.stderr)
+                return 2
+        report = detect_providers(project_root)
+        print(json.dumps(report, indent=2) if as_json else render_detect(report))
+        return 0
+
+    def _value(flag: str, idx: int) -> Optional[str]:
+        """The value token after a value-taking flag, or None (with a printed
+        error) when it's absent or is itself another flag — so `--panel --force`
+        reports "missing value" instead of silently consuming `--force`."""
+        if idx + 1 >= len(args) or args[idx + 1].startswith("--"):
+            print(f"Error: missing value for {flag}", file=sys.stderr)
+            return None
+        return args[idx + 1]
+
+    if sub == "set":
+        panel: Optional[list[str]] = None
+        default_judge: Optional[str] = None
+        force = False
+        i = 0
+        while i < len(args):
+            if args[i] == "--panel":
+                v = _value("--panel", i)
+                if v is None:
+                    return 2
+                panel = [s.strip() for s in v.split(",") if s.strip()]
+                i += 2
+            elif args[i] == "--default-judge":
+                v = _value("--default-judge", i)
+                if v is None:
+                    return 2
+                default_judge = v.strip()
+                i += 2
+            elif args[i] == "--force":
+                force = True
+                i += 1
+            else:
+                print(f"Error: unknown set flag '{args[i]}'", file=sys.stderr)
+                return 2
+        return run_set(project_root, panel=panel, default_judge=default_judge, force=force)
+
+    # check / select share the probe flags.
     probe = True
     candidates: list[str] = []
     i = 0
@@ -862,8 +1152,11 @@ def cli_models(cmd_args: list[str], project_root: Path) -> int:
         if args[i] == "--no-probe":
             probe = False
             i += 1
-        elif args[i] == "--claude-candidates" and i + 1 < len(args):
-            candidates = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+        elif args[i] == "--claude-candidates":
+            v = _value("--claude-candidates", i)
+            if v is None:
+                return 2
+            candidates = [s.strip() for s in v.split(",") if s.strip()]
             i += 2
         else:
             print(f"Error: unknown models flag '{args[i]}'", file=sys.stderr)
@@ -879,5 +1172,6 @@ def cli_models(cmd_args: list[str], project_root: Path) -> int:
         return 0
     if sub == "select":
         return run_select(project_root, probe=probe, claude_candidates=candidates)
-    print(f"Error: unknown models subcommand '{sub}' (use: check, select)", file=sys.stderr)
+    print(f"Error: unknown models subcommand '{sub}' "
+          f"(use: check, select, detect, set)", file=sys.stderr)
     return 2

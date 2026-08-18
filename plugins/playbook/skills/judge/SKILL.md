@@ -68,6 +68,16 @@ Task(
 The judge starts fresh. No conversation history. Only what you put in the prompt
 and what it reads from the repo.
 
+> **In a playbook-initialized project, `Task` is on `permissions.deny`**
+> (`init` writes it into `.claude/settings.json`), so the `Task(...)` spawn
+> above is refused. Two sanctioned routes:
+> - **Judging a task's plan or implementation** — use the vendor-judge CLI
+>   instead: `.claude/bin/tasks plan-review <N>` or `.claude/bin/tasks impl-review <N>`
+>   (a sandboxed, blind panel that writes `judge.md`). This is the preferred
+>   path inside a task and needs no `Task` permission.
+> - **A generic one-off judgment with no task** — the user must explicitly allow
+>   `Task` (remove it from `permissions.deny`) before the `Task` spawn will run.
+
 ### 4. Verdict file location (priority order)
 
 1. **Task folder**: `.agent/tasks/NNN-name/judge-<topic>.md` — preferred

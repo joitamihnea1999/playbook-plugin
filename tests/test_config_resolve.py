@@ -223,8 +223,11 @@ class IntentRunnerHonoursConfigTest(unittest.TestCase):
     """
 
     def test_default_runner_passes_the_resolved_budget(self):
-        import types
-        from provider.adapters import codex as codex_mod
+        # The shipped default_judge is now a claude alias (all-Claude defaults,
+        # 1.5.11 audit), so stub the CLAUDE adapter — the runner constructs
+        # whichever adapter default_judge resolves to. The assertion (runner
+        # passes the resolved budget + timeout) is backend-agnostic.
+        from provider.adapters import claude as claude_mod
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -243,10 +246,10 @@ class IntentRunnerHonoursConfigTest(unittest.TestCase):
             return "report"
 
         from tasks import intent as intent_mod
-        orig = codex_mod.CodexAdapter.run_headless_judge
-        codex_mod.CodexAdapter.run_headless_judge = fake_judge
+        orig = claude_mod.ClaudeAdapter.run_headless_judge
+        claude_mod.ClaudeAdapter.run_headless_judge = fake_judge
         self.addCleanup(lambda: setattr(
-            codex_mod.CodexAdapter, "run_headless_judge", orig))
+            claude_mod.ClaudeAdapter, "run_headless_judge", orig))
 
         runner = intent_mod.make_default_runner(project, timeout_secs=1200)
         runner("chat", "prompt --- EVIDENCE\nstuff")
@@ -564,7 +567,7 @@ class EffortFlagScopeTest(unittest.TestCase):
 
     Two paths exist and are easy to forget: the panel seat goes through
     ClaudeAdapter.run_headless_judge, while `plan-review --backend claude`
-    assembles its own argv in tasks/cli.py. A depth setting on one and not the
+    assembles its own argv in tasks/review.py. A depth setting on one and not the
     other means the same judge reviews differently depending on how it was
     invoked.
     """
@@ -574,7 +577,7 @@ class EffortFlagScopeTest(unittest.TestCase):
     def test_both_claude_launch_paths_pass_effort_high(self):
         adapter = (self.PLAYBOOK / "provider" / "adapters" / "claude.py").read_text(
             encoding="utf-8")
-        cli = (self.PLAYBOOK / "tasks" / "cli.py").read_text(encoding="utf-8")
+        cli = (self.PLAYBOOK / "tasks" / "review.py").read_text(encoding="utf-8")
         self.assertIn('"--effort", "high"', adapter)
         self.assertIn('"--effort", "high"', cli)
 

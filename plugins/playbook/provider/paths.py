@@ -10,13 +10,13 @@ directories — the split-brain this module exists to prevent.
 Why this lives in `provider/` instead of importing `tasks.core`
 ---------------------------------------------------------------
 The Codex hook scripts bootstrap their imports by putting `scripts/lib/` on
-`sys.path` (see `_bootstrap_imports` in `scripts/codex-*-hook`). In that
-context `import tasks.core` does NOT reach the canonical `tasks/` package — it
-reaches the `scripts/lib/tasks/` mirror, which is 600+ lines diverged and dead
-(see mind map [7], [32]). Executing dead code on the enforcement path would be
-bad on its own; it would also block the already-parked deletion of that mirror.
-`provider/` is byte-mirrored into `scripts/lib/provider/`, so a resolver that
-lives here is correct from both import roots.
+`sys.path` (see `_bootstrap_imports` in `scripts/codex-*-hook`). In that context
+`import tasks.*` does NOT reach the canonical `tasks/` package — there is no
+`scripts/lib/tasks/` (the dead 7k-line mirror pinned at 1.4.1 was deleted in
+1.5.17), so an `import tasks.core` from a hook would now fail outright. `provider/`
+is byte-mirrored into `scripts/lib/provider/`, so a resolver that lives here is
+importable from both roots without ever touching `tasks/`. This is exactly why
+the enforcement-path helpers live in `provider/`, not `tasks/`.
 
 The validation contract is intentionally identical to `tasks/core.py`
 `_validate_username` and `scripts/gate-echo-lib.sh` `resolve_agent_dir`; a

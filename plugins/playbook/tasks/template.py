@@ -23,8 +23,9 @@ def header(num: int, title: str) -> str:
 def sticker() -> str:
     return """\
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
-> Never batch. Never backfill. The document IS the execution trace.
+> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).
 > **Closing a gate:** check the box, append your outcome. Never replace the original text.
+> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts \u2014 moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` \u2026 `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).
 > Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).
 > If you see the same gate 5+ times in the hook echo, you're drifting \u2014 STOP and update."""
 
@@ -34,7 +35,16 @@ def status() -> str:
 ## Status
 pending
 
-> **Before filling this in:** run `.claude/bin/tasks work <N>` to activate this task. Hooks won't enforce until activated."""
+> **Before filling this in:** run `.claude/bin/tasks work <N>` to activate this task. Hooks won't enforce until activated.
+
+## Risk
+unclassified
+
+> **Set this at the Structure gate** to one of: `reversible` / `irreversible` / `assertive`.
+> - `reversible` — the question is whether the WORLD reverts, not the diff: touches only code/config that `git revert` fully undoes. A change that deletes/migrates persisted data, alters an on-disk format, rotates a secret, rewrites history, or publishes/asserts a claim about the world is NOT reversible even when its diff reverts cleanly. Normal bar.
+> - `irreversible` — deletes/migrates data, rotates a secret, rewrites history, or publishes. Needs a named rollback plan + explicit confirmation, and cannot light-close.
+> - `assertive` — changes a **claim about the world** (docs, a calibration, a measurement, a "verified accurate"). Reviewed for the claim AND its instrument regardless of diff size — a docs-only diff can be the most review-worthy thing a task produces. Cannot light-close.
+> - Leaving it `unclassified` is **not** the cheap way out: an unset gate cannot be evaluated, so the close is held to the same bar as `assertive`/`irreversible` (review evidence, or `--force --reason`). One word here is the whole cost."""
 
 
 def intent_why_refs(playbook: str) -> str:
@@ -46,7 +56,7 @@ def intent_why_refs(playbook: str) -> str:
 (why this matters now \u2014 urgency, context, what breaks if delayed)
 
 ## References
-- [ ] Context: `grep -Ein "keyword1|keyword2" MIND_MAP.md` \u2192 paste relevant excerpts below
+- [ ] Context: `.claude/bin/tasks recall keyword1 keyword2` (locates matching nodes across MIND_MAP.md + overflow), then `tasks recall <N>` for each \u2192 paste relevant excerpts below
 - Playbook: {playbook}
 - Note: Don't hardcode task numbers in plans \u2014 `.claude/bin/tasks new` auto-increments.
 
@@ -81,7 +91,8 @@ def understand() -> str:
 def structure() -> str:
     return """\
 ### Structure
-- [ ] What kind of work is this? (build / investigate / evaluate / decide / combination?) If combination, what's the sequence? If >15 gates or uncertain approach, pick a checkpoint where you pause and reassess direction before continuing."""
+- [ ] What kind of work is this? (build / investigate / evaluate / decide / combination?) If combination, what's the sequence? If >15 gates or uncertain approach, pick a checkpoint where you pause and reassess direction before continuing.
+- [ ] **Set `## Risk`** (reversible / irreversible / assertive). Ask: if this claim/change were WRONG, what would show it? An `assertive` task (changes a claim about the world — docs, a calibration, a measurement) must name the instrument that would reveal the claim false. An `irreversible` task must name its rollback plan. These cannot be light-closed for being small."""
 
 
 def reflection_gates() -> str:
@@ -119,11 +130,10 @@ def design_phase() -> str:
 def judge_section() -> str:
     return """\
 ## Plan Review
-- [ ] Run `.claude/bin/tasks plan-review <N>` — wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only and will NOT touch your gates). Re-read this file to see its findings below, then address valid concerns by revising Work Plan gates yourself. **Justify lens:** does every work gate trace up to something in Intent/Design? Are there gates that justify nothing above them (scope creep)? Intent claims with no gate to satisfy them (gaps)?
-- [ ] **Triage plan-review findings: judge = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale). Push back where you have concrete evidence — you live with the outcomes, the reviewer doesn't. Verify file:line claims before applying — single-judge reviews can cite wrong locations.
-- [ ] *(Optional)* Run `.claude/bin/tasks panel-review <N>` for multi-model panel (writes to judge.md, not this file). Add `--prompt "..."` to append extra steering (e.g. focus area, constraint). Read judge.md with user, accept/reject findings, apply selected advice to Work Plan.
+- [ ] Run `.claude/bin/tasks panel-review <N>` — ALL available judges review the plan in parallel (blind: they see the repo, not your conversation). Wait for it to finish; findings land in `judge.md` (this dir), led by a PANEL VERDICT. Read judge.md, then address valid concerns by revising Work Plan gates yourself. **Justify lens:** does every work gate trace up to something in Intent/Design? Are there gates that justify nothing above them (scope creep)? Intent claims with no gate to satisfy them (gaps)? *(Fallback if no panel can run: `.claude/bin/tasks plan-review <N>` — single judge, writes into this file.)*
+- [ ] **Triage panel findings into this file: judges = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale) here under this gate. Push back where you have concrete evidence — you live with the outcomes, the reviewers don't. Verify file:line claims before applying. Where judges DISAGREE with each other, say which you believed and why — disagreement between models is signal, not noise.
 
-(plan review findings appear here)
+(plan review triage appears here)
 
 ---"""
 
@@ -143,11 +153,10 @@ def work_plan() -> str:
 def judge_impl_section() -> str:
     return """\
 ## Implementation Review
-- [ ] Run `.claude/bin/tasks impl-review <N>` — wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only). Re-read findings. **Satisfy lens:** does every Intent claim trace down through code to tests? Where does the chain break?
-- [ ] **Triage impl-review findings: judge = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale). Push back where you have concrete evidence — you live with the outcomes, the reviewer doesn't. Verify file:line claims before applying — single-judge reviews can cite wrong locations.
-- [ ] *(Optional)* Run `.claude/bin/tasks panel-review <N> --mode impl` for multi-model panel review. Add `--prompt "..."` to append extra steering.
+- [ ] Run `.claude/bin/tasks panel-review <N> --mode impl` — ALL available judges review the implementation in parallel. Wait for it to finish; findings land in `judge.md`, led by a PANEL VERDICT (a quorum-PASS impl panel is what the close gate accepts as evidence when `panel_required_for` is set). Read judge.md. **Satisfy lens:** does every Intent claim trace down through code to tests? Where does the chain break? *(Fallback if no panel can run: `.claude/bin/tasks impl-review <N>` — single judge, writes into this file.)*
+- [ ] **Triage panel findings into this file: judges = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale) here under this gate. Push back where you have concrete evidence — you live with the outcomes, the reviewers don't. Verify file:line claims before applying. Where judges DISAGREE, say which you believed and why.
 
-(implementation review findings appear here)
+(implementation review triage appears here)
 
 ---"""
 
@@ -189,6 +198,41 @@ def _intent_check(task_path: str) -> str:
             "Check whether the task addresses what the user actually asked for, not just the agent's interpretation. "
         )
     return ""
+
+
+def judge_verify_clause(commands) -> str:
+    """Optional judge-execution clause (L1): the PROJECT declares commands safe
+    to run inside the judge's read-only sandbox (`judge_verify` in
+    .agent/config.json — read-only-repo-safe AND parallel-safe, unique temp
+    dirs). Empty when nothing is declared, so undeclared projects get exactly
+    the pre-1.5.3 prompt. The rules exist to keep execution evidence honest:
+    hypothesis-first kills vacuous 'it ran and passed'; reproduce-twice kills
+    flake noise; no-timing kills parallel-contention garbage."""
+    cmds = [c.strip() for c in (commands or [])
+            if isinstance(c, str) and c.strip()]
+    if not cmds:
+        return ""
+    listed = "; ".join(f"`{c}`" for c in cmds[:6])
+    return (
+        "EXECUTION (optional): the project declares these commands safe to run "
+        f"in your read-only sandbox: {listed}. Use them only to check a SPECIFIC "
+        "suspicion — never as routine (the close gate already runs the suite). "
+        "Rules: state your predicted outcome BEFORE running — an unpredicted "
+        "result is a lead to investigate, not evidence by itself; reproduce any "
+        "failure a second time before reporting it; never use timing or "
+        "benchmark output as evidence (judges run in parallel and contend for "
+        "CPU); if a command fails for environmental reasons, say so plainly "
+        "rather than reporting a code defect. "
+    )
+
+
+def _trim_clause(trim_notice: str) -> str:
+    """One line telling a TRIMMED seat what it did not receive and where the
+    full file lives — the judge has repo read access, so an elision is an
+    instruction to go read, not a blind spot."""
+    if not trim_notice:
+        return ""
+    return f"CONTEXT NOTE: {trim_notice} "
 
 
 def _depth_budget_clause(soft_timeout_secs: "int | None") -> str:
@@ -263,6 +307,8 @@ def plan_review_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Return the blind judge prompt for plan review (before implementation)."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
@@ -276,6 +322,8 @@ def plan_review_prompt(
         "Read the source files referenced in the plan to understand existing patterns. "
         f"{intent_check}"
         f"{time_budget}"
+        f"{_trim_clause(trim_notice)}"
+        f"{judge_verify_clause(judge_verify)}"
         "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
         f"({depth_budget}). "
         "Where you have file access, read the relevant source and its callers/callees (don't judge from names alone) and trace, end-to-end, the data and control flow the plan would touch. "
@@ -295,6 +343,10 @@ def plan_review_prompt(
         "(6) Prove it — cite file:line evidence for claims about existing code. No hand-waving. "
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
+        "Then, as your LAST line, report whether the cap bound you: "
+        "`CAP: 5/5 reported, more remain` if you had to drop findings to fit, or "
+        "`CAP: <k>/5 reported, exhausted` if you reported everything you found — "
+        "so the reader can tell convergence (nothing left) from saturation (more remain). "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
         "DO NOT edit any files — you are sandboxed read-only and the attempt will "
         "fail. Output your findings to stdout only; the parent process writes them "
@@ -309,6 +361,8 @@ def impl_review_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Return the blind judge prompt for implementation review (after code is written)."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
@@ -322,6 +376,8 @@ def impl_review_prompt(
         "Read the source files changed by this task (look at the Work Plan gates for paths). "
         f"{intent_check}"
         f"{time_budget}"
+        f"{_trim_clause(trim_notice)}"
+        f"{judge_verify_clause(judge_verify)}"
         "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
         f"({depth_budget}). "
         "Where you have file access, read the changed source and its callers/callees (don't judge from names alone) and trace the data and control flow end-to-end. "
@@ -341,6 +397,10 @@ def impl_review_prompt(
         "(6) Prove it works — cite file:line evidence showing correctness, or construct a concrete scenario showing failure. "
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
+        "Then, as your LAST line, report whether the cap bound you: "
+        "`CAP: 5/5 reported, more remain` if you had to drop findings to fit, or "
+        "`CAP: <k>/5 reported, exhausted` if you reported everything you found — "
+        "so the reader can tell convergence (nothing left) from saturation (more remain). "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
         "DO NOT edit any files — you are sandboxed read-only and the attempt will "
         "fail. Output your findings to stdout only; the parent process writes them "
@@ -354,6 +414,8 @@ def panel_plan_review_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Panel judge prompt for plan review — writes to stdout, never edits task.md."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
@@ -367,6 +429,8 @@ def panel_plan_review_prompt(
         "Read the source files referenced in the plan to understand existing patterns. "
         f"{intent_check}"
         f"{time_budget}"
+        f"{_trim_clause(trim_notice)}"
+        f"{judge_verify_clause(judge_verify)}"
         "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
         f"({depth_budget}). "
         "Where you have file access, read the relevant source and its callers/callees (don't judge from names alone) and trace, end-to-end, the data and control flow the plan would touch. "
@@ -386,6 +450,10 @@ def panel_plan_review_prompt(
         "(6) Prove it — cite file:line evidence for claims about existing code. No hand-waving. "
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
+        "Then, as your LAST line, report whether the cap bound you: "
+        "`CAP: 5/5 reported, more remain` if you had to drop findings to fit, or "
+        "`CAP: <k>/5 reported, exhausted` if you reported everything you found — "
+        "so the reader can tell convergence (nothing left) from saturation (more remain). "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
         "Note: your findings will be triaged by the reading agent — they will verify file:line claims before applying, push back on speculative concerns, and require concrete evidence. Self-flag any claim you cannot defend with code citation. The reading agent lives with the outcomes; you do not. "
         "DO NOT edit any files. Output your findings to stdout only."
@@ -398,6 +466,8 @@ def panel_impl_review_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Panel judge prompt for impl review — writes to stdout, never edits task.md."""
     context_location = "provided below" if inline_context else "provided in your system prompt"
@@ -411,6 +481,8 @@ def panel_impl_review_prompt(
         "Read the source files changed by this task (look at the Work Plan gates for paths). "
         f"{intent_check}"
         f"{time_budget}"
+        f"{_trim_clause(trim_notice)}"
+        f"{judge_verify_clause(judge_verify)}"
         "Work the problem deeply before you write anything — spend substantial reasoning effort on the analysis, not on a long report "
         f"({depth_budget}). "
         "Where you have file access, read the changed source and its callers/callees (don't judge from names alone) and trace the data and control flow end-to-end. "
@@ -430,6 +502,10 @@ def panel_impl_review_prompt(
         "(6) Prove it works — cite file:line evidence showing correctness, or construct a concrete scenario showing failure. "
         "Be specific and adversarial — your job is to find problems, not approve. "
         "Max 5 findings, Critical and Important only — drop Minor. "
+        "Then, as your LAST line, report whether the cap bound you: "
+        "`CAP: 5/5 reported, more remain` if you had to drop findings to fit, or "
+        "`CAP: <k>/5 reported, exhausted` if you reported everything you found — "
+        "so the reader can tell convergence (nothing left) from saturation (more remain). "
         "Each finding: cite file:line, 1-2 sentences stating the problem, 1 sentence stating the fix. No elaboration. "
         "Note: your findings will be triaged by the reading agent — they will verify file:line claims before applying, push back on speculative concerns, and require concrete evidence. Self-flag any claim you cannot defend with code citation. The reading agent lives with the outcomes; you do not. "
         "DO NOT edit any files. Output your findings to stdout only."
@@ -444,6 +520,8 @@ def judge_prompt(
     *,
     soft_timeout_secs: "int | None" = None,
     hard_timeout_secs: "int | None" = None,
+    trim_notice: str = "",
+    judge_verify=None,
 ) -> str:
     """Deprecated: use plan_review_prompt() or impl_review_prompt() instead."""
     kwargs = dict(
@@ -616,7 +694,8 @@ def mind_map_header() -> str:
     """Navigation header shown before full mind map at bootstrap."""
     return (
         "Project knowledge graph. Nodes cross-reference with [N] IDs.\n"
-        "Full map below — drill into a node: grep '^\\[N\\]' MIND_MAP.md\n"
+        "Below is either the full map or an index (routing nodes + titles) —\n"
+        "drill into any node: grep '^\\[N\\]' MIND_MAP.md\n"
         "Format spec: /mindmap skill"
     )
 
@@ -626,6 +705,7 @@ def workflow_briefing() -> str:
     """Workflow rules shown at task activation (tasks work <N>)."""
     return """\
 - One gate at a time: read gate → do work → check box → next gate
+- Closing several ALREADY-DONE gates in one edit: allowed only when each line carries its own outcome note (hook-enforced, max 5; where no hook runs, keep to one at a time). Bare batch ticks are blocked.
 - Pattern templates in task.md ARE the work plan — fill them in, don't skip"""
 
 
@@ -645,15 +725,20 @@ Tasks CLI:
     tasks impl-review <N>      blind impl review
     tasks panel-review [<N>]   multi-model judge panel; task optional — use --prompt alone for any question, --bare to strip all context
     tasks models check         audit models.json judge pins against live availability (--no-probe skips claude probes)
+    tasks models detect        list installed agent CLIs + their selectable models/efforts (fast, no probe)
     tasks models select        interactively refresh the panel in .agent/models.json
+    tasks models set           write the panel non-interactively (--panel a,b --default-judge c [--force])
   Analysis:
     tasks retro [--since N]    project retrospective
-    tasks global-retro-collect --since DATE ROOT [ROOT...]   collect cross-VM retro archive
     tasks context <N>          extract chat messages for a task
     tasks doctor               harness health check
+    tasks environment          advisory: optional tools that improve the setup + how to install them
+    tasks detect-verify        suggest a full verify command (typecheck+tests+lint) from the project's toolchains
   Info:
     tasks list [--pending]     show tasks
-    tasks status               current gate position"""
+    tasks status               current gate position
+    tasks recall <id|words>    fetch a mind-map node (main+overflow) by id, or locate by keyword
+    tasks compact <N>          move <!-- archive:start/end --> narrative to task-archive.md"""
 
 
 def agents_md_template() -> str:
@@ -694,7 +779,9 @@ This sets the active task.  Without it, edits are blocked.
 - Read the task.md that `tasks work` prints.
 - Work **one gate at a time**: read the gate → do the work → check the box
   (append your outcome on the same line) → move to the next gate.
-- Never skip gates.  Never batch-close multiple gates in one edit.
+- Never skip gates.  Batch-closing ALREADY-DONE gates in one edit is allowed
+  only where a hook enforces an outcome note per line — no such hook runs on
+  this provider, so keep to one gate at a time here.
 - If you discover new work, add new gates to task.md immediately.
 
 ## End of Task
@@ -753,7 +840,8 @@ Activate a task:
 ## Working Through a Task
 
 Work one gate at a time.  Check each gate box before moving to the next.
-Never skip.  Never batch.
+Never skip.  Batch-closing needs a hook that enforces per-line outcome
+notes — none runs on this provider, so keep to one gate at a time here.
 
 ## End of Task
 
@@ -778,18 +866,33 @@ Never skip.  Never batch.
 
 def usage_text() -> str:
     """Usage text for `tasks --help`."""
-    types = ", ".join(sorted(set(PLAYBOOKS.keys()) | {"quick"}))
+    # D2: `light` is a first-class type (own template, accepted by cmd_new, listed
+    # by list_all_types on the error path) — include it here too, not just `quick`.
+    types = ", ".join(sorted(set(PLAYBOOKS.keys()) | {"quick", "light"}))
     return f"""\
 Usage: tasks <command> [args]
 
 Commands:
   work <number>       Set active task (e.g. tasks work 058)
-  work done [--force] Finish task; bounces if gates still open (--force overrides)
+  work done [--force --reason "why"]  Finish task; runs the verify contract and
+                      records a receipt; a failing verify blocks, as does an
+                      unreviewed task under the panel_required_for policy
+                      (/playbook:init seeds ["assertive","irreversible"] ⇒ only
+                      those close-gate on a PASS panel, reversible work closes on
+                      verify+single-judge; set "all" for a panel on every close).
+                      --force needs --reason.
+  audit [<N>]         Run mechanical pre-panel sweeps (conflict markers, merge
+                      artifacts, stale markers, + project sweeps); receipt to task.md
+  parked [--all]      List open parked items across tasks (--all: incl. resolved)
+  blocked "<reason>"  Pause the active task awaiting the owner's decision — an
+                      honest state (not a faked checkbox); resume with work <N>
   freehand            User-driven mode (no gate pressure)
   new <type> <name> [intent]   Create task (intent pre-fills ## Intent)
   new --stub <type> <name> [intent]   Create stub (expands on work)
   list [--pending]    List all tasks with status
   status              Show head position for active tasks
+  compact <N> [--dry-run]  Move <!-- archive:start/end --> narrative from a bloated
+                      task.md into task-archive.md (verbatim); refuses gates/pins
   plan-review <N>     Run blind plan review
   impl-review <N>     Run blind implementation review
   panel-review [<N>]  Multi-model judge panel
@@ -797,17 +900,23 @@ Commands:
                       --no-mind-map      strip mind map from context
                       --bare             no context at all; --prompt is the entire prompt
   models check        Audit models.json judge pins against live availability (--no-probe: skip claude probes)
+  models detect       List installed agent CLIs + selectable models/efforts (fast, no probe) [--json]
   models select       Interactively refresh the panel in .agent/models.json
+  models set          Write the panel non-interactively: --panel a,b --default-judge c [--force]
   retro [--since N]   Project retrospective
-  global-retro-collect --since DATE [--machine NAME] [--out DIR] [--format zip|tgz] ROOT [ROOT...]
                       Collect Playbook artifacts for a global retro archive
   context <N>         Extract chat messages for a task
   log [N] [--width W]  Compact one-line-per-message chat log (last N, body cropped to W; default all/500)
   prepare-merge [--target <branch>] [--dry-run]
                       Renumber tasks, re-sequence chat_log, report MIND_MAP collisions
                       so the branch merges cleanly into target (default: main)
-  doctor              Harness health check
-  bootstrap           Load mind map + skills + pending tasks
+  doctor [--verbose]  Harness health check (--verbose: enumerate findings in
+                      stale/foreign install copies too, not just the live one)
+  environment         Advisory: optional tools that improve the setup + install hints [--json] [--suggest-only]
+  detect-verify       Suggest a full verify command (typecheck+tests+lint) from the toolchains present [--json]
+  bootstrap           Load mind map (indexed if large) + skills + pending tasks
+  recall <id|words>   Fetch a mind-map node by id (main + overflow), or locate
+                      nodes by keyword — the fetch half of the bootstrap index
   init                Create CLAUDE.md for this project
 
 Sandboxed subagents (separate CLI):
@@ -825,7 +934,6 @@ Examples:
   tasks panel-review 001 --prompt "focus on the title-detection approach"
   tasks panel-review --prompt "which of these two designs is simpler?" --no-mind-map
   tasks panel-review --bare --prompt "read ideas.txt and pick the best story idea"
-  tasks global-retro-collect --since 2026-03-14 ~/Code /data --out /tmp
   tasks list --pending"""
 
 
@@ -834,7 +942,15 @@ Examples:
 def sticker_quick() -> str:
     return """\
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
-> Never batch. Never backfill. The document IS the execution trace."""
+> Never backfill. The document IS the execution trace. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one gate at a time).
+> **Selection rule:** quick is for declared-reversible trivia only \u2014 anything touching docs, claims, data, or publishing belongs in `light` or heavier (risk decides review; smallness never does)."""
+
+
+def sticker_light() -> str:
+    return """\
+> **Light shape** \u2014 small, sub-day work; ceremony compressed, review NEVER waived: risk decides review, smallness never does. If this grows beyond small, convert: `tasks new <type> <name>`.
+> Gate discipline unchanged: one gate \u2192 do work \u2192 check box with its outcome. Never backfill. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one at a time).
+> **Selection rule:** `quick` is for declared-reversible trivia only; docs, claims, data, or publishing belong here or heavier."""
 
 
 def render_stub_template(num: int, title: str, intent_text: str = "",
@@ -866,6 +982,41 @@ def render_quick_template(num: int, title: str) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def render_light_template(num: int, title: str) -> str:
+    """Small-work shape (F14): ~6 gates, risk classified FIRST, review routed
+    by risk — never by size. The 056 lesson is enforced close-side
+    (`close_decision`): an assertive/irreversible task cannot close without
+    impl-grade review evidence whatever template it used; this shape's job is
+    to say so early and shed the Build ceremony around it.
+
+    Wording constraint (blind-judge Finding 2): no checkable line may carry
+    the literal `impl-review` / `panel-review` / `plan-review` tokens —
+    `has_review_evidence` matches those substrings on checked lines, so a
+    routing gate that names the command would MINT evidence when checked.
+    Say "the implementation panel"; the close gate reads judge.md, not boxes.
+    """
+    parts = [
+        header(num, title),
+        sticker_light(),
+        status(),
+        "## Intent\n(one line — what to do and what proves it worked)",
+        "## References\n(optional context; recent chat lands here at activation)",
+        "---",
+        """## Risk Routing
+- [ ] `## Risk` above set to exactly one word — reversible / irreversible / assertive — BEFORE any work, and this gate's outcome note states WHY in one line (what would `git revert` NOT undo? does this assert a claim about the world?). If assertive or irreversible: ceremony stays light but the FULL review bar applies — run the implementation panel once the work is built; the close gate enforces the evidence in judge.md. Light never waives review.""",
+        """## Work
+- [ ] Orient: name the files/claims this touches and what "verified" means (one paragraph)
+- [ ] Do the work
+- [ ] Verify: run the check that proves it — paste the result on this line""",
+        """## Review
+- [ ] Review routing honored — reversible: may proceed without review; assertive/irreversible: the implementation panel ran and its findings are triaged in judge.md (the close gate checks the evidence itself, not this box)""",
+        """## Pre-review
+- [ ] MIND_MAP.md: owning node updated in place (only if architecture or claims moved)""",
+        parked(),
+    ]
+    return "\n\n".join(parts) + "\n"
+
+
 # ---------------------------------------------------------------------------
 
 def render_template(num: int, title: str, task_type: str | None = None) -> str:
@@ -879,9 +1030,11 @@ def render_template(num: int, title: str, task_type: str | None = None) -> str:
     Returns:
         Complete task.md content as a string
     """
-    # Quick template — standalone, no PLAYBOOKS lookup
+    # Quick/light templates — standalone, no PLAYBOOKS lookup
     if task_type == "quick":
         return render_quick_template(num, title)
+    if task_type == "light":
+        return render_light_template(num, title)
 
     pattern_name = PLAYBOOKS.get(task_type) if task_type else None
     playbook_ref = f"playbook/{pattern_name}" if pattern_name else "(none)"

@@ -42,6 +42,8 @@ Because state lives in the file and not in memory, execution survives context co
 
 **Hooks** enforce the structure at the system level. The agent can't edit code without an active task, can't skip gates, can't mark work done with gates still open. Warnings don't stick, so we block instead. ([How enforcement works](docs/architecture.md).)
 
+**The correctness contract** makes a close earned, not asserted. Every task carries a `## Risk` class (`reversible` / `irreversible` / `assertive` — the last for changes to *claims about the world*, which can't skip review for being small diffs); `tasks work done` runs the project's declared verify commands and records a receipt (command, exit code, commit) into task.md, refusing to close on a failure — `--force` requires a recorded `--reason`. `tasks audit` runs mechanical pre-review sweeps (conflict markers, merge artifacts, stale markers, mind-map drift against the real file tree) so judges spend tokens on hard problems; panels return a PASS/FAIL verdict against a configurable quorum instead of a bare count; and a task waiting on the user's decision has an honest `blocked` state instead of a faked checkbox.
+
 **The monitor** is a second agent watching from outside: it reads the session transcript incrementally and nudges the working agent when the trajectory drifts - a separate context window, so it judges without the front agent's anchoring.
 
 **Tests** make the consequences of a wrong change visible immediately - the agent sees the failure and corrects course. The better the tests, the longer it can run unsupervised. Playbook leans heavily on this: the task.md template puts a test gate after each work gate, and we recommend expanding test coverage as part of every task.
@@ -52,7 +54,7 @@ Because state lives in the file and not in memory, execution survives context co
 
 **Shared repos.** Several people — or several workstations — can drive the same repo without trampling each other: agent runtime state is namespaced per user under `.agent/<user>/`, and a dedicated merge skill keeps those lanes from cross-contaminating when branches meet. ([Per-user lanes](docs/architecture.md#per-user-lanes).)
 
-**Skills** for recurring maneuvers: `/playbook:freehand` (you drive, no gate pressure), `/playbook:intent` (blind vertical retro of a finished task), a merge skill for multi-user repos, and default tech-stack picks for fresh projects. ([Full list](docs/cli.md).)
+**Skills** for recurring maneuvers: `/playbook:freehand` (you drive, no gate pressure), `/playbook:intent` (blind vertical retro of a finished task), a merge skill for multi-user repos, a testing skill that derives tests from spec + human corrections + architecture risk, and default tech-stack picks for fresh projects. ([Full list](docs/cli.md).)
 
 <p align="center"><img src="assets/reactive_test_environment.png" width="600" alt="An AI agent in a go-kart racing inside concentric tire barriers labeled Unit Tests, Integration Tests, and E2E Tests, with a Safe Zone in the center"></p>
 
@@ -129,7 +131,7 @@ One setup that works well: the **orchestrator** runs outside the sandbox - write
 
 > **[1] Project Overview** - Claude Playbook packages an agent steering methodology as a distributable plugin **[2]**. The core insight: the solution to agent autonomy is text, not code **[18]**. Refined across 700+ tasks...
 >
-> **[5] Task System** - Each task is a living document that IS the execution trace **[19]**. Design Phase → Work Plan → Pre-review. Task types: feature → Build, explore → Investigate, review → Evaluate...
+> **[5] Task System** - Each task is a living document that IS the execution trace **[19]**. Design Phase → Work Plan → Pre-review. Task types: feature → Build, research → Investigate, audit → Evaluate, bugfix → Fix...
 >
 > **[19] Document-Driven Execution** - task.md is a computational model: checkboxes = state, sections = memory, templates = instruction set, agent = interpreter **[5]**...
 
@@ -141,4 +143,4 @@ Not everything needs a task. Questions, shell commands, docs, git - just ask. Th
 
 Works on macOS, Linux, and Windows (Git Bash / MSYS).
 
-<!-- readme-audit: v1.4.7 @ 2026-07-29 -->
+<!-- readme-audit: v1.5.32 @ 2026-08-18 -->

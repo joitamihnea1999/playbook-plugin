@@ -26,13 +26,30 @@ Then **ask the user** what they want to work on. Don't autonomously pick a task.
 
 ## Mind Map
 
-Read `MIND_MAP.md` at project root before starting any work. It's the project's institutional memory — architecture, decisions, history, and reasoning. Consult it before each task, update it after completing one.
+Read `MIND_MAP.md` at project root before starting any work. It's the project's institutional memory — architecture, decisions, and reasoning. Consult it before each task, update it after completing one. `tasks bootstrap` prints it (an index of routing nodes + titles once it's large); pull a node's full content — across `MIND_MAP.md` and the `MIND_MAP_OVERFLOW.md` deep-detail tier — with `.claude/bin/tasks recall <N>`, or locate nodes by topic with `tasks recall <keyword>`.
+
+## Choosing the ceremony level (you decide, biased safe)
+
+Classify every request before acting — **judge RISK first, size second.** You classify it; the user should not have to. When you're on the line between two levels, always choose the heavier one — better safe than sorry.
+
+**High-risk triggers — if ANY applies, go heavy no matter how small the change looks (never `quick`, never "just do it"):** deletes or migrates data; touches secrets, auth, or permissions; a destructive or outward command (`rm`, force-push, a deploy/publish, or a network / DB / payment / email side effect); changes a **claim about the world** (a README/doc/benchmark/"verified accurate" statement — that is `assertive`, even as a one-word docs edit); or anything a `git revert` will not fully undo *in the world* (`irreversible`). → `tasks new light` if small and contained, a full task type if multi-step.
+
+**Otherwise, by size:**
+- A question, reading, or a read-only command → just answer; no task.
+- Trivial + clearly reversible code, or a non-claim doc tweak (typo, rename, a small self-contained pure function) → `tasks new quick`.
+- Small but touches real behavior/logic, or you are not certain it is reversible → `tasks new light`.
+- Multi-step, a new subsystem, or an uncertain approach → a full task type (`feature`/`build`/`bugfix`/`research`/…).
+- The user explicitly asks to pair with no gate pressure → `tasks freehand` (user-initiated only — it keeps no trace, the least safe option).
+
+Ask the user which level **only** if you still cannot gauge the risk or the scope after the above — and then lead with a recommendation, defaulted to the SAFER (heavier) option. Never level down to save time on something that might not be reversible.
+
+(Deterministic backstops, not a substitute for judging well: the code-edit hook blocks editing a code file with no active task, and the destructive-command interlock blocks unambiguous high-blast shell commands — `rm -rf` a dangerous path, `git push --force`, `curl|sh`, a DB `DROP` — until acknowledged. Those catch the worst mistakes mechanically. **Docs and non-catastrophic commands are still judgment-only**, and no interlock is exhaustive — so the risk triggers above remain your real guard; weigh them, don't lean on the net.)
 
 ## Task Lifecycle
 
 These are **your** commands to run — the user never calls the tasks CLI.
 
-When the user asks you to do something: run `tasks new` then immediately `tasks work <N>` — never leave a task created but unactivated.
+Once you've chosen the level (above): run `tasks new <type>` then immediately `tasks work <N>` — never leave a task created but unactivated.
 
 ```
 tasks new <type> <name> [intent]   # creates task.md — then immediately:
@@ -41,25 +58,48 @@ tasks work <N>                     # activate it — hooks start enforcing
 
 Work through task.md gates: Design Phase (understand, structure, verify) → Work Plan (build/investigate gates) → Pre-review. Check each gate's checkbox as you complete it, appending your observations on the same line.
 
-When done: `tasks work done` — deactivates the task, sets status to done.
+When done: `tasks work done` — runs the project's verify contract, records a receipt, sets status to done.
 
-The task.md **is** the execution trace. Never skip checkboxes. Never backfill. One gate at a time.
+The task.md **is** the execution trace. Never skip checkboxes. Never backfill. Close each gate as you complete it; closing several ALREADY-DONE gates in one edit is allowed only when each line carries its own outcome note (hook-enforced, max 5 — a bare batch tick is blocked; where no hook runs, keep to one gate at a time).
+
+## Correctness Contract
+
+The close is **earned, not asserted** — these are enforced by the CLI, not conventions:
+
+- **`## Risk`** — set at the Structure gate: `reversible` (the WORLD reverts, not the diff — only code/config that `git revert` fully undoes; persisted data, on-disk formats, secrets, history, and published claims never qualify even when the diff reverts cleanly), `irreversible` (deletes/migrates data, publishes — needs a named rollback plan), or `assertive` (changes a **claim about the world**: docs, a calibration, a "verified accurate"). Assertive/irreversible tasks **cannot close without an implementation review** — a small diff is not a reason to skip review; a docs-only diff can be the most review-worthy thing a task produces.
+- **Verify contract** — declare in `.agent/config.json` what green means for this project, and closes run it:
+  ```json
+  {"verify": {"_always": ["<your test command>"], "assertive": ["<claim checks>"]}}
+  ```
+  A failing verify blocks the close. `--force` requires `--reason "why"` — recorded in the receipt.
+- **`tasks audit`** — run before any review: mechanical sweeps (conflict markers, merge artifacts, stale markers, mind-map drift) so judges spend tokens on hard problems, not greppable ones. Reviews warn when the audit is missing or stale.
+- **Judges are advisors, not oracles.** Triage every finding (accept/park/reject with rationale). A clean panel does NOT clear correspondence (does it match the world? check the real artifact), disclosure (secrets/provenance — a grep's job), or blast radius (the `## Risk` gate's job).
+- **Test claims need executable proof.** A test you haven't watched fail is not evidence; assert against real output, not a mock you wrote.
+- **Judges can execute what you declare safe.** Add `"judge_verify": ["<command>"]` to `.agent/config.json` — commands that never write inside the repo (redirect caches, unique temp dirs, parallel-safe) — and reviewers may run them to check a specific suspicion. Write your tests to qualify.
+- **Keep task.md reviewable.** Judges read it through a bounded window (newest sections + Intent/Design survive trimming; receipts in judge.md say exactly what was delivered). When a task file grows past the budget, `tasks audit` nudges the sanctioned compaction: wrap old review-round narrative in `<!-- archive:start -->` … `<!-- archive:end -->` and run `tasks compact <N>` — it moves each block VERBATIM to `task-archive.md` and refuses to touch gates, Intent/Design/Parked, or pins. A section that must survive any trim gets `<!-- pin -->` on its own line right under the heading.
 
 ## CLI
 
 ```bash
 .claude/bin/tasks work <number>              # activate task, hook starts tracking
-.claude/bin/tasks work done                  # deactivate when finished
+.claude/bin/tasks work done                  # verify + receipt + deactivate (--force needs --reason)
 .claude/bin/tasks new <type> <name>          # create task — does NOT activate
 .claude/bin/tasks list [--pending]           # task overview
 .claude/bin/tasks status                     # current gate position
-.claude/bin/tasks bootstrap                  # orientation: mind map + skills + pending
+.claude/bin/tasks audit [<N>]                # mechanical pre-review sweeps + receipt
+.claude/bin/tasks blocked "<reason>"         # honest pause: awaiting the user's decision
+.claude/bin/tasks parked [--all]             # surface parked items before they rot
+.claude/bin/tasks compact <N>                # move <!-- archive:start/end --> narrative to task-archive.md
+.claude/bin/tasks recall <id|words>          # fetch a mind-map node (main+overflow) or locate nodes by keyword
+.claude/bin/tasks bootstrap                  # orientation: mind map (indexed if large) + skills + pending
 ```
 
 ## Don't
 
 - Create task directories manually — always `.claude/bin/tasks new`
 - Edit session state files directly (under `.agent/`, or `.agent/<user>/` in a multi-user repo) — use `.claude/bin/tasks work <N>` / `.claude/bin/tasks work done`
-- Edit `## Status` in task.md directly — use `.claude/bin/tasks work done`
+- Edit `## Status` in task.md directly — use `.claude/bin/tasks work done` (or `tasks blocked` for an honest pause)
 - Skip task.md checkboxes — they're your observable progress
 - Start coding without an active task — blocked by hook until `.claude/bin/tasks work <N>`
+- Fake a checkbox to end a turn — if the next gate needs the user's decision, `tasks blocked "<reason>"` is the honest state
+- Leave the mind map describing code that no longer exists — update the owning node in place when you change the architecture

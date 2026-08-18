@@ -116,33 +116,68 @@ def evaluate_tool_call(
 
 
 def _is_management_path(file_path: str) -> bool:
-    """Return True if path is under .agent/ or .claude/ (always allowed without task)."""
+    """Return True if path is genuinely under .agent/ or .claude/ (always allowed
+    without a task).
+
+    NEW-1: resolve `..` FIRST (lexical normpath) — a path that merely contains
+    the token but traverses back out to a code file (`.agent/../src/main.py`)
+    must not be treated as management, or it bypasses the code-edit gate.
+    """
     import os
-    norm = file_path.replace("\\", "/")
+    norm = os.path.normpath(file_path.replace("\\", "/"))
     parts = norm.split("/")
     return ".agent" in parts or ".claude" in parts
+
+
+_CODE_EXTENSIONS = {
+    # Programming languages (union of both prior lists ∪ common extras — closes
+    # the codex hole where .php/.vue/.swift/… went ungated).
+    ".py", ".ts", ".js", ".mjs", ".cjs", ".tsx", ".jsx", ".sh", ".bash", ".go",
+    ".rs", ".rb", ".java", ".c", ".cpp", ".h", ".hpp", ".swift", ".kt", ".kts",
+    ".dart", ".cs", ".php", ".r", ".m", ".mm", ".scala", ".zig", ".lua", ".ex",
+    ".exs", ".ml", ".mli", ".tf", ".vue", ".svelte", ".ipynb",
+    # Config / markup / schema treated as code (strict, owner decision 1.5.18).
+    ".css", ".scss", ".less", ".html", ".sql", ".yaml", ".yml", ".toml",
+    ".proto", ".graphql", ".gradle",
+}
+# Docs / data / binaries — never code, even inside a code dir. (.json/.yaml
+# split is deliberate: .yaml/.toml drive behavior and are gated; .json stays
+# data, matching the pre-1.5.17 exemption.)
+_DOC_DATA_EXTENSIONS = {
+    ".md", ".txt", ".json", ".png", ".svg", ".jpg", ".jpeg", ".gif", ".ico",
+    ".webp", ".pdf", ".lock", ".csv",
+}
+_CODE_DIRS = {"scripts", "bin", "src", "hooks", "lib", "cmd"}
 
 
 def _is_code_file_path(file_path: str) -> bool:
     """Return True if path looks like a code file (should require active task).
 
-    Mirrors task-gate-hook is_code_file_path: extensions, scripts/bin/src/hooks
-    directories, and shebang detection (shebang not checked here — hooks only).
+    F2 (1.5.18): this MUST agree with the bash `is_code_file_path` in
+    scripts/gate-echo-lib.sh — the default Claude path enforces via that hook, the
+    opt-in codex apply_patch gate enforces via this, and "no code without a task"
+    has to mean the same thing under every provider.
+    tests/test_gate_classifier_parity.py pins the agreement over a shared vector
+    table; edit both together. The one deliberate asymmetry: the bash hook adds a
+    shebang check for an extensionless EXISTING file (it can read the working
+    tree; this pre-decision sees a patch, not always a file) — a bash-only
+    superset, never a hole.
+
+    Algorithm: extension decides first (code -> gate; doc/data -> exempt); an
+    undecided extension gates iff a path component is a known code dir.
     """
     import os
-    _CODE_EXTENSIONS = {
-        ".py", ".ts", ".js", ".tsx", ".jsx", ".sh", ".bash",
-        ".go", ".rs", ".rb", ".java", ".c", ".cpp", ".h",
-        ".css", ".html", ".sql", ".yaml", ".yml", ".toml",
-    }
-    _CODE_DIRS = {"scripts", "bin", "src", "hooks", "lib", "cmd"}
-
     if not file_path:
         return False
-    norm = file_path.replace("\\", "/")
+    # rstrip trailing CR/LF so a malformed path ending in a newline classifies
+    # like the bash side (whose `$(…)` ext extraction drops it) — 1.5.20 parity.
+    norm = file_path.replace("\\", "/").rstrip("\r\n")
     _, ext = os.path.splitext(norm)
-    if ext.lower() in _CODE_EXTENSIONS:
+    ext = ext.lower()
+    if ext in _CODE_EXTENSIONS:
         return True
+    if ext in _DOC_DATA_EXTENSIONS:
+        return False
     parts = set(norm.split("/"))
     return bool(parts & _CODE_DIRS)
 

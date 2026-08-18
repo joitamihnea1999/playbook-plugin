@@ -94,6 +94,12 @@ class CodexAdapter(ProviderAdapter):
         return "codex"
 
     @classmethod
+    def context_transport(cls) -> str:
+        # Prompt + context travel on STDIN — no OS argv limit; the panel gives
+        # stdin seats the high context budget.
+        return "stdin"
+
+    @classmethod
     def panel_variants(cls) -> list[Optional[str]]:
         return list(cls._PANEL_VARIANTS)
 
@@ -345,8 +351,9 @@ class CodexAdapter(ProviderAdapter):
             with open(rollout_path, "rb") as f:
                 for raw_line in f:
                     obj = json.loads(raw_line.decode("utf-8", errors="replace"))
-                    if obj.get("type") == "session_meta":
-                        return obj.get("payload", {}).get("cwd") == expected_cwd
+                    if isinstance(obj, dict) and obj.get("type") == "session_meta":
+                        _p = obj.get("payload")
+                        return isinstance(_p, dict) and _p.get("cwd") == expected_cwd
         except (OSError, json.JSONDecodeError):
             pass
         return False
@@ -373,11 +380,14 @@ class CodexAdapter(ProviderAdapter):
                         obj = json.loads(raw_line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         continue
+                    # I18: skip non-dict records rather than AttributeError.
+                    if not isinstance(obj, dict):
+                        continue
 
                     if obj.get("type") != "response_item":
                         continue
-                    payload = obj.get("payload", {})
-                    if payload.get("role") != "user":
+                    payload = obj.get("payload")
+                    if not isinstance(payload, dict) or payload.get("role") != "user":
                         continue
 
                     content = payload.get("content", [])

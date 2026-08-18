@@ -8,7 +8,7 @@ Generate a populated `MIND_MAP.md` for this project. Work directly — no Task a
 ## Process
 
 1. **Scan codebase:** Read READMEs, configs, entry points. Map directories, tech stack, architecture, data flow.
-2. **Mine git history:** Commit timeline, development phases, major milestones.
+2. **Mine git history for the *why*:** how the architecture got its shape and what design decisions it reveals — fold the reasons into subsystem nodes. The *when* (hashes, dates) stays in git; it does not go in the map.
 3. **Construct map:** Plan node hierarchy, write nodes, weave links. Use the format from the `mindmap.md` skill.
 4. **Write to `MIND_MAP.md`** in the project root. If one exists, replace scaffold content but preserve any existing populated nodes.
 
@@ -18,5 +18,5 @@ Generate a populated `MIND_MAP.md` for this project. Work directly — no Task a
 - Target **20-50 nodes** with cross-links
 - Routing nodes [1-5] link to everything else
 - Links embedded naturally in text, not clustered at end
-- Include git history with commit hashes
+- Capture design *decisions and their reasons* — never commit hashes, dates, or a history node (git holds the *when*)
 - Reference actual file paths, function names, numbers

@@ -30,9 +30,9 @@ claude plugin marketplace add mariuscristescu/playbook-plugin
 claude plugin install playbook@playbook-x-marketplace
 ```
 
-### 4. Run /init to update project files
+### 4. Run /playbook:init to update project files
 
-Run `/init` to merge any new CLAUDE.md sections and update project wrappers. This is safe to re-run — it's idempotent.
+Run `/playbook:init` to merge any new CLAUDE.md sections and update project wrappers, hooks, and `.gitignore`. This is safe to re-run — it's idempotent. (Note: the plugin's initializer is `/playbook:init`, which runs `scripts/init`; Claude Code's built-in `/init` is a different, generic CLAUDE.md generator that does none of this mechanical upgrade work.)
 
 ### 5. Verify
 

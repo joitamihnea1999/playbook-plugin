@@ -112,20 +112,41 @@ _OLD_CHAT_HEADER_RE = re.compile(r"^\*\*\[([0-9-]{10} [0-9:]{8} UTC)\]\*\*(.*)$"
 _NEW_CHAT_HEADER_RE = re.compile(r"^\*\*\[M(\d{3,})\]\*\* ")
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _sanitize_session_id(sid: str) -> str:
+    """Accept an externally-supplied session id ONLY if it is a safe single
+    directory component; otherwise "" so the caller falls back (N1).
+
+    This value composes codex hook paths that are WRITTEN — `counters`,
+    turn-baseline JSON, the stop-block marker — so an unsanitized
+    `PLAYBOOK_SESSION_ID=../tasks/…` escaped `sessions/` and wrote inside the
+    task dir (the codex twin of C4). Same whitelist as
+    tasks.core / gate-echo-lib.sh so the "one resolver contract" holds across
+    all three surfaces: `pid-*` ids and the sanctioned `judge` pass; a slash,
+    whitespace, control char, or `.`/`..` is rejected.
+    """
+    if not sid or sid in (".", ".."):
+        return ""
+    return sid if _SESSION_ID_RE.fullmatch(sid) else ""
+
+
 def resolve_session_id() -> str:
     """Best available session ID for Codex hook scripts.
 
-    Priority:
+    Priority (each env source is SANITIZED — N1):
     1. PLAYBOOK_SESSION_ID — set by bin/playbook-codex wrapper (may not survive sandbox)
     2. CODEX_THREAD_ID — native Codex env var, stable per session, always present
     3. pid-{ppid} — parent process PID (the Codex process that spawned this hook)
     """
     import os as _os
-    return (
-        _os.environ.get("PLAYBOOK_SESSION_ID")
-        or _os.environ.get("CODEX_THREAD_ID")
-        or f"pid-{_os.getppid()}"
-    )
+    for _src in (_os.environ.get("PLAYBOOK_SESSION_ID"),
+                 _os.environ.get("CODEX_THREAD_ID")):
+        _clean = _sanitize_session_id(_src or "")
+        if _clean:
+            return _clean
+    return f"pid-{_os.getppid()}"
 
 
 def codex_config_path(home_dir: Path | None = None) -> Path:
@@ -248,9 +269,11 @@ def _playbook_hook_entry(script_name: str, matcher: str | None = None) -> dict:
 def render_playbook_hooks() -> dict:
     """Return the Playbook-owned Codex hooks.json fragment.
 
-    PreToolUse: scoped to `^apply_patch$` only — file-edit pre-blocking. Bash
-    (exec_command) is intentionally not pre-blocked; running shell commands
-    without a task is allowed (matches Claude policy).
+    PreToolUse: `^apply_patch$` → the task gate (file-edit pre-blocking). Running
+    a shell command without a task is still allowed (matches Claude policy), BUT
+    a DESTRUCTIVE/irreversible one is pre-blocked by `command_guard.py` scoped to
+    `^exec_command$` — the same interlock Claude/grok get, so `rm -rf /` /
+    `git push --force` / `curl|sh` can't run by accident under Codex either.
 
     PostToolUse: scoped to `^apply_patch$` AND `^exec_command$` so the gate
     echo fires on both file edits and bash. The same `codex-apply-patch-hook`
@@ -271,6 +294,7 @@ def render_playbook_hooks() -> dict:
             ],
             "PreToolUse": [
                 _playbook_hook_entry("codex-apply-patch-hook", matcher="^apply_patch$"),
+                _playbook_hook_entry("command_guard.py", matcher="^exec_command$"),
             ],
             "PostToolUse": [
                 _playbook_hook_entry("codex-apply-patch-hook", matcher="^apply_patch$"),
@@ -384,13 +408,35 @@ def current_state_file(project_root: Path, session_id: str) -> Path:
     return resolve_agent_dir(project_root) / "sessions" / session_id / "current_state"
 
 
+def _task_status_is_done(task_file: Path) -> bool:
+    """True iff the task.md's ## Status (last one wins, matching tasks.core
+    `_extract_status`) STARTS WITH `done` — the same rule as the CLI authority
+    tasks.core `_is_done`, so "done (2026-…)" counts. An unreadable/absent
+    status is NOT done — F3 must never turn a parse failure into a new block."""
+    try:
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    status = ""
+    for i, line in enumerate(lines):
+        if line.strip() == "## Status" and i + 1 < len(lines):
+            status = lines[i + 1].strip()
+    return status.startswith("done")
+
+
 def has_active_task(project_root: Path, session_id: str) -> bool:
-    """True iff current_state names a task and its task.md exists.
+    """True iff current_state names a task, its task.md exists, and it is not
+    closed.
 
     The task.md existence check (panel impl-review #J) prevents a split-brain
     where current_state points at a task whose directory was deleted —
     apply_patch_pre_decision would allow but apply_patch_post_context would
     say "no active task", giving the model contradictory signals.
+
+    F3 (parity with the bash gate): a pointer that resolves to a DONE task does
+    NOT count as active — normal close clears the pointer, so this only fires on
+    a stale/hand-written pointer to a closed task; `tasks work <N>` reopens it
+    (status → in_progress) before editing, so a real resume is unaffected.
     """
     state_file = current_state_file(project_root, session_id)
     if not state_file.exists():
@@ -401,7 +447,10 @@ def has_active_task(project_root: Path, session_id: str) -> bool:
         return False
     if not task_num:
         return False
-    return _find_task_file(project_root, task_num) is not None
+    task_file = _find_task_file(project_root, task_num)
+    if task_file is None:
+        return False
+    return not _task_status_is_done(task_file)
 
 
 def apply_patch_pre_decision(
@@ -561,7 +610,8 @@ def _format_gate_echo(task_num: str, done: int, total: int, gate_text: str | Non
     if total == 0:
         return f"# [{task_num}] no gates defined yet — add work plan before continuing."
     if gate_text is None:
-        return f"# [{task_num}] — all gates done. Stay for follow-up. Auto-closes on task switch."
+        return (f"# [{task_num}] — all gates done. Close it with `tasks work done` "
+                "(runs the verify contract + close policy); switching tasks bounces until then.")
     # Freehand-mode echo when gate text is "Freehand" (bare) or starts with
     # "Freehand <punctuation>..." (e.g. "Freehand — work is done"). Must NOT
     # match "Freehand log" — alphanumeric continuations are normal gates

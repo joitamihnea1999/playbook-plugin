@@ -27,7 +27,17 @@ if [ -z "$PROJECT_DIR" ]; then
     exit 0
 fi
 
-AGENT_DIR=$(resolve_agent_dir "$PROJECT_DIR")
+# I1: a malformed .agent/current_user makes resolve_agent_dir `exit 1`, which at
+# top level under `set -e` aborted the hook with exit 1 — a NON-blocking error,
+# so the stop proceeded with open gates (failed OPEN). Detect it and FAIL CLOSED
+# below (block the stop once), never abort-open. The stop_hook_active valve
+# still ends a re-issued stop, so this can't wedge the session.
+if ! AGENT_DIR=$(resolve_agent_dir "$PROJECT_DIR" 2>/dev/null); then
+    MARKER_INVALID=true
+    AGENT_DIR="$PROJECT_DIR/.agent"   # nominal for path building; blocks below
+else
+    MARKER_INVALID=false
+fi
 
 # Read stdin (Stop JSON) — extract stop_hook_active
 INPUT=$(cat)
@@ -37,6 +47,17 @@ SESSION_ID="$(resolve_session_id)"
 # Safety valve: if already blocked once, allow stopping to prevent loops
 if [ "$STOP_ACTIVE" = "True" ]; then
     exit 0
+fi
+
+# I1: malformed marker — FAIL CLOSED (block the stop, never abort-open). Placed
+# AFTER the stop_hook_active valve so a re-issued stop still ends the turn.
+if [ "${MARKER_INVALID:-false}" = true ]; then
+    cat >&2 <<'MSG'
+BLOCKED: .agent/current_user is malformed — cannot resolve your lane to check
+task gates. Fix it to a single username line (letters, digits, and ._- only),
+then finish.
+MSG
+    exit 2
 fi
 
 # --- Eval mode: skip stop guard if stop_guard=off ---
@@ -56,6 +77,10 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
+# N2: task pointers are numeric — a non-digit value (incl. a glob metachar that
+# would match a real task under the `-path "*/${TASK}-*/*"` find below) is not a
+# valid pointer. Blank it so it reads as "no active task".
+case "$TASK" in *[!0-9]*) TASK="" ;; esac
 if [ -z "$TASK" ]; then
     exit 0
 fi
@@ -64,6 +89,19 @@ fi
 TASK_FILE=$(find "$AGENT_DIR/tasks" -maxdepth 2 -name "task.md" -path "*/${TASK}-*/*" 2>/dev/null | head -1)
 
 if [ -z "$TASK_FILE" ]; then
+    exit 0
+fi
+
+# Blocked state (#08): a task paused awaiting the owner's decision is NOT waiting
+# on the agent — let the turn end without a fabricated checkbox. Keyed on the
+# status marker (the line after `## Status`), NOT on gate text, so it can't
+# inherit the freehand bypass's first-unchecked-gate fragility.
+# LAST `## Status` wins — this must mirror core.py::_extract_status exactly
+# (which reads the line after the last heading). A first-match read here plus a
+# stray duplicate heading in prose would make Python and the enforcing hook
+# disagree about the same file — the #09 disease in a new spot.
+STATUS_LINE=$(awk '/^## Status[[:space:]]*$/{want=NR+1} NR==want{val=$0} END{if (want) print val}' "$TASK_FILE" 2>/dev/null | tr -d '[:space:]')
+if [ "$STATUS_LINE" = "blocked" ]; then
     exit 0
 fi
 
@@ -78,9 +116,13 @@ fi
 # Missing counter file = assume work was done (block)
 COUNTER_FILE="$SESSION_DIR/counters"
 if [ -f "$COUNTER_FILE" ]; then
-    WRITES=$(read_counter "$COUNTER_FILE" writes)
-    TOOLS=$(read_counter "$COUNTER_FILE" tools)
-    if [ "${WRITES:-0}" -eq 0 ] && [ "${TOOLS:-0}" -lt 5 ]; then
+    # read_counter_int (not read_counter): coerce the .agent/-resident counter
+    # bytes to integers before the `[ -eq ]`/`[ -lt ]` tests — parity with the
+    # C5 hardening elsewhere (the `[` builtin doesn't command-substitute like
+    # `$(( ))`, but keep the whole codebase off raw counter bytes in arithmetic).
+    WRITES=$(read_counter_int "$COUNTER_FILE" writes)
+    TOOLS=$(read_counter_int "$COUNTER_FILE" tools)
+    if [ "$WRITES" -eq 0 ] && [ "$TOOLS" -lt 5 ]; then
         exit 0
     fi
 fi

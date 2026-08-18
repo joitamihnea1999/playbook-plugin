@@ -4,7 +4,7 @@ description: >
   Conversation monitor — a second Claude agent that watches the front agent's
   work from outside and nudges when trajectory goes wrong. Reads session JSONL
   incrementally, maintains a compact judgment trace, delivers nudges via hook.
-argument-hint: [off | start]
+argument-hint: [start]
 ---
 
 # Monitor
@@ -31,19 +31,21 @@ monitor its own drift. An external monitor can watch the arc.
 
 ## Usage
 
-**Start the monitor:**
+**Start the monitor** (from the project, ideally after the front agent's first
+tool call so the transcript binding is clean):
 ```
-/monitor
+.claude/bin/monitor start
 ```
-Launches `.agent/monitor/monitor.py --session-id <current-session> --interactive`
-in the background. Writes its PID to `.agent/monitor/.pid`.
+This runs `scripts/monitor-lib/launch-monitor`, which starts a second,
+**sandboxed** Claude session (`claude --safe-mode`, so plugin hooks are disabled
+inside it) contained by `provider.sandbox` — seatbelt on macOS, bwrap on Linux:
+the project is bound read-only and the monitor's own `<agent-dir>/monitor/` is
+the only project-side writable path. It auto-detects the oldest live front-agent
+pid; override with `.claude/bin/monitor start --session-id pid-<N>`.
 
-**Stop the monitor:**
-```
-/monitor off
-```
-Runs `python3 .agent/monitor/monitor.py stop`, which sends SIGTERM to the
-running monitor process. Falls back to `.shutdown` marker if signal fails.
+**Stop the monitor:** the monitor IS a Claude session, not a background daemon —
+end it the way you end any session (tell it "stop", or exit that Claude). There
+is no `/monitor off` command and no `monitor.py` process to signal.
 
 ## What the Monitor Watches
 
@@ -56,17 +58,18 @@ The sensor extracts all this incrementally from `~/.claude/projects/<slug>/<sess
 
 ## What the Monitor Writes
 
-Two files the monitor owns:
-- `.agent/monitor/pids/<session-id>/session.md` — compact trace + judgment
-- `.agent/monitor/pids/<session-id>/nudge.md` — outbox for the hook
-
-Plus persistent state:
-- `.agent/monitor/MONITOR_MIND_MAP.md` — accumulated user knowledge
-- `.agent/monitor/rules.md` — steering rules learned from observation
+A **flat** layout under `<agent-dir>/monitor/` (`.agent/monitor/`, or
+`.agent/<user>/monitor/` on a multi-user repo) — the monitor's only writable
+area (there is no `pids/<session-id>/` subdir):
+- `session.md` — wake-by-wake journal (compact trace + judgment)
+- `nudge.md` — one-sentence outbox consumed by the hook
+- `trace.md` — sensor-written compact event trace
+- `rules.md` — steering rules learned from observation
+- `MONITOR_MIND_MAP.md` — accumulated orientation knowledge
 
 ## Delivery
 
-The monitor writes nudges to `.agent/monitor/pids/<session-id>/nudge.md`.
+The monitor writes nudges to `<agent-dir>/monitor/nudge.md`.
 A non-plugin `PostToolUse` hook (registered in `.claude/settings.json`) reads
 the nudge on the front agent's next tool call, emits it as `additionalContext`,
 and logs `[MONITOR→<session-id>]` to chat_log.
@@ -93,20 +96,22 @@ pre-coded with problems you haven't seen.
 
 ## Lifecycle
 
-1. `/monitor` — launch background process, record PID
-2. Sensor loop: poll JSONL → extract events → reason via `claude -p` → write
-3. Each wake: update session.md, maybe nudge, maybe add rule
-4. `/monitor off` — SIGTERM to the process, final session.md entry, clean exit
-5. Idle timeout: if no new JSONL for 5min, check front agent PID liveness; if dead, exit
+1. `.claude/bin/monitor start` — launch the sandboxed monitor Claude session
+2. `bootstrap.sh` seeds the briefing; each wake the sensor's `wait_once` blocks
+   until the front agent finishes a turn (`stop_reason: end_turn`) or a 60s
+   stall flush
+3. Each wake: append to session.md, maybe write nudge.md, maybe add a rule
+4. Stop by exiting that Claude session (a final session.md entry, then exit)
 
 ## Architecture
 
-- `.agent/monitor/` — monitor's home (r/w for monitor, r/o everywhere else)
-- `.agent/monitor/sensor.py` — incremental JSONL reader + compact extractor
-- `.agent/monitor/monitor.py` — main loop (bootstrap → sensor → reason → write)
-- `.agent/monitor/CLAUDE.md` — monitor's orientation document
-- `.agent/monitor/sandbox.sb` — seatbelt profile (macOS)
+- `scripts/monitor-lib/launch-monitor` — starts the sandboxed monitor Claude session
+- `scripts/monitor-lib/bootstrap.sh` — seeds the monitor's briefing on each start
+- `scripts/monitor-lib/sensor.py` — incremental JSONL reader + compact extractor
+  (`read_new_events`, `wait_once`)
+- `scripts/monitor-lib/CLAUDE.md` — the monitor's operating instructions
 - `.claude/hooks/monitor-nudge.sh` — injection hook (registered in settings.json)
+- `<agent-dir>/monitor/` — the monitor's home (r/w for the monitor, r/o everywhere else)
 
 ## Limitations (v1)
 

@@ -9,6 +9,17 @@ argument-hint: [pattern-name]
 
 # Playbook
 
+## Finding things fast
+
+Reach for the sharpest tool, not always `grep`:
+
+- **Project memory (mind map):** `tasks recall <keyword>` — a ranked relevance search across `MIND_MAP.md` + `MIND_MAP_OVERFLOW.md` (better than grepping one file for an exact word); then `tasks recall <N>` pulls that node's full content across both tiers. `tasks bootstrap` prints the index.
+- **Code by meaning:** use the language server (go-to-definition, find-references, rename) to answer "where is X defined / who calls X" — it returns the real definition and callers, not string matches. This is the right tool for tracing code, not `grep <symbol>`.
+- **Code by shape:** `ast-grep`/`sg` (if installed) finds code by AST pattern — "every bare `except:`", "calls to X missing an arg" — where grep only matches text.
+- **Plain text / logs / cleanup-verify:** `grep`/`rg` is still right (the harness Grep tool is already ripgrep-backed). `grep -r 'removed_thing'` returning zero remains the universal cleanup test.
+
+`tasks environment` lists which of these are installed and how to add the missing ones.
+
 ## Rhythm
 
 Every task follows a rhythm: **push → stop → push → stop → close**.
@@ -242,6 +253,8 @@ depth reveal that sampling missed?" not just "approach working?").
 
 ## Type Calibration
 
+**Pick the ceremony level yourself, biased safe — judge RISK first, size second.** Any high-risk trigger forces heavy no matter how small the diff looks (never `quick`, never "just do it"): deletes/migrates data; touches secrets/auth/permissions; a destructive or outward command (`rm`, force-push, deploy/publish, network/DB/payment/email side effect); changes a claim about the world (docs/benchmark/"verified" = `assertive`, even one word); or anything `git revert` won't undo in the world (`irreversible`) → `light` if small, a full type if multi-step. Otherwise by size: question/read-only → no task; trivial + reversible code or non-claim doc → `quick`; small-but-real or reversibility-unclear → `light`; multi-step/new-subsystem/uncertain → full; no-gate pairing the user asked for → `freehand` (user-initiated only, no trace). On the line, take the heavier. Ask the user ONLY when you still can't gauge risk/scope, and then recommend the safer option. The code-edit hook mechanically catches a mis-leveled *code* change; shell/git/docs are not gated, so weigh the risk triggers there especially. Under the seeded `panel_required_for: ["assertive","irreversible"]` policy, reversible `quick`/`light` work closes without a panel.
+
 Before writing your Work Plan, ask:
 
 1. **Is the template heavier than the task?** Cleanup, bugfix (known cause),
@@ -297,6 +310,18 @@ After all work patterns complete, before code becomes permanent:
 - **Overscoping.** The agent defaults to maximal scope; the user must constrain. Start with the smallest sample that answers the question. One analysis scoped from 82 files to 10 — and 10 was enough.
 - **Assumed root cause.** Jumping to a fix without confirming the cause. If it's not obvious, compose Investigate → Fix.
 - **Full ceremony for trivial changes.** 4 Design Phase gates for 5-line changes. Match template weight to task weight.
+
+---
+
+## Limits of Review — what a panel structurally cannot catch
+
+Judges (single or panel) do **conformance** review: does the code match the intent, does the intent match what the user asked. That is genuinely valuable and it is the strongest part of the tool. But three classes of failure are **outside** what any judge can verify, and assuming a clean panel covers them is exactly how they ship. A green panel is *not evidence* on any of these:
+
+- **Correspondence — does the result match the WORLD, not just the intent?** A judge reads code and text; it cannot see reality. A measurement can be internally consistent and wrong (a ruler that measures the wrong thing); a UI can pass every code lens and look broken. Across the evidence base, 12 owner-found defects were visible in a screenshot and caught by *zero* of 46 panels. For user-facing work or any asserted measured fact, **you** check the real artifact (screenshot/recording/actual output) or the instrument — the panel cannot.
+- **Disclosure — provenance, secrets, attribution, AI-authorship in public files.** This is a mechanical scan (`tasks audit`, a pre-commit grep), not a judgement call. Run it; do not expect a judge to.
+- **Irreversibility / blast radius.** A panel weighs correctness, not consequence — it will happily approve a clean diff that drops a database. Consequence is carried by `## Risk` (reversible / irreversible / assertive), not by the review: an `irreversible` or `assertive` task needs a rollback plan or the claim-and-its-instrument signed off **regardless** of how clean the findings are.
+
+The fix for each is not a better judge or an eighth seat — it is a different check (your eyes, a grep, the risk gate). Naming the limit is what stops a passing panel from reading as "all clear."
 
 ---
 

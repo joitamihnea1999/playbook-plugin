@@ -67,6 +67,12 @@ class ClaudeAdapter(ProviderAdapter):
         return "claude"
 
     @classmethod
+    def context_transport(cls) -> str:
+        # Prompt + context travel on STDIN — no OS argv limit; the panel gives
+        # stdin seats the high context budget.
+        return "stdin"
+
+    @classmethod
     def panel_variants(cls) -> list[Optional[str]]:
         return list(cls._DEFAULT_PANEL_VARIANTS)
 
@@ -243,13 +249,18 @@ class ClaudeAdapter(ProviderAdapter):
                         obj = json.loads(raw_line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         continue
+                    # I18: a decoded line may be null/[]/a string — skip non-dicts
+                    # rather than AttributeError on `.get()`.
+                    if not isinstance(obj, dict):
+                        continue
 
                     if obj.get("type") != "user":
                         continue
                     if obj.get("isMeta"):
                         continue
 
-                    content = obj.get("message", {}).get("content", "")
+                    _msg = obj.get("message")
+                    content = _msg.get("content", "") if isinstance(_msg, dict) else ""
                     if isinstance(content, list):
                         parts = [
                             c.get("text", "")

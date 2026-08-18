@@ -1,0 +1,7 @@
+{
+  "name": "edit-code-without-active-task → BLOCK",
+  "hook": "task-gate-hook",
+  "files": {"src/foo.py": "x = 1\n"},
+  "current_state": "",
+  "payload": {"tool_name": "Edit", "tool_input": {"file_path": "src/foo.py"}}
+}

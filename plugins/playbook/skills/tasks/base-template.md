@@ -1,7 +1,7 @@
 # {num:03d} - {title}
 
 > **Gate discipline:** One gate → do work → check box → next gate.
-> Never batch. Never backfill. The document IS the execution trace.
+> Never backfill. The document IS the execution trace. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one gate at a time).
 > **Closing a gate:** check the box, append your outcome. Never replace the original text.
 > Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).
 > If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.

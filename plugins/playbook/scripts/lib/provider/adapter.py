@@ -64,6 +64,16 @@ class ProviderAdapter(ABC):
         """
 
     @classmethod
+    def context_transport(cls) -> str:
+        """How judge context physically reaches this provider: "stdin" (no OS
+        size limit — the ceiling is model context) or "argv" (one element capped
+        at MAX_ARG_STRLEN bytes on POSIX). Panel review sizes each seat's
+        payload by this — an argv seat must not dictate what a stdin seat gets
+        to read. Default "argv": the conservative transport; stdin-capable
+        adapters override."""
+        return "argv"
+
+    @classmethod
     @abstractmethod
     def panel_variants(cls) -> list[Optional[str]]:
         """Model variants this provider contributes to multi-judge panel review.

@@ -23,15 +23,17 @@ import json
 import re
 from pathlib import Path
 
-# The six lifecycle registrations the plugin ships. Event name -> script
-# basename expected under the sibling scripts/ dir.
+# The lifecycle registrations the plugin ships. Event name -> the script
+# basename(s) expected under the sibling scripts/ dir. Most events run one hook;
+# PreToolUse runs two (the task gate AND the destructive-command guard), so the
+# value is a LIST — every listed script must be registered for that event.
 EXPECTED_HOOKS = {
-    "SessionStart": "session-start-hook",
-    "PreToolUse": "task-gate-hook",
-    "UserPromptSubmit": "chat-log-hook",
-    "PostToolUse": "state-echo-hook",
-    "Stop": "stop-hook",
-    "SessionEnd": "session-end-hook",
+    "SessionStart": ["session-start-hook"],
+    "PreToolUse": ["task-gate-hook", "command-guard-hook"],
+    "UserPromptSubmit": ["chat-log-hook"],
+    "PostToolUse": ["state-echo-hook"],
+    "Stop": ["stop-hook"],
+    "SessionEnd": ["session-end-hook"],
 }
 
 _QUOTES = ("\"", "'")
@@ -105,13 +107,14 @@ def hook_command_issues(hooks_json_path) -> list[str]:
     # point at its script. Only enforced when the file has a recognizable
     # hooks dict (an entirely unparseable file already reported above).
     if isinstance(hooks_obj, dict):
-        for event, script in EXPECTED_HOOKS.items():
+        for event, scripts in EXPECTED_HOOKS.items():
             if event not in seen_events:
                 issues.append(f"{event}: expected hook registration missing")
                 continue
             cmds = [c for ev, c in _iter_commands(hooks_obj) if ev == event and isinstance(c, str)]
-            if not any(script in c for c in cmds):
-                issues.append(f"{event}: no command references {script}")
+            for script in scripts:
+                if not any(script in c for c in cmds):
+                    issues.append(f"{event}: no command references {script}")
 
     return issues
 
@@ -138,6 +141,33 @@ def _installed_playbook_paths(home: Path) -> list[Path]:
             if p:
                 out.append(Path(p))
     return out
+
+
+def authoritative_hooks_path(env=None) -> "Path | None":
+    """The hooks.json copy belonging to the code that is RUNNING.
+
+    CLAUDE_PLUGIN_ROOT when the host set it (inside a hook context), else the
+    copy shipped alongside this module — the same tree doctor's version check
+    reads (the running module's own manifest, task 010). This is the copy whose
+    defects are actionable for THIS install; every other candidate is another
+    host's copy or a stale cache, and findings there must say so (F16: doctor
+    warned about a grok marketplace-cache copy while the bound install enforced
+    cleanly all session — noise indistinguishable from disease trains people to
+    ignore the check).
+
+    Returns None when neither resolves to a real file (e.g. a dev src/ layout
+    with no hooks dir) — callers then cannot rank copies and should not try.
+    """
+    import os
+
+    env = os.environ if env is None else env
+    plugin_root = env.get("CLAUDE_PLUGIN_ROOT")
+    if plugin_root:
+        p = Path(plugin_root) / "hooks" / "hooks.json"
+        if p.is_file():
+            return p
+    p = Path(__file__).resolve().parent.parent / "hooks" / "hooks.json"
+    return p if p.is_file() else None
 
 
 def candidate_hooks_paths(project_path, env=None) -> list[Path]:
@@ -197,18 +227,96 @@ def candidate_hooks_paths(project_path, env=None) -> list[Path]:
     return resolved
 
 
-def hooks_check_report(project_path, env=None) -> list[tuple[str, str]]:
+def _copy_version(hooks_path: Path) -> str:
+    """Version of the install copy that owns this hooks.json, "" if unreadable.
+
+    hooks.json lives at <root>/hooks/hooks.json, the manifest at
+    <root>/.claude-plugin/plugin.json.
+    """
+    try:
+        import json as _json
+        manifest = hooks_path.parent.parent / ".claude-plugin" / "plugin.json"
+        data = _json.loads(manifest.read_text(encoding="utf-8"))
+        v = data.get("version", "")
+        return v if isinstance(v, str) else ""
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _code_version() -> str:
+    """Version of the tree this code runs from, "" if unreadable."""
+    try:
+        import json as _json
+        manifest = (Path(__file__).resolve().parent.parent
+                    / ".claude-plugin" / "plugin.json")
+        data = _json.loads(manifest.read_text(encoding="utf-8"))
+        v = data.get("version", "")
+        return v if isinstance(v, str) else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def hooks_check_report(project_path, env=None, verbose: bool = False) -> list[tuple[str, str]]:
     """Doctor §1f payload: (label, detail) warnings across every real copy.
 
     Thin, side-effect-free glue over candidate_hooks_paths + hook_command_issues
     so the doctor wiring is a plain for-loop and this function is unit-testable
     with fixture paths. Each warning is labelled with which copy is dirty so a
     clean CLI tree but stale grok copy is distinguishable.
+
+    F16: copies OTHER than the authoritative one (the tree this code runs
+    from / CLAUDE_PLUGIN_ROOT) are labelled as such. Scanning them stays —
+    a stale grok copy WAS the firing one in the AloVet bug — but a finding in
+    a stray cache must not read like a defect in the live install. When no
+    authoritative copy resolves, ranking is impossible and labels stay plain.
+
+    1.5.32: a foreign copy of a DIFFERENT version is collapsed to a single line.
+    An abandoned cache from an old release fails every check a since-changed hook
+    contract added, and on a real machine that was two thirds of the doctor's
+    entire warning surface — warning fatigue is how the findings that matter get
+    skimmed past. The collapse is version-keyed, not blanket: a foreign copy at
+    the SAME version as the running code may be a genuinely live second install
+    with a genuinely broken binding, so those are still enumerated in full.
+    `verbose=True` enumerates everything (`tasks doctor --verbose`).
     """
     report: list[tuple[str, str]] = []
+    auth = authoritative_hooks_path(env=env)
+    auth_key = None
+    if auth is not None:
+        try:
+            auth_key = str(auth.resolve())
+        except OSError:
+            auth_key = None
+    code_v = _code_version()
     for path in candidate_hooks_paths(project_path, env=env):
-        for issue in hook_command_issues(path):
-            report.append((f"hooks: {path}", issue))
+        label = f"hooks: {path}"
+        is_auth = True
+        if auth_key is not None:
+            try:
+                is_auth = str(path.resolve()) == auth_key
+            except OSError:
+                is_auth = False
+            if not is_auth:
+                label = (f"hooks (other install copy — not the one this CLI "
+                         f"runs from): {path}")
+        issues = hook_command_issues(path)
+        if not issues:
+            continue
+        copy_v = _copy_version(path)
+        stale = (not is_auth) and (not verbose) and (copy_v != code_v)
+        if stale:
+            shown = f"v{copy_v}" if copy_v else "version unreadable"
+            report.append((
+                "hooks (stale install copy — not the one this CLI runs from)",
+                f"{path} ({shown}, this code is v{code_v or '?'}) — "
+                f"{len(issues)} issue(s), expected for an older release. "
+                f"First: {issues[0]} "
+                f"[delete that install or refresh it; "
+                f"`tasks doctor --verbose` lists all {len(issues)}]"
+            ))
+            continue
+        for issue in issues:
+            report.append((label, issue))
     return report
 
 

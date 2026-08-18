@@ -6,19 +6,29 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|search_replace|write|Bash|Shell|StrReplace|run_terminal_command",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|search_replace|write|Bash|Shell|StrReplace|run_terminal_command",
         "hooks": [
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/task-gate-hook\"",
-            "timeout": 5000
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Shell|run_terminal_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/command-guard-hook\"",
+            "timeout": 5
           }
         ]
       }
@@ -41,7 +51,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/state-echo-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -52,7 +62,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -63,7 +73,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-end-hook\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }

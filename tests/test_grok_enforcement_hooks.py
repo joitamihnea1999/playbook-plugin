@@ -57,6 +57,17 @@ class BuildPayloadTests(unittest.TestCase):
             },
         )
 
+    def test_command_guard_is_wired_for_grok(self):
+        # 1.5.31: the destructive-command interlock must be in grok's always-
+        # trusted enforcement, on a shell-tool matcher.
+        payload = build_enforcement_hooks_payload(resolve_playbook_plugin_root())
+        pre = payload["hooks"]["PreToolUse"]
+        guard = [e for e in pre if any("command-guard-hook" in h["command"]
+                                       for h in e["hooks"])]
+        self.assertEqual(len(guard), 1, "command-guard-hook not wired for grok")
+        for tok in ("Bash", "Shell", "run_terminal_command"):
+            self.assertIn(tok, guard[0]["matcher"])
+
     def test_pretool_matcher_covers_grok_tools(self):
         root = resolve_playbook_plugin_root()
         payload = build_enforcement_hooks_payload(root)
@@ -236,6 +247,13 @@ class GateHookGrokDialectTests(unittest.TestCase):
     def test_grok_write_allowed_with_active_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = self._project(tmp)
+            # A REAL active task the pointer resolves to (I2: the gate no longer
+            # trusts a bare non-empty pointer — it must name an existing task).
+            tdir = project / ".agent" / "tasks" / "001-x"
+            tdir.mkdir(parents=True)
+            (tdir / "task.md").write_text(
+                "# 001 - x\n## Status\nin_progress\n## Work Plan\n- [ ] g\n",
+                encoding="utf-8")
             sess = project / ".agent" / "sessions" / self.SESSION
             sess.mkdir(parents=True)
             (sess / "current_state").write_text("001\n", encoding="utf-8")

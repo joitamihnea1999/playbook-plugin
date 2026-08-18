@@ -535,5 +535,216 @@ class SelectTest(unittest.TestCase):
         self.assertTrue((self.project / ".agent" / "models.json").exists())
 
 
+class DetectProvidersTest(unittest.TestCase):
+    """1.5.14: `tasks models detect` — fast, no-network provider/model inventory.
+
+    Feeds /playbook:init the menu of installed agents + selectable models. All
+    detection surfaces are monkeypatched so the test never launches a CLI.
+    """
+
+    def _detect(self, *, installed, codex_cache=None, agy=None, grok=None,
+                claude_models=None):
+        which = lambda name: "/usr/bin/" + name if name in installed else None
+        with mock.patch.object(mc.shutil, "which", side_effect=which), \
+                mock.patch.object(mc, "load_codex_cache", return_value=codex_cache), \
+                mock.patch.object(mc, "list_agy_models", return_value=agy), \
+                mock.patch.object(mc, "list_grok_models", return_value=grok), \
+                mock.patch.object(mc, "_claude_configured_models",
+                                  return_value=claude_models or []):
+            return mc.detect_providers(Path("/tmp"))
+
+    def _by_name(self, report):
+        return {p["name"]: p for p in report["providers"]}
+
+    def test_all_five_providers_always_present(self):
+        report = self._detect(installed=set())
+        self.assertEqual([p["name"] for p in report["providers"]],
+                         ["claude", "codex", "agy", "grok", "pi"])
+
+    def test_none_installed_reports_false_and_empty(self):
+        by = self._by_name(self._detect(installed=set()))
+        for name in ("claude", "codex", "agy", "grok", "pi"):
+            self.assertFalse(by[name]["installed"], name)
+            self.assertEqual(by[name]["models"], [], name)
+
+    def test_claude_models_from_configured_and_aliases_deduped(self):
+        by = self._by_name(self._detect(
+            installed={"claude"}, claude_models=["claude-opus-4-8[1m]"]))
+        c = by["claude"]
+        self.assertTrue(c["installed"])
+        ids = [m["id"] for m in c["models"]]
+        # configured id leads; shipped alias targets follow; no dup of the
+        # configured id even though it's also a shipped alias target.
+        self.assertEqual(ids[0], "claude-opus-4-8[1m]")
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertIn("claude-sonnet-5", ids)
+        self.assertTrue(all(m["efforts"] == [] for m in c["models"]))
+
+    def test_codex_models_and_per_model_efforts_from_cache(self):
+        cache = mc.parse_codex_cache(_CACHE_FIXTURE)
+        by = self._by_name(self._detect(installed={"codex"}, codex_cache=cache))
+        cx = by["codex"]
+        ids = {m["id"]: m["efforts"] for m in cx["models"]}
+        self.assertEqual(ids["gpt-5.5"], ["low", "medium", "high", "xhigh"])
+        self.assertIn("codex-auto-review", ids)  # hidden entries kept
+
+    def test_codex_installed_but_cache_unreadable(self):
+        by = self._by_name(self._detect(installed={"codex"}, codex_cache=None))
+        self.assertTrue(by["codex"]["installed"])
+        self.assertEqual(by["codex"]["models"], [])
+        self.assertIn("cache unreadable", by["codex"]["note"])
+
+    def test_grok_models_carry_effort_vocabulary(self):
+        by = self._by_name(self._detect(installed={"grok"}, grok=["grok-4.6"]))
+        g = by["grok"]
+        self.assertEqual(g["efforts"], ["high", "low", "medium"])
+        self.assertEqual(g["models"][0]["efforts"], ["high", "low", "medium"])
+
+    def test_agy_names_but_pin_note(self):
+        by = self._by_name(self._detect(installed={"agy"}, agy=["Gemini 3 Pro"]))
+        self.assertEqual([m["id"] for m in by["agy"]["models"]], ["Gemini 3 Pro"])
+        self.assertIn("NOT selectable", by["agy"]["note"])
+
+    def test_render_skips_model_list_for_absent_providers(self):
+        report = self._detect(installed={"claude"}, claude_models=["claude-opus-4-8"])
+        text = mc.render_detect(report)
+        self.assertIn("[claude] installed", text)
+        self.assertIn("[codex] not installed", text)
+        # a not-installed provider prints its header but no model lines
+        # (model lines are 4-space-indented; the footer's "codex:gpt-5.5" example is not)
+        self.assertNotIn("\n    gpt-", text)
+
+    def test_cli_json_flag_emits_valid_json(self):
+        which = lambda name: None
+        with mock.patch.object(mc.shutil, "which", side_effect=which), \
+                mock.patch.object(mc, "load_codex_cache", return_value=None), \
+                mock.patch.object(mc, "list_agy_models", return_value=None), \
+                mock.patch.object(mc, "list_grok_models", return_value=None), \
+                mock.patch.object(mc, "_claude_configured_models", return_value=[]):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = mc.cli_models(["detect", "--json"], Path("/tmp"))
+        self.assertEqual(rc, 0)
+        parsed = json.loads(buf.getvalue())
+        self.assertEqual(len(parsed["providers"]), 5)
+
+    def test_cli_rejects_unknown_detect_flag(self):
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.cli_models(["detect", "--bogus"], Path("/tmp")), 2)
+
+
+class SetTest(unittest.TestCase):
+    """1.5.14: `tasks models set` — non-interactive panel writer for init.
+
+    Shares run_select's validation + audit + atomic write; the only difference
+    is no prompts, so a bad pin aborts (or needs --force) instead of asking.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self._tmp.name)
+        (self.project / ".agent").mkdir()
+        self.path = self.project / ".agent" / "models.json"
+        self._clean = mock.patch.object(mc, "check_pins", return_value={
+            "entries": [], "codex": None, "codex_cli_version": None,
+            "agy_models": None, "claude_candidates": [], "warnings": []})
+        self._clean.start()
+        self._ljc = mock.patch("provider.sandbox.load_judge_config",
+                               return_value={"default_judge": "opus", "panel": ["opus", "sonnet"]})
+        self._ljc.start()
+
+    def tearDown(self):
+        self._clean.stop()
+        self._ljc.stop()
+        self._tmp.cleanup()
+
+    def _run(self, argv):
+        with redirect_stdout(io.StringIO()):
+            return mc.cli_models(argv, self.project)
+
+    def test_writes_panel_and_default_judge(self):
+        rc = self._run(["set", "--panel", "opus,codex:gpt-5.5:high", "--default-judge", "opus"])
+        self.assertEqual(rc, 0)
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["panel"], ["opus", "codex:gpt-5.5:high"])
+        self.assertEqual(data["default_judge"], "opus")
+        self.assertIn("_doc", data)
+
+    def test_panel_absent_keeps_existing_but_sets_default_judge(self):
+        self.path.write_text(json.dumps({"panel": ["sonnet"], "aliases": {"x": ["claude", "c", []]}}))
+        rc = self._run(["set", "--default-judge", "opus"])
+        self.assertEqual(rc, 0)
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["panel"], ["sonnet"])          # untouched
+        self.assertEqual(data["default_judge"], "opus")
+        self.assertEqual(data["aliases"], {"x": ["claude", "c", []]})  # preserved
+
+    def test_empty_panel_clears_it(self):
+        rc = self._run(["set", "--panel", ""])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(self.path.read_text())["panel"], [])
+
+    def test_nothing_to_set_is_rc2(self):
+        self.assertEqual(self._run(["set"]), 2)
+        self.assertFalse(self.path.exists())
+
+    def test_bad_spec_aborts_without_writing(self):
+        self.assertEqual(self._run(["set", "--panel", "codex:gpt-5.5:bogus"]), 1)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self._run(["set", "--panel", "not-a-provider:x"]), 1)
+        self.assertFalse(self.path.exists())
+
+    def test_dead_pin_refused_unless_force(self):
+        gone = {"spec": "codex:gpt-5.3-codex", "provider": "codex",
+                "variant": "gpt-5.3-codex", "verdict": mc.GONE, "detail": "dead"}
+        self._clean.stop()
+        self._clean = mock.patch.object(mc, "check_pins", return_value={
+            "entries": [gone], "codex": None, "codex_cli_version": None,
+            "agy_models": None, "claude_candidates": [], "warnings": []})
+        self._clean.start()
+        self.assertEqual(self._run(["set", "--panel", "codex:gpt-5.3-codex"]), 1)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self._run(["set", "--panel", "codex:gpt-5.3-codex", "--force"]), 0)
+        self.assertTrue(self.path.exists())
+
+    def test_cli_rejects_unknown_set_flag(self):
+        self.assertEqual(self._run(["set", "--bogus"]), 2)
+
+    # ── 1.5.16 verification-pass fixes ────────────────────────────────────────
+    def test_default_judge_only_does_not_freeze_the_panel(self):
+        # A file relying on the shipped panel (no `panel` key) must NOT gain a
+        # frozen copy of it when only the default judge is set.
+        self.path.write_text(json.dumps({"default_judge": "opus",
+                                          "aliases": {"x": ["claude", "c", []]}}))
+        rc = self._run(["set", "--default-judge", "sonnet"])
+        self.assertEqual(rc, 0)
+        data = json.loads(self.path.read_text())
+        self.assertNotIn("panel", data)            # untouched — still tracks shipped
+        self.assertEqual(data["default_judge"], "sonnet")
+
+    def test_empty_panel_write_warns(self):
+        self.path.write_text(json.dumps({"panel": ["opus", "sonnet"]}))
+        with redirect_stdout(io.StringIO()):
+            buf = io.StringIO()
+            with __import__("contextlib").redirect_stderr(buf):
+                rc = mc.cli_models(["set", "--panel", ""], self.project)
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(self.path.read_text())["panel"], [])
+        self.assertIn("EMPTY panel", buf.getvalue())
+
+    def test_flag_missing_value_is_rejected(self):
+        # `--panel --force` must report a missing value, not consume --force.
+        self.assertEqual(self._run(["set", "--panel", "--force"]), 2)
+        self.assertEqual(self._run(["set", "--default-judge"]), 2)  # value-flag at end
+
+    def test_non_dict_models_json_starts_fresh_not_crash(self):
+        self.path.write_text(json.dumps(["opus"]))  # valid JSON, not an object
+        rc = self._run(["set", "--default-judge", "opus"])
+        self.assertEqual(rc, 0)
+        data = json.loads(self.path.read_text())
+        self.assertIsInstance(data, dict)
+        self.assertEqual(data["default_judge"], "opus")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

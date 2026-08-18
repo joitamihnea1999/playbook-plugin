@@ -30,7 +30,7 @@ PLUGIN = REPO_ROOT / "plugins" / "playbook"
 
 sys.path.insert(0, str(PLUGIN))
 
-import tasks.cli as cli  # noqa: E402
+import tasks.shared as shared  # noqa: E402  (the 1.5.9 split moved the GC policy out of cli.py)
 
 DAY = 86400
 
@@ -72,7 +72,7 @@ class TestSessionIsDead(unittest.TestCase):
         return d
 
     def dead(self, d: Path, own: str = "") -> bool:
-        return cli._session_is_dead(d, own, self.cutoff)
+        return shared._session_is_dead(d, own, self.cutoff)
 
     def test_own_session_is_never_dead_even_with_an_ancient_pointer(self):
         """The field case: a live session two days into one task."""
@@ -156,12 +156,12 @@ class TestGcSelfExclusionWithoutEnv(unittest.TestCase):
             ("uuid-new", 60),
         ])
         env_backup = os.environ.pop("PLAYBOOK_SESSION_ID", None)
-        real = cli.resolve_session_id
-        cli.resolve_session_id = lambda: "pid-win-fallback"
+        real = shared.resolve_session_id
+        shared.resolve_session_id = lambda: "pid-win-fallback"
         try:
-            cli._gc_dead_sessions(self.project)
+            shared._gc_dead_sessions(self.project)
         finally:
-            cli.resolve_session_id = real
+            shared.resolve_session_id = real
             if env_backup is not None:
                 os.environ["PLAYBOOK_SESSION_ID"] = env_backup
         self.assertEqual(sorted(p.name for p in self.sessions.iterdir()),
@@ -171,7 +171,7 @@ class TestGcSelfExclusionWithoutEnv(unittest.TestCase):
         self.populate([("uuid-mine", 2 * DAY), ("uuid-other", 2 * DAY)])
         os.environ["PLAYBOOK_SESSION_ID"] = "uuid-mine"
         try:
-            cli._gc_dead_sessions(self.project)
+            shared._gc_dead_sessions(self.project)
         finally:
             os.environ.pop("PLAYBOOK_SESSION_ID", None)
         self.assertEqual([p.name for p in self.sessions.iterdir()], ["uuid-mine"])
@@ -274,7 +274,7 @@ class TestSymlinkSafety(unittest.TestCase):
 
         os.environ["PLAYBOOK_SESSION_ID"] = "pid-own"
         try:
-            cli._gc_dead_sessions(project)
+            shared._gc_dead_sessions(project)
         finally:
             os.environ.pop("PLAYBOOK_SESSION_ID", None)
 

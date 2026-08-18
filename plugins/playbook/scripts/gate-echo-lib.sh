@@ -82,8 +82,18 @@ find_agent_root_pid() {
 # — Python and bash converge on the same value when env var is unset.
 resolve_session_id() {
     if [ -n "${PLAYBOOK_SESSION_ID:-}" ]; then
-        echo "$PLAYBOOK_SESSION_ID"
-        return 0
+        # Sanitize (C4): this value becomes a path component in `rm -rf
+        # .agent/sessions/<id>` and in every hook. An unsanitized `../tasks`
+        # deleted the task DB. Accept only a safe single component (the
+        # canonical `pid-*` ids AND the sanctioned `judge` session id);
+        # NEUTRALIZE anything else — a slash, whitespace, or the traversal
+        # components `.`/`..` — by falling through to the derived pid. Mirrors
+        # tasks.core._sanitize_session_id.
+        case "$PLAYBOOK_SESSION_ID" in
+            .|..) : ;;                       # traversal → neutralize
+            *[!A-Za-z0-9._-]*) : ;;          # slash / space / control char → neutralize
+            *) echo "$PLAYBOOK_SESSION_ID"; return 0 ;;
+        esac
     fi
     # Windows/MSYS: a PID fallback split-brains — this shell sees MSYS PIDs
     # while the Python CLI sees native-Windows PIDs (disjoint namespaces), so
@@ -278,6 +288,83 @@ read_counter() {
     if [ -f "$file" ]; then
         sed -n "s/^${key}=//p" "$file" 2>/dev/null | head -1
     fi
+}
+
+# _safe_int VALUE
+# Coerce arbitrary (untrusted) bytes to a non-negative decimal integer,
+# defaulting to 0. Counter/offset files live under .agent/, which the task-gate
+# EXEMPTS from the code-edit gate, so their content is untrusted — and bash
+# arithmetic EXECUTES command substitution / array subscripts embedded in an
+# operand: `tools=x[$(touch PWNED)]` ran `touch` inside `$(( TOOLS + 1 ))` (C5).
+# NEVER feed raw file bytes to `$(( ))`; run them through this first. `10#`
+# forces base-10 so a leading-zero counter ("008") doesn't trip octal parsing.
+# An all-digit but absurdly long value (>18 digits) would overflow bash's signed
+# 64-bit `$(( ))` and print a NEGATIVE number, breaking the "non-negative"
+# contract (F10). Real counters never approach 10^18, so clamp overlong input
+# to 0 rather than return a wrapped negative.
+_safe_int() {
+    case "$1" in
+        ''|*[!0-9]*) printf '0' ;;
+        *) if [ "${#1}" -gt 18 ]; then printf '0'; else printf '%d' "$((10#$1))"; fi ;;
+    esac
+}
+
+# read_counter_int FILE KEY — read_counter coerced to a safe integer (C5).
+read_counter_int() {
+    _safe_int "$(read_counter "$1" "$2")"
+}
+
+# is_code_file_path FILE_PATH
+# Returns 0 for source code paths that should require an active task.
+#
+# F2 (1.5.18): this MUST agree in behavior with the Python `_is_code_file_path`
+# in provider/policy.py — the default Claude path enforces via this bash hook,
+# the opt-in codex apply_patch gate enforces via that Python one, and "no code
+# without a task" has to mean the same thing under every provider.
+# tests/test_gate_classifier_parity.py pins the agreement over a shared vector
+# table; edit BOTH together. The one deliberate asymmetry is the shebang branch
+# below — bash can read the working tree, the codex pre-decision sees a patch and
+# not always a file, so it is a bash-only superset, never a hole.
+#
+# Algorithm: extension decides first (code ext -> gate; doc/data ext -> exempt);
+# an undecided extension gates iff a path component is a known code dir.
+# Extension match is case-insensitive (parity with Python's .lower()); use `tr`
+# not `${x,,}` so macOS's bash 3.2 is fine.
+is_code_file_path() {
+    local file_path="$1"
+    local norm="${file_path//\\//}"          # backslashes -> slashes (Python parity)
+    local base="${norm##*/}"                 # basename
+    # Strip LEADING dots before finding the extension, so a dots-then-name
+    # basename (".gitignore", "..py", "...toml") has NO extension — matching
+    # Python's os.path.splitext, which ignores leading dots (1.5.20 parity fix).
+    local stripped="$base"
+    while [ "${stripped#.}" != "$stripped" ]; do stripped="${stripped#.}"; done
+    local ext=""
+    case "$stripped" in
+        *.*) ext=".$(printf '%s' "${stripped##*.}" | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+
+    case "$ext" in
+        # Code — languages (both prior lists ∪ common extras) + strict config/markup.
+        .py|.ts|.js|.mjs|.cjs|.tsx|.jsx|.sh|.bash|.go|.rs|.rb|.java|.c|.cpp|.h|.hpp|.swift|.kt|.kts|.dart|.cs|.php|.r|.m|.mm|.scala|.zig|.lua|.ex|.exs|.ml|.mli|.tf|.vue|.svelte|.ipynb|.css|.scss|.less|.html|.sql|.yaml|.yml|.toml|.proto|.graphql|.gradle)
+            return 0 ;;
+        # Docs / data / binaries — never code, even inside a code dir.
+        .md|.txt|.json|.png|.svg|.jpg|.jpeg|.gif|.ico|.webp|.pdf|.lock|.csv)
+            return 1 ;;
+    esac
+
+    # Undecided by extension -> code iff a path component is a known code dir.
+    case "/$norm/" in
+        */scripts/*|*/bin/*|*/src/*|*/hooks/*|*/lib/*|*/cmd/*)
+            return 0 ;;
+    esac
+
+    # bash-only superset: an extensionless EXISTING file with a shebang.
+    if [ -z "$ext" ] && [ -f "$file_path" ] && head -1 "$file_path" 2>/dev/null | grep -q '^#!'; then
+        return 0
+    fi
+
+    return 1
 }
 
 # write_counter FILE KEY VALUE

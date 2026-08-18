@@ -4,3 +4,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# stray scratch pointer accidentally committed in 1.5.12 (verify pass)
+.scratch_path
+
+# final-acceptance panel audit scratch (evidence kept locally, not shipped)
+reviews/
