@@ -28,11 +28,23 @@ Then **ask the user** what they want to work on. Don't autonomously pick a task.
 
 Read `MIND_MAP.md` at project root before starting any work. It's the project's institutional memory — architecture, decisions, and reasoning. Consult it before each task, update it after completing one. `tasks bootstrap` prints it (an index of routing nodes + titles once it's large); pull a node's full content — across `MIND_MAP.md` and the `MIND_MAP_OVERFLOW.md` deep-detail tier — with `.claude/bin/tasks recall <N>`, or locate nodes by topic with `tasks recall <keyword>`.
 
+## Choosing the ceremony level (decide this yourself — don't make the user pick)
+
+Match the process to the RISK and size of the request. **You classify it; the user should not have to.** When you're on the line between two levels, always choose the heavier one — better safe than sorry.
+
+- **No code touched** (a question, docs, a shell command, git, reading) → just do it, no task.
+- **Trivial and clearly reversible code** (a typo, a rename, a small self-contained pure function) → `tasks new quick` (3 gates, no review; closes clean).
+- **Small but touches real behavior/logic, OR touches a claim/config/data, OR you're not certain it's reversible** → `tasks new light` (risk classified first, review routed by risk).
+- **Multi-step, a new subsystem, an uncertain approach, or anything irreversible / assertive / security-relevant** → a full task type (`feature`/`build`/`bugfix`/`research`/…).
+- **The user explicitly wants to pair with no gate pressure** → `tasks freehand`. (Don't pick this on your own — it keeps no trace, so it's the least safe option; use it only when the user asks.)
+
+**Only when you genuinely cannot tell the risk or the scope**, ask the user which level — but always lead with a recommendation, and let that recommendation default to the SAFER (heavier) option. Never pick a lighter level just to save time on something that might not be reversible.
+
 ## Task Lifecycle
 
 These are **your** commands to run — the user never calls the tasks CLI.
 
-When the user asks you to do something: run `tasks new` then immediately `tasks work <N>` — never leave a task created but unactivated.
+Once you've chosen the level (above): run `tasks new <type>` then immediately `tasks work <N>` — never leave a task created but unactivated.
 
 ```
 tasks new <type> <name> [intent]   # creates task.md — then immediately:

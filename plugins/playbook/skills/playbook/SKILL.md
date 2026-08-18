@@ -253,6 +253,8 @@ depth reveal that sampling missed?" not just "approach working?").
 
 ## Type Calibration
 
+**Pick the ceremony level yourself, biased safe.** Before starting, classify the request and choose — don't make the user decide: no code → no task; trivial + clearly reversible → `quick`; small-but-real / touches a claim/config/data / reversibility unclear → `light`; multi-step / new subsystem / uncertain approach / irreversible / assertive → a full type; user explicitly wants no-gate pairing → `freehand` (user-initiated only — it keeps no trace). On the line between two levels, take the heavier. Ask the user which level ONLY when you truly can't gauge risk or scope — and then recommend one, defaulting to the safer/heavier. Under the seeded `panel_required_for: ["assertive","irreversible"]` policy, reversible `quick`/`light` work closes without a panel, so light ceremony no longer means a force-close.
+
 Before writing your Work Plan, ask:
 
 1. **Is the template heavier than the task?** Cleanup, bugfix (known cause),

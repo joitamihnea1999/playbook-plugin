@@ -16,7 +16,7 @@ Perform **every** step in order.
 
 ### 1. Run mechanical setup
 
-Find and run the plugin's `scripts/init` script, which handles: `.claude/settings.json` permissions, `.agent/tasks/` directory, `MIND_MAP.md` stub, `.claude/bin/` wrappers, **CLAUDE.md** (created from the template, or template-owned sections merged in place — project content is preserved byte-for-byte), and **.gitignore** (a marker-guarded playbook runtime-state block). It also seeds `.agent/config.json` with the review knobs and the strict policy defaults (`panel_required_for: "all"`). Resolve it from the install manifest first (the same copy the harness hooks run — a bare `find` can pick a stale cached version), falling back to a deterministic find:
+Find and run the plugin's `scripts/init` script, which handles: `.claude/settings.json` permissions, `.agent/tasks/` directory, `MIND_MAP.md` stub, `.claude/bin/` wrappers, **CLAUDE.md** (created from the template, or template-owned sections merged in place — project content is preserved byte-for-byte), and **.gitignore** (a marker-guarded playbook runtime-state block). It also seeds `.agent/config.json` with the review knobs and the risk-gated close policy (`panel_required_for: ["assertive", "irreversible"]` — reversible work closes on verify+single-judge, only claims/data/publish need a panel; set `"all"` for max strictness). Resolve it from the install manifest first (the same copy the harness hooks run — a bare `find` can pick a stale cached version), falling back to a deterministic find:
 
 ```bash
 INIT_SCRIPT="$(python3 - "$PWD" 2>/dev/null <<'PY'

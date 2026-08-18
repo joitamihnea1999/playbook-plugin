@@ -71,6 +71,19 @@ class InitRobustness(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"clean init failed: {r.stdout}\n{r.stderr}")
         self.assertTrue((project / "CLAUDE.md").exists())
 
+    def test_seeds_risk_gated_close_policy(self):
+        # 1.5.28: the seeded default is risk-gated, NOT "all" — reversible work
+        # (the common case) must close without a panel; only assertive/irreversible
+        # gate on one. A drift back to "all" would silently re-impose a panel on
+        # every trivial close.
+        import json
+        project = Path(self._tmp.name) / "policy"
+        r = self._run_init(project)
+        self.assertEqual(r.returncode, 0, f"init failed: {r.stdout}\n{r.stderr}")
+        cfg = json.loads((project / ".agent" / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["panel_required_for"], ["assertive", "irreversible"],
+                         f"seeded close policy drifted: {cfg.get('panel_required_for')!r}")
+
 
 if __name__ == "__main__":
     unittest.main()

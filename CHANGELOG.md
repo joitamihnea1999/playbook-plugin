@@ -2,7 +2,35 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.27] — 2026-08-17
+## [1.5.28] — 2026-08-18
+
+Match ceremony to risk — so quick work stays quick and the trust machinery aims
+where it matters, and the agent chooses the level (the user shouldn't have to).
+
+### Changed
+
+- **`/playbook:init` now seeds a risk-gated close policy** —
+  `panel_required_for: ["assertive", "irreversible"]` instead of `"all"`.
+  Reversible work (the common case, incl. `quick`/`light`) closes on
+  verify+single-judge evidence with no panel wait; only changes to
+  claims-about-the-world (`assertive`) and data/publish (`irreversible`) require a
+  quorum-PASS panel. `"all"` remains available for max strictness. Fixes the
+  papercut where a trivial reversible `quick` task couldn't close without
+  `--force`. `scripts/init` seed + `_doc`; docs (cli, init.md, usage) reconciled;
+  new test pins the seed against drift.
+
+### Added
+
+- **Ceremony auto-classification guidance** (CLAUDE.md template + `/playbook`
+  skill): the agent now decides the level itself — no code → no task; trivial +
+  clearly reversible → `quick`; small-but-real / touches a claim/config/data /
+  reversibility unclear → `light`; multi-step / new subsystem / uncertain /
+  irreversible / assertive → a full type; `freehand` only when the user asks for
+  no-gate pairing. On the line between two levels it takes the heavier; it asks
+  the user **only** when it genuinely can't gauge risk or scope, and even then
+  leads with a recommendation biased to the safer option. Better safe than sorry.
+
+
 
 ### Added
 
