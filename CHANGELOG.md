@@ -2,6 +2,107 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.32] — 2026-08-18
+
+An audit-driven maintenance release: close the last close-gate fail-open, cut the
+per-tool-call hook latency roughly in half, stop two "inspection" flags from
+doing real work, and quiet the doctor's biggest source of noise.
+
+### Fixed — soundness
+
+- **An unset `## Risk` no longer walks through the close gate.** `panel_required_for`
+  keys the review requirement to the risk class, and `unclassified` is in no
+  class — so the whole risk-keyed bar evaluated to nothing and the task closed on
+  a warning. That made "leave the field blank" the cheapest path through the
+  strictest gate in the system, chosen by the same agent the gate exists to
+  constrain. The close now separates two facts the old code conflated, using a
+  discriminator already on disk (no new metadata):
+  - **no `## Risk` heading at all** → a pre-1.5.0 task that was never offered the
+    gate. Closes with the warning, exactly as before.
+  - **heading present but unset**, or malformed (`## Risk: assertive` on one
+    line) → the gate was offered and skipped. Blocks unless there is impl-review
+    evidence or `--force --reason`, the same bar as `assertive`/`irreversible`.
+  New `tasks.core.has_risk_section`; `close_decision` gains
+  `risk_section_present` (default `False`, so a caller that cannot tell gets the
+  lenient legacy path rather than an invented block). `## Risk Routing` in the
+  light template is a gate checklist, not the field, and does not trigger it.
+
+- **`sandbox --print-argv` was launching a live, billable agent.** The flag's own
+  help says "print the fully wrapped argv instead of executing", but its check
+  sat *after* the `--prompt` early-return in `provider/sandbox.py` — so
+  `--print-argv --prompt "…"` ignored the dry run and spawned a real headless
+  agent with the project writable. It now short-circuits before the run and
+  prints the argv that path would actually use; `subagent.build_invocation()` was
+  extracted so the dry run and the real run read from one builder and cannot
+  drift. (`--list-agents`, `--list-models`, `--print-profile` were already
+  correct.)
+
+- **`init --help` provisioned the project and named it `--help`.** `$1` is a
+  free-text display name and nothing rejected a flag in that position, so a full
+  install ran — global touches (`~/.profile`, `~/.claude/settings.json`,
+  `~/.claude/bash-log.sh`) included — and the mind map came out titled
+  `# Mind Map — --help`. Now `-h/--help` prints usage and exits, any other
+  leading-dash argument is refused with exit 2, and a real display name still
+  lands in the mind map.
+
+### Changed — performance
+
+- **The hooks stop spending one interpreter per field.** `task-gate-hook` and
+  `state-echo-hook` each ran `python3` four times per tool call — normalize, read
+  `tool_name`, read `file_path`, `os.path.normpath` — parsing the same JSON three
+  times, on hooks bound to every tool call. `hook-payload-normalize.py` gains
+  `--emit-fields`, which does all of it in the one process already being spawned
+  to normalize, and `command_guard.py` now normalizes in-process so its wrapper is
+  a single `exec python3` instead of two piped interpreters.
+
+  Measured on the same payload, project and machine (10 runs, `BASH_ENV` unset):
+
+  | hook | before | after |
+  |---|---|---|
+  | `task-gate-hook` | 71 ms | 36 ms |
+  | `command-guard-hook` | 47 ms | 28 ms |
+  | `state-echo-hook` | 78 ms | 42 ms |
+  | **per Bash tool call** | **196 ms** | **106 ms** |
+
+  Records are NUL-delimited, because a command or path may contain newlines and a
+  line-based protocol would hand the gate a different command than the one about
+  to run. A leading sentinel (`pb-fields-v2`) separates "the fused read ran" from
+  "python is missing / the script died" — without the sentinel each hook falls
+  back to its original per-field extraction, because an enforcing gate must never
+  mistake an unreadable payload for an empty one. The task-014 byte-identity
+  contract still holds: a native Claude payload comes back exactly as received.
+  New `test_fused_payload_fields.py` pins the wire format and re-evaluates the old
+  one-liners as a parity oracle across 16 payload shapes.
+
+  Separately observed while measuring: with the `BASH_ENV=~/.claude/bash-log.sh`
+  wiring `init` installs, its `DEBUG` trap fires on every command *inside* each
+  hook and adds roughly 70 ms per tool call on top of the numbers above. Not
+  changed here; worth its own look.
+
+### Changed — doctor
+
+- **A stale install copy is one line, not seven.** `tasks doctor` scans every
+  hooks.json a host might load, which is right — a stale grok copy was the firing
+  one in the AloVet bug. But on a real machine 6 of its 12 warnings came from a
+  `~/.grok/marketplace-cache/…` copy of **v1.4.3** abandoned weeks earlier, and
+  every one was correct *and* noise: a cache from before `command-guard-hook`
+  existed necessarily fails the check for it. Warning fatigue is how the findings
+  that matter get skimmed past. A foreign copy whose version differs from the
+  running code now collapses to a single row naming the path, both versions, the
+  finding count and the first finding. The collapse is version-keyed, not blanket:
+  a foreign copy at the *same* version may be a live second install with a real
+  defect, so those are still enumerated. `tasks doctor --verbose` enumerates
+  everything.
+
+### Notes
+
+- Suite **1159 → 1217**. Every fix watched red first, each with a negative
+  control. Two behavior-change tests in `test_light_template.py` were rewritten
+  rather than deleted: they encoded the old warn-and-pass close, and now encode
+  the block plus the preserved legacy path.
+- Known, unchanged, pre-existing: with `python3` absent the gate fails open. The
+  entire CLI is Python, so that state has no working playbook in it either way.
+
 ## [1.5.31] — 2026-08-18
 
 Extend the destructive-command interlock to **all three providers** (was Claude
