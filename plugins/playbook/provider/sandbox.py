@@ -920,6 +920,15 @@ def _main(argv: list[str]) -> int:
         spec = _subagent.SubagentSpec(
             agent=agent, model=model_for_spec, prompt=args.prompt, bare=args.bare,
         )
+        # --print-argv is a DRY RUN and must short-circuit BEFORE the run — and
+        # it has to print THIS path's argv (the adapter's headless invocation),
+        # not the empty raw-passthrough one, or the inspection would be a lie.
+        if args.print_argv:
+            _inv = _subagent.build_invocation(spec, project_root=project)
+            for a in _wrapped_argv(agent, _inv.argv, project, args.rw,
+                                   project_writable=not args.ro_project):
+                print(a)
+            return 0
         if args.stream:
             for ev in _subagent.stream_subagent(spec, project_root=project):
                 if ev.text:

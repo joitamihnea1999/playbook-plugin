@@ -73,6 +73,21 @@ class SubagentResult:
     raw_stdout: str = ""
 
 
+def build_invocation(spec: SubagentSpec, *, project_root: Path | str,
+                     stream: bool = False):
+    """Build the agent's native headless invocation WITHOUT running it.
+
+    Split out of run_subagent so `sandbox --print-argv --prompt ...` inspects the
+    same argv the run would use — one source of truth, so the dry run can never
+    drift from the real one.
+    """
+    adapter = _adapter_class(spec.agent)(
+        session_id="subagent", project_root=Path(project_root))
+    return adapter.headless_argv(
+        spec.prompt, spec.model, context=spec.context, bare=spec.bare,
+        **({"stream": True} if stream else {}))
+
+
 def run_subagent(spec: SubagentSpec, *, project_root: Path | str) -> SubagentResult:
     """Run a subagent to completion and return its result (text/file sinks).
 
@@ -80,8 +95,7 @@ def run_subagent(spec: SubagentSpec, *, project_root: Path | str) -> SubagentRes
     a single value — it yields events as they arrive.
     """
     project_root = Path(project_root)
-    adapter = _adapter_class(spec.agent)(session_id="subagent", project_root=project_root)
-    inv = adapter.headless_argv(spec.prompt, spec.model, context=spec.context, bare=spec.bare)
+    inv = build_invocation(spec, project_root=project_root)
 
     extra_rw = [str(spec.workspace)] if spec.workspace else None
     # contain="outdir": corpus read-only, workspace (extra_rw) the sole writable
@@ -169,10 +183,7 @@ def stream_subagent(spec: SubagentSpec, *, project_root: Path | str) -> Iterator
     import subprocess
     import threading
     project_root = Path(project_root)
-    adapter = _adapter_class(spec.agent)(session_id="subagent", project_root=project_root)
-    inv = adapter.headless_argv(
-        spec.prompt, spec.model, context=spec.context, bare=spec.bare, stream=True
-    )
+    inv = build_invocation(spec, project_root=project_root, stream=True)
     extra_rw = [str(spec.workspace)] if spec.workspace else None
     project_writable = spec.contain != "outdir"
 
