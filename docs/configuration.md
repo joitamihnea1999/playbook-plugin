@@ -103,6 +103,31 @@ excluded here can change after a panel without anyone being told, so a path
 that can carry claims or code does NOT belong in this list. Commit the file —
 stamp and close must agree across clones.
 
+## `.agent/config.json` — `command_guard` (destructive-command interlock)
+
+A PreToolUse hook (`command-guard-hook`) blocks unambiguous high-blast /
+irreversible shell commands — `rm -rf` on a dangerous path, `git push --force`,
+`git reset --hard`, `git clean -fd`, `curl|sh`, `dd`/`mkfs` to a device, a DB
+`DROP`/`TRUNCATE` — before they run, because the sandbox contains filesystem
+blast radius but not outward/logical irreversibility, and judgment alone is not a
+guarantee. It is **conservative** (matches only at a command position, so an
+`echo`/`grep` of dangerous text is fine; a relative `rm -rf ./build` is fine;
+`--force-with-lease` is allowed), and it **fails OPEN** on any internal error so
+it can never wedge a session.
+
+- **Acknowledge** a command you've confirmed: run it with `PLAYBOOK_ALLOW_DANGEROUS=1`,
+  or inside a task classified `## Risk: irreversible` with a rollback plan.
+- **Extend** with project-specific patterns (e.g. a deploy/publish command):
+  ```json
+  {"dangerous_commands": ["^fly deploy\\b", "npm publish"]}
+  ```
+  Entries are case-insensitive regexes matched against the whole command.
+- **Disable** entirely: `{"command_guard": false}`.
+
+It's a safety interlock against the agent's *mistake*, not an adversary — for
+adversarial containment run the agent in the sandbox (OS-level). Claude path
+today; codex/grok Bash guarding is a follow-up.
+
 ### The irreversible freshness gate (`--stale-panel-ok`)
 
 When `## Risk` is `irreversible`, panel evidence is required by
@@ -159,4 +184,5 @@ Pinned model ids rot as providers ship and retire models, so the pins have a mai
 | `PLAYBOOK_JUDGE_BUDGET_USD` | Overrides `judge_budget_usd` (below CLI flags). |
 | `PLAYBOOK_REVIEW_TIMEOUT_SECS` | Overrides `review_timeout_secs` (below CLI flags). May only raise a hard timeout that `config.json` has set — see the floor rule above. |
 | `PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS` | Overrides `review_soft_timeout_secs` (below CLI flags). Not floored. |
+| `PLAYBOOK_ALLOW_DANGEROUS` | Set truthy to acknowledge one destructive command past the `command_guard` interlock (a human-confirmed one-off). |
 | `PLAYBOOK_PROJECT_ROOT`, `PLAYBOOK_SESSION_ID`, `PLAYBOOK_SANDBOXED`, `PLAYBOOK_MINDMAP_MAX`, `PLAYBOOK_EVAL_CONFIG` | Internal — set by the wrappers, hooks, and sandbox; not meant to be set by hand. |

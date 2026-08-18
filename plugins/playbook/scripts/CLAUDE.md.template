@@ -43,7 +43,7 @@ Classify every request before acting — **judge RISK first, size second.** You 
 
 Ask the user which level **only** if you still cannot gauge the risk or the scope after the above — and then lead with a recommendation, defaulted to the SAFER (heavier) option. Never level down to save time on something that might not be reversible.
 
-(Backstop, not a substitute for judging well: the code-edit hook mechanically blocks editing a code file with no active task, so a mis-leveled *code* change is caught. Shell, git, and docs are NOT gated that way — the risk triggers above are their only guard, so weigh them there especially.)
+(Deterministic backstops, not a substitute for judging well: the code-edit hook blocks editing a code file with no active task, and the destructive-command interlock blocks unambiguous high-blast shell commands — `rm -rf` a dangerous path, `git push --force`, `curl|sh`, a DB `DROP` — until acknowledged. Those catch the worst mistakes mechanically. **Docs and non-catastrophic commands are still judgment-only**, and no interlock is exhaustive — so the risk triggers above remain your real guard; weigh them, don't lean on the net.)
 
 ## Task Lifecycle
 

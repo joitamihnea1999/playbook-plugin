@@ -36,14 +36,15 @@ def _write_plugin_tree(root: Path, commands: dict) -> Path:
     """Lay down a minimal plugin tree (hooks/hooks.json + scripts/) and return
     the hooks.json path. `commands` maps event name -> command string."""
     (root / "scripts").mkdir(parents=True, exist_ok=True)
-    for script in EXPECTED_HOOKS.values():
-        s = root / "scripts" / script
-        s.write_text("#!/bin/bash\n", encoding="utf-8")
+    for scripts in EXPECTED_HOOKS.values():
+        for script in scripts:
+            (root / "scripts" / script).write_text("#!/bin/bash\n", encoding="utf-8")
     hooks_dir = root / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     obj = {"hooks": {}}
     for event, cmd in commands.items():
-        obj["hooks"][event] = [{"hooks": [{"type": "command", "command": cmd}]}]
+        cmds = cmd if isinstance(cmd, list) else [cmd]
+        obj["hooks"][event] = [{"hooks": [{"type": "command", "command": c}]} for c in cmds]
     path = hooks_dir / "hooks.json"
     path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
     return path
@@ -51,8 +52,8 @@ def _write_plugin_tree(root: Path, commands: dict) -> Path:
 
 def _good_commands() -> dict:
     return {
-        ev: f'bash "${{CLAUDE_PLUGIN_ROOT}}/scripts/{script}"'
-        for ev, script in EXPECTED_HOOKS.items()
+        ev: [f'bash "${{CLAUDE_PLUGIN_ROOT}}/scripts/{s}"' for s in scripts]
+        for ev, scripts in EXPECTED_HOOKS.items()
     }
 
 
@@ -68,7 +69,7 @@ class ShippedFileTests(unittest.TestCase):
             for e in entries
             for h in e["hooks"]
         ]
-        self.assertEqual(len(cmds), len(EXPECTED_HOOKS))
+        self.assertEqual(len(cmds), sum(len(v) for v in EXPECTED_HOOKS.values()))
         for c in cmds:
             self.assertTrue(c.startswith('bash "'), c)
             self.assertTrue(c.endswith('"'), c)
@@ -79,10 +80,11 @@ class ShippedFileTests(unittest.TestCase):
         import os
 
         scripts_dir = SHIPPED.parent.parent / "scripts"
-        for script in EXPECTED_HOOKS.values():
-            p = scripts_dir / script
-            self.assertTrue(p.exists(), f"{script} missing")
-            self.assertTrue(os.access(p, os.X_OK), f"{script} not executable")
+        for scripts in EXPECTED_HOOKS.values():
+            for script in scripts:
+                p = scripts_dir / script
+                self.assertTrue(p.exists(), f"{script} missing")
+                self.assertTrue(os.access(p, os.X_OK), f"{script} not executable")
 
 
 class ValidatorTests(unittest.TestCase):
@@ -122,8 +124,8 @@ class ValidatorTests(unittest.TestCase):
         # Bare (no bash, no quotes) is the reporter's own workaround — it is
         # NOT quote-wrapped, so the quoting check must not flag it.
         cmds = {
-            ev: f"${{CLAUDE_PLUGIN_ROOT}}/scripts/{script}"
-            for ev, script in EXPECTED_HOOKS.items()
+            ev: [f"${{CLAUDE_PLUGIN_ROOT}}/scripts/{s}" for s in scripts]
+            for ev, scripts in EXPECTED_HOOKS.items()
         }
         path = _write_plugin_tree(self.root, cmds)
         self.assertEqual(

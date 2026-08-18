@@ -1,0 +1,8 @@
+#!/bin/bash
+# command-guard-hook — PreToolUse on shell tools: block destructive/irreversible
+# commands (rm -rf /, git push --force, curl|sh, DB DROP, …) until acknowledged.
+# Thin wrapper; all logic + FAIL-OPEN live in command_guard.py. See that file.
+if [ "${PLAYBOOK_ROLE:-}" = "monitor" ]; then exit 0; fi
+command -v python3 >/dev/null 2>&1 || exit 0          # no python → fail open
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$HOOK_DIR/command_guard.py"

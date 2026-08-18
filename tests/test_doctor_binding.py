@@ -66,8 +66,8 @@ def make_home(*, stray_claude_scripts: bool = False,
         hooks_dir.mkdir(parents=True)
         obj = {"hooks": {
             ev: [{"hooks": [{"type": "command",
-                             "command": f'"${{CLAUDE_PLUGIN_ROOT}}/scripts/{script}"'}]}]
-            for ev, script in EXPECTED_HOOKS.items()
+                             "command": f'"${{CLAUDE_PLUGIN_ROOT}}/scripts/{s}"'}]} for s in scripts]
+            for ev, scripts in EXPECTED_HOOKS.items()
         }}
         (hooks_dir / "hooks.json").write_text(json.dumps(obj), encoding="utf-8")
     return home
@@ -114,15 +114,16 @@ class DoctorInspectsTheRunningInstall(unittest.TestCase):
         # regression in the copy the host actually loads (the AloVet bug).
         fixture = Path(tempfile.mkdtemp()) / "plugroot"
         (fixture / "scripts").mkdir(parents=True)
-        for script in EXPECTED_HOOKS.values():
-            s = fixture / "scripts" / script
-            s.write_text("#!/bin/bash\n# GATE_TEXT_STORE marker\n", encoding="utf-8")
-            s.chmod(0o755)
+        for scripts in EXPECTED_HOOKS.values():
+            for script in scripts:
+                s = fixture / "scripts" / script
+                s.write_text("#!/bin/bash\n# GATE_TEXT_STORE marker\n", encoding="utf-8")
+                s.chmod(0o755)
         (fixture / "hooks").mkdir()
         obj = {"hooks": {
             ev: [{"hooks": [{"type": "command",
-                             "command": f'"${{CLAUDE_PLUGIN_ROOT}}/scripts/{script}"'}]}]
-            for ev, script in EXPECTED_HOOKS.items()
+                             "command": f'"${{CLAUDE_PLUGIN_ROOT}}/scripts/{s}"'}]} for s in scripts]
+            for ev, scripts in EXPECTED_HOOKS.items()
         }}
         (fixture / "hooks" / "hooks.json").write_text(json.dumps(obj), encoding="utf-8")
 

@@ -23,15 +23,17 @@ import json
 import re
 from pathlib import Path
 
-# The six lifecycle registrations the plugin ships. Event name -> script
-# basename expected under the sibling scripts/ dir.
+# The lifecycle registrations the plugin ships. Event name -> the script
+# basename(s) expected under the sibling scripts/ dir. Most events run one hook;
+# PreToolUse runs two (the task gate AND the destructive-command guard), so the
+# value is a LIST — every listed script must be registered for that event.
 EXPECTED_HOOKS = {
-    "SessionStart": "session-start-hook",
-    "PreToolUse": "task-gate-hook",
-    "UserPromptSubmit": "chat-log-hook",
-    "PostToolUse": "state-echo-hook",
-    "Stop": "stop-hook",
-    "SessionEnd": "session-end-hook",
+    "SessionStart": ["session-start-hook"],
+    "PreToolUse": ["task-gate-hook", "command-guard-hook"],
+    "UserPromptSubmit": ["chat-log-hook"],
+    "PostToolUse": ["state-echo-hook"],
+    "Stop": ["stop-hook"],
+    "SessionEnd": ["session-end-hook"],
 }
 
 _QUOTES = ("\"", "'")
@@ -105,13 +107,14 @@ def hook_command_issues(hooks_json_path) -> list[str]:
     # point at its script. Only enforced when the file has a recognizable
     # hooks dict (an entirely unparseable file already reported above).
     if isinstance(hooks_obj, dict):
-        for event, script in EXPECTED_HOOKS.items():
+        for event, scripts in EXPECTED_HOOKS.items():
             if event not in seen_events:
                 issues.append(f"{event}: expected hook registration missing")
                 continue
             cmds = [c for ev, c in _iter_commands(hooks_obj) if ev == event and isinstance(c, str)]
-            if not any(script in c for c in cmds):
-                issues.append(f"{event}: no command references {script}")
+            for script in scripts:
+                if not any(script in c for c in cmds):
+                    issues.append(f"{event}: no command references {script}")
 
     return issues
 

@@ -2,7 +2,39 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.29] — 2026-08-18
+## [1.5.30] — 2026-08-18
+
+Add the missing **deterministic** safety layer, so a dangerous command can't run
+by accident — not just by judgment. Analysis: the sandbox contains filesystem
+blast radius and the close contract catches under-leveling at close, but a
+destructive/outward shell command (`rm -rf /`, `git push --force`, `curl|sh`, a
+DB `DROP`) had no mechanical guard *before* it ran.
+
+### Added
+
+- **Destructive-command interlock** (`scripts/command_guard.py` +
+  `command-guard-hook`, a second PreToolUse hook on shell tools). Blocks
+  unambiguous high-blast/irreversible commands until acknowledged
+  (`PLAYBOOK_ALLOW_DANGEROUS=1`, or inside an `irreversible`-classified task).
+  Designed to not become a problem itself: **conservative** (matches only at a
+  command position — `echo "rm -rf /"` / `grep "DROP TABLE"` do not trip it; a
+  relative `rm -rf ./build` is fine; `--force-with-lease` is allowed), **fails
+  OPEN** on any internal error (never wedges a session), **config-extensible**
+  (`dangerous_commands: [regex]`) and disable-able (`command_guard: false`).
+  Spec'd by a decision-fixture set (dangerous MUST block, look-alikes MUST
+  allow) in `tests/test_command_guard.py`. Claude path today; codex/grok Bash
+  guarding is a follow-up.
+- `hooks_check.EXPECTED_HOOKS` generalized to event→list so the hook-integrity
+  check (and `tasks doctor`) now guard the new hook's presence + quoting too.
+
+### Note
+
+This is a safety interlock against the agent's *mistake*, not an adversary, and
+no pattern set is exhaustive — the real guarantee for filesystem blast radius is
+still running the agent in the **sandbox** (OS-level). Docs (architecture,
+configuration, CLAUDE.md ceremony backstop) updated to say so.
+
+
 
 Harden the ceremony-classification protocol so it doesn't under-level the
 highest-risk requests. Adversarial review of 1.5.28's protocol found it led with

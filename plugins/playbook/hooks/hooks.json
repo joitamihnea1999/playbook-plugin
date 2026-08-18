@@ -21,6 +21,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Bash|Shell|run_terminal_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/command-guard-hook\"",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
