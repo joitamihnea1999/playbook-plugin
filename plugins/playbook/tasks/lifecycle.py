@@ -267,11 +267,16 @@ def cmd_work(cmd_args):
                 # unless forced with a recorded reason.
                 from tasks.core import (
                     close_decision, extract_risk, format_verify_receipt,
-                    has_panel_impl_evidence, has_review_evidence,
+                    has_panel_impl_evidence, has_review_evidence, has_risk_section,
                     resolve_panel_required, resolve_verify_commands,
                     resolve_verify_timeout,
                 )
                 risk = extract_risk(task_file)
+                # Whether the gate was OFFERED, not just what it says: a missing
+                # `## Risk` heading is a pre-1.5.0 task, a present-but-unset one
+                # is a skipped gate. close_decision holds only the second to the
+                # high-consequence bar.
+                risk_offered = has_risk_section(task_file)
                 commands = resolve_verify_commands(project_path, risk)
                 entries = []
                 verify_failed = False
@@ -368,21 +373,24 @@ def cmd_work(cmd_args):
                     has_review_evidence=_evidence,
                     force=force, reason=reason,
                     panel_required=_panel_req,
+                    risk_section_present=risk_offered,
                 )
                 if not allowed:
                     print(f"\nBlocked: cannot close task {prev_task} — {block_reason}",
                           file=sys.stderr, flush=True)
                     sys.exit(1)
 
-                # F14 blind-judge Finding 3: `unclassified` is not in
-                # HIGH_CONSEQUENCE, so the risk-keyed review bar was never
-                # evaluated — say so loudly instead of failing open in
-                # silence. A warning, not a block: every pre-1.5.0 task is
-                # unclassified, and panel-always projects already hold
-                # "all" closes to panel evidence regardless of risk.
+                # F14 blind-judge Finding 3, narrowed by the 1.5.32 audit: an
+                # unclassified risk means the risk-keyed review bar cannot be
+                # evaluated. Where the gate WAS offered and skipped,
+                # close_decision has already blocked above; reaching here with
+                # `unclassified` therefore means a pre-1.5.0 task whose template
+                # had no Risk section, or a close that cleared the bar another
+                # way (review evidence, or --force). Still say what was skipped
+                # — a silent fail-open is the thing this line exists to prevent.
                 if risk == "unclassified":
                     print("⚠ closing with ## Risk unclassified — the "
-                          "risk-keyed review requirement was NOT evaluated "
+                          "risk-keyed review requirement could not be evaluated "
                           "for this close. Set ## Risk to exactly one word "
                           "(reversible / irreversible / assertive) at the "
                           "Risk gate.", file=sys.stderr, flush=True)

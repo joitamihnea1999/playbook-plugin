@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.31"
+VERSION = "1.5.32"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -904,6 +904,37 @@ def extract_risk(task_file) -> str:
     return DEFAULT_RISK
 
 
+def has_risk_section(task_file) -> bool:
+    """True when the task.md carries a `## Risk` HEADING at all.
+
+    This is the discriminator that lets `unclassified` fail closed without
+    breaking history, and it needs no new metadata: pre-1.5.0 templates have no
+    Risk section, so a missing heading means the gate was never offered to
+    whoever wrote the task, while a present-but-unset heading means it was
+    offered and skipped. Those are different facts and the close gate treats
+    them differently (see close_decision).
+
+    Deliberately LOOSER than extract_risk's exact `## Risk` match: any `## Risk…`
+    heading counts as offered, so the malformed one-liner `## Risk: assertive`
+    — which extract_risk correctly degrades to `unclassified` — lands on the
+    strict side rather than being mistaken for a pre-1.5.0 task. A skipped gate
+    and a botched gate are the same fact for this purpose. Erring toward strict
+    costs one word or a `--force --reason`; erring the other way is the fail-open
+    this function exists to remove.
+
+    Heading-only by design, and only THIS heading: prose that mentions risk must
+    not silently promote a task to the strict bar, `### Risk` is a different
+    level, and `## Risk Routing` is the light template's gate checklist rather
+    than the classification field. Unreadable file → False: fail toward the
+    documented legacy behavior, never toward inventing a block from an I/O error.
+    """
+    try:
+        lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    return any(re.match(r"^##\s+Risk\s*(:|$)", ln.strip()) for ln in lines)
+
+
 def tree_state_fingerprint(project_path: Path) -> str:
     """Content fingerprint of the CODE STATE: sha256 over HEAD + porcelain status
     + working diff, 12 hex chars. Names *what state* a panel reviewed or a close
@@ -1149,7 +1180,8 @@ def resolve_verify_commands(project_path: Path, risk: str = DEFAULT_RISK) -> "li
 
 def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
                    has_review_evidence: bool, force: bool, reason: "str | None",
-                   panel_required: bool = False) -> "tuple[bool, str]":
+                   panel_required: bool = False,
+                   risk_section_present: bool = False) -> "tuple[bool, str]":
     """Pure close policy → (allowed, block_reason). block_reason is '' when allowed.
 
     1. --force ALWAYS requires a non-empty reason: a forced close must be
@@ -1162,7 +1194,16 @@ def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
        cheap insurance; the policy is enforced here so it cannot decay into a
        habit someone forgets.
     4. otherwise an assertive/irreversible task with NO review evidence blocks —
-       high-consequence work cannot be light-closed for being small (056)."""
+       high-consequence work cannot be light-closed for being small (056).
+    5. an UNSET risk gate is held to that same bar. `unclassified` is in no risk
+       class, so the whole risk-keyed requirement used to evaluate to nothing and
+       the close proceeded on a warning — making "leave the field blank" the
+       cheapest path through the strictest gate in the system, chosen by the very
+       agent the gate constrains. `risk_section_present` separates the two facts
+       the old code conflated: no `## Risk` heading = a pre-1.5.0 task that was
+       never offered the gate (warn and pass, unchanged), heading present but
+       unset = offered and skipped (block). Default False so a caller that cannot
+       tell gets the lenient legacy path rather than an invented block."""
     if force:
         if not (reason and reason.strip()):
             return False, '--force requires --reason "why" — a forced close must record why.'
@@ -1180,6 +1221,15 @@ def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
             f"{risk} task cannot light-close: it changes "
             + ("a claim about the world" if risk == "assertive" else "state that is hard to undo")
             + " — run impl-review/panel-review first, or override with --force --reason."
+        )
+    if (risk == DEFAULT_RISK and risk_section_present
+            and not has_review_evidence):
+        return False, (
+            "## Risk was left unclassified, so the risk-keyed review requirement "
+            "cannot be evaluated — an unset gate is held to the high-consequence "
+            "bar rather than skipped. Set ## Risk to exactly one word "
+            "(reversible / irreversible / assertive), or supply impl-review "
+            "evidence, or override with --force --reason."
         )
     return True, ""
 

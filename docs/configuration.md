@@ -128,6 +128,24 @@ It's a safety interlock against the agent's *mistake*, not an adversary — for
 adversarial containment run the agent in the sandbox (OS-level). Active on all
 three providers (Claude, grok, codex).
 
+### An unset `## Risk` is held to the high-consequence bar
+
+`panel_required_for` keys the review requirement to the risk class, so an
+`unclassified` task used to fall through it entirely and close on a warning —
+making a blank field the cheapest path through the strictest gate in the system,
+chosen by the same agent the gate constrains. Since 1.5.32 the close
+distinguishes two facts that were previously conflated:
+
+- **no `## Risk` heading at all** — a pre-1.5.0 task that was never offered the
+  gate. Closes, with the warning naming what could not be evaluated. Unchanged.
+- **heading present but unset** (or malformed, e.g. the one-line
+  `## Risk: assertive`) — the gate was offered and skipped. `tasks work done`
+  blocks unless there is impl-review evidence or `--force --reason`, exactly as
+  for `assertive` / `irreversible`.
+
+Setting `## Risk` to one word clears it. `## Risk Routing` in the light template
+is a gate checklist, not the classification field, and does not trigger this.
+
 ### The irreversible freshness gate (`--stale-panel-ok`)
 
 When `## Risk` is `irreversible`, panel evidence is required by

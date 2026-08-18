@@ -72,7 +72,8 @@ class Fixture:
 
     def make_light_task(self, risk: "str | None", *, checked: bool,
                         judge_md: "str | None" = None,
-                        malformed_risk_line: bool = False) -> Path:
+                        malformed_risk_line: bool = False,
+                        strip_risk_section: bool = False) -> Path:
         r = self.run("new", "light", "small change")
         assert r.returncode == 0, r.stderr
         tf = next((self.proj / ".agent" / "tasks").glob("001-*/task.md"))
@@ -81,6 +82,9 @@ class Fixture:
             text = text.replace("## Risk\nunclassified", f"## Risk\n{risk}", 1)
         if malformed_risk_line:
             text = text.replace("## Risk\nunclassified", "## Risk: assertive\n", 1)
+        if strip_risk_section:
+            # Stand in for a pre-1.5.0 template: no Risk heading at all.
+            text = text.replace("## Risk\nunclassified", "", 1)
         if checked:
             text = text.replace("- [ ]", "- [x]")
         tf.write_text(text, encoding="utf-8")
@@ -171,22 +175,56 @@ class CloseSideBar(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(status_of(tf), "done")
 
-    def test_unclassified_close_warns_loud(self):
+    def test_unclassified_close_is_blocked_not_warned(self):
+        """1.5.32: the template OFFERS `## Risk`, so leaving it unset is a
+        skipped gate, not a legacy task — it is held to the high-consequence bar
+        instead of closing on a warning. Before this, blank was the cheapest
+        path through the strictest gate in the system."""
         f = Fixture()
-        f.make_light_task(None, checked=True)
+        tf = f.make_light_task(None, checked=True)
+        self.assertEqual(f.run("work", "1").returncode, 0)
+        r = f.run("work", "done")
+        self.assertEqual(r.returncode, 1,
+                         "unset risk gate closed:\n" + r.stdout + r.stderr)
+        self.assertIn("unclassified", (r.stdout + r.stderr).lower())
+        self.assertNotEqual(status_of(tf), "done")
+
+    def test_unclassified_close_passes_with_review_evidence(self):
+        """Evidence is what the bar actually asks for — the same escape the
+        assertive/irreversible classes have."""
+        f = Fixture()
+        tf = f.make_light_task(None, checked=True,
+                               judge_md=PANEL_IMPL_ROUND.format(n=1))
         self.assertEqual(f.run("work", "1").returncode, 0)
         r = f.run("work", "done")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(status_of(tf), "done")
+        # It still SAYS what could not be evaluated — silence was the original sin.
+        self.assertIn("unclassified", (r.stdout + r.stderr).lower())
+
+    def test_legacy_task_without_a_risk_section_still_closes_with_a_warning(self):
+        """The pre-1.5.0 carve-out survives, narrowed to the tasks it was written
+        for: no `## Risk` heading means the gate was never offered."""
+        f = Fixture()
+        tf = f.make_light_task(None, checked=True, strip_risk_section=True)
+        self.assertEqual(f.run("work", "1").returncode, 0)
+        r = f.run("work", "done")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(status_of(tf), "done")
         self.assertIn("unclassified", (r.stdout + r.stderr).lower())
         self.assertIn("⚠", r.stdout + r.stderr)
 
-    def test_malformed_one_line_risk_parses_unclassified_and_warns(self):
+    def test_malformed_one_line_risk_is_treated_as_offered_and_blocks(self):
         # Judge Finding 3: "## Risk: assertive" (one line) is NOT a valid
-        # heading — it degrades to unclassified. The close must at least warn.
+        # heading — it degrades to unclassified. A BOTCHED gate is the same fact
+        # as a skipped one, so it must land on the strict side rather than be
+        # mistaken for a task that never had the section.
         f = Fixture()
         f.make_light_task(None, checked=True, malformed_risk_line=True)
         self.assertEqual(f.run("work", "1").returncode, 0)
         r = f.run("work", "done")
+        self.assertEqual(r.returncode, 1,
+                         "malformed risk heading closed:\n" + r.stdout + r.stderr)
         self.assertIn("unclassified", (r.stdout + r.stderr).lower())
 
 
