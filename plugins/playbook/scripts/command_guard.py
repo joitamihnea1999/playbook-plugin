@@ -187,12 +187,37 @@ def _load_cfg(root):
         return {}
 
 
+def _normalize_payload(payload):
+    """Apply the provider-dialect normalizer in-process.
+
+    The wrapper used to pipe stdin through hook-payload-normalize.py and then
+    into this script — two interpreter starts on every shell tool call. Doing it
+    here makes the guard one process. FAIL-OPEN on any failure: the caller falls
+    back to the raw payload, which is what the pre-normalizer guard read anyway
+    (Shell / run_terminal_command are already recognised by name below; the
+    normalizer's job here is grok's camelCase toolName/toolInput).
+    """
+    try:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "hook-payload-normalize.py")
+        spec = importlib.util.spec_from_file_location("_pb_hook_norm", path)
+        if spec is None or spec.loader is None:
+            return payload
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.normalize(payload)
+    except Exception:
+        return payload
+
+
 def main() -> int:
     # FAIL-OPEN: any failure to read/parse must allow (never wedge a session).
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         return 0
+    payload = _normalize_payload(payload)
     # Bash/Shell/run_terminal_command = Claude + grok (post-normalize);
     # exec_command = Codex's shell tool.
     if payload.get("tool_name") not in ("Bash", "Shell", "run_terminal_command", "exec_command"):

@@ -1,14 +1,13 @@
 #!/bin/bash
 # command-guard-hook — PreToolUse on shell tools: block destructive/irreversible
 # commands (rm -rf /, git push --force, curl|sh, DB DROP, …) until acknowledged.
-# Thin wrapper; all logic + FAIL-OPEN live in command_guard.py. Normalizes the
-# payload first so grok's camelCase / renamed shell tools (Shell,
-# run_terminal_command) are seen the same as Claude's Bash. Codex registers
-# command_guard.py directly (its exec_command shape is handled natively).
+# Thin wrapper; all logic + FAIL-OPEN live in command_guard.py, which also
+# normalizes the payload in-process so grok's camelCase / renamed shell tools
+# (Shell, run_terminal_command) are seen the same as Claude's Bash — one
+# interpreter start instead of two, on a hook bound to every shell call. Codex
+# registers command_guard.py directly (its exec_command shape is native).
+# `exec` hands stdin straight through: no cat, no second process.
 if [ "${PLAYBOOK_ROLE:-}" = "monitor" ]; then exit 0; fi
 command -v python3 >/dev/null 2>&1 || exit 0          # no python → fail open
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-INPUT=$(cat)
-NORM=$(printf '%s' "$INPUT" | python3 "$HOOK_DIR/hook-payload-normalize.py" 2>/dev/null || true)
-[ -n "$NORM" ] && INPUT="$NORM"
-printf '%s' "$INPUT" | python3 "$HOOK_DIR/command_guard.py"
+exec python3 "$HOOK_DIR/command_guard.py"

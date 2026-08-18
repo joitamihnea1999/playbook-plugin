@@ -37,6 +37,7 @@ Cursor-compat note: Cursor's camelCase dialect shares the top-level key
 shape, so this normalizer is deliberately not grok-branded.
 """
 import json
+import os
 import re
 import sys
 
@@ -135,8 +136,79 @@ def normalize(payload):
     return out
 
 
+# --- fused field extraction (--emit-fields) ---------------------------------
+#
+# The hooks used to spend one python3 process per field: normalize, then
+# tool_name, then file_path, then os.path.normpath — four interpreter starts
+# (~14 ms each, bare) parsing the same JSON three times, on EVERY tool call.
+# `--emit-fields` does all of it in the one process that was already being
+# spawned for normalization.
+#
+# Wire format: NUL-delimited records, because a command or a path may contain
+# newlines and a line-based protocol would silently truncate it. bash reads
+# them with `IFS= read -r -d ''`. The leading sentinel lets the hook tell "the
+# fused path ran" from "python is missing / the script died", and fall back to
+# the original per-field extraction in that case rather than treating an empty
+# tool_name as fact — a gate that cannot read its payload must not fail open.
+FIELDS_SENTINEL = "pb-fields-v2"
+
+
+def extract_fields(payload):
+    """(tool_name, path, normpath_of_path, command, transcript_path).
+
+    `path` matches what the gate hook's three guards computed between them:
+    file_path, falling back to notebook_path only when absent (NotebookEdit).
+    normpath is applied unconditionally, so an absent path yields "." exactly as
+    `os.path.normpath('')` did at the original call site.
+
+    transcript_path carries the state-echo hook's sanitization with it: a value
+    containing a newline is dropped rather than passed on, because that file is
+    written as the monitor's one-line pointer and a second line there is a
+    pointer-file injection.
+    """
+    ti = payload.get("tool_input") if isinstance(payload, dict) else None
+    ti = ti if isinstance(ti, dict) else {}
+    tool_name = payload.get("tool_name", "") if isinstance(payload, dict) else ""
+    path = ti.get("file_path", "") or ti.get("notebook_path", "")
+    command = ti.get("command", "")
+    transcript = payload.get("transcript_path", "") if isinstance(payload, dict) else ""
+    if not (isinstance(transcript, str) and transcript
+            and "\n" not in transcript and "\r" not in transcript):
+        transcript = ""
+    return (
+        tool_name if isinstance(tool_name, str) else "",
+        path if isinstance(path, str) else "",
+        os.path.normpath(path) if isinstance(path, str) else "",
+        command if isinstance(command, str) else "",
+        transcript,
+    )
+
+
+def emit_fields(raw):
+    """Write the sentinel, the four fields, then the payload — all NUL-delimited.
+
+    The payload record honours the same byte-identity contract as the plain
+    mode: a native claude payload is echoed back exactly as received.
+    """
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        # Non-JSON: empty fields + the raw payload back. Identical to what the
+        # per-site `|| echo ""` fallbacks produced before this mode existed.
+        out = [FIELDS_SENTINEL, "", "", "", "", "", raw]
+    else:
+        fields = extract_fields(normalize(payload))
+        body = raw if not needs_normalize(payload) else json.dumps(
+            normalize(payload), separators=(",", ":"))
+        out = [FIELDS_SENTINEL, *fields, body]
+    sys.stdout.write("\0".join(out) + "\0")
+
+
 def main():
     raw = sys.stdin.read()
+    if "--emit-fields" in sys.argv[1:]:
+        emit_fields(raw)
+        return
     try:
         payload = json.loads(raw)
     except Exception:
