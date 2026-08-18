@@ -67,6 +67,13 @@ class InitRobustness(unittest.TestCase):
         self.assertEqual(self._provisioned(project), [],
                          "--help provisioned files instead of printing usage")
 
+    def test_short_help_is_also_dry(self):
+        project = Path(self._tmp.name) / "shorthelp"
+        r = self._run_init_args(project, "-h")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Usage: init", r.stdout)
+        self.assertEqual(self._provisioned(project), [])
+
     def test_unknown_flag_is_rejected_not_used_as_a_name(self):
         project = Path(self._tmp.name) / "badflag"
         r = self._run_init_args(project, "--bogus")

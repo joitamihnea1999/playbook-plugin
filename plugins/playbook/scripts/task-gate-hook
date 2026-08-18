@@ -71,12 +71,22 @@ fi
 # Read stdin (PreToolUse JSON)
 INPUT=$(cat)
 
+block_unreadable_payload() {
+    cat >&2 <<'MSG'
+BLOCKED: The enforcing task gate could not read a complete tool payload.
+
+No authorization decision can be made from missing or malformed fields.
+Retry the tool call after restoring python3/the Playbook hook scripts.
+MSG
+    exit 2
+}
+
 # Normalize provider payload dialects (grok camelCase + renamed tools →
-# claude snake_case; identity for claude payloads; fail-open to the raw
-# payload on any error). One shot here — every parse site below reads the
-# normalized $INPUT. See scripts/hook-payload-normalize.py (task 014).
+# claude snake_case; identity for claude payloads). An enforcing read retries
+# independent extraction after a fused failure and blocks if the payload stays
+# unreadable. See scripts/hook-payload-normalize.py (task 014).
 # --emit-fields does the normalize AND every field this hook needs in that same
-# one process: tool_name, the path (file_path, else notebook_path), its lexical
+# one process: tool_name, the tool-specific path, its lexical
 # normpath, and the command. Before, each was its own `python3 -c` — four
 # interpreter starts per tool call parsing the same JSON three times. Records
 # are NUL-delimited because a command or path may contain newlines. The sentinel
@@ -91,31 +101,71 @@ FILE_PATH=""
 NORM_PATH=""
 PB_CMD=""
 PB_TRANSCRIPT=""
+PB_FRAME_COMPLETE=true
 {
-    IFS= read -r -d '' PB_SENTINEL || true
-    IFS= read -r -d '' TOOL_NAME   || true
-    IFS= read -r -d '' FILE_PATH   || true
-    IFS= read -r -d '' NORM_PATH   || true
-    IFS= read -r -d '' PB_CMD      || true
-    IFS= read -r -d '' PB_TRANSCRIPT || true
-    IFS= read -r -d '' PB_PAYLOAD  || true
+    IFS= read -r -d '' PB_SENTINEL   || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' TOOL_NAME     || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' FILE_PATH     || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' NORM_PATH     || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' PB_CMD        || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' PB_TRANSCRIPT || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' PB_PAYLOAD    || PB_FRAME_COMPLETE=false
 } < <(printf '%s' "$INPUT" | python3 "$HOOK_DIR/hook-payload-normalize.py" --emit-fields 2>/dev/null) || true
 
-if [ "$PB_SENTINEL" = "pb-fields-v2" ]; then
+if [ "$PB_SENTINEL" = "pb-fields-v2" ] && [ "$PB_FRAME_COMPLETE" = true ]; then
     PB_FUSED=1
     INPUT="$PB_PAYLOAD"
 else
-    # Fallback: the pre-fusion path, verbatim. Normalize provider payload
+    # Recovery path: normalize, then extract every field independently.  A
+    # producer that emitted only a sentinel/partial frame must never turn an
+    # Edit into empty truth.  Any decode/extraction failure blocks: this is the
+    # enforcing hook, and unreadable input cannot authorize work.
     # dialects (grok camelCase + renamed tools → claude snake_case; identity for
-    # claude payloads; fail-open to the raw payload on any error), then read the
-    # one field the guards below need up front.
+    # claude payloads), then read the fields the guards below need up front.
     TOOL_NAME=""; FILE_PATH=""; NORM_PATH=""; PB_CMD=""
-    NORMALIZED=$(printf '%s' "$INPUT" | python3 "$HOOK_DIR/hook-payload-normalize.py" 2>/dev/null || true)
-    if [ -n "$NORMALIZED" ]; then
+    NORMALIZED=""
+    if NORMALIZED=$(printf '%s' "$INPUT" | python3 "$HOOK_DIR/hook-payload-normalize.py" 2>/dev/null) \
+       && [ -n "$NORMALIZED" ]; then
         INPUT="$NORMALIZED"
     fi
-    TOOL_NAME=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tool_name',''))" 2>/dev/null || echo "")
+    if ! TOOL_NAME=$(printf '%s' "$INPUT" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); v=d.get('tool_name',''); sys.stdout.write(v if isinstance(v,str) else '')" \
+        2>/dev/null); then
+        block_unreadable_payload
+    fi
+    if ! FILE_PATH=$(printf '%s' "$INPUT" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); ti=d.get('tool_input',{}); ti=ti if isinstance(ti,dict) else {}; t=d.get('tool_name',''); v=ti.get('notebook_path','') if t == 'NotebookEdit' else ti.get('file_path',''); sys.stdout.write(v if isinstance(v,str) else '')" \
+        2>/dev/null); then
+        block_unreadable_payload
+    fi
+    if ! NORM_PATH=$(FP="$FILE_PATH" python3 -c \
+        "import os,sys; sys.stdout.write(os.path.normpath(os.environ['FP']))" \
+        2>/dev/null); then
+        block_unreadable_payload
+    fi
+    if ! PB_CMD=$(printf '%s' "$INPUT" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); ti=d.get('tool_input',{}); ti=ti if isinstance(ti,dict) else {}; v=ti.get('command',''); sys.stdout.write(v if isinstance(v,str) else '')" \
+        2>/dev/null); then
+        block_unreadable_payload
+    fi
+    # Downstream branches may reuse the successfully recovered fields exactly
+    # like fused fields; the value denotes "fields ready", not wire provenance.
+    PB_FUSED=fallback
 fi
+
+# A valid hook call always names a tool.  Empty/whitespace/wrong-typed names are
+# schema failures, not evidence that the call is harmless.
+if [[ ! "$TOOL_NAME" =~ [^[:space:]] ]]; then
+    block_unreadable_payload
+fi
+case "$TOOL_NAME" in
+    Edit|Write|MultiEdit|NotebookEdit)
+        [[ "$FILE_PATH" =~ [^[:space:]] ]] || block_unreadable_payload
+        ;;
+    Bash)
+        [[ "$PB_CMD" =~ [^[:space:]] ]] || block_unreadable_payload
+        ;;
+esac
 
 # Session ID: env var → ancestor-scan → pid-$PPID (see gate-echo-lib.sh::resolve_session_id)
 SESSION_ID="$(resolve_session_id)"

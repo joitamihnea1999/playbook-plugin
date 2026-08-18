@@ -4,6 +4,13 @@
 # Purpose: forensic post-mortem record ("what did the agent actually run?")
 
 _cpb_log_cmd() {
+    # Hook shells are implementation machinery, not user/agent Bash tool calls.
+    # BASH_ENV is sourced before bash assigns the script name to $0, so this
+    # check must live in the DEBUG callback (where $0 is final), not at source
+    # time.  It avoids both history noise and the expensive walk/date fork for
+    # every hook-internal command. Real Bash tool shells keep $0 as bash/sh.
+    case "${0##*/}" in *-hook) return 0 ;; esac
+
     # Filter shell internals and CC infrastructure noise.
     #
     # Every exit from this function MUST be `return 0`, never bare `return`:

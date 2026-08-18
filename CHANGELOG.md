@@ -2,6 +2,101 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.33] — 2026-08-18
+
+Independent verification hardening for 1.5.32. The original NUL-frame fix is
+retained, and the release now also closes the other fail-opens and inspection
+side effects reproduced by the verification pass.
+
+### Fixed
+
+- **A `\u0000` in the payload could shift the fused wire frame and make the gate
+  fail open.** JSON can encode a literal NUL, and NUL is the `--emit-fields`
+  record delimiter. So `file_path` = `"/tmp/a.py\u0000/.agent/x"` was emitted as
+  *two* records: the path slot got `/tmp/a.py` and `/.agent/x` slid into the
+  normpath slot — which `task-gate-hook` matches against its `*/.agent/*`
+  exemption. Measured before the fix: `task-gate-hook` returned **0 (allow)** on
+  an edit to real code with no active task. Every later record shifted too, so the
+  payload record arrived empty and the hook's remaining parses read nothing.
+
+  Each field is now truncated at its first NUL before it reaches the wire, and
+  `normpath` is taken on the truncated value. Truncation rather than rejection
+  because it is also the faithful reading: a path carrying an embedded NUL, had it
+  reached any syscall, *is* `/tmp/a.py` — so the frame stays intact and the path is
+  judged as the code file it actually names. Verified live: the same payload now
+  returns 2, a genuine `.agent/` edit is still exempt, and a NUL in `tool_name`
+  still routes to the right guard.
+
+  Practical exposure was low — Claude Code does not emit `\u0000` in a path, and a
+  NUL-bearing path cannot reach a syscall intact — but this was an enforcing gate
+  failing open on input it could not represent, which the project's doctrine
+  forbids outright regardless of likelihood.
+
+- **The fused reader now validates the complete frame and fails closed.** A
+  leading sentinel alone was not enough: truncated output, a dead normalizer,
+  malformed JSON, a missing Python interpreter, or an invalid/blank tool name
+  could still be mistaken for empty fields and allowed. The gate now accepts a
+  fused record only after all seven NUL-terminated fields have been read. It
+  retries extraction independently when possible and blocks when an enforcing
+  field remains unreadable. Lone UTF-16 surrogates are made wire-safe, and the
+  selected path is tool-specific (`notebook_path` for `NotebookEdit`,
+  `file_path` otherwise), so a decoy field cannot redirect the exemption check.
+  `Read` and other non-mutating tools remain usable without a path.
+
+- **Risk-heading detection is strict about meaning, not spelling.** The close
+  gate now recognizes BOM-prefixed, CRLF, case-varied, tab-separated and
+  trailing-space forms of `## Risk`; ignores examples inside fenced code blocks;
+  and treats duplicate headings as unclassified rather than choosing the most
+  convenient value. Legacy task files with no real Risk heading keep the
+  documented warning-only compatibility path.
+
+- **Inspection flags now short-circuit every side-effecting path tested.** The
+  tasks CLI handles nested `--help` before session GC or command dispatch;
+  `playbook-codex`, `playbook-grok` and `playbook-agy` handle help before creating
+  session state or launching a provider; and sandbox inspection flags remain dry
+  even when combined with `--prompt`.
+
+- **`sandbox --ro-project --prompt` now executes the containment it prints.**
+  The prompt branch parsed `--ro-project` and repeatable `--rw` paths, and
+  `--print-argv` displayed them correctly, but the live normal and streaming
+  runners received a default `SubagentSpec(contain="repo")`. The project was
+  therefore writable despite the read-only request, and every `--rw` exception
+  was discarded. Both prompt runners now receive `contain="outdir"` plus all
+  explicit writable paths. A real bubblewrap regression uses a fake agent to
+  prove that a project-root write is denied while the named `--rw` path remains
+  writable; composition tests cover normal and streaming execution.
+
+- **Doctor collapse no longer hides an actionable live-install defect.** Only a
+  semantically older, parseable foreign version is collapsed. Missing,
+  malformed, equivalent and newer versions are enumerated, and a collapsed row
+  carries every finding rather than only the first one.
+
+- **The installed `BASH_ENV` logger no longer performs logging work inside hook
+  processes.** Its DEBUG callback returns immediately for `*-hook` executables,
+  avoiding repeated history scans and timestamps while preserving logging for
+  actual provider shells.
+
+### Notes
+
+- Suite **1223 → 1247**. The added tests cover complete-frame truncation,
+  unavailable-normalizer, surrogate, conflicting-path, malformed-input,
+  risk-heading, provider-help, doctor-version, live `BASH_ENV`, and prompt-path
+  read-only-containment regressions.
+
+- Phase 0 remeasurement after the logger fix used three warmups followed by 10
+  samples. Each sample sequentially ran `task-gate-hook`, `command-guard-hook`
+  and `state-echo-hook` on the same minimal Bash payload. Mean total time was
+  **142.62 ms** with `BASH_ENV` unset and **146.21 ms** with the bundled logger
+  installed: **3.59 ms** measured overhead. Absolute wall-clock timing varied
+  across samples and machine load; the supported conclusion is that the hook
+  fast path removed the prior material logger penalty, not a universal latency.
+- The parity oracle in `test_fused_payload_fields.py` now documents ONE deliberate
+  divergence from pre-fusion behavior: for a NUL-bearing field the old
+  `python3 -c` + bash command-substitution path was *itself* unsafe (bash drops the
+  NUL, yielding `/tmp/a.py/.agent/x`, which also matched the exemption). Truncation
+  is the only reading that blocks. The divergence is asserted explicitly rather
+  than smuggled in as "parity".
+
 ## [1.5.32] — 2026-08-18
 
 An audit-driven maintenance release: close the last close-gate fail-open, cut the
@@ -66,22 +161,22 @@ doing real work, and quiet the doctor's biggest source of noise.
 
   Records are NUL-delimited, because a command or path may contain newlines and a
   line-based protocol would hand the gate a different command than the one about
-  to run. A leading sentinel (`pb-fields-v2`) separates "the fused read ran" from
-  "python is missing / the script died" — without the sentinel each hook falls
-  back to its original per-field extraction, because an enforcing gate must never
-  mistake an unreadable payload for an empty one. The task-014 byte-identity
+  to run. A leading sentinel (`pb-fields-v2`) and a complete seven-record read
+  separate valid output from a missing interpreter, dead script or truncated
+  frame. The enforcing gate retries independent extraction when possible and
+  blocks when the payload remains unreadable. The task-014 byte-identity
   contract still holds: a native Claude payload comes back exactly as received.
   New `test_fused_payload_fields.py` pins the wire format and re-evaluates the old
   one-liners as a parity oracle across 16 payload shapes.
 
-  Separately observed while measuring: with the `BASH_ENV=~/.claude/bash-log.sh`
-  wiring `init` installs, its `DEBUG` trap fires on every command *inside* each
-  hook and adds roughly 70 ms per tool call on top of the numbers above. Not
-  changed here; worth its own look.
+  Separately observed while measuring: the `BASH_ENV=~/.claude/bash-log.sh`
+  wiring installed by `init` made its DEBUG trap fire inside every hook. 1.5.33
+  short-circuits that callback for hook processes while retaining it in real
+  provider shells.
 
 ### Changed — doctor
 
-- **A stale install copy is one line, not seven.** `tasks doctor` scans every
+- **An older install copy is one line, not seven.** `tasks doctor` scans every
   hooks.json a host might load, which is right — a stale grok copy was the firing
   one in the AloVet bug. But on a real machine 6 of its 12 warnings came from a
   `~/.grok/marketplace-cache/…` copy of **v1.4.3** abandoned weeks earlier, and
@@ -91,8 +186,9 @@ doing real work, and quiet the doctor's biggest source of noise.
   running code now collapses to a single row naming the path, both versions, the
   finding count and the first finding. The collapse is version-keyed, not blanket:
   a foreign copy at the *same* version may be a live second install with a real
-  defect, so those are still enumerated. `tasks doctor --verbose` enumerates
-  everything.
+  defect, so those are still enumerated. 1.5.33 further restricts the collapse to
+  semantically older, parseable versions and includes every finding in the
+  summary row. `tasks doctor --verbose` enumerates everything.
 
 ### Notes
 
@@ -100,8 +196,8 @@ doing real work, and quiet the doctor's biggest source of noise.
   control. Two behavior-change tests in `test_light_template.py` were rewritten
   rather than deleted: they encoded the old warn-and-pass close, and now encode
   the block plus the preserved legacy path.
-- Known, unchanged, pre-existing: with `python3` absent the gate fails open. The
-  entire CLI is Python, so that state has no working playbook in it either way.
+- Superseded by 1.5.33: an enforcing gate with an unavailable `python3` now
+  blocks instead of treating the payload as empty.
 
 ## [1.5.31] — 2026-08-18
 

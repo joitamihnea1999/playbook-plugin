@@ -153,11 +153,47 @@ def normalize(payload):
 FIELDS_SENTINEL = "pb-fields-v2"
 
 
+def _wire_safe(value: str) -> str:
+    """Return a field that bash can receive without changing the wire frame.
+
+    Truncate at the first NUL — the wire delimiter must not appear in a field.
+
+    JSON encodes a literal NUL as \\u0000, so a payload can smuggle the delimiter
+    into a field value. Emitted naively, `file_path` = "/tmp/a.py\\u0000/.agent/x"
+    becomes TWO records: the path slot gets "/tmp/a.py" and "/.agent/x" slides
+    into the normpath slot — which the gate matches against its `*/.agent/*`
+    exemption and ALLOWS, while every later record (including the payload) ends
+    up misaligned. Measured before this guard: the gate returned 0 on an edit to
+    real code. A fail-open in the enforcing gate, which the doctrine forbids.
+
+    Truncation rather than rejection because it is also the FAITHFUL reading: a
+    path carrying an embedded NUL, had it reached any syscall, would be
+    "/tmp/a.py". So the frame stays intact and the path is judged as the code file
+    it actually names — blocked, not exempted.
+
+    Lone UTF-16 surrogates are legal JSON escapes but are not UTF-8 encodable.
+    Replace them with U+FFFD before stdout encoding.  Otherwise the producer
+    dies after parsing a valid payload and the enforcing consumer is forced
+    onto its slower recovery path.  U+FFFD matches the host-facing effective
+    filename on runtimes which repair an unpaired surrogate during UTF-8
+    conversion, and (critically) preserves the real suffix for classification.
+    """
+    if not isinstance(value, str):
+        return value
+    value = value.split("\0", 1)[0]
+    return "".join(
+        "\ufffd" if 0xD800 <= ord(ch) <= 0xDFFF else ch
+        for ch in value
+    )
+
+
 def extract_fields(payload):
     """(tool_name, path, normpath_of_path, command, transcript_path).
 
-    `path` matches what the gate hook's three guards computed between them:
-    file_path, falling back to notebook_path only when absent (NotebookEdit).
+    `path` is tool-specific. NotebookEdit acts on notebook_path even if a
+    foreign/over-specified payload also carries file_path; every other editing
+    tool acts on file_path. A decoy management file must not exempt the real
+    notebook target.
     normpath is applied unconditionally, so an absent path yields "." exactly as
     `os.path.normpath('')` did at the original call site.
 
@@ -169,18 +205,25 @@ def extract_fields(payload):
     ti = payload.get("tool_input") if isinstance(payload, dict) else None
     ti = ti if isinstance(ti, dict) else {}
     tool_name = payload.get("tool_name", "") if isinstance(payload, dict) else ""
-    path = ti.get("file_path", "") or ti.get("notebook_path", "")
+    path = (ti.get("notebook_path", "") if tool_name == "NotebookEdit"
+            else ti.get("file_path", ""))
     command = ti.get("command", "")
     transcript = payload.get("transcript_path", "") if isinstance(payload, dict) else ""
     if not (isinstance(transcript, str) and transcript
             and "\n" not in transcript and "\r" not in transcript):
         transcript = ""
+    # Every field is truncated at the first NUL before it reaches the wire, so a
+    # \u0000 in the payload can never shift the frame (see _wire_safe). normpath is
+    # taken on the TRUNCATED path — judging the untruncated one would defeat it.
+    tool_name = _wire_safe(tool_name) if isinstance(tool_name, str) else ""
+    path = _wire_safe(path) if isinstance(path, str) else ""
+    command = _wire_safe(command) if isinstance(command, str) else ""
     return (
-        tool_name if isinstance(tool_name, str) else "",
-        path if isinstance(path, str) else "",
-        os.path.normpath(path) if isinstance(path, str) else "",
-        command if isinstance(command, str) else "",
-        transcript,
+        tool_name,
+        path,
+        os.path.normpath(path),
+        command,
+        _wire_safe(transcript),
     )
 
 
@@ -193,9 +236,11 @@ def emit_fields(raw):
     try:
         payload = json.loads(raw)
     except Exception:
-        # Non-JSON: empty fields + the raw payload back. Identical to what the
-        # per-site `|| echo ""` fallbacks produced before this mode existed.
-        out = [FIELDS_SENTINEL, "", "", "", "", "", raw]
+        # A malformed payload is not a successful fused read.  Emit no valid
+        # sentinel so the enforcing hook takes its recovery path and blocks if
+        # the raw payload still cannot be decoded.  State-echo is advisory and
+        # simply retains its old best-effort behavior on the same path.
+        out = ["pb-fields-error-v2", "", "", "", "", "", raw]
     else:
         fields = extract_fields(normalize(payload))
         body = raw if not needs_normalize(payload) else json.dumps(

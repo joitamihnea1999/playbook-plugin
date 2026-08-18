@@ -35,7 +35,7 @@ _HERE = Path(__file__).resolve().parent
 PLUGIN = _HERE.parent / "plugins/playbook"
 sys.path.insert(0, str(PLUGIN))
 
-from tasks.core import close_decision, has_risk_section  # noqa: E402
+from tasks.core import close_decision, extract_risk, has_risk_section  # noqa: E402
 
 IMPL_EVIDENCE = (
     "# Panel Impl Review — task 1\n\n"
@@ -151,6 +151,37 @@ class RiskSectionDetection(unittest.TestCase):
         p = self._md("# 001 - T\n\n### Risk\nassertive\n")
         self.assertFalse(has_risk_section(p))
 
+    def test_bom_tabs_case_crlf_and_trailing_space_are_real_headings(self):
+        cases = (
+            "\ufeff## Risk\nunclassified\n",
+            "##\tRisk\nunclassified\n",
+            "## risk\nunclassified\n",
+            "## Risk   \r\nunclassified\r\n",
+        )
+        for body in cases:
+            with self.subTest(body=body):
+                p = self._md(body)
+                self.assertTrue(has_risk_section(p))
+                self.assertEqual(extract_risk(p), "unclassified")
+
+    def test_heading_inside_fence_is_not_metadata(self):
+        for fence in ("```", "~~~~"):
+            with self.subTest(fence=fence):
+                p = self._md(
+                    f"# Legacy\n\n{fence}md\n## Risk\nunclassified\n{fence}\n")
+                self.assertFalse(has_risk_section(p))
+                self.assertEqual(extract_risk(p), "unclassified")
+
+    def test_duplicate_fields_fail_to_unclassified(self):
+        for body in (
+            "## Risk\n\n## Risk\nreversible\n",
+            "## Risk\nreversible\n## Risk\n\n",
+        ):
+            with self.subTest(body=body):
+                p = self._md(body)
+                self.assertTrue(has_risk_section(p))
+                self.assertEqual(extract_risk(p), "unclassified")
+
     def test_unreadable_file_is_treated_as_legacy(self):
         """Fail toward the documented old behavior, never toward inventing a
         block from an I/O error."""
@@ -227,6 +258,19 @@ class CloseEndToEnd(unittest.TestCase):
         _, r = self._work_then_close(self.CLASSIFIED)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Task 001 done.", r.stdout)
+
+    def test_bom_and_lowercase_unset_headings_block(self):
+        for heading in ("\ufeff## Risk", "## risk"):
+            with self.subTest(heading=heading):
+                body = self.MODERN_UNSET.replace("## Risk", heading)
+                _, r = self._work_then_close(body)
+                self.assertNotEqual(r.returncode, 0)
+
+    def test_fenced_risk_example_does_not_block_a_legacy_close(self):
+        body = self.LEGACY.replace(
+            "## Work Plan", "```md\n## Risk\nunclassified\n```\n\n## Work Plan")
+        _, r = self._work_then_close(body)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

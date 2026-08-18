@@ -123,6 +123,15 @@ class DispatchLiveSmoke(unittest.TestCase):
             (proj / ".agent" / "tasks").mkdir(parents=True)
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_PLAYBOOK)
+            # The dispatch smoke verifies routing, not live provider/model
+            # availability. In a developer install, inheriting real
+            # claude/codex/grok binaries makes bare `tasks models` perform live
+            # probes and can exceed this test's 120s timeout. BASH_ENV also
+            # installs a per-command DEBUG trap in every child shell. Keep the
+            # smoke hermetic while retaining ordinary system tools.
+            env.pop("BASH_ENV", None)
+            if os.name != "nt":
+                env["PATH"] = "/usr/bin:/bin"
             # Pin the session id so arms that write session state stay inside
             # the scratch dir deterministically.
             env["PLAYBOOK_SESSION_ID"] = "pid-999999999"

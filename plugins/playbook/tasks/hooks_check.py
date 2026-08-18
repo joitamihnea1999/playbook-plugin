@@ -256,6 +256,21 @@ def _code_version() -> str:
         return ""
 
 
+def _version_key(value: str) -> "tuple[int, int, int] | None":
+    """Comparable release version, accepting harmless display formatting.
+
+    Missing/malformed versions are unknown, never evidence of staleness.  A
+    leading ``v`` and leading zeroes are display differences, so v1.5.33,
+    01.5.33 and 1.5.33 compare equal rather than hiding a same-version copy.
+    Playbook manifests use three numeric components; anything else remains
+    unclassified and is enumerated in full.
+    """
+    if not isinstance(value, str):
+        return None
+    m = re.fullmatch(r"[vV]?(\d+)\.(\d+)\.(\d+)", value.strip())
+    return tuple(int(part) for part in m.groups()) if m else None
+
+
 def hooks_check_report(project_path, env=None, verbose: bool = False) -> list[tuple[str, str]]:
     """Doctor §1f payload: (label, detail) warnings across every real copy.
 
@@ -270,13 +285,11 @@ def hooks_check_report(project_path, env=None, verbose: bool = False) -> list[tu
     a stray cache must not read like a defect in the live install. When no
     authoritative copy resolves, ranking is impossible and labels stay plain.
 
-    1.5.32: a foreign copy of a DIFFERENT version is collapsed to a single line.
-    An abandoned cache from an old release fails every check a since-changed hook
-    contract added, and on a real machine that was two thirds of the doctor's
-    entire warning surface — warning fatigue is how the findings that matter get
-    skimmed past. The collapse is version-keyed, not blanket: a foreign copy at
-    the SAME version as the running code may be a genuinely live second install
-    with a genuinely broken binding, so those are still enumerated in full.
+    1.5.33: a foreign copy with a parseable, semantically OLDER version is
+    collapsed to a single line containing every finding. This preserves the scan
+    and its evidence without turning an older release's expected omissions into
+    equal-looking rows. Missing, malformed, equivalent and newer versions remain
+    fully enumerated because they may be live installs with genuine defects.
     `verbose=True` enumerates everything (`tasks doctor --verbose`).
     """
     report: list[tuple[str, str]] = []
@@ -303,16 +316,23 @@ def hooks_check_report(project_path, env=None, verbose: bool = False) -> list[tu
         if not issues:
             continue
         copy_v = _copy_version(path)
-        stale = (not is_auth) and (not verbose) and (copy_v != code_v)
-        if stale:
-            shown = f"v{copy_v}" if copy_v else "version unreadable"
+        copy_key = _version_key(copy_v)
+        code_key = _version_key(code_v)
+        older = (not is_auth) and (not verbose) \
+            and copy_key is not None and code_key is not None \
+            and copy_key < code_key
+        if older:
+            # Group an older copy into one doctor row, but do not discard a
+            # single finding. Version age does not prove the copy is dead: a
+            # second host may still load it, and its missing enforcing hook can
+            # be more important than the first cosmetic issue.
+            all_findings = " | ".join(issues)
             report.append((
-                "hooks (stale install copy — not the one this CLI runs from)",
-                f"{path} ({shown}, this code is v{code_v or '?'}) — "
-                f"{len(issues)} issue(s), expected for an older release. "
-                f"First: {issues[0]} "
+                "hooks (older install copy — not the one this CLI runs from)",
+                f"{path} (v{copy_v}, this code is v{code_v}) — "
+                f"{len(issues)} issue(s): {all_findings} "
                 f"[delete that install or refresh it; "
-                f"`tasks doctor --verbose` lists all {len(issues)}]"
+                f"`tasks doctor --verbose` prints one row per issue]"
             ))
             continue
         for issue in issues:

@@ -58,12 +58,14 @@ class SubagentSpec:
     bare: bool = False
     # Containment is always on (everything routes through sandbox.run). "repo" =
     # project writable (current default); "outdir" = corpus read-only, workspace
-    # the sole writable path. There is intentionally no uncontained mode.
+    # and any explicit extra_rw paths writable. There is no uncontained mode.
     contain: Literal["repo", "outdir"] = "repo"
-    workspace: Optional[Path] = None            # sole writable dir for contain="outdir"
+    workspace: Optional[Path] = None            # managed output dir for contain="outdir"
     sink: Literal["text", "file"] = "text"
     harvest: str = "answer.md"                  # file to read back when sink="file"
     timeout_secs: int = 300
+    # Appended for compatibility with positional construction of older fields.
+    extra_rw: tuple[str, ...] = ()              # additional CLI-requested writable paths
 
 
 @dataclass
@@ -97,9 +99,11 @@ def run_subagent(spec: SubagentSpec, *, project_root: Path | str) -> SubagentRes
     project_root = Path(project_root)
     inv = build_invocation(spec, project_root=project_root)
 
-    extra_rw = [str(spec.workspace)] if spec.workspace else None
-    # contain="outdir": corpus read-only, workspace (extra_rw) the sole writable
-    # project-side path. "repo" keeps the project writable (current default).
+    extra_rw = list(spec.extra_rw)
+    if spec.workspace:
+        extra_rw.append(str(spec.workspace))
+    # contain="outdir": corpus read-only; explicitly named extra paths (including
+    # workspace when present) remain writable. "repo" keeps the project writable.
     project_writable = spec.contain != "outdir"
     result = _sandbox.run(
         spec.agent, inv.argv,
@@ -107,7 +111,7 @@ def run_subagent(spec: SubagentSpec, *, project_root: Path | str) -> SubagentRes
         input=inv.stdin,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=spec.timeout_secs,
-        extra_rw=extra_rw,
+        extra_rw=extra_rw or None,
         project_writable=project_writable,
     )
     stdout = result.stdout or ""
@@ -184,7 +188,9 @@ def stream_subagent(spec: SubagentSpec, *, project_root: Path | str) -> Iterator
     import threading
     project_root = Path(project_root)
     inv = build_invocation(spec, project_root=project_root, stream=True)
-    extra_rw = [str(spec.workspace)] if spec.workspace else None
+    extra_rw = list(spec.extra_rw)
+    if spec.workspace:
+        extra_rw.append(str(spec.workspace))
     project_writable = spec.contain != "outdir"
 
     popen_kwargs = {}
@@ -193,7 +199,7 @@ def stream_subagent(spec: SubagentSpec, *, project_root: Path | str) -> Iterator
     proc = _sandbox.popen(
         spec.agent, inv.argv,
         project_root=project_root,
-        extra_rw=extra_rw,
+        extra_rw=extra_rw or None,
         project_writable=project_writable,
         **popen_kwargs,
     )
