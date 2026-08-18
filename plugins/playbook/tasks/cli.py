@@ -52,6 +52,18 @@ def main():
         print_usage()
         return
 
+    # Inspection is globally side-effect free, regardless of where a command
+    # arm would otherwise interpret the token.  Previously `work done --help`
+    # closed the active task, `new ... --help` created one, `compact ... --help`
+    # rewrote files, and even the one arm with dedicated help ran session GC
+    # before printing it.  Intercept before GC and before all dispatch.
+    if any(a in ("-h", "--help") for a in args[1:]):
+        if args[0] == "merge-doctor":
+            from tasks.merge_prep import cmd_merge_doctor
+            cmd_merge_doctor(["--help"])
+        print_usage()
+        return
+
     _gc_dead_sessions(find_project_root())
 
     cmd = args[0]

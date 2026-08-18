@@ -751,7 +751,11 @@ source /dev/null'
     # in this victim (legacy shape, no `current_user`), so it would still go
     # red — but for partly the wrong reason, and it would stop isolating the
     # filter arms the moment a marker enters the scenario.
-    sed '/case "\$BASH_COMMAND" in/,/esac/ s|) return 0 ;;|) return ;;|' \
+    # Remove the hook-process fast path too: even when it does not match, its
+    # successful `case` resets the stale status that this historical mutant is
+    # meant to expose.
+    sed -e '/case "${0##\*\/}" in \*-hook) return 0 ;; esac/d' \
+        -e '/case "\$BASH_COMMAND" in/,/esac/ s|) return 0 ;;|) return ;;|' \
         "$BASH_LOG" > "$d/bash-log-mutant-arms.sh"
     assert_eq "$(grep -c ') return ;;' "$d/bash-log-mutant-arms.sh")" "4" \
         "S17 negative control (arms): mutant reverted exactly the 4 filter arms"

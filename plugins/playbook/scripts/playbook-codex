@@ -12,6 +12,18 @@
 
 set -e
 
+case "${1:-}" in
+    -h|--help)
+        cat <<'EOF'
+Usage: playbook-codex [codex-args...]
+
+Launch Codex with Playbook's project/session environment. All arguments are
+forwarded to codex. This help path performs no project or session writes.
+EOF
+        exit 0
+        ;;
+esac
+
 # Root + lane resolution come from the shared hook library — never re-vendored
 # here. A wrapper that walks for `.agent/tasks/` alone is blind to the
 # multi-user layout (`.agent/<user>/tasks/`) and provisions the wrong lane.

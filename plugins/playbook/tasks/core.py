@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "1.5.32"
+VERSION = "1.5.33"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 
@@ -888,6 +888,42 @@ def _as_command_list(value) -> "list[str]":
     return []
 
 
+_RISK_HEADING_RE = re.compile(
+    r"^##[ \t]+Risk[ \t]*(?::.*)?$", re.IGNORECASE
+)
+_RISK_FIELD_RE = re.compile(r"^##[ \t]+Risk[ \t]*$", re.IGNORECASE)
+
+
+def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
+    """Risk headings outside Markdown fences as ``(index, stripped_line)``.
+
+    A task may quote the template in a fenced review/example.  Such text is not
+    metadata.  BOMs are ignored at line starts (not just at file start), and
+    heading case/tabs follow Markdown's ordinary permissiveness.  Duplicates are
+    returned deliberately: callers treat more than one field as malformed
+    rather than letting an attacker choose which duplicate wins.
+    """
+    found: "list[tuple[int, str]]" = []
+    fence_char = ""
+    fence_len = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip().lstrip("\ufeff")
+        fm = re.match(r"^(`{3,}|~{3,})", stripped)
+        if fence_char:
+            if (fm and fm.group(1)[0] == fence_char
+                    and len(fm.group(1)) >= fence_len):
+                fence_char = ""
+                fence_len = 0
+            continue
+        if fm:
+            fence_char = fm.group(1)[0]
+            fence_len = len(fm.group(1))
+            continue
+        if _RISK_HEADING_RE.match(stripped):
+            found.append((i, stripped))
+    return found
+
+
 def extract_risk(task_file) -> str:
     """Read the `## Risk` classification from a task.md — the token on the line
     after the heading. Returns one of RISK_CLASSES, or 'unclassified' if the
@@ -896,11 +932,18 @@ def extract_risk(task_file) -> str:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return DEFAULT_RISK
-    for i, ln in enumerate(lines):
-        if ln.strip() == "## Risk" and i + 1 < len(lines):
-            raw = lines[i + 1].strip().strip("`*_").lower()
-            token = raw.split()[0] if raw else ""
-            return token if token in RISK_CLASSES else DEFAULT_RISK
+    headings = _risk_heading_lines(lines)
+    if len(headings) != 1:
+        return DEFAULT_RISK
+    i, heading = headings[0]
+    # A one-line heading (`## Risk: assertive`) proves the gate was offered but
+    # is not the field shape, so it stays unclassified and strict at close.
+    if not _RISK_FIELD_RE.match(heading) or i + 1 >= len(lines):
+        return DEFAULT_RISK
+    raw = lines[i + 1].strip().strip("`*_").lower()
+    token = raw.split()[0] if raw else ""
+    if token in RISK_CLASSES:
+        return token
     return DEFAULT_RISK
 
 
@@ -932,7 +975,7 @@ def has_risk_section(task_file) -> bool:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    return any(re.match(r"^##\s+Risk\s*(:|$)", ln.strip()) for ln in lines)
+    return bool(_risk_heading_lines(lines))
 
 
 def tree_state_fingerprint(project_path: Path) -> str:

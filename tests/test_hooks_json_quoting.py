@@ -270,15 +270,16 @@ class DoctorWiringTests(unittest.TestCase):
 
 
 class StaleForeignCopyCollapse(unittest.TestCase):
-    """1.5.32: an abandoned install copy of an OLDER version is one line.
+    """An older install is one row without hiding any of its findings.
 
     Field finding (1.5.31 audit): on a real machine, 6 of the doctor's 12
     warnings came from a `~/.grok/marketplace-cache/…` copy of v1.4.3 abandoned
     weeks earlier. Every one was correct and every one was noise — a cache from
     before `command-guard-hook` existed necessarily fails the check for it.
     Warning fatigue is how the findings that matter get skimmed past, so a
-    version-mismatched foreign copy collapses. It is NOT blanket: a foreign copy
-    at the SAME version may be a live second install with a real defect.
+    older foreign copy groups into one row. It is NOT blanket: unknown, newer,
+    or semantically same versions may be live and stay enumerated. The grouped
+    row itself carries every finding, because an older copy may still be live.
 
     The `project_path` candidate (<root>/plugins/playbook/hooks/hooks.json) is
     the seam used to plant a foreign copy — a real scan source, not a test hook.
@@ -320,21 +321,23 @@ class StaleForeignCopyCollapse(unittest.TestCase):
         rows = self._foreign_rows()
         self.assertEqual(len(rows), 1, f"not collapsed: {rows}")
         label, detail = rows[0]
-        self.assertIn("stale install copy", label)
+        self.assertIn("older install copy", label)
         self.assertIn("1.4.3", detail, "the collapsed row must name the version")
         self.assertIn("--verbose", detail, "it must say how to see the rest")
         self.assertRegex(detail, r"\d+ issue\(s\)")
+        self.assertIn("command-guard-hook", detail,
+                      "grouping hid the missing enforcing hook")
+        self.assertIn("Stop", detail, "grouping hid a later finding")
 
     def test_verbose_enumerates_them_again(self):
         self._stamp(self.foreign, "1.4.3")
         self.assertGreater(len(self._foreign_rows(verbose=True)), 1,
                            "--verbose must not hide anything")
 
-    def test_unreadable_version_also_collapses(self):
-        """No manifest at all is an abandoned tree too — and it must not crash."""
+    def test_unreadable_version_is_enumerated_not_assumed_stale(self):
+        """No manifest proves neither age nor liveness."""
         rows = self._foreign_rows()
-        self.assertEqual(len(rows), 1, f"not collapsed: {rows}")
-        self.assertIn("version unreadable", rows[0][1])
+        self.assertGreater(len(rows), 1, f"unknown version was hidden: {rows}")
 
     def test_same_version_copy_is_still_enumerated(self):
         """The safety half: a foreign copy at the running version could be a
@@ -346,6 +349,20 @@ class StaleForeignCopyCollapse(unittest.TestCase):
         self._stamp(self.foreign, code_v)
         self.assertGreater(len(self._foreign_rows()), 1,
                            "a same-version copy was wrongly collapsed")
+
+    def test_equivalent_version_formatting_is_still_same_version(self):
+        from tasks.hooks_check import _code_version
+        code_v = _code_version()
+        for shown in (f"v{code_v}", "01.5.33"):
+            with self.subTest(version=shown):
+                self._stamp(self.foreign, shown)
+                self.assertGreater(len(self._foreign_rows()), 1)
+
+    def test_malformed_or_newer_version_is_not_called_stale(self):
+        for shown in ("banana", "99.0.0"):
+            with self.subTest(version=shown):
+                self._stamp(self.foreign, shown)
+                self.assertGreater(len(self._foreign_rows()), 1)
 
     def test_a_clean_stale_copy_says_nothing_at_all(self):
         """Negative control: collapsing must not invent a row for a copy that

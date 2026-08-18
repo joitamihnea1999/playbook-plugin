@@ -917,8 +917,14 @@ def _main(argv: list[str]) -> int:
     # when --prompt is absent.
     if args.prompt is not None:
         from . import subagent as _subagent
+        # Prompt execution must inherit the same containment contract as raw
+        # passthrough and --print-argv. Dropping these flags here made inspection
+        # show a read-only project while the live runner received writable repo
+        # defaults; repeatable --rw exceptions disappeared as well.
         spec = _subagent.SubagentSpec(
             agent=agent, model=model_for_spec, prompt=args.prompt, bare=args.bare,
+            contain="outdir" if args.ro_project else "repo",
+            extra_rw=tuple(args.rw),
         )
         # --print-argv is a DRY RUN and must short-circuit BEFORE the run — and
         # it has to print THIS path's argv (the adapter's headless invocation),

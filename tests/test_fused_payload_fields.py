@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -71,6 +73,19 @@ PAYLOADS = {
     "transcript path": {"tool_name": "Read", "transcript_path": "/t/s.jsonl"},
     "transcript injection": {"tool_name": "Read",
                              "transcript_path": "/t/s.jsonl\nevil"},
+    # JSON can encode a literal NUL (\u0000), which IS the wire delimiter.
+    "nul in path": {"tool_name": "Edit",
+                    "tool_input": {"file_path": "/tmp/a.py\x00/.agent/x"}},
+    "nul in tool_name": {"tool_name": "Edit\x00INJECTED",
+                         "tool_input": {"file_path": "/x/app.py"}},
+    "nul in command": {"tool_name": "Bash",
+                       "tool_input": {"command": "ls\x00rm -rf /"}},
+    "surrogate path": {"tool_name": "Edit",
+                       "tool_input": {"file_path": "src/a\ud800.py"}},
+    "both notebook paths": {"tool_name": "NotebookEdit",
+                            "tool_input": {
+                                "file_path": "/tmp/.agent/decoy",
+                                "notebook_path": "src/live.ipynb"}},
 }
 
 
@@ -99,9 +114,13 @@ def old_file_path(raw):
     return json.loads(raw).get("tool_input", {}).get("file_path", "")
 
 
-def old_file_or_notebook(raw):
-    d = json.loads(raw).get("tool_input", {})
-    return d.get("file_path", "") or d.get("notebook_path", "")
+def effective_tool_path(raw):
+    payload = json.loads(raw)
+    d = payload.get("tool_input", {})
+    if not isinstance(d, dict):
+        return ""
+    return (d.get("notebook_path", "") if payload.get("tool_name") == "NotebookEdit"
+            else d.get("file_path", ""))
 
 
 def old_command(raw):
@@ -110,6 +129,25 @@ def old_command(raw):
 
 def old_normpath(fp):
     return os.path.normpath(fp)
+
+
+def oracle(value: str) -> str:
+    """The old one-liner's value, corrected for the one case it got wrong.
+
+    Parity with the pre-fusion behavior is the contract everywhere EXCEPT a
+    NUL-bearing field, where the old value was itself the defect: bash command
+    substitution drops a NUL, so `file_path` = "/tmp/a.py\0/.agent/x" reached the
+    gate as "/tmp/a.py/.agent/x" and matched the `*/.agent/*` exemption. Both the
+    old path and a naive fused emit ALLOW an edit to real code; truncating at the
+    NUL is the only reading that blocks it. So the oracle truncates too, and the
+    divergence is asserted deliberately in NulInjectionCannotShiftTheFrame rather
+    than smuggled in as "parity".
+    """
+    if not isinstance(value, str):
+        return value
+    value = value.split("\0", 1)[0]
+    return "".join("\ufffd" if 0xD800 <= ord(ch) <= 0xDFFF else ch
+                   for ch in value)
 
 
 class WireFormat(unittest.TestCase):
@@ -121,17 +159,16 @@ class WireFormat(unittest.TestCase):
                                  f"{name}: got {len(fields)} records")
                 self.assertEqual(fields[0], SENTINEL)
 
-    def test_non_json_still_emits_the_sentinel_and_the_raw_payload(self):
-        """The hooks must be able to tell a malformed payload (fields empty, and
-        that is the truth) from a dead script (no sentinel → fall back)."""
+    def test_non_json_emits_an_error_sentinel_and_the_raw_payload(self):
+        """Malformed JSON is not a successful enforcing-field read."""
         fields = emit_fields("this is not json")
-        self.assertEqual(fields[0], SENTINEL)
+        self.assertEqual(fields[0], "pb-fields-error-v2")
         self.assertEqual(fields[1:6], ["", "", "", "", ""])
         self.assertEqual(fields[6], "this is not json")
 
     def test_empty_stdin(self):
         fields = emit_fields("")
-        self.assertEqual(fields[0], SENTINEL)
+        self.assertEqual(fields[0], "pb-fields-error-v2")
         self.assertEqual(fields[6], "")
 
 
@@ -145,19 +182,20 @@ class ParityWithThePerFieldExtraction(unittest.TestCase):
                 fields = emit_fields(raw)
                 normalized = plain_normalize(raw)
                 expected = old_tool_name(normalized)
-                self.assertEqual(fields[1], str(expected) if isinstance(expected, str) else "")
+                self.assertEqual(fields[1],
+                                 oracle(expected) if isinstance(expected, str) else "")
 
-    def test_path_parity_matches_file_path_then_notebook_path(self):
+    def test_path_matches_the_field_the_named_tool_actually_uses(self):
         for name, payload in PAYLOADS.items():
             with self.subTest(payload=name):
                 raw = json.dumps(payload)
                 fields = emit_fields(raw)
                 normalized = plain_normalize(raw)
                 try:
-                    expected = old_file_or_notebook(normalized)
+                    expected = effective_tool_path(normalized)
                 except Exception:
                     expected = ""
-                expected = expected if isinstance(expected, str) else ""
+                expected = oracle(expected) if isinstance(expected, str) else ""
                 self.assertEqual(fields[2], expected)
 
     def test_normpath_parity_including_the_empty_case(self):
@@ -180,7 +218,7 @@ class ParityWithThePerFieldExtraction(unittest.TestCase):
                     expected = old_command(normalized)
                 except Exception:
                     expected = ""
-                expected = expected if isinstance(expected, str) else ""
+                expected = oracle(expected) if isinstance(expected, str) else ""
                 self.assertEqual(fields[4], expected)
 
     def test_traversal_is_resolved_not_exempted(self):
@@ -191,6 +229,62 @@ class ParityWithThePerFieldExtraction(unittest.TestCase):
         self.assertNotIn(".agent", fields[3])
 
 
+class NulInjectionCannotShiftTheFrame(unittest.TestCase):
+    """A NUL inside a field would otherwise shift every later record.
+
+    JSON encodes a literal NUL as \\u0000, so a payload can smuggle the wire
+    delimiter into a field value. Emitted naively, `file_path` =
+    "/tmp/a.py\\u0000/.agent/x" splits into two records: the path slot gets
+    "/tmp/a.py" and "/.agent/x" lands in the NORMPATH slot — which the gate
+    matches against its `*/.agent/*` exemption and ALLOWS, while the payload
+    record ends up misaligned and empty. Measured before the fix: the gate
+    returned 0 (allow) on an edit to real code. That is a fail-open in the
+    enforcing gate, which the project's doctrine forbids outright.
+
+    The fix is to truncate each field at the first NUL — which is also the
+    faithful reading, since a path with an embedded NUL, had it reached any
+    syscall, would BE "/tmp/a.py". So the frame stays intact and the truncated
+    path is judged as the code file it actually names: blocked, not exempted.
+    """
+
+    def test_record_count_is_stable_under_nul_injection(self):
+        for name in ("nul in path", "nul in tool_name", "nul in command"):
+            with self.subTest(payload=name):
+                fields = emit_fields(json.dumps(PAYLOADS[name]))
+                self.assertEqual(len(fields), N_FIELDS,
+                                 f"{name}: frame shifted to {len(fields)} records")
+                self.assertEqual(fields[0], SENTINEL)
+
+    def test_no_field_contains_a_nul(self):
+        for name in ("nul in path", "nul in tool_name", "nul in command"):
+            with self.subTest(payload=name):
+                for i, f in enumerate(emit_fields(json.dumps(PAYLOADS[name]))):
+                    self.assertNotIn("\x00", f, f"{name}: record {i} carries a NUL")
+
+    def test_the_payload_record_survives_intact(self):
+        """The misalignment used to blank the payload record, so every
+        downstream parse in the hook silently read an empty payload."""
+        fields = emit_fields(json.dumps(PAYLOADS["nul in path"]))
+        self.assertTrue(fields[6].strip(), "payload record was blanked")
+        json.loads(fields[6])  # must still be parseable
+
+    def test_path_truncates_at_the_nul_not_past_the_exemption(self):
+        fields = emit_fields(json.dumps(PAYLOADS["nul in path"]))
+        self.assertEqual(fields[2], "/tmp/a.py")
+        self.assertEqual(fields[3], "/tmp/a.py")
+        self.assertNotIn(".agent", fields[3],
+                         "the injected fragment reached the exemption test")
+
+    def test_tool_name_truncates_at_the_nul(self):
+        fields = emit_fields(json.dumps(PAYLOADS["nul in tool_name"]))
+        self.assertEqual(fields[1], "Edit", "tool_name lost its guard routing")
+        self.assertEqual(fields[2], "/x/app.py")
+
+    def test_command_truncates_at_the_nul(self):
+        fields = emit_fields(json.dumps(PAYLOADS["nul in command"]))
+        self.assertEqual(fields[4], "ls")
+
+
 class NulFraming(unittest.TestCase):
     def test_multiline_command_survives_intact(self):
         fields = emit_fields(json.dumps(PAYLOADS["multiline command"]))
@@ -199,6 +293,11 @@ class NulFraming(unittest.TestCase):
     def test_unicode_path_survives_intact(self):
         fields = emit_fields(json.dumps(PAYLOADS["unicode path"]))
         self.assertEqual(fields[2], "src/café/ação.py")
+
+    def test_lone_surrogate_is_repaired_without_losing_the_code_suffix(self):
+        fields = emit_fields(json.dumps(PAYLOADS["surrogate path"]))
+        self.assertEqual(fields[2], "src/a\ufffd.py")
+        self.assertEqual(fields[3], "src/a\ufffd.py")
 
     def test_shell_metacharacters_are_data_not_code(self):
         fields = emit_fields(json.dumps(PAYLOADS["quotes in command"]))
@@ -221,6 +320,82 @@ class TranscriptSanitization(unittest.TestCase):
         fields = emit_fields(json.dumps(
             {"tool_name": "Read", "transcript_path": "/t/s.jsonl\revil"}))
         self.assertEqual(fields[5], "")
+
+    def test_nul_is_truncated_in_transcript_too(self):
+        fields = emit_fields(json.dumps(
+            {"tool_name": "Read", "transcript_path": "/t/s.jsonl\0shift"}))
+        self.assertEqual(len(fields), N_FIELDS)
+        self.assertEqual(fields[5], "/t/s.jsonl")
+
+
+class EnforcingGateConsumesTheWholeFrame(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="pb-fused-live-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.project = self.tmp / "project"
+        (self.project / ".agent" / "tasks").mkdir(parents=True)
+        self.env = dict(os.environ, PLAYBOOK_SESSION_ID="pid-fused-live")
+        self.env.pop("BASH_ENV", None)
+
+    def _gate(self, payload, scripts=SCRIPTS, env=None):
+        return subprocess.run(
+            ["bash", str(scripts / "task-gate-hook")],
+            cwd=self.project, env=env or self.env,
+            input=json.dumps(payload), text=True, capture_output=True,
+            timeout=30,
+        )
+
+    @staticmethod
+    def _edit(path="src/a.py"):
+        return {"tool_name": "Edit", "tool_input": {"file_path": path}}
+
+    def _scripts_with_emitter(self, replacement: str) -> Path:
+        dst = self.tmp / ("scripts-" + str(len(list(self.tmp.glob("scripts-*")))))
+        shutil.copytree(SCRIPTS, dst)
+        normalizer = dst / "hook-payload-normalize.py"
+        text = normalizer.read_text(encoding="utf-8")
+        text = text.replace("        emit_fields(raw)\n", replacement, 1)
+        normalizer.write_text(text, encoding="utf-8")
+        return dst
+
+    def test_sentinel_only_output_falls_back_and_blocks(self):
+        scripts = self._scripts_with_emitter(
+            '        sys.stdout.write("pb-fields-v2\\0")\n')
+        self.assertEqual(self._gate(self._edit(), scripts).returncode, 2)
+
+    def test_mid_record_truncation_falls_back_and_blocks(self):
+        scripts = self._scripts_with_emitter(
+            '        sys.stdout.write("pb-fields-v2\\0Edit\\0src/a.py\\0")\n')
+        self.assertEqual(self._gate(self._edit(), scripts).returncode, 2)
+
+    def test_missing_python_blocks_instead_of_becoming_empty_truth(self):
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        fake = bindir / "python3"
+        fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env = dict(self.env, PATH=f"{bindir}:/usr/bin:/bin")
+        self.assertEqual(self._gate(self._edit(), env=env).returncode, 2)
+
+    def test_malformed_or_empty_tool_payload_blocks(self):
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "task-gate-hook")], cwd=self.project,
+            env=self.env, input="not json", text=True, capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(r.returncode, 2)
+        for tool_name in ("", "   ", 42):
+            with self.subTest(tool_name=tool_name):
+                self.assertEqual(self._gate({"tool_name": tool_name}).returncode, 2)
+
+    def test_surrogate_and_conflicting_notebook_paths_block(self):
+        self.assertEqual(
+            self._gate(PAYLOADS["surrogate path"]).returncode, 2)
+        self.assertEqual(
+            self._gate(PAYLOADS["both notebook paths"]).returncode, 2)
+
+    def test_read_without_a_path_remains_allowed(self):
+        self.assertEqual(self._gate({"tool_name": "Read"}).returncode, 0)
 
 
 class ByteIdentityContract(unittest.TestCase):

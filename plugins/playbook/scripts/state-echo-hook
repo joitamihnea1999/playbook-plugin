@@ -121,17 +121,18 @@ PB_PATH=""
 PB_NORM=""
 PB_CMD=""
 PB_TRANSCRIPT=""
+PB_FRAME_COMPLETE=true
 {
-    IFS= read -r -d '' PB_SENTINEL   || true
-    IFS= read -r -d '' TOOL_NAME     || true
-    IFS= read -r -d '' PB_PATH       || true
-    IFS= read -r -d '' PB_NORM       || true
-    IFS= read -r -d '' PB_CMD        || true
-    IFS= read -r -d '' PB_TRANSCRIPT || true
-    IFS= read -r -d '' PB_PAYLOAD    || true
+    IFS= read -r -d '' PB_SENTINEL   || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' TOOL_NAME     || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' PB_PATH       || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' PB_NORM       || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' PB_CMD        || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' PB_TRANSCRIPT || PB_FRAME_COMPLETE=false
+    IFS= read -r -d '' PB_PAYLOAD    || PB_FRAME_COMPLETE=false
 } < <(printf '%s' "$INPUT" | python3 "$HOOK_DIR/hook-payload-normalize.py" --emit-fields 2>/dev/null) || true
 
-if [ "$PB_SENTINEL" = "pb-fields-v2" ]; then
+if [ "$PB_SENTINEL" = "pb-fields-v2" ] && [ "$PB_FRAME_COMPLETE" = true ]; then
     PB_FUSED=1
     INPUT="$PB_PAYLOAD"
 else
