@@ -269,9 +269,11 @@ def _playbook_hook_entry(script_name: str, matcher: str | None = None) -> dict:
 def render_playbook_hooks() -> dict:
     """Return the Playbook-owned Codex hooks.json fragment.
 
-    PreToolUse: scoped to `^apply_patch$` only — file-edit pre-blocking. Bash
-    (exec_command) is intentionally not pre-blocked; running shell commands
-    without a task is allowed (matches Claude policy).
+    PreToolUse: `^apply_patch$` → the task gate (file-edit pre-blocking). Running
+    a shell command without a task is still allowed (matches Claude policy), BUT
+    a DESTRUCTIVE/irreversible one is pre-blocked by `command_guard.py` scoped to
+    `^exec_command$` — the same interlock Claude/grok get, so `rm -rf /` /
+    `git push --force` / `curl|sh` can't run by accident under Codex either.
 
     PostToolUse: scoped to `^apply_patch$` AND `^exec_command$` so the gate
     echo fires on both file edits and bash. The same `codex-apply-patch-hook`
@@ -292,6 +294,7 @@ def render_playbook_hooks() -> dict:
             ],
             "PreToolUse": [
                 _playbook_hook_entry("codex-apply-patch-hook", matcher="^apply_patch$"),
+                _playbook_hook_entry("command_guard.py", matcher="^exec_command$"),
             ],
             "PostToolUse": [
                 _playbook_hook_entry("codex-apply-patch-hook", matcher="^apply_patch$"),

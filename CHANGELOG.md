@@ -2,7 +2,30 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.30] — 2026-08-18
+## [1.5.31] — 2026-08-18
+
+Extend the destructive-command interlock to **all three providers** (was Claude
+only) — so a dangerous command can't run by accident under Codex or Grok either.
+
+### Changed / Added
+
+- **Codex**: `render_playbook_hooks` now registers `command_guard.py` as a
+  `PreToolUse` hook scoped to `^exec_command$` (Codex *can* pre-block exec; it
+  just didn't). `command_guard.classify_command` now understands Codex's
+  `exec_command` shapes — a string, an argv **list**, and the `bash -lc "<script>"`
+  wrapper (unwrapped so the real command isn't hidden behind the interpreter).
+- **Grok**: the always-trusted global enforcement (`build_enforcement_hooks_payload`)
+  gains a second `PreToolUse` matcher (`Bash|Shell|run_terminal_command`) →
+  `command-guard-hook`. The hook wrapper now normalizes the payload first, so
+  grok's camelCase / renamed shell tools (`Shell`, `run_terminal_command`) are
+  seen the same as Claude's `Bash`.
+- Fixed a crash in the guard's block message when the command was an argv list
+  (Codex) — it now coerces to a display string before formatting.
+- Provider mirror (`scripts/lib/provider/`) re-synced; docs (architecture,
+  configuration) updated to say the interlock is active on Claude, grok, codex.
+  New tests: `test_codex_command_guard.py` + grok-parity + grok-normalize cases.
+
+
 
 Add the missing **deterministic** safety layer, so a dangerous command can't run
 by accident — not just by judgment. Analysis: the sandbox contains filesystem

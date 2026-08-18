@@ -125,6 +125,29 @@ class HookBehavior(unittest.TestCase):
         r = self._run("not json at all")
         self.assertEqual(r.returncode, 0, "guard must fail OPEN, never wedge a session")
 
+    def _run_hook(self, payload_json, env=None):
+        """Run via the bash wrapper (which normalizes grok dialects first)."""
+        import os
+        hook = _HERE.parent / "plugins" / "playbook" / "scripts" / "command-guard-hook"
+        e = dict(os.environ)
+        e.pop("PLAYBOOK_ALLOW_DANGEROUS", None)
+        if env:
+            e.update(env)
+        return subprocess.run(["bash", str(hook)], input=payload_json,
+                              capture_output=True, text=True, env=e)
+
+    def test_grok_camelcase_shell_payload_is_normalized_and_blocked(self):
+        # grok delivers camelCase toolName/toolInput and renames Bash→Shell; the
+        # wrapper normalizes before the guard sees it.
+        r = self._run_hook('{"toolName":"Shell","toolInput":{"command":"rm -rf /"},'
+                           '"hookEventName":"PreToolUse"}')
+        self.assertEqual(r.returncode, 2)
+
+    def test_grok_run_terminal_command_safe_allows(self):
+        r = self._run_hook('{"toolName":"run_terminal_command",'
+                           '"toolInput":{"command":"ls -la"},"hookEventName":"PreToolUse"}')
+        self.assertEqual(r.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

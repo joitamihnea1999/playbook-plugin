@@ -57,6 +57,17 @@ class BuildPayloadTests(unittest.TestCase):
             },
         )
 
+    def test_command_guard_is_wired_for_grok(self):
+        # 1.5.31: the destructive-command interlock must be in grok's always-
+        # trusted enforcement, on a shell-tool matcher.
+        payload = build_enforcement_hooks_payload(resolve_playbook_plugin_root())
+        pre = payload["hooks"]["PreToolUse"]
+        guard = [e for e in pre if any("command-guard-hook" in h["command"]
+                                       for h in e["hooks"])]
+        self.assertEqual(len(guard), 1, "command-guard-hook not wired for grok")
+        for tok in ("Bash", "Shell", "run_terminal_command"):
+            self.assertIn(tok, guard[0]["matcher"])
+
     def test_pretool_matcher_covers_grok_tools(self):
         root = resolve_playbook_plugin_root()
         payload = build_enforcement_hooks_payload(root)

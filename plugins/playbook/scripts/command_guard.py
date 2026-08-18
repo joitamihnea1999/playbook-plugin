@@ -108,14 +108,45 @@ _WHOLE = [
 ]
 
 
-def classify_command(command: str, extra_patterns=None):
-    """Return ("block", name, why) or ("allow", None, None). Pure + deterministic."""
-    if not command or not command.strip():
+_SHELL_C = re.compile(r"^(?:sh|bash|zsh|ksh|dash)\b[^;]*?\s-[a-z]*c\s+(.+)$")
+
+
+def _unwrap_shell_c(seg: str) -> "str | None":
+    """`bash -lc "rm -rf /"` → `rm -rf /`. Codex wraps exec in `bash -lc <script>`,
+    which would otherwise hide the real command behind the interpreter token."""
+    m = _SHELL_C.match(seg.strip())
+    if not m:
+        return None
+    inner = m.group(1).strip()
+    if len(inner) >= 2 and inner[0] in "\"'" and inner[-1] == inner[0]:
+        inner = inner[1:-1]
+    return inner
+
+
+def classify_command(command, extra_patterns=None, _depth=0):
+    """Return ("block", name, why) or ("allow", None, None). Pure + deterministic.
+
+    `command` may be a str, or a list of argv tokens (Codex `exec_command`), in
+    which case the joined form AND each element are checked."""
+    if isinstance(command, (list, tuple)):
+        for part in list(command) + [" ".join(str(p) for p in command)]:
+            v = classify_command(part, extra_patterns, _depth)
+            if v[0] == "block":
+                return v
         return ("allow", None, None)
+    if not command or not str(command).strip():
+        return ("allow", None, None)
+    command = str(command)
     for seg in _SEP.split(command):
-        hit = _segment_checks(_strip_prefixes(seg))
+        stripped = _strip_prefixes(seg)
+        hit = _segment_checks(stripped)
         if hit:
             return ("block", hit[0], hit[1])
+        inner = _unwrap_shell_c(stripped)
+        if inner and _depth < 3:                       # unwrap `bash -lc "<script>"`
+            v = classify_command(inner, extra_patterns, _depth + 1)
+            if v[0] == "block":
+                return v
     for name, rx, why in _WHOLE:
         if rx.search(command):
             return ("block", name, why)
@@ -162,10 +193,13 @@ def main() -> int:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         return 0
-    if payload.get("tool_name") not in ("Bash", "Shell", "run_terminal_command"):
+    # Bash/Shell/run_terminal_command = Claude + grok (post-normalize);
+    # exec_command = Codex's shell tool.
+    if payload.get("tool_name") not in ("Bash", "Shell", "run_terminal_command", "exec_command"):
         return 0
-    command = (payload.get("tool_input") or {}).get("command", "")
-    if not isinstance(command, str):
+    ti = payload.get("tool_input") or {}
+    command = ti.get("command", ti.get("cmd", ""))     # codex exec may use either
+    if not isinstance(command, (str, list)):
         return 0
 
     root = _find_root()
@@ -184,9 +218,10 @@ def main() -> int:
     if verdict != "block":
         return 0
 
+    shown = command if isinstance(command, str) else " ".join(str(p) for p in command)
     sys.stderr.write(
         f"BLOCKED — destructive/irreversible command ({name}): {why}.\n"
-        f"  command: {command.strip()[:200]}\n"
+        f"  command: {shown.strip()[:200]}\n"
         "  If this is intended: confirm with the user, and run it inside a task\n"
         "  classified `## Risk: irreversible` with a rollback plan. To proceed on\n"
         "  a one-off you've confirmed, re-run with PLAYBOOK_ALLOW_DANGEROUS=1.\n")

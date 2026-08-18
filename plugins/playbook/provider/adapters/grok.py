@@ -148,7 +148,12 @@ def build_enforcement_hooks_payload(plugin_root: Path) -> dict:
                 {
                     "matcher": _GROK_PRETOOL_MATCHER,
                     "hooks": [entry("task-gate-hook")],
-                }
+                },
+                {
+                    # Destructive-command interlock (same guard Claude/Codex get).
+                    "matcher": "Bash|Shell|run_terminal_command",
+                    "hooks": [entry("command-guard-hook")],
+                },
             ],
             "UserPromptSubmit": [
                 {

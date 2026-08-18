@@ -125,8 +125,8 @@ it can never wedge a session.
 - **Disable** entirely: `{"command_guard": false}`.
 
 It's a safety interlock against the agent's *mistake*, not an adversary — for
-adversarial containment run the agent in the sandbox (OS-level). Claude path
-today; codex/grok Bash guarding is a follow-up.
+adversarial containment run the agent in the sandbox (OS-level). Active on all
+three providers (Claude, grok, codex).
 
 ### The irreversible freshness gate (`--stale-panel-ok`)
 
