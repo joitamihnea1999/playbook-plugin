@@ -28,17 +28,22 @@ Then **ask the user** what they want to work on. Don't autonomously pick a task.
 
 Read `MIND_MAP.md` at project root before starting any work. It's the project's institutional memory — architecture, decisions, and reasoning. Consult it before each task, update it after completing one. `tasks bootstrap` prints it (an index of routing nodes + titles once it's large); pull a node's full content — across `MIND_MAP.md` and the `MIND_MAP_OVERFLOW.md` deep-detail tier — with `.claude/bin/tasks recall <N>`, or locate nodes by topic with `tasks recall <keyword>`.
 
-## Choosing the ceremony level (decide this yourself — don't make the user pick)
+## Choosing the ceremony level (you decide, biased safe)
 
-Match the process to the RISK and size of the request. **You classify it; the user should not have to.** When you're on the line between two levels, always choose the heavier one — better safe than sorry.
+Classify every request before acting — **judge RISK first, size second.** You classify it; the user should not have to. When you're on the line between two levels, always choose the heavier one — better safe than sorry.
 
-- **No code touched** (a question, docs, a shell command, git, reading) → just do it, no task.
-- **Trivial and clearly reversible code** (a typo, a rename, a small self-contained pure function) → `tasks new quick` (3 gates, no review; closes clean).
-- **Small but touches real behavior/logic, OR touches a claim/config/data, OR you're not certain it's reversible** → `tasks new light` (risk classified first, review routed by risk).
-- **Multi-step, a new subsystem, an uncertain approach, or anything irreversible / assertive / security-relevant** → a full task type (`feature`/`build`/`bugfix`/`research`/…).
-- **The user explicitly wants to pair with no gate pressure** → `tasks freehand`. (Don't pick this on your own — it keeps no trace, so it's the least safe option; use it only when the user asks.)
+**High-risk triggers — if ANY applies, go heavy no matter how small the change looks (never `quick`, never "just do it"):** deletes or migrates data; touches secrets, auth, or permissions; a destructive or outward command (`rm`, force-push, a deploy/publish, or a network / DB / payment / email side effect); changes a **claim about the world** (a README/doc/benchmark/"verified accurate" statement — that is `assertive`, even as a one-word docs edit); or anything a `git revert` will not fully undo *in the world* (`irreversible`). → `tasks new light` if small and contained, a full task type if multi-step.
 
-**Only when you genuinely cannot tell the risk or the scope**, ask the user which level — but always lead with a recommendation, and let that recommendation default to the SAFER (heavier) option. Never pick a lighter level just to save time on something that might not be reversible.
+**Otherwise, by size:**
+- A question, reading, or a read-only command → just answer; no task.
+- Trivial + clearly reversible code, or a non-claim doc tweak (typo, rename, a small self-contained pure function) → `tasks new quick`.
+- Small but touches real behavior/logic, or you are not certain it is reversible → `tasks new light`.
+- Multi-step, a new subsystem, or an uncertain approach → a full task type (`feature`/`build`/`bugfix`/`research`/…).
+- The user explicitly asks to pair with no gate pressure → `tasks freehand` (user-initiated only — it keeps no trace, the least safe option).
+
+Ask the user which level **only** if you still cannot gauge the risk or the scope after the above — and then lead with a recommendation, defaulted to the SAFER (heavier) option. Never level down to save time on something that might not be reversible.
+
+(Backstop, not a substitute for judging well: the code-edit hook mechanically blocks editing a code file with no active task, so a mis-leveled *code* change is caught. Shell, git, and docs are NOT gated that way — the risk triggers above are their only guard, so weigh them there especially.)
 
 ## Task Lifecycle
 

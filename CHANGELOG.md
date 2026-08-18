@@ -2,7 +2,30 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [1.5.28] — 2026-08-18
+## [1.5.29] — 2026-08-18
+
+Harden the ceremony-classification protocol so it doesn't under-level the
+highest-risk requests. Adversarial review of 1.5.28's protocol found it led with
+"is it code?" — so its "no code → just do it" bucket silently waved through two
+genuinely dangerous cases: **destructive/outward shell & git ops** (`rm`,
+force-push, deploy, DB/network/payment side effects — all `irreversible`) and
+**assertive docs** (a README/benchmark/"verified" claim — `assertive` even as a
+one-word edit).
+
+### Changed
+
+- **Ceremony protocol is now RISK-first, size-second** (CLAUDE.md template +
+  `/playbook` skill). A leading **high-risk trigger list** — deletes/migrates
+  data; secrets/auth/permissions; a destructive or outward command; a claim about
+  the world; anything `git revert` won't undo in the world — forces `light`/full
+  no matter how small the diff looks, overriding the "no task" shortcut. The
+  size-based buckets handle only what clears those triggers. Also states the
+  honest backstop: the code-edit hook mechanically catches a mis-leveled *code*
+  change, but shell/git/docs have no such gate, so the risk triggers are their
+  only guard. (A prose protocol applied by judgment can't be infallible; this
+  makes it risk-first, safe-defaulted, and explicit about the cases that bite.)
+
+
 
 Match ceremony to risk — so quick work stays quick and the trust machinery aims
 where it matters, and the agent chooses the level (the user shouldn't have to).
