@@ -269,5 +269,91 @@ class DoctorWiringTests(unittest.TestCase):
         self.assertEqual(report, [])
 
 
+class StaleForeignCopyCollapse(unittest.TestCase):
+    """1.5.32: an abandoned install copy of an OLDER version is one line.
+
+    Field finding (1.5.31 audit): on a real machine, 6 of the doctor's 12
+    warnings came from a `~/.grok/marketplace-cache/…` copy of v1.4.3 abandoned
+    weeks earlier. Every one was correct and every one was noise — a cache from
+    before `command-guard-hook` existed necessarily fails the check for it.
+    Warning fatigue is how the findings that matter get skimmed past, so a
+    version-mismatched foreign copy collapses. It is NOT blanket: a foreign copy
+    at the SAME version may be a live second install with a real defect.
+
+    The `project_path` candidate (<root>/plugins/playbook/hooks/hooks.json) is
+    the seam used to plant a foreign copy — a real scan source, not a test hook.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.auth = self.root / "live"
+        self.foreign = self.root / "plugins" / "playbook"
+        _write_plugin_tree(self.auth, _good_commands())
+        bad = _good_commands()
+        bad["PreToolUse"] = '"${CLAUDE_PLUGIN_ROOT}/scripts/task-gate-hook"'
+        bad["Stop"] = '"${CLAUDE_PLUGIN_ROOT}/scripts/stop-hook"'
+        _write_plugin_tree(self.foreign, bad)
+
+    def _stamp(self, root: Path, version: str):
+        d = root / ".claude-plugin"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "plugin.json").write_text(
+            json.dumps({"name": "playbook", "version": version}), encoding="utf-8")
+
+    def _foreign_rows(self, verbose=False):
+        env = {"CLAUDE_PLUGIN_ROOT": str(self.auth)}
+        report = hooks_check_report(project_path=str(self.root), env=env,
+                                    verbose=verbose)
+        return [r for r in report if str(self.foreign) in r[0] + r[1]]
+
+    def test_the_foreign_copy_is_actually_scanned(self):
+        """Guard the seam itself: if the scanner stopped reading project_path,
+        every assertion below would pass vacuously."""
+        self._stamp(self.foreign, "1.4.3")
+        self.assertTrue(self._foreign_rows(verbose=True),
+                        "the planted foreign copy was never scanned")
+
+    def test_older_version_copy_collapses_to_one_row(self):
+        self._stamp(self.foreign, "1.4.3")
+        rows = self._foreign_rows()
+        self.assertEqual(len(rows), 1, f"not collapsed: {rows}")
+        label, detail = rows[0]
+        self.assertIn("stale install copy", label)
+        self.assertIn("1.4.3", detail, "the collapsed row must name the version")
+        self.assertIn("--verbose", detail, "it must say how to see the rest")
+        self.assertRegex(detail, r"\d+ issue\(s\)")
+
+    def test_verbose_enumerates_them_again(self):
+        self._stamp(self.foreign, "1.4.3")
+        self.assertGreater(len(self._foreign_rows(verbose=True)), 1,
+                           "--verbose must not hide anything")
+
+    def test_unreadable_version_also_collapses(self):
+        """No manifest at all is an abandoned tree too — and it must not crash."""
+        rows = self._foreign_rows()
+        self.assertEqual(len(rows), 1, f"not collapsed: {rows}")
+        self.assertIn("version unreadable", rows[0][1])
+
+    def test_same_version_copy_is_still_enumerated(self):
+        """The safety half: a foreign copy at the running version could be a
+        genuinely live second install, so its findings stay individually visible.
+        """
+        from tasks.hooks_check import _code_version
+        code_v = _code_version()
+        self.assertTrue(code_v, "the running tree must have a readable version")
+        self._stamp(self.foreign, code_v)
+        self.assertGreater(len(self._foreign_rows()), 1,
+                           "a same-version copy was wrongly collapsed")
+
+    def test_a_clean_stale_copy_says_nothing_at_all(self):
+        """Negative control: collapsing must not invent a row for a copy that
+        has no findings."""
+        _write_plugin_tree(self.foreign, _good_commands())
+        self._stamp(self.foreign, "1.0.0")
+        self.assertEqual(self._foreign_rows(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

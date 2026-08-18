@@ -93,7 +93,13 @@ def cmd_audit(cmd_args):
 
 
 def cmd_doctor(cmd_args):
-    """The `tasks doctor` arm — body moved verbatim from cli.py (1.5.9 split)."""
+    """The `tasks doctor` arm — body moved verbatim from cli.py (1.5.9 split).
+
+    `--verbose` enumerates every finding in every install copy it can see;
+    without it, a foreign copy of a different version collapses to one line
+    (see hooks_check.hooks_check_report).
+    """
+    verbose = "--verbose" in (cmd_args or []) or "-v" in (cmd_args or [])
     project_path = find_project_root()
     passed = 0
     failed = 0
@@ -272,7 +278,7 @@ def cmd_doctor(cmd_args):
     # Advisory; never crashes doctor.
     try:
         from tasks.hooks_check import hooks_check_report
-        for _label, _detail in hooks_check_report(project_path):
+        for _label, _detail in hooks_check_report(project_path, verbose=verbose):
             warn(_label, _detail)
     except Exception as e:  # advisory — doctor must never crash here
         warn("hooks: command-quoting check ran", f"skipped ({e})")

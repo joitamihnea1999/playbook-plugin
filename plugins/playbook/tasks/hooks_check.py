@@ -227,7 +227,36 @@ def candidate_hooks_paths(project_path, env=None) -> list[Path]:
     return resolved
 
 
-def hooks_check_report(project_path, env=None) -> list[tuple[str, str]]:
+def _copy_version(hooks_path: Path) -> str:
+    """Version of the install copy that owns this hooks.json, "" if unreadable.
+
+    hooks.json lives at <root>/hooks/hooks.json, the manifest at
+    <root>/.claude-plugin/plugin.json.
+    """
+    try:
+        import json as _json
+        manifest = hooks_path.parent.parent / ".claude-plugin" / "plugin.json"
+        data = _json.loads(manifest.read_text(encoding="utf-8"))
+        v = data.get("version", "")
+        return v if isinstance(v, str) else ""
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _code_version() -> str:
+    """Version of the tree this code runs from, "" if unreadable."""
+    try:
+        import json as _json
+        manifest = (Path(__file__).resolve().parent.parent
+                    / ".claude-plugin" / "plugin.json")
+        data = _json.loads(manifest.read_text(encoding="utf-8"))
+        v = data.get("version", "")
+        return v if isinstance(v, str) else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def hooks_check_report(project_path, env=None, verbose: bool = False) -> list[tuple[str, str]]:
     """Doctor §1f payload: (label, detail) warnings across every real copy.
 
     Thin, side-effect-free glue over candidate_hooks_paths + hook_command_issues
@@ -240,6 +269,15 @@ def hooks_check_report(project_path, env=None) -> list[tuple[str, str]]:
     a stale grok copy WAS the firing one in the AloVet bug — but a finding in
     a stray cache must not read like a defect in the live install. When no
     authoritative copy resolves, ranking is impossible and labels stay plain.
+
+    1.5.32: a foreign copy of a DIFFERENT version is collapsed to a single line.
+    An abandoned cache from an old release fails every check a since-changed hook
+    contract added, and on a real machine that was two thirds of the doctor's
+    entire warning surface — warning fatigue is how the findings that matter get
+    skimmed past. The collapse is version-keyed, not blanket: a foreign copy at
+    the SAME version as the running code may be a genuinely live second install
+    with a genuinely broken binding, so those are still enumerated in full.
+    `verbose=True` enumerates everything (`tasks doctor --verbose`).
     """
     report: list[tuple[str, str]] = []
     auth = authoritative_hooks_path(env=env)
@@ -249,8 +287,10 @@ def hooks_check_report(project_path, env=None) -> list[tuple[str, str]]:
             auth_key = str(auth.resolve())
         except OSError:
             auth_key = None
+    code_v = _code_version()
     for path in candidate_hooks_paths(project_path, env=env):
         label = f"hooks: {path}"
+        is_auth = True
         if auth_key is not None:
             try:
                 is_auth = str(path.resolve()) == auth_key
@@ -259,7 +299,23 @@ def hooks_check_report(project_path, env=None) -> list[tuple[str, str]]:
             if not is_auth:
                 label = (f"hooks (other install copy — not the one this CLI "
                          f"runs from): {path}")
-        for issue in hook_command_issues(path):
+        issues = hook_command_issues(path)
+        if not issues:
+            continue
+        copy_v = _copy_version(path)
+        stale = (not is_auth) and (not verbose) and (copy_v != code_v)
+        if stale:
+            shown = f"v{copy_v}" if copy_v else "version unreadable"
+            report.append((
+                "hooks (stale install copy — not the one this CLI runs from)",
+                f"{path} ({shown}, this code is v{code_v or '?'}) — "
+                f"{len(issues)} issue(s), expected for an older release. "
+                f"First: {issues[0]} "
+                f"[delete that install or refresh it; "
+                f"`tasks doctor --verbose` lists all {len(issues)}]"
+            ))
+            continue
+        for issue in issues:
             report.append((label, issue))
     return report
 
