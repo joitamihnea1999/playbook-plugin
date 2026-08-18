@@ -16,6 +16,37 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/gate-echo-lib.sh"
 
 PROJECT_DIR="$PWD"
+
+# $1 is a free-text display name, so an unrecognised FLAG would otherwise be
+# adopted as the project's name and written into MIND_MAP.md — while init went
+# ahead and provisioned, including the global touches (~/.profile, ~/.claude).
+# An inspection flag must never mutate anything: answer it and exit.
+case "${1-}" in
+    -h|--help)
+        cat <<'USAGE'
+Usage: init [project-display-name]
+
+Mechanical project setup for the playbook plugin. Operates on the current
+directory (assumed to be the project root) and is safe to re-run — existing
+files are reported as skipped, not overwritten.
+
+  project-display-name   Title used in MIND_MAP.md (default: basename of cwd).
+
+Provisions: .agent/ state dirs (or .agent/<user>/ in a multi-user repo),
+.claude/bin/ wrappers, settings.json permissions, CLAUDE.md, MIND_MAP.md stub,
+the monitor scaffold, and the shell bash-log hookup.
+
+Normally invoked for you by /playbook:init.
+USAGE
+        exit 0
+        ;;
+    -*)
+        echo "init: unknown option '$1'" >&2
+        echo "The only argument is an optional project display name. See: init --help" >&2
+        exit 2
+        ;;
+esac
+
 PROJECT_NAME="${1:-$(basename "$PWD")}"
 
 # Everything init provisions is per-user runtime state, so it belongs in the

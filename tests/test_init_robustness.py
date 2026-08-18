@@ -42,6 +42,46 @@ class InitRobustness(unittest.TestCase):
             cwd=project, env=env, text=True, capture_output=True,
         )
 
+    def _run_init_args(self, project: Path, *argv):
+        """init with arbitrary argv — for the flag contract below."""
+        project.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)  # never touch the real ~/.claude
+        return subprocess.run(
+            ["bash", str(INIT), *argv],
+            cwd=project, env=env, text=True, capture_output=True,
+        )
+
+    @staticmethod
+    def _provisioned(project: Path) -> list[str]:
+        return [p.name for p in project.iterdir() if p.name != ".git"]
+
+    def test_help_prints_usage_and_provisions_nothing(self):
+        """`init --help` used to be adopted as the project DISPLAY NAME: init ran
+        in full — global touches included — and wrote "# Mind Map — --help".
+        An inspection flag must answer and exit without mutating anything."""
+        project = Path(self._tmp.name) / "helponly"
+        r = self._run_init_args(project, "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Usage: init", r.stdout)
+        self.assertEqual(self._provisioned(project), [],
+                         "--help provisioned files instead of printing usage")
+
+    def test_unknown_flag_is_rejected_not_used_as_a_name(self):
+        project = Path(self._tmp.name) / "badflag"
+        r = self._run_init_args(project, "--bogus")
+        self.assertEqual(r.returncode, 2, f"unknown flag accepted: {r.stdout}")
+        self.assertEqual(self._provisioned(project), [],
+                         "a rejected flag still provisioned files")
+
+    def test_a_leading_dash_free_name_is_still_a_name(self):
+        """The guard must not break the one real argument."""
+        project = Path(self._tmp.name) / "named"
+        r = self._run_init_args(project, "My Project")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("# Mind Map — My Project",
+                      (project / "MIND_MAP.md").read_text(encoding="utf-8"))
+
     def test_init_completes_with_single_quote_path(self):
         project = Path(self._tmp.name) / "John's proj"
         r = self._run_init(project)
