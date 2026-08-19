@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://playbook.local/schemas/guarantee-ledger-v1.json",
+  "title": "Playbook guarantee ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "ledger_version", "guarantees"],
+  "properties": {
+    "$schema": {"const": "guarantee-ledger.schema.json"},
+    "schema_version": {"const": 1},
+    "ledger_version": {"type": "string", "format": "date", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+    "guarantees": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/guarantee"}
+    }
+  },
+  "$defs": {
+    "guarantee": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "category", "statement", "owner", "failure_consequence",
+        "claim_kind", "proofs", "applicable_platforms", "applicable_providers",
+        "status", "missing_evidence_or_limitation", "follow_up_phases",
+        "required_live_evidence", "semantic_protocol", "violation_reproduction"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^PB-[A-Z0-9]+(?:-[A-Z0-9]+)*$"},
+        "category": {"enum": ["task-lifecycle", "risk-and-close", "hook-payload-and-paths", "command-safety", "sessions-and-attribution", "monitor", "judges-and-reviews", "providers-and-hooks", "installation-and-upgrade", "sandbox", "mind-map", "merge", "configuration", "doctor", "compatibility-and-package", "cli-contracts", "performance"]},
+        "statement": {"type": "string", "minLength": 1},
+        "owner": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/ownerBinding"}},
+        "failure_consequence": {"enum": ["Critical", "High", "Medium", "Low"]},
+        "claim_kind": {"enum": ["mechanical", "semantic"]},
+        "proofs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/proof"}},
+        "applicable_platforms": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["linux", "macos", "windows-git-bash"]}},
+        "applicable_providers": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["claude", "codex", "antigravity", "grok", "pi"]}},
+        "status": {"enum": ["verified_by_current_executable_evidence", "partially_evidenced", "unverified", "missing_evidence", "known_violation", "not_applicable"]},
+        "missing_evidence_or_limitation": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "follow_up_phases": {"type": "array", "uniqueItems": true, "items": {"type": "integer", "minimum": 2, "maximum": 11}},
+        "required_live_evidence": {"type": "array", "items": {"$ref": "#/$defs/liveEvidence"}},
+        "semantic_protocol": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/semanticProtocol"}]},
+        "violation_reproduction": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/violationReproduction"}]}
+      }
+    },
+    "proof": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "path", "reference", "boundary", "negative_control", "limitations"],
+      "properties": {
+        "type": {"enum": ["executable unit", "executable integration", "packaged-install test", "live-provider test", "live-platform test", "manual/human judgment", "missing"]},
+        "path": {"type": ["string", "null"]},
+        "reference": {"type": "string", "minLength": 1},
+        "boundary": {"enum": ["unit", "subprocess", "real-os", "packaged-install", "live-provider", "live-platform", "human-review", "none"]},
+        "negative_control": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/negativeControl"}]},
+        "limitations": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "violationReproduction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "path", "reference", "invocation", "observed", "platforms", "artifacts", "phase"],
+      "properties": {
+        "type": {"enum": ["executable integration", "executable unit", "live-platform test", "manual/human judgment"]},
+        "path": {"type": "string", "minLength": 1},
+        "reference": {"type": "string", "minLength": 1},
+        "invocation": {"type": "string", "minLength": 1},
+        "observed": {"type": "string", "minLength": 1},
+        "platforms": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["linux", "macos", "windows-git-bash"]}},
+        "artifacts": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "phase": {"type": "integer", "minimum": 2, "maximum": 11}
+      }
+    },
+    "ownerBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "reference"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "reference": {"type": "string", "minLength": 1, "pattern": "^(?:symbol:[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)?|function:[A-Za-z_][\\w:.-]*|case-arm:[A-Za-z0-9_*?.@%+=:,/\\[\\]{}-]+|section:.+|pointer:/.*|whole-file)$"}
+      }
+    },
+    "negativeControl": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "reference"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "reference": {"type": "string", "minLength": 1}
+      }
+    },
+    "liveEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "targets", "phase", "reason"],
+      "properties": {
+        "type": {"enum": ["live-provider test", "live-platform test"]},
+        "targets": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["linux", "macos", "windows-git-bash", "claude", "codex", "antigravity", "grok", "pi"]}},
+        "phase": {"const": 8},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "semanticProtocol": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "repeated_samples", "bounded_conclusion"],
+      "properties": {
+        "protocol": {"type": "string", "minLength": 1},
+        "repeated_samples": {"type": "integer", "minimum": 2},
+        "bounded_conclusion": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
