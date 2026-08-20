@@ -26,6 +26,17 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="$HERE/../plugins/playbook/scripts"
 
+# The lane-agreement assertions below (S9, S16) compare a SHELL-derived path to
+# a PYTHON-derived path. On Windows/Git Bash those legitimately differ in string
+# form — MSYS-mount (/tmp/…, forward slashes) vs native drive (C:\Users\…) — even
+# though both name the same directory. Canonicalize BOTH sides through the same
+# product seam so the comparison tests "same location", not "same byte string":
+# the shell half via gate-echo-lib.sh's _canonical_path (cygpath -m on Windows,
+# identity elsewhere) and the Python half via tasks.core.canonical_path
+# (Path.as_posix()). On Linux/macOS both are identities, so these stay green.
+# shellcheck source=/dev/null
+. "$SCRIPTS/gate-echo-lib.sh"
+
 PASS=0
 FAIL=0
 pass() { echo "  PASS  $*"; PASS=$((PASS+1)); }
@@ -246,11 +257,14 @@ echo "=== S9: wrapper lane agrees with what the tasks CLI reads ==="
     run_wrapper codex "$d"
     wrapper_lane="$(find "$d/.agent" -type d -name 'pid-*' | head -1)"
     wrapper_lane="$(dirname "$(dirname "$wrapper_lane")")"
+    # Canonicalize both halves to the same form (identity off Windows) — see the
+    # note by the gate-echo-lib.sh source at the top of this file.
+    wrapper_lane="$(_canonical_path "$wrapper_lane")"
     cli_lane="$(PYTHONPATH="$SCRIPTS/.." python3 -c '
 import sys
 from pathlib import Path
-from tasks.core import resolve_agent_dir
-print(resolve_agent_dir(Path(sys.argv[1])))
+from tasks.core import resolve_agent_dir, canonical_path
+print(canonical_path(resolve_agent_dir(Path(sys.argv[1]))))
 ' "$d")"
     assert_eq "$wrapper_lane" "$cli_lane" "S9 wrapper lane == tasks.core.resolve_agent_dir"
 }
@@ -591,12 +605,12 @@ echo "=== S16: shell command loggers write the lane the CLI reads (impl-panel I6
     BASH_LOG="$SCRIPTS/bash-log.sh"
     ZSH_LOG="$SCRIPTS/bash-log.zsh"
 
-    cli_lane() {   # the file the tasks CLI will read
+    cli_lane() {   # the file the tasks CLI will read (canonical cross-language form)
         PYTHONPATH="$SCRIPTS/.." python3 -c '
 import sys
 from pathlib import Path
-from tasks.core import resolve_agent_dir
-print(resolve_agent_dir(Path(sys.argv[1])))
+from tasks.core import resolve_agent_dir, canonical_path
+print(canonical_path(resolve_agent_dir(Path(sys.argv[1]))))
 ' "$1" 2>/dev/null
     }
 
@@ -624,7 +638,7 @@ with open(d/".agent"/"current_user", "w", newline="") as fh:
     log_bash "$d"; log_zsh "$d"
     assert_eq "$(ls "$d/.agent/bash_history" 2>/dev/null)" "$d/.agent/bash_history" \
         "S16 legacy: history at the root lane"
-    assert_eq "$d/.agent" "$(cli_lane "$d")" "S16 legacy: writer lane == CLI reader lane"
+    assert_eq "$(_canonical_path "$d/.agent")" "$(cli_lane "$d")" "S16 legacy: writer lane == CLI reader lane"
 
     # --- multi-user: the lane, and NOT the root ---
     d="$WORK/s16-mu"; build_project "$d" multi-user alice
@@ -635,7 +649,7 @@ with open(d/".agent"/"current_user", "w", newline="") as fh:
     [ -f "$d/.agent/bash_history" ] \
         && fail "S16 multi-user: also wrote the root history" \
         || pass "S16 multi-user: no root history"
-    assert_eq "$d/.agent/alice/bash_history" "$(cli_lane "$d")/bash_history" \
+    assert_eq "$(_canonical_path "$d/.agent/alice/bash_history")" "$(cli_lane "$d")/bash_history" \
         "S16 multi-user: writer file == the file tasks retro/context read"
     # Both shells logged into the same file (bash always; zsh only if present).
     _EXPECT_LOGS=$([ "$_HAVE_ZSH" = 1 ] && echo 2 || echo 1)

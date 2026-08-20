@@ -22,7 +22,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "plugins" / "playbook" / "scripts" / "task-gate-hook"
 
 
-@unittest.skipIf(os.geteuid() == 0, "chmod cannot restrict root")
+# os.geteuid does not exist on native Windows; evaluating it at decorator level
+# raised AttributeError and collapsed the whole module to a _FailedTest import
+# error. getattr with a non-root default (matching test_session_gc_policy.py)
+# keeps the module importable everywhere — the perm test still runs and gates
+# only where it is meaningful.
+@unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0, "chmod cannot restrict root")
 class GateMkdirFailOpen(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

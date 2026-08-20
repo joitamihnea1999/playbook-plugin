@@ -2,6 +2,38 @@
 # gate-echo-lib.sh
 # Shared logic for hooks: project root detection + gate parsing.
 
+# _canonical_path PATH
+# Canonical cross-language form of an absolute path, so a Git-Bash shell and a
+# native-Windows Python resolve the SAME string for the same location.
+#
+# The divergence this fixes: under MSYS/Git Bash the shell speaks POSIX-mount
+# paths (/tmp/…, forward slashes), but the Python CLI runs as a native Windows
+# process — MSYS converts its argv and .resolve() yields drive-letter paths
+# (C:\Users\…). The two halves then address one directory by two different
+# strings, so any string comparison across the seam disagrees.
+#
+# Canonical direction = forward-slash drive form (C:/Users/…). It is the only
+# form BOTH halves can produce AND use for real I/O:
+#   * the MSYS mount form (/tmp/…) is unusable by native Python for file I/O;
+#   * the pure-backslash native form (C:\…) is hostile to bash, which treats
+#     backslash as an escape — so we do NOT reuse the CI's `cygpath -w`
+#     (that exists for CreateProcess exec, a different boundary), we use
+#     `cygpath -m` (mixed: drive letter + forward slashes). Python meets it
+#     from the other side with `Path.as_posix()` (see tasks.core.canonical_path).
+#
+# Applied only at the cross-language BOUNDARY (never threaded through the
+# resolvers themselves — that would break bash's own I/O and force every call
+# site to convert). cygpath's presence IS the Windows/Cygwin signal: on Linux
+# and macOS there is no cygpath, so this is a pure identity and those lanes are
+# byte-for-byte unchanged.
+_canonical_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
 # find_project_root
 # Walk up from $PWD looking for .agent/tasks/ (legacy) or .agent/<user>/tasks/
 # (multi-user) — the definitive playbook marker.

@@ -215,6 +215,25 @@ def resolve_agent_dir(project_path: Path) -> Path:
     return project_path / ".agent" / name
 
 
+def canonical_path(path: "Path | str") -> str:
+    """Canonical cross-language string form of a path: forward-slash separators.
+
+    The seam this closes: under MSYS/Git Bash the shell hooks speak POSIX-mount
+    paths (forward slashes), while this CLI runs as a native Windows process
+    where ``str(Path(...))`` yields backslashes (``C:\\Users\\…``). A shell
+    writer and a Python reader then name the same directory with two different
+    strings, and any cross-half string comparison disagrees.
+
+    ``as_posix()`` is the Python half of the fix: it renders the native path
+    with forward slashes (``C:/Users/…``), meeting the shell's ``cygpath -m``
+    output (see ``_canonical_path`` in scripts/gate-echo-lib.sh). On POSIX this
+    is identical to ``str()`` for an absolute path, so Linux and macOS behaviour
+    is unchanged. Use ONLY at the boundary where a path crosses to/from the
+    shell — never to build paths for I/O, which must stay native ``Path``.
+    """
+    return Path(path).as_posix()
+
+
 # ── Configuration (.agent/config.json) ──────────────────────────────────────
 # Read at the .agent/ ROOT (not the per-user subdir — these are shared across
 # users in a multi-user repo). Precedence for every setting: CLI flag > env var >

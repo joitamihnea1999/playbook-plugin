@@ -377,7 +377,11 @@ class BootstrapGuards(unittest.TestCase):
         (proj / ".agent" / "tasks").mkdir(parents=True)
         slug = str(proj).replace("/", "-")
         sess_dir = home / ".claude" / "projects" / slug
-        sess_dir.mkdir(parents=True)
+        # exist_ok: on Windows str(proj) keeps backslashes and a drive letter,
+        # so `home / … / slug` reinterprets the slug as absolute and resolves
+        # back onto the existing proj dir — mkdir(parents=True) then raises
+        # FileExistsError (WinError 183). Harmless off Windows (fresh path).
+        sess_dir.mkdir(parents=True, exist_ok=True)
         (sess_dir / "front.jsonl").write_bytes(FULL_TURN)
         r = self._run({"PLAYBOOK_PROJECT_DIR": str(proj),
                        "PLAYBOOK_AGENT_DIR": str(proj / ".agent"),

@@ -96,7 +96,11 @@ class BootstrapBinding(unittest.TestCase):
     def _slugdir(self, proj: Path, home: Path) -> Path:
         slug = str(proj).replace("/", "-")
         d = home / ".claude" / "projects" / slug
-        d.mkdir(parents=True)
+        # exist_ok: on Windows str(proj) keeps backslashes and a drive letter,
+        # so joining `slug` reinterprets it as absolute and `d` resolves back
+        # onto the existing proj dir — mkdir(parents=True) then raises
+        # FileExistsError (WinError 183). Harmless off Windows (fresh path).
+        d.mkdir(parents=True, exist_ok=True)
         return d
 
     def test_pointer_beats_newer_mtime_decoy(self):

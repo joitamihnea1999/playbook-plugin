@@ -168,6 +168,34 @@ jobs:
           export PLAYBOOK_VERIFY_BASH="$BASH_PATH"
           echo "PLAYBOOK_VERIFY_BASH=$BASH_PATH"
           python scripts/verify | tee verify-windows.txt
+
+      # LEGIBILITY (Windows only): scripts/verify's console output caps the
+      # per-failure detail (`... and N more`), so on a broad Windows failure the
+      # GitHub log truncates and 400+ failures become unattributable. Capture the
+      # COMPLETE, uncapped detail to a file and upload it: the whole unittest
+      # suite at -v (every test id + full traceback) plus each shell fixture's
+      # full output. Diagnostic only — `|| true` keeps it from failing the job
+      # (the lane is continue-on-error anyway), and this step exists solely to
+      # make the artifact whole. Linux/macOS are untouched — this is a
+      # Windows-job-only step.
+      - name: Full failure detail (attributable artifact)
+        if: always()
+        run: |
+          # Match scripts/verify's env hygiene so a dogfooding logger cannot
+          # forge results (see scripts/verify `env()`).
+          unset BASH_ENV PLAYBOOK_SESSION_ID PLAYBOOK_ROLE PLAYBOOK_EVAL_CONFIG
+          {
+            echo "===== unittest discover -v (full, uncapped) ====="
+            python -m unittest discover -s tests -v 2>&1 || true
+            echo
+            echo "===== wrapper-multiuser-fixture.sh (full) ====="
+            ( cd "$(mktemp -d)" && bash "$GITHUB_WORKSPACE/tests/wrapper-multiuser-fixture.sh" 2>&1 ) || true
+            echo
+            echo "===== merge-verify-fixture.sh (full) ====="
+            ( cd "$(mktemp -d)" && bash "$GITHUB_WORKSPACE/tests/merge-verify-fixture.sh" 2>&1 ) || true
+          } > verify-windows-full.txt 2>&1
+          echo "wrote verify-windows-full.txt ($(wc -l < verify-windows-full.txt) lines)"
+
       - name: Step summary
         if: always()
         run: |
@@ -176,4 +204,6 @@ jobs:
         if: always()
         with:
           name: verify-windows-py3.10
-          path: verify-windows.txt
+          path: |
+            verify-windows.txt
+            verify-windows-full.txt
