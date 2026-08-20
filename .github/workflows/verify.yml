@@ -1,0 +1,169 @@
+name: verify
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # REQUIRED from day one: this is the host the suite has always been run on.
+  linux:
+    name: linux / py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # scripts/verify enumerates via `git ls-files`
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: scripts/verify
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/verify | tee verify-linux-py${{ matrix.python }}.txt
+      - name: Step summary
+        if: always()
+        shell: bash
+        run: |
+          { echo '```'; cat verify-linux-py${{ matrix.python }}.txt; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verify-linux-py${{ matrix.python }}
+          path: verify-linux-py${{ matrix.python }}.txt
+
+  # DISCOVERY, not a gate: macOS has never run this suite. Promote to required
+  # (drop continue-on-error) once it goes green.
+  macos:
+    name: macos / py3.10 (discovery)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: scripts/verify
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/verify | tee verify-macos.txt
+
+      # bash-log.zsh has never been executed anywhere: zsh is not installed on
+      # the Linux dev host. macOS ships zsh, so run the real file against the
+      # four lane shapes and assert the files it actually writes.
+      - name: bash-log.zsh lane shapes (real zsh)
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          # A dogfooding host propagates the plugin's own bash-log via BASH_ENV,
+          # which writes .agent/bash_history into every scratch project and would
+          # forge these assertions (see tests/test_shell_fixtures.py).
+          unset BASH_ENV
+          LOGGER="$PWD/plugins/playbook/scripts/bash-log.zsh"
+          ZDOT="$(mktemp -d)"; WORK="$(mktemp -d)"; RC=0
+          printf 'source %s\n' "$LOGGER" > "$ZDOT/.zshenv"
+          PROBE="playbook-zsh-probe"
+
+          # $1 scenario name, $2 expected history file relative to .agent/ ("" = nothing written)
+          lane() {
+            name="$1"; want="$2"; proj="$WORK/$name"
+            ( cd "$proj" && ZDOTDIR="$ZDOT" HOME="$ZDOT" zsh -c "echo $PROBE" >/dev/null 2>&1 ) || true
+            got="$(cd "$proj" && find .agent -name bash_history -type f | sort | tr '\n' ' ')"
+            got="${got% }"
+            if [ "$got" = "$want" ]; then
+              echo "  PASS  $name → [${want:-nothing}]"
+            else
+              echo "  FAIL  $name → expected [${want:-nothing}], got [${got:-nothing}]"; RC=1
+            fi
+          }
+
+          # 1. valid marker → that user's lane, never the root
+          mkdir -p "$WORK/valid-marker/.agent/alice"
+          echo alice > "$WORK/valid-marker/.agent/current_user"
+          lane valid-marker ".agent/alice/bash_history"
+
+          # 2. no marker + root .agent/tasks/ → root lane
+          mkdir -p "$WORK/no-marker-root-tasks/.agent/tasks"
+          lane no-marker-root-tasks ".agent/bash_history"
+
+          # 3. no marker + no root tasks/ → the owning lane is unknown: write nothing
+          mkdir -p "$WORK/no-marker-no-tasks/.agent"
+          lane no-marker-no-tasks ""
+
+          # 4. unusable marker → write nothing (root fallback = cross-user leak)
+          mkdir -p "$WORK/invalid-marker/.agent/alice"
+          printf '../evil\n' > "$WORK/invalid-marker/.agent/current_user"
+          lane invalid-marker ""
+
+          echo "bash-log.zsh lane shapes: rc=$RC" | tee -a verify-macos.txt
+          exit $RC
+
+      # macOS /bin/bash is 3.2 — the fixtures have only ever run under bash 5.
+      - name: shell fixtures under /bin/bash (bash 3.2)
+        if: always()
+        shell: bash
+        run: |
+          unset BASH_ENV
+          echo "/bin/bash version: $(/bin/bash --version | head -1)"
+          RC=0
+          for f in wrapper-multiuser-fixture.sh merge-verify-fixture.sh; do
+            ( cd "$(mktemp -d)" && /bin/bash "$GITHUB_WORKSPACE/tests/$f" ) || RC=1
+          done
+          echo "bash 3.2 fixtures: rc=$RC" | tee -a verify-macos.txt
+          exit $RC
+
+      - name: Step summary
+        if: always()
+        shell: bash
+        run: |
+          { echo '```'; cat verify-macos.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verify-macos-py3.10
+          path: verify-macos.txt
+
+  # DISCOVERY, not a gate: Windows/Git Bash has never run this suite. Promote to
+  # required (drop continue-on-error) once it goes green.
+  windows:
+    name: windows / py3.10 git-bash (discovery)
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash          # Git Bash / MSYS on windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: scripts/verify
+        run: |
+          set -o pipefail
+          python scripts/verify | tee verify-windows.txt
+      - name: Step summary
+        if: always()
+        run: |
+          { echo '```'; cat verify-windows.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verify-windows-py3.10
+          path: verify-windows.txt

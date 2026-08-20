@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""Canonical verification entrypoint: run every check, print PASS/FAIL/SKIP.
+
+Stdlib-only, Python 3 — must behave identically on Linux, macOS and
+Windows/Git Bash. Shell fixtures are invoked as `bash` subprocesses.
+Exit code is non-zero iff at least one check FAILed; SKIP never fails the run.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PY_FLOOR = (3, 10)          # declared floor: docs/guarantee-ledger.md
+PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
+
+results: list[dict] = []
+CHECKS: list[tuple] = []
+
+
+def env() -> dict:
+    """Child env with dogfooding state stripped (see tests/test_shell_fixtures.py)."""
+    e = dict(os.environ)
+    for k in ("BASH_ENV", "PLAYBOOK_SESSION_ID", "PLAYBOOK_ROLE", "PLAYBOOK_EVAL_CONFIG"):
+        e.pop(k, None)
+    return e
+
+
+def run(cmd: list[str], cwd: Path | str = ROOT, timeout: int = 900):
+    p = subprocess.run(cmd, cwd=str(cwd), env=env(), timeout=timeout,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                       errors="replace")
+    return p.returncode, p.stdout
+
+
+def tail(text: str, n: int = 2) -> str:
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    return " / ".join(lines[-n:])[:220] if lines else "(no output)"
+
+
+def ut_tail(text: str) -> str:
+    """Prefer unittest's own verdict line over whatever a test printed last."""
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        if ln == "OK" or ln.startswith(("OK ", "FAILED", "Ran ", "No tests")):
+            i = lines.index(ln)
+            return " / ".join(lines[max(0, i - 1):i + 1])[:220]
+    return tail(text)
+
+
+def record(name, status, detail="", started=None):
+    results.append({"check": name, "status": status, "detail": detail,
+                    "seconds": round(time.time() - started, 1) if started else 0.0})
+
+
+def check(name, needs: dict[str, str] | None = None):
+    """Decorator: register a check in declaration order; main() runs them."""
+    def deco(fn):
+        CHECKS.append((name, needs or {}, fn))
+        return fn
+    return deco
+
+
+def run_checks() -> None:
+    for name, needs, fn in CHECKS:
+        missing = [(t, why) for t, why in needs.items() if shutil.which(t) is None]
+        if missing:
+            tool, why = missing[0]
+            record(name, SKIP, f"{tool} not found on PATH — {why}")
+            continue
+        t0 = time.time()
+        try:
+            status, detail = fn()
+        except subprocess.TimeoutExpired:
+            status, detail = FAIL, "timed out"
+        except Exception as exc:                        # a broken check is a FAIL
+            status, detail = FAIL, f"{type(exc).__name__}: {exc}"
+        record(name, status, detail, t0)
+
+
+def tracked(*suffixes: str) -> list[str]:
+    rc, out = run(["git", "ls-files", "-z"], timeout=120)
+    if rc != 0:
+        raise RuntimeError("git ls-files failed")
+    files = [f for f in out.split("\0") if f]
+    return [f for f in files if not suffixes or f.endswith(suffixes)]
+
+
+def no_dup_pairs(pairs):
+    seen = set()
+    for k, _ in pairs:
+        if k in seen:
+            raise ValueError(f"duplicate member: {k!r}")
+        seen.add(k)
+    return dict(pairs)
+
+
+def is_shell(rel: str) -> bool:
+    if rel.endswith(".ts"):
+        return False
+    if rel.endswith((".sh", ".zsh")):
+        return True
+    p = ROOT / rel
+    try:
+        first = p.open("rb").readline(200).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return first.startswith("#!") and ("sh" in first.split("/")[-1].split()[0] or " sh" in first)
+
+
+GIT = {"git": "cannot enumerate tracked files"}
+BASH = {"bash": "shell fixtures need bash"}
+
+
+@check("unittest discover")
+def _unittest():
+    rc, out = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"])
+    return (PASS if rc == 0 else FAIL), ut_tail(out)
+
+
+@check("wrapper-multiuser fixture", {**BASH, **GIT})
+def _wrapper():
+    with tempfile.TemporaryDirectory() as td:
+        rc, out = run(["bash", str(ROOT / "tests" / "wrapper-multiuser-fixture.sh")], cwd=td)
+    counts = [ln for ln in out.splitlines() if "passed," in ln and "failed" in ln]
+    detail = counts[-1].strip() if counts else tail(out)
+    return (PASS if rc == 0 else FAIL), detail
+
+
+@check("merge-verify fixture", {**BASH, **GIT})
+def _merge():
+    with tempfile.TemporaryDirectory() as td:
+        rc, out = run(["bash", str(ROOT / "tests" / "merge-verify-fixture.sh")], cwd=td)
+    counts = [ln for ln in out.splitlines() if "passed," in ln and "failed" in ln]
+    return (PASS if rc == 0 else FAIL), (counts[-1].strip() if counts else tail(out))
+
+
+@check("guarantee ledger")
+def _ledger():
+    rc1, out1 = run([sys.executable, "scripts/guarantee_ledger.py", "--summary"], timeout=300)
+    rc2, out2 = run([sys.executable, "-m", "unittest", "tests.test_guarantee_ledger", "-q"], timeout=300)
+    if rc1 == 0 and rc2 == 0:
+        return PASS, "--summary ok / unit tests ok"
+    return FAIL, f"--summary rc={rc1}: {tail(out1, 1)} | unittest rc={rc2}: {tail(out2, 1)}"
+
+
+@check("version + mirror parity")
+def _parity():
+    rc, out = run([sys.executable, "-m", "unittest",
+                   "tests.test_version_parity", "tests.test_mirror_sync", "-q"], timeout=600)
+    return (PASS if rc == 0 else FAIL), ut_tail(out)
+
+
+@check("json strict parse", GIT)
+def _json():
+    bad = []
+    files = tracked(".json")
+    for rel in files:
+        try:
+            json.loads((ROOT / rel).read_text(encoding="utf-8"), object_pairs_hook=no_dup_pairs)
+        except Exception as exc:
+            bad.append(f"{rel}: {exc}")
+    return (PASS, f"{len(files)} files, no duplicate members") if not bad else (FAIL, "; ".join(bad[:3]))
+
+
+@check(f"ast.parse @ py{PY_FLOOR[0]}.{PY_FLOOR[1]}", GIT)
+def _ast():
+    bad = []
+    files = tracked(".py")
+    for rel in files:
+        try:
+            ast.parse((ROOT / rel).read_text(encoding="utf-8"), filename=rel,
+                      feature_version=PY_FLOOR)
+        except SyntaxError as exc:
+            bad.append(f"{rel}:{exc.lineno}: {exc.msg}")
+        except Exception as exc:
+            bad.append(f"{rel}: {type(exc).__name__}: {exc}")
+    return (PASS, f"{len(files)} files") if not bad else (FAIL, "; ".join(bad[:3]))
+
+
+@check("bash -n shell files", {**BASH, **GIT})
+def _bashn():
+    bad = []
+    files = [f for f in tracked() if is_shell(f)]
+    for rel in files:
+        rc, out = run(["bash", "-n", rel], timeout=60)
+        if rc != 0:
+            bad.append(f"{rel}: {tail(out, 1)}")
+    return (PASS, f"{len(files)} files") if not bad else (FAIL, "; ".join(bad[:3]))
+
+
+@check("git diff --check", GIT)
+def _diffcheck():
+    rc, out = run(["git", "diff", "--check"], timeout=120)
+    return (PASS, "no whitespace errors") if rc == 0 else (FAIL, tail(out))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Run every check in this repo.")
+    ap.add_argument("--json", action="store_true", help="machine-readable summary on stdout")
+    args = ap.parse_args()
+
+    run_checks()
+    failed = sum(1 for r in results if r["status"] == FAIL)
+    summary = {
+        "root": str(ROOT),
+        "platform": sys.platform,
+        "python": sys.version.split()[0],
+        "checks": results,
+        "totals": {s: sum(1 for r in results if r["status"] == s) for s in (PASS, FAIL, SKIP)},
+        "exit_code": 1 if failed else 0,
+    }
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        w = max(len(r["check"]) for r in results)
+        print(f"\n  playbook verify — {sys.platform}, python {summary['python']}\n")
+        for r in results:
+            print(f"  {r['status']:<5} {r['check']:<{w}}  {r['seconds']:>6.1f}s  {r['detail']}")
+        t = summary["totals"]
+        print(f"\n  {t[PASS]} passed, {t[FAIL]} failed, {t[SKIP]} skipped\n")
+    return summary["exit_code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())
