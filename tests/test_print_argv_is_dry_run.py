@@ -309,9 +309,30 @@ _SEATBELT_PROJECT_ROOTS = [
 ] + ["/Users/ci/work/corpus-proj"]
 
 
+def _emitted(path: str) -> str:
+    """The exact path string build_seatbelt_profile emits for `path`.
+
+    Production runs every path through Path(...).resolve(). On macOS /tmp is a
+    symlink to /private/tmp and /var to /private/var, so a project passed as
+    /tmp/… is EMITTED as /private/tmp/… — resolve() canonicalises the existing
+    symlinked PREFIX even when the leaf does not exist. On Linux the two forms
+    are identical, which is why comparing against the unresolved form passed
+    locally yet failed on macOS CI (10 subtests, 'deny' != 'allow'). The two
+    seatbelt-profile classes below are the one place that difference bites, so
+    every queried path and every literal-string assertion is put through the
+    same resolve() as production — comparing like with like on both platforms.
+    """
+    return str(Path(path).resolve())
+
+
 class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
     """project_writable=False must deny writes to the project subpath — for a
-    project rooted under ANY of _SYSTEM_RW_PATHS, not only outside them."""
+    project rooted under ANY of _SYSTEM_RW_PATHS, not only outside them.
+
+    Paths are compared through _emitted() (= production's Path.resolve()): on
+    macOS /tmp and /var are symlinks, so the profile names /private/tmp… /
+    /private/var… while the raw _SEATBELT_PROJECT_ROOTS strings do not. See
+    _emitted() for why this class is where that bites."""
 
     def _profile(self, project, extra_rw=None):
         return sandbox.build_seatbelt_profile(
@@ -323,7 +344,7 @@ class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
             with self.subTest(project=project):
                 profile = self._profile(project)
                 self.assertIn(
-                    f'(deny file-write* (subpath "{project}"))', profile,
+                    f'(deny file-write* (subpath "{_emitted(project)}"))', profile,
                     "the read-only project must be an explicit terminal deny, not "
                     "merely an omitted require-not exemption:\n" + profile)
 
@@ -333,7 +354,7 @@ class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
                 profile = self._profile(project)
                 self.assertEqual(
                     "deny",
-                    seatbelt_write_decision(profile, project + "/pwned.txt"),
+                    seatbelt_write_decision(profile, _emitted(project) + "/pwned.txt"),
                     "a --ro-project write to the project root must be denied even "
                     "when the project lives under a system rw path:\n" + profile)
 
@@ -343,7 +364,7 @@ class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
                 profile = self._profile(project)
                 self.assertEqual(
                     "deny",
-                    seatbelt_write_decision(profile, project + "/.git/config"),
+                    seatbelt_write_decision(profile, _emitted(project) + "/.git/config"),
                     ".git must stay read-only:\n" + profile)
 
     def test_the_hosting_system_path_itself_stays_writable(self):
@@ -353,7 +374,7 @@ class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
             project = f"{sys_path}/xy/abc123/T/corpus-proj"
             with self.subTest(sys_path=sys_path):
                 profile = self._profile(project)
-                sibling = f"{sys_path}/xy/abc123/T/other-scratch"
+                sibling = _emitted(f"{sys_path}/xy/abc123/T/other-scratch")
                 self.assertEqual(
                     "allow", seatbelt_write_decision(profile, sibling),
                     f"{sys_path} must stay writable outside the project:\n" + profile)
@@ -365,22 +386,25 @@ class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
             with self.subTest(project=project):
                 profile = self._profile(project, extra_rw=[ws])
                 self.assertEqual(
-                    "allow", seatbelt_write_decision(profile, ws + "/wrote"),
+                    "allow", seatbelt_write_decision(profile, _emitted(ws) + "/wrote"),
                     "the --rw workspace inside a read-only project must stay "
                     "writable:\n" + profile)
                 self.assertEqual(
-                    "deny", seatbelt_write_decision(profile, project + "/pwned.txt"),
+                    "deny", seatbelt_write_decision(profile, _emitted(project) + "/pwned.txt"),
                     "only extra_rw is writable inside a read-only project:\n" + profile)
                 # The re-allow must textually FOLLOW the project deny (last wins).
                 self.assertLess(
-                    profile.index(f'(deny file-write* (subpath "{project}"))'),
-                    profile.index(f'(allow file-write* (subpath "{ws}"))'),
+                    profile.index(f'(deny file-write* (subpath "{_emitted(project)}"))'),
+                    profile.index(f'(allow file-write* (subpath "{_emitted(ws)}"))'),
                     "the extra_rw re-allow must come AFTER the project deny:\n" + profile)
 
 
 class WorkerModeSeatbeltProfileUnchanged(unittest.TestCase):
     """The complement: project_writable=True keeps the project writable, and in
-    BOTH modes an extra_rw path inside the project stays writable."""
+    BOTH modes an extra_rw path inside the project stays writable.
+
+    Paths are compared through _emitted() for the same macOS symlink reason as
+    RoProjectSeatbeltProfileDeniesWrites (see _emitted())."""
 
     def test_project_stays_writable_in_worker_mode(self):
         for project in _SEATBELT_PROJECT_ROOTS:
@@ -388,13 +412,13 @@ class WorkerModeSeatbeltProfileUnchanged(unittest.TestCase):
                 profile = sandbox.build_seatbelt_profile(
                     project, project + "/.git", None, project_writable=True)
                 self.assertNotIn(
-                    f'(deny file-write* (subpath "{project}"))', profile,
+                    f'(deny file-write* (subpath "{_emitted(project)}"))', profile,
                     "worker mode must not deny the project:\n" + profile)
                 self.assertEqual(
-                    "allow", seatbelt_write_decision(profile, project + "/edit.txt"),
+                    "allow", seatbelt_write_decision(profile, _emitted(project) + "/edit.txt"),
                     "worker mode must keep the project writable:\n" + profile)
                 self.assertEqual(
-                    "deny", seatbelt_write_decision(profile, project + "/.git/config"),
+                    "deny", seatbelt_write_decision(profile, _emitted(project) + "/.git/config"),
                     ".git must stay read-only even in worker mode:\n" + profile)
 
     def test_extra_rw_inside_project_writable_in_both_modes(self):
@@ -405,7 +429,7 @@ class WorkerModeSeatbeltProfileUnchanged(unittest.TestCase):
                 profile = sandbox.build_seatbelt_profile(
                     project, project + "/.git", [ws], project_writable=writable)
                 self.assertEqual(
-                    "allow", seatbelt_write_decision(profile, ws + "/wrote"),
+                    "allow", seatbelt_write_decision(profile, _emitted(ws) + "/wrote"),
                     f"extra_rw must stay writable (project_writable={writable}):\n"
                     + profile)
 
