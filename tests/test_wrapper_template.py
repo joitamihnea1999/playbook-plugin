@@ -31,6 +31,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -234,7 +235,7 @@ class TestGeneratedWrapperIsComplete(unittest.TestCase):
         (project / ".agent" / "tasks").mkdir(parents=True)
         script = f'source "{lib}"\ncreate_wrapper "{project}" {name}\n'
         proc = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True,
+            [bash_or_skip(), "-c", script], capture_output=True, text=True,
             encoding="utf-8", errors="replace",
         )
         self.assertEqual(proc.returncode, 0, f"create_wrapper failed: {proc.stderr}")

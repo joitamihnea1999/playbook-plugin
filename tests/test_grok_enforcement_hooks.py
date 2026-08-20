@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import unittest
@@ -202,7 +203,7 @@ class GateHookGrokDialectTests(unittest.TestCase):
             for child in sess.iterdir():
                 child.unlink()
         return subprocess.run(
-            ["bash", self.HOOK],
+            [bash_or_skip(), self.HOOK],
             input=json.dumps(payload).encode(),
             cwd=str(project),
             env=env,
@@ -261,7 +262,7 @@ class GateHookGrokDialectTests(unittest.TestCase):
             env = os.environ.copy()
             env["PLAYBOOK_SESSION_ID"] = self.SESSION
             proc = subprocess.run(
-                ["bash", self.HOOK],
+                [bash_or_skip(), self.HOOK],
                 input=json.dumps(
                     {
                         "hookEventName": "pre_tool_use",

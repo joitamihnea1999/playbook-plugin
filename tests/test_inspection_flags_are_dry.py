@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import time
@@ -98,7 +99,7 @@ class LauncherHelpIsDry(unittest.TestCase):
         for name in ("codex", "grok", "agy"):
             with self.subTest(provider=name):
                 r = subprocess.run(
-                    ["bash", str(SCRIPTS / f"playbook-{name}"), "--help"],
+                    [bash_or_skip(), str(SCRIPTS / f"playbook-{name}"), "--help"],
                     cwd=self.project, env=env, capture_output=True, text=True,
                     timeout=30,
                 )
@@ -124,12 +125,12 @@ class BashLogSkipsHookInternals(unittest.TestCase):
         hook.write_text("#!/bin/bash\necho hook-ran\n", encoding="utf-8")
         hook.chmod(0o755)
         env = dict(os.environ, BASH_ENV=str(SCRIPTS / "bash-log.sh"))
-        r = subprocess.run(["bash", str(hook)], cwd=self.project, env=env,
+        r = subprocess.run([bash_or_skip(), str(hook)], cwd=self.project, env=env,
                            capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(self.history.exists(), "hook internals polluted history")
 
-        r = subprocess.run(["bash", "-c", "echo agent-ran"], cwd=self.project,
+        r = subprocess.run([bash_or_skip(), "-c", "echo agent-ran"], cwd=self.project,
                            env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.history.exists(), "real Bash tool shell was not logged")

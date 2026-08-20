@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,7 +45,7 @@ class MarkerFailClosedBase(unittest.TestCase):
         env = dict(os.environ)
         env["PLAYBOOK_SESSION_ID"] = "pid-marker-test"
         return subprocess.run(
-            ["bash", str(SCRIPTS / hook)],
+            [bash_or_skip(), str(SCRIPTS / hook)],
             cwd=self.project, env=env, text=True,
             input=json.dumps(stdin_obj), capture_output=True,
         )

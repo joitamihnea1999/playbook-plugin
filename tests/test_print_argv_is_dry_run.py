@@ -325,6 +325,10 @@ def _emitted(path: str) -> str:
     return str(Path(path).resolve())
 
 
+@unittest.skipIf(sys.platform == "win32",
+                 "seatbelt profile is a macOS-only artifact asserted at POSIX-path "
+                 "semantics; Path.resolve() rewrites the POSIX roots to backslash "
+                 "drive-letter paths on Windows. Runs on Linux and macOS.")
 class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
     """project_writable=False must deny writes to the project subpath — for a
     project rooted under ANY of _SYSTEM_RW_PATHS, not only outside them.
@@ -399,6 +403,10 @@ class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
                     "the extra_rw re-allow must come AFTER the project deny:\n" + profile)
 
 
+@unittest.skipIf(sys.platform == "win32",
+                 "seatbelt profile is a macOS-only artifact asserted at POSIX-path "
+                 "semantics; Path.resolve() rewrites the POSIX roots to backslash "
+                 "drive-letter paths on Windows. Runs on Linux and macOS.")
 class WorkerModeSeatbeltProfileUnchanged(unittest.TestCase):
     """The complement: project_writable=True keeps the project writable, and in
     BOTH modes an extra_rw path inside the project stays writable.

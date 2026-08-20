@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import unittest
@@ -51,7 +52,7 @@ def _event_line(text="hi", typ="user") -> str:
 class HookRecordsTranscript(unittest.TestCase):
     def _run_hook(self, proj: Path, payload: dict):
         env = dict(os.environ, PLAYBOOK_SESSION_ID=SESSION)
-        return subprocess.run(["bash", str(STATE_ECHO)],
+        return subprocess.run([bash_or_skip(), str(STATE_ECHO)],
                               input=json.dumps(payload), cwd=proj, env=env,
                               capture_output=True, text=True, timeout=60)
 
@@ -89,7 +90,7 @@ class BootstrapBinding(unittest.TestCase):
                    PLAYBOOK_PROJECT_DIR=str(proj),
                    PLAYBOOK_AGENT_DIR=str(proj / ".agent"),
                    MONITOR_SRC=str(BOOTSTRAP.parent))
-        r = subprocess.run(["bash", str(BOOTSTRAP)], cwd=proj, env=env,
+        r = subprocess.run([bash_or_skip(), str(BOOTSTRAP)], cwd=proj, env=env,
                            capture_output=True, text=True, timeout=120)
         return r.stdout + r.stderr
 

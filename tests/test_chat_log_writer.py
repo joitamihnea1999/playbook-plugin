@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,7 +34,7 @@ class ChatLogWriter(unittest.TestCase):
         if provider:
             env["PLAYBOOK_PROVIDER"] = provider
         return subprocess.run(
-            ["bash", str(HOOK)], cwd=self.project, env=env, text=True,
+            [bash_or_skip(), str(HOOK)], cwd=self.project, env=env, text=True,
             input=json.dumps({"prompt": prompt}), capture_output=True)
 
     def test_entry_format_and_sequence(self):

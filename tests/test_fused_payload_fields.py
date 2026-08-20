@@ -31,6 +31,7 @@ import json
 import os
 import shutil
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import unittest
@@ -339,7 +340,7 @@ class EnforcingGateConsumesTheWholeFrame(unittest.TestCase):
 
     def _gate(self, payload, scripts=SCRIPTS, env=None):
         return subprocess.run(
-            ["bash", str(scripts / "task-gate-hook")],
+            [bash_or_skip(), str(scripts / "task-gate-hook")],
             cwd=self.project, env=env or self.env,
             input=json.dumps(payload), text=True, capture_output=True,
             timeout=30,
@@ -379,7 +380,7 @@ class EnforcingGateConsumesTheWholeFrame(unittest.TestCase):
 
     def test_malformed_or_empty_tool_payload_blocks(self):
         r = subprocess.run(
-            ["bash", str(SCRIPTS / "task-gate-hook")], cwd=self.project,
+            [bash_or_skip(), str(SCRIPTS / "task-gate-hook")], cwd=self.project,
             env=self.env, input="not json", text=True, capture_output=True,
             timeout=30,
         )

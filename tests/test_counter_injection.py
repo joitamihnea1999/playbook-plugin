@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,7 +49,7 @@ class CounterInjectionBase(unittest.TestCase):
         env = dict(os.environ)
         env["PLAYBOOK_SESSION_ID"] = SID
         return subprocess.run(
-            ["bash", str(SCRIPTS / hook)],
+            [bash_or_skip(), str(SCRIPTS / hook)],
             cwd=self.project, env=env, text=True,
             input=json.dumps(stdin_obj), capture_output=True,
         )
@@ -97,7 +98,7 @@ class SafeIntContract(unittest.TestCase):
     def _safe_int(self, value: str) -> str:
         lib = SCRIPTS / "gate-echo-lib.sh"
         r = subprocess.run(
-            ["bash", "-c", f"source '{lib.as_posix()}' && _safe_int \"$1\"", "_", value],
+            [bash_or_skip(), "-c", f"source '{lib.as_posix()}' && _safe_int \"$1\"", "_", value],
             capture_output=True, text=True)
         return r.stdout
 

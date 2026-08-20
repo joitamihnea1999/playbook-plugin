@@ -11,6 +11,7 @@ each dangerous form there is a benign near-miss that must pass.
 Run: python3 tests/test_command_guard.py
 """
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import unittest
 from pathlib import Path
@@ -133,7 +134,7 @@ class HookBehavior(unittest.TestCase):
         e.pop("PLAYBOOK_ALLOW_DANGEROUS", None)
         if env:
             e.update(env)
-        return subprocess.run(["bash", str(hook)], input=payload_json,
+        return subprocess.run([bash_or_skip(), str(hook)], input=payload_json,
                               capture_output=True, text=True, env=e)
 
     def test_grok_camelcase_shell_payload_is_normalized_and_blocked(self):

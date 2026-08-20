@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import unittest
@@ -88,7 +89,7 @@ class SessionEndHookIntegration(unittest.TestCase):
         env["PLAYBOOK_SESSION_ID"] = session_id
         env["PATH"] = os.environ.get("PATH", "")
         return subprocess.run(
-            ["bash", str(SCRIPTS / "session-end-hook")],
+            [bash_or_skip(), str(SCRIPTS / "session-end-hook")],
             cwd=self.project, env=env, text=True,
             input=json.dumps({"reason": reason}),
             capture_output=True,

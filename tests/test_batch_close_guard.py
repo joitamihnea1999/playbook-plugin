@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import unittest
@@ -81,7 +82,7 @@ class ProjectFixture:
     def run_hook(self, payload: dict) -> subprocess.CompletedProcess:
         env = dict(os.environ, PLAYBOOK_SESSION_ID=SESSION)
         env.pop("PLAYBOOK_ROLE", None)
-        return subprocess.run(["bash", str(HOOK)],
+        return subprocess.run([bash_or_skip(), str(HOOK)],
                               input=json.dumps(payload).encode(),
                               cwd=self.proj, env=env, capture_output=True,
                               timeout=60)

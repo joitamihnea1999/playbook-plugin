@@ -14,6 +14,7 @@ import json
 import os
 import stat
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,7 +45,7 @@ class GateMkdirFailOpen(unittest.TestCase):
         env["PLAYBOOK_SESSION_ID"] = "pid-mkdirfail"
         env.pop("BASH_ENV", None)
         r = subprocess.run(
-            ["bash", str(HOOK)], cwd=self.project, env=env, text=True,
+            [bash_or_skip(), str(HOOK)], cwd=self.project, env=env, text=True,
             input=json.dumps({"tool_name": "Edit",
                               "tool_input": {"file_path": str(self.project / "src" / "main.py")}}),
             capture_output=True)

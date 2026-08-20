@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,7 +39,7 @@ class InitRobustness(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = str(self.home)  # never touch the real ~/.claude
         return subprocess.run(
-            ["bash", str(INIT), name],
+            [bash_or_skip(), str(INIT), name],
             cwd=project, env=env, text=True, capture_output=True,
         )
 
@@ -48,7 +49,7 @@ class InitRobustness(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = str(self.home)  # never touch the real ~/.claude
         return subprocess.run(
-            ["bash", str(INIT), *argv],
+            [bash_or_skip(), str(INIT), *argv],
             cwd=project, env=env, text=True, capture_output=True,
         )
 

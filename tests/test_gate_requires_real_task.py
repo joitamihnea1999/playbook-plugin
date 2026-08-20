@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,7 +44,7 @@ class GateRequiresRealTask(unittest.TestCase):
         env = dict(os.environ)
         env["PLAYBOOK_SESSION_ID"] = SID
         return subprocess.run(
-            ["bash", str(SCRIPTS / "task-gate-hook")],
+            [bash_or_skip(), str(SCRIPTS / "task-gate-hook")],
             cwd=self.project, env=env, text=True,
             input=json.dumps({"tool_name": "Edit",
                               "tool_input": {"file_path": str(file_path)}}),

@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import unittest
@@ -232,7 +233,7 @@ class TestResolverParity(TempProjectCase):
             f'resolve_agent_dir "{project}"\n'
         )
         proc = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True
+            [bash_or_skip(), "-c", script], capture_output=True, text=True
         )
         return proc.returncode, proc.stdout.strip()
 
@@ -266,7 +267,7 @@ class TestResolverParity(TempProjectCase):
             f'_cpb_log_cmd\n'
         )
         proc = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, cwd=str(project)
+            [bash_or_skip(), "-c", script], capture_output=True, text=True, cwd=str(project)
         )
         if proc.returncode != 0:
             return proc.returncode, None
@@ -285,7 +286,7 @@ class TestResolverParity(TempProjectCase):
     def _shell_lanes_without_marker(self, project: Path):
         """gate-echo-lib.sh's lanes_without_marker, as a sorted list."""
         proc = subprocess.run(
-            ["bash", "-c",
+            [bash_or_skip(), "-c",
              f'source "{SCRIPTS}/gate-echo-lib.sh"\nlanes_without_marker "{project}"\n'],
             capture_output=True, text=True,
         )
@@ -300,7 +301,7 @@ class TestResolverParity(TempProjectCase):
         env = {k: v for k, v in os.environ.items()
                if k not in ("BASH_ENV", "PLAYBOOK_SESSION_ID", "PLAYBOOK_ROLE")}
         subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c",
+            [bash_or_skip(), "--noprofile", "--norc", "-c",
              'source "$1"\necho parity_probe >/dev/null\n', "_",
              str(SCRIPTS / "bash-log.sh")],
             cwd=str(project), env=env, capture_output=True, text=True,
@@ -457,7 +458,7 @@ class TestResolverParity(TempProjectCase):
 
     def _shell_lane(self, project: Path, snippet: str):
         """Run a shell resolver snippet; returns (rc, stdout)."""
-        proc = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
+        proc = subprocess.run([bash_or_skip(), "-c", snippet], capture_output=True, text=True)
         return proc.returncode, proc.stdout.strip()
 
     def test_raw_marker_shapes_agree_across_every_implementation(self):
@@ -501,7 +502,7 @@ class TestResolverParity(TempProjectCase):
                 nudge_dir.mkdir(parents=True, exist_ok=True)
                 (nudge_dir / "nudge.md").write_text(f"nudge-{name}\n", encoding="utf-8")
                 proc = subprocess.run(
-                    ["bash", str(REPO_ROOT / "plugins" / "playbook" / "hooks" / "monitor-nudge.sh")],
+                    [bash_or_skip(), str(REPO_ROOT / "plugins" / "playbook" / "hooks" / "monitor-nudge.sh")],
                     input='{"hook_event_name":"PostToolUse"}',
                     capture_output=True, text=True, cwd=str(p),
                     env={k: v for k, v in os.environ.items() if k != "PLAYBOOK_ROLE"},
@@ -1097,7 +1098,7 @@ class LoggerProbeCase(unittest.TestCase):
             + (epilogue + "\n" if epilogue else "")
         )
         return subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c", script, "_", str(BASH_LOG)],
+            [bash_or_skip(), "--noprofile", "--norc", "-c", script, "_", str(BASH_LOG)],
             cwd=str(project), env=env, text=True, capture_output=True,
         )
 
@@ -1199,7 +1200,7 @@ class MarkerAbsentWithLanes(LoggerProbeCase):
         env = {k: v for k, v in os.environ.items()
                if k not in ("BASH_ENV", "PLAYBOOK_SESSION_ID", "PLAYBOOK_ROLE")}
         result = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c",
+            [bash_or_skip(), "--noprofile", "--norc", "-c",
              f'source "$1"\necho {PROBE} >/dev/null\necho ALIVE\n', "_", str(BASH_LOG)],
             cwd=str(deep), env=env, text=True, capture_output=True,
         )

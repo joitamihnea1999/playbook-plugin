@@ -38,6 +38,7 @@ import importlib.util
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import time
@@ -271,7 +272,7 @@ class NudgeDeliveryHook(unittest.TestCase):
         env.pop("PLAYBOOK_ROLE", None)
         env.update(env_extra or {})
         return subprocess.run(
-            ["bash", str(NUDGE_HOOK)], cwd=proj, env=env,
+            [bash_or_skip(), str(NUDGE_HOOK)], cwd=proj, env=env,
             input=json.dumps({"hook_event_name": "PostToolUse"}),
             capture_output=True, text=True, timeout=60)
 
@@ -347,7 +348,7 @@ class BootstrapGuards(unittest.TestCase):
             env.pop(k, None)
         env.update(env_extra)
         return subprocess.run(
-            ["bash", str(MONITOR_LIB / "bootstrap.sh"), *args],
+            [bash_or_skip(), str(MONITOR_LIB / "bootstrap.sh"), *args],
             capture_output=True, text=True, timeout=120, env=env)
 
     def test_refuses_without_project_dir(self):

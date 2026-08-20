@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,7 +53,7 @@ class GatePathTraversal(unittest.TestCase):
         env["PLAYBOOK_SESSION_ID"] = "pid-trav-test"
         env.pop("BASH_ENV", None)
         return subprocess.run(
-            ["bash", str(HOOK)], cwd=self.project, env=env, text=True,
+            [bash_or_skip(), str(HOOK)], cwd=self.project, env=env, text=True,
             input=json.dumps({"tool_name": "Edit",
                               "tool_input": {"file_path": file_path}}),
             capture_output=True)

@@ -25,6 +25,7 @@ pure string classification.
 Pure stdlib unittest. Run: python3 -m unittest tests.test_gate_classifier_parity
 """
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import unittest
 from pathlib import Path
@@ -75,7 +76,7 @@ VECTORS = [
 
 def bash_is_code(path: str) -> bool:
     r = subprocess.run(
-        ["bash", "-c", f"source '{GATE_LIB.as_posix()}' && is_code_file_path \"$1\"", "_", path],
+        [bash_or_skip(), "-c", f"source '{GATE_LIB.as_posix()}' && is_code_file_path \"$1\"", "_", path],
         capture_output=True, text=True)
     return r.returncode == 0
 

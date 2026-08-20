@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from tests._bashcheck import bash_or_skip
 import unittest
 from pathlib import Path
 
@@ -64,7 +65,7 @@ class ShellFixtures(unittest.TestCase):
                     self.skipTest(f"{name}: missing binary(ies): {missing}")
                 try:
                     r = subprocess.run(
-                        ["bash", str(path)],
+                        [bash_or_skip(), str(path)],
                         cwd=str(_HERE.parent), env=_clean_env(),
                         capture_output=True, text=True,
                         timeout=_PER_FIXTURE_TIMEOUT,

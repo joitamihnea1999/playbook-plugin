@@ -20,6 +20,7 @@ Run: python3 tests/test_blocked_state.py
 """
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import unittest
@@ -131,7 +132,7 @@ class BlockedEndToEnd(unittest.TestCase):
 
     def run_stop_hook(self, stop_active=False):
         payload = '{"stop_hook_active": %s}' % ("true" if stop_active else "false")
-        return subprocess.run(["bash", str(SCRIPTS / "stop-hook")],
+        return subprocess.run([bash_or_skip(), str(SCRIPTS / "stop-hook")],
                               input=payload, cwd=self.project, env=self._env(),
                               capture_output=True, text=True)
 

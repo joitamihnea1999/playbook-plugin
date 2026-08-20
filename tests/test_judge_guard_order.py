@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,7 +32,7 @@ class JudgeGuardOrder(unittest.TestCase):
         env = dict(os.environ)
         env["PLAYBOOK_SESSION_ID"] = session_id
         return subprocess.run(
-            ["bash", str(HOOK)],
+            [bash_or_skip(), str(HOOK)],
             cwd=self.project, env=env, text=True,
             input=json.dumps({"tool_name": "Bash",
                               "tool_input": {"command": cmd}}),

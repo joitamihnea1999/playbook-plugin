@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+from tests._bashcheck import bash_or_skip
 import sys
 import tempfile
 import unittest
@@ -116,7 +117,7 @@ class InitWritesBothFiles(unittest.TestCase):
         home.mkdir(parents=True)
         env = dict(os.environ, HOME=str(home))
         env.pop("CLAUDE_PLUGIN_ROOT", None)
-        r = subprocess.run(["bash", str(SCRIPTS / "init"), "Fixture Proj"],
+        r = subprocess.run([bash_or_skip(), str(SCRIPTS / "init"), "Fixture Proj"],
                            cwd=proj, env=env, capture_output=True, text=True,
                            timeout=120)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
