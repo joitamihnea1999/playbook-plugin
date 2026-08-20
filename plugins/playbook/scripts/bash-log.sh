@@ -47,18 +47,12 @@ _cpb_log_cmd() {
             # marker absent — append every command to the SHARED root
             # .agent/bash_history (PB-LANE-RESOLUTION, Critical).
             #
-            # The four answers, identical to lanes_without_marker's verdict in
-            # every shape a supported surface can produce (test_provider_multiuser
-            # .py pins the logger as a fourth implementation of that table). Known
-            # exception, pre-existing and unreachable via supported flows: a
-            # DOT-named lane. Globbing skips dotfiles, so this and gate-echo-lib.sh
-            # see no lane where Python's iterdir() reports one. Phase 4 reconciles
-            # the two families; do not "fix" it here — the shell copies agree.
+            # The decision rests on exactly two filesystem facts: the marker,
+            # and whether root .agent/tasks/ is a directory. Nothing about
+            # .agent/'s children is consulted.
             #   valid marker                       -> the validated user lane
             #   no marker, root .agent/tasks/      -> the root IS a lane
-            #   no marker, no per-user lane        -> the root IS a lane
-            #   no marker, a per-user lane exists  -> owner unknown; skip
-            #   invalid or unusable marker         -> owner unknown; skip
+            #   anything else                      -> owner unknown; skip
             local _lane=""
             if [[ -f "$_dir/.agent/current_user" ]]; then
                 local _u="" _extra=""
@@ -90,59 +84,12 @@ _cpb_log_cmd() {
                 # here would kill logging for every single-user project.
                 _lane="$_dir/.agent"
             else
-                # No marker, no root lane. Ownership is unknown ONLY if a
-                # per-user lane actually exists — that is the fresh-clone shape
-                # the Critical fix is about. With no lane there is nobody to
-                # contaminate, and `resolve_agent_dir` answers the root, so
-                # skipping here would write nothing while `tasks retro` and
-                # `tasks context` read `<root>/.agent/bash_history`: silent
-                # forensic loss, not safety. Reachable shape: `.agent/config.json`
-                # is documented as committable and git tracks no empty `tasks/`,
-                # so a clone of a single-user project arrives exactly like this.
-                #
-                # A per-user lane is what provider/paths.py::lanes_without_marker
-                # counts: a child of .agent/ that itself contains tasks/. This
-                # loop is the last thing tried, so it never runs in the common
-                # marker case or in any legacy/mixed project.
-                #
-                # Pure builtins: globbing forks nothing.
-                #
-                # This scan is this file's ONLY glob, and this file is SOURCED
-                # into the user's shell, so it inherits that shell's globbing
-                # options — the `-d` guard below cannot protect against them,
-                # because bash expands the glob BEFORE the guard ever runs.
-                # Under `shopt -s failglob` an unmatched glob is an ERROR, and
-                # `.agent/` with no children at all is an in-policy shape
-                # (a fresh single-user clone). Measured on bash 5.2: the host
-                # shell prints "no match" once per command into stderr that
-                # hook output feeds back to the agent, the scan is abandoned so
-                # the lane stays empty and logging is silently lost, and under
-                # `set -e` the host shell DIES. So failglob is neutralised
-                # across the scan and restored to its exact prior state.
-                #
-                # `shopt -q/-s/-u` are builtins and fork nothing; capturing
-                # `$(shopt -p failglob)` would fork a subshell per command,
-                # which is what this DEBUG-trap file exists to avoid, so `-q`
-                # is used as the fork-free equivalent of that idiom. The test
-                # MUST sit inside `if`: a bare `shopt -q` on an unset option
-                # returns 1 and would itself kill a `set -e` host shell.
-                #
-                # The restore happens BEFORE either exit path, so the scan
-                # leaves no residue in the user's shell options.
-                #
-                # With failglob off, an unmatched glob stays literal in bash
-                # and `<dir>/.agent/*/tasks` is not a directory; under
-                # `shopt -s nullglob` it vanishes and the loop body never runs.
-                # Both give the same verdict, so "no children" is handled with
-                # or without nullglob, and nullglob is left untouched.
-                local _sub _failglob=0 _lanefound=0
-                if shopt -q failglob; then _failglob=1; shopt -u failglob; fi
-                for _sub in "$_dir/.agent"/*; do
-                    if [[ -d "$_sub/tasks" ]]; then _lanefound=1; break; fi
-                done
-                if (( _failglob )); then shopt -s failglob; fi
-                if (( _lanefound )); then return 0; fi
-                _lane="$_dir/.agent"
+                # No marker, no root tasks/: owner unknown, so the shared
+                # root is not elected. Stricter than lanes_without_marker,
+                # which still answers the root — a missing forensic log, not
+                # contamination, healed by anything creating .agent/tasks/.
+                # No glob remains here, so no host option can move this.
+                return 0
             fi
             [[ -d "$_lane" ]] || return 0
             local _cmd="${BASH_COMMAND//$'\n'/\\n}"

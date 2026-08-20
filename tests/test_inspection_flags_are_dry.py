@@ -113,7 +113,10 @@ class BashLogSkipsHookInternals(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.project = Path(self.tmp.name) / "project"
-        (self.project / ".agent").mkdir(parents=True)
+        # A root `.agent/tasks/` is what makes the root a lane: without it the
+        # logger has no lane it can prove it owns and skips (PB-LANE-RESOLUTION),
+        # which would make the agent-shell half of this test vacuous.
+        (self.project / ".agent/tasks").mkdir(parents=True)
         self.history = self.project / ".agent/bash_history"
 
     def test_hook_shell_is_not_logged_but_agent_shell_is(self):

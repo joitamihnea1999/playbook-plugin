@@ -21,92 +21,98 @@ skipping. Nothing else in the product changes.
   then applied the documented fix (`echo <user> > .agent/current_user`), the
   resolved lane moved and everything logged beforehand was orphaned.
 
-  The lane now starts unknown and one of these answers is chosen explicitly:
+  The lane now starts unknown, and the decision rests on exactly two filesystem
+  facts — whether `.agent/current_user` is present and valid, and whether root
+  `.agent/tasks/` is a directory:
 
   | shape | lane |
   |---|---|
   | valid marker | the validated user lane |
   | no marker, root `.agent/tasks/` exists | the root IS a legitimate lane |
-  | no marker, no per-user lane exists | the root IS a legitimate lane |
-  | no marker, a per-user lane exists | owner unknown — skip logging |
-  | invalid or unusable marker | owner unknown — skip logging |
+  | anything else | owner unknown — skip logging |
 
-  A "per-user lane" is exactly what `provider/paths.py::lanes_without_marker`
-  counts: a direct child directory of `.agent/` that itself contains `tasks/`.
-  So the loggers now write the root precisely when `lanes_without_marker` is
-  empty and skip precisely when it is not — the same verdict
-  `provider/paths.py`, `tasks/core.py` and `gate-echo-lib.sh` already reach, on
-  every shape the supported surfaces can produce. The loggers were the one
-  surface still deciding for themselves.
+  Nothing about the children of `.agent/` is consulted. That makes the loggers
+  **deliberately stricter** than `provider/paths.py::lanes_without_marker`,
+  `tasks/core.py` and `gate-echo-lib.sh`, rather than in parity with them: on a
+  marker-absent project with no root `tasks/`, those three still answer the
+  root and the loggers write nothing. See the next bullet for what that costs.
 
-  One known exception, and it is not new: a **dot-named** lane directory
-  (`.agent/.hidden/tasks/`). The shell implementations glob, and globbing skips
-  dotfiles, so `gate-echo-lib.sh` and both loggers see no lane and treat the
-  root as legitimate, while the Python implementations use `iterdir()` and
-  report `['.hidden']`. The loggers match the shell reference exactly; the
-  divergence is between shell and Python and predates this release. No supported
-  flow can create such a lane — `validate_username` rejects a leading dot — so
-  this is a precision limit on the parity claim, not a reachable defect.
-  Reconciling the two families is Phase 4 work and is recorded on
-  `PB-LANE-RESOLUTION`.
+  A **dot-named** lane directory (`.agent/.hidden/tasks/`) is no longer part of
+  this: the loggers read no child of `.agent/` at all, so it is just another
+  marker-absent shape without root `tasks/` and they skip. The underlying
+  shell/Python divergence still exists between `gate-echo-lib.sh`, which globs
+  and so skips dotfiles, and the Python copies, which use `iterdir()` and report
+  `['.hidden']`. It predates this release, no supported flow can create such a
+  lane (`validate_username` rejects a leading dot), and reconciling the two
+  families is Phase 4 work recorded on `PB-LANE-RESOLUTION`.
 
-- **Legitimate root-lane logging is preserved, deliberately — including for
-  projects with no `tasks/` directory yet.** A blanket "never log to root" would
-  satisfy every marker-absent assertion and silently kill logging for every
-  legacy and mixed-layout project, where root `.agent/tasks/` makes the root
-  itself a real lane (wrapper fixture scenario S6). Narrowing it to *only* that
-  case would have been almost as bad, and reachably so: `.agent/config.json` is
-  documented as committable and git tracks no empty `tasks/`, so a clone of a
-  single-user project arrives with `.agent/config.json` and nothing else. There
-  is no other lane to contaminate there, and `resolve_agent_dir` still answers
-  the root, so refusing to log would lose history that `tasks retro` and
-  `tasks context` read — silent forensic loss, not safety. Both exemptions are
-  bound as adverse controls: the blanket wrong fix is red on
+- **Legitimate root-lane logging is preserved for projects that have a root
+  `.agent/tasks/`, and given up for those that do not.** A blanket "never log to
+  root" would satisfy every marker-absent assertion and silently kill logging
+  for every legacy and mixed-layout project, where root `.agent/tasks/` makes
+  the root itself a real lane (wrapper fixture scenario S6); that exemption
+  stays, bound as an adverse control on
   `LegitimateRootLane.test_mixed_layout_without_a_marker_logs_to_the_root` and
-  on the fixture's S16 legacy assertion, and the over-strict variant is red on
-  `test_committed_config_only_logs_to_the_root` and its siblings.
+  on the fixture's S16 legacy assertion.
+
+  What is deliberately given up is the wider exemption: a project with no
+  per-user lane and no root `tasks/` yet — reachably, a clone of a single-user
+  project that committed `.agent/config.json`, since git tracks no empty
+  `tasks/` — used to log the root and now logs nothing. `resolve_agent_dir`
+  still answers the root there, so `tasks retro` and `tasks context` read a file
+  nothing writes. That is a missing forensic log rather than cross-user
+  contamination, it is owner-ratified, and it heals the moment anything creates
+  `.agent/tasks/`, which `/playbook:init` does. The four affected shapes are
+  pinned as such: `test_bare_agent_directory_writes_nothing`,
+  `test_committed_config_only_writes_nothing`,
+  `test_sessions_dir_only_writes_nothing` and
+  `test_child_directory_without_tasks_writes_nothing`.
 
 ### Tests
 
-- Suite **1341 → 1379**. Hermetic logger cases in
+- Suite **1341 → 1375**. Hermetic logger cases in
   `tests/test_provider_multiuser.py` execute the real bundled `bash-log.sh`
   through `bash` with `BASH_ENV` stripped — so a dogfooding host's installed
   logger cannot log a second time and mask the result — and assert filesystem
   effects for every policy answer, plus errexit survival on both the skip and
   the root path, deep-subdirectory walking, append-not-truncate, and that a
   non-lane sibling cannot cancel a real lane.
-- **The parity claim above is a test, not a sentence.**
-  `TestResolverParity.test_logger_agrees_with_lanes_without_marker` runs one
-  nine-shape table through `provider/paths.py`, `tasks/core.py`,
-  `gate-echo-lib.sh` and the bundled logger, and requires the logger to write
-  the root exactly when the lane list is empty. The logger is now a fourth
-  implementation held to that table — which is what stops this divergence
-  recurring when Phase 4 moves lane resolution behind one core.
-- **The per-user-lane scan no longer inherits the host shell's globbing.** The
-  scan is the logger's only glob, and the logger is sourced into a shell it does
-  not control. Under `shopt -s failglob` bash raises "no match" *before* the
-  scan's `-d` guard can run, so a bare `.agent/` — an in-policy shape — printed
-  that line once per command into stderr the agent reads, silently lost the
-  lane, and under `set -e` killed the host shell outright. The scan now clears
-  `failglob` for its own duration and restores it on both exits, using only
-  `shopt -q/-s/-u` so it stays fork-free (a `$(shopt -p …)` capture would fork a
-  subshell for every command in the DEBUG trap). No shape's decision changes
-  under default options.
+- **The strictness claim above is a test, not a sentence.**
+  `TestResolverParity.test_logger_is_never_looser_than_lanes_without_marker`
+  runs one nine-shape table through `provider/paths.py`, `tasks/core.py`,
+  `gate-echo-lib.sh` and the bundled logger. It asserts the logger's own answer
+  per shape and, separately, the direction of the difference: the logger may
+  never write the root on a shape where a reference implementation reports that
+  a per-user lane exists. That is the Critical fresh-clone case, and it is the
+  half that must not regress when Phase 4 moves lane resolution behind one core.
+- **The per-user-lane enumeration is deleted rather than made glob-safe.** It
+  was the logger's only glob, in a file sourced into a shell it does not
+  control, so its result followed the host shell's globbing state. Measured
+  against `.agent/alice/tasks/` with no marker — a shape that must skip:
+  default options and `shopt -s failglob` skipped, while `set -f`,
+  `set -o noglob` and `GLOBIGNORE='*'` each silently wrote the **shared root**.
+  Guarding one option at a time was the wrong shape of fix; the decision now
+  reads two `-f`/`-d` tests and consults no directory listing at all.
 - **Host shell options are now a tested dimension**, where previously none of it
   was covered: `HostShellOptionMatrix` runs all eleven in-policy shapes under
-  twelve option combinations — default, `set -e`, `set -u`, `set -o pipefail`,
+  fifteen option combinations — default, `set -e`, `set -u`, `set -o pipefail`,
   `failglob`, `nullglob`, `dotglob`, `extglob`, `failglob`/`nullglob`/`dotglob`
-  each combined with `set -e`, and a non-empty `GLOBIGNORE` — and requires
-  exit 0, `ALIVE` on stdout, empty stderr, and the same lane decision in every
-  one of the 132 cells. Every in-policy shape is option-invariant. A companion
-  arm asserts the scan leaves the host's `failglob`, `nullglob` and `dotglob`
-  exactly as it found them, on both the root conclusion and the early exit.
-- Four mutants were rebuilt in `/tmp` copies and each confirmed red: the
-  pre-fix blind root default, the blanket "never log to root", the
-  over-strict "skip whenever there is no root `tasks/`" variant, and the
-  `failglob`-unsafe scan. The last two are invisible to
-  `tests/wrapper-multiuser-fixture.sh` (274 / 0 with either), which is why the
-  hermetic cases and the parity table carry them.
+  each combined with `set -e`, a non-empty `GLOBIGNORE`, and the three that the
+  deleted glob could not survive (`set -f`, `set -o noglob`, `GLOBIGNORE='*'`)
+  — and requires exit 0, `ALIVE` on stdout, empty stderr, and the same lane
+  decision in every one of the 165 cells. Those are the shapes and options that
+  were measured, not a claim about arbitrary host shell state. A companion arm
+  asserts the logger leaves the host's `failglob`, `nullglob` and `dotglob`
+  exactly as it found them.
+- The three new option cells were watched red against a real mutant rather than
+  a synthetic one: the glob-based enumeration this release deletes, run on
+  `.agent/alice/tasks/` with no marker, writes the shared root under `set -f`,
+  `set -o noglob` and `GLOBIGNORE='*'`. The earlier-recorded mutants — the
+  pre-fix blind root default and the blanket "never log to root" — were not
+  rebuilt for this pass; they remain covered by the hermetic cases and by the S6
+  adverse control. Every one of them is invisible to
+  `tests/wrapper-multiuser-fixture.sh`, which is 274 / 0 either way, and that is
+  why the hermetic cases and the shape table carry this guarantee.
 - `tests/wrapper-multiuser-fixture.sh` under the corrected bundled logger is
   274 passed / 0 failed, where it was 272 / 2 before.
 
@@ -115,33 +121,26 @@ skipping. Nothing else in the product changes.
 - **`bash-log.zsh` received the structurally identical correction but was not
   executed.** zsh is not installed on the development host, so it was neither
   run nor syntax-checked. It is held to the Bash policy by source comparison
-  (`ZshLoggerSourceParity`: lane-initialisation placement, the `.agent/tasks/`
-  exemption, the per-user-lane scan and its `<child>/tasks` predicate, the
-  per-pattern `(N)` nullglob qualifier zsh needs because its default `NOMATCH`
-  errors on an unmatched glob, the `break 2` that leaves both the scan and the
-  walk, the marker validation arms, and that its `unset` line still clears every
+  (`ZshLoggerSourceParity`: lane-initialisation placement, that the bare root is
+  assigned only under the `.agent/tasks/` guard, the marker validation arms, the
+  one-line marker contract, and that its `unset` line still clears every
   variable it introduces) and its live execution is scheduled Phase 8 work — not
-  claimed here. Those source assertions now run against comment-stripped code:
+  claimed here. Those source assertions run against comment-stripped code:
   against the raw file text a comment naming an idiom satisfied the assertion
-  for it, which made the `break 2` arm a false green. The `(N)` qualifier
-  remains the highest residual risk in this release, precisely because it cannot
-  be executed here. zsh needs no analogue of the `failglob` correction above —
-  `(N)` is already per-pattern and so cannot be overridden by a host option —
-  but that is source reasoning, not a measurement.
+  for it, which had made one arm a false green. Deleting the enumeration also
+  removed the `(N)` glob qualifier and the `break 2` that were this file's
+  zsh-specific, unexecutable idioms, so the residual risk here is smaller than
+  it was — but it is still source reasoning, not a measurement.
 - **The installed copy at `~/.claude/bash-log.sh` is unchanged.** This release
   corrects the bundled artifact only; a machine keeps the old behavior until
   `/playbook:init` re-deploys the logger. The wrapper fixture run against the
   installed copy still fails the same two S15 assertions, by design.
-- **A host shell with `shopt -s dotglob` set — or a non-empty `GLOBIGNORE` —
-  moves the dot-named-lane answer**, measured, from the root to skip. That is
-  the same shell/Python divergence described above, seen from the host-option
-  side: `dotglob` makes the dot-named child visible to the scan. It is recorded
-  rather than fixed. The shape is unreachable through supported flows, it is
-  outside the in-policy matrix, and forcing `dotglob` off inside the scan would
-  change behavior on a shape this correction is not scoped to touch. Every
-  in-policy shape is option-invariant. `HostShellOptionMatrix
-  .test_dotglob_changes_only_the_out_of_policy_dot_named_lane` pins the current
-  split so a Phase 4 reconciliation has to acknowledge it.
+- **The dot-named-lane shape no longer moves under `shopt -s dotglob` or a
+  non-empty `GLOBIGNORE`**, measured: with the enumeration gone it skips under
+  all three preludes, like every other marker-absent shape without root
+  `tasks/`. `HostShellOptionMatrix.test_dotglob_no_longer_moves_the_dot_named
+  _lane_answer` pins that. The shell/Python divergence itself is untouched and
+  still Phase 4's to reconcile.
 - macOS and Windows/Git Bash logger behavior, and live provider lane handoff,
   remain unverified.
 
