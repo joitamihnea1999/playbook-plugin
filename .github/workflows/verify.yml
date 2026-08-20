@@ -42,12 +42,12 @@ jobs:
           name: verify-linux-py${{ matrix.python }}
           path: verify-linux-py${{ matrix.python }}.txt
 
-  # DISCOVERY, not a gate: macOS has never run this suite. Promote to required
-  # (drop continue-on-error) once it goes green.
+  # REQUIRED: macOS went green during discovery and is now a gate. It exercises
+  # what the Linux lanes cannot — bash-log.zsh under real zsh and the shell
+  # fixtures under bash 3.2.
   macos:
-    name: macos / py3.10 (discovery)
+    name: macos / py3.10
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
