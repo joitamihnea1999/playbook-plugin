@@ -425,9 +425,31 @@ def build_seatbelt_profile(
         "    )",
         ")",
     ]
+    # Rule ORDER is load-bearing: seatbelt applies the LAST matching rule, so the
+    # terminal rules below (project deny, .git deny, extra_rw re-allow) each win
+    # over the require-all exemption block above and over each other in listed
+    # order. The order mirrors build_bwrap_argv: project (ro) → .git (ro) →
+    # extra_rw (rw, last).
+    #
+    # When project_writable=False the read-only project MUST be an explicit
+    # terminal deny — expressing it only as an omitted require-not exemption is a
+    # confirmed containment failure: a project rooted under any _SYSTEM_RW_PATHS
+    # entry (e.g. /var/folders, where macOS mktemp places dirs) matches that
+    # exemption's require-not, so require-all is false and nothing denies the
+    # project write. The .git deny already relied on this terminal precedent.
+    if not project_writable:
+        profile_lines.append(f'(deny file-write* (subpath "{project}"))')
     if git_dir:
         git_resolved = str(Path(git_dir).resolve())
         profile_lines.append(f'(deny file-write* (subpath "{git_resolved}"))')
+    # Re-allow each extra_rw workspace AFTER the project deny (last wins), so a
+    # writable workspace living inside the read-only project keeps its access —
+    # the half build_bwrap_argv gets right by binding extra_rw last. Only in
+    # ro-project mode: in worker mode the project is already writable and adding
+    # these allows would change that unchanged behaviour.
+    if not project_writable:
+        for rw in rw_paths:
+            profile_lines.append(f'(allow file-write* (subpath "{rw}"))')
 
     return "\n".join(profile_lines)
 

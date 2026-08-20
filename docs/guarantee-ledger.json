@@ -1,7 +1,7 @@
 {
   "$schema": "guarantee-ledger.schema.json",
   "schema_version": 1,
-  "ledger_version": "2026-08-19",
+  "ledger_version": "2026-08-20",
   "guarantees": [
     {
       "id": "PB-TASK-ACTIVATE",
@@ -712,13 +712,13 @@
       "owner": [{"path": "plugins/playbook/provider/sandbox.py", "reference": "symbol:build_bwrap_argv"}, {"path": "plugins/playbook/provider/sandbox.py", "reference": "symbol:build_seatbelt_profile"}],
       "failure_consequence": "Critical",
       "claim_kind": "mechanical",
-      "proofs": [{"type": "live-platform test", "path": "tests/test_print_argv_is_dry_run.py", "reference": "PrintArgvNeverExecutes.test_ro_project_prompt_denies_project_write_but_keeps_rw_exception", "boundary": "real-os", "negative_control": null, "limitations": ["Linux bubblewrap only; macOS seatbelt is not executed."]}],
+      "proofs": [{"type": "executable unit", "path": "tests/test_print_argv_is_dry_run.py", "reference": "RoProjectSeatbeltProfileDeniesWrites.test_project_write_is_denied_under_every_system_rw_root", "boundary": "unit", "negative_control": {"path": "tests/test_print_argv_is_dry_run.py", "reference": "WorkerModeSeatbeltProfileUnchanged.test_project_stays_writable_in_worker_mode"}, "limitations": ["Profile-text policy proof only: the generated SBPL is evaluated by an in-process last-matching-rule interpreter on Linux; seatbelt is not executed on this host, so this proves the emitted policy is correct, not that macOS enforces it."]}, {"type": "live-platform test", "path": "tests/test_print_argv_is_dry_run.py", "reference": "PrintArgvNeverExecutes.test_ro_project_prompt_denies_project_write_but_keeps_rw_exception", "boundary": "real-os", "negative_control": null, "limitations": ["Runs under real bubblewrap on Linux; the macOS seatbelt leg is unexecuted on this host and is the pending live proof."]}],
       "applicable_platforms": ["linux", "macos"],
       "applicable_providers": ["claude", "codex", "antigravity", "grok", "pi"],
       "status": "partially_evidenced",
-      "missing_evidence_or_limitation": ["macOS seatbelt has not been exercised live; full worker-mode .git mutation matrix is incomplete."],
+      "missing_evidence_or_limitation": ["Confirmed containment failure on macOS CI (run 32381370391, job 96465123480): under --ro-project a project rooted at a _SYSTEM_RW_PATHS entry (e.g. /var/folders, where macOS mktemp places dirs) was fully writable because the read-only project was expressed only as an omitted require-not exemption inside a require-all-of-require-nots deny block, which a broader exemption cancels. Corrected in build_seatbelt_profile: the read-only project is now an explicit terminal deny (the .git precedent), with each extra_rw workspace re-allowed after it.", "The correction is proven at the profile-text level on Linux; end-to-end seatbelt execution is NOT verified on this host — the macOS leg of test_ro_project_prompt_denies_project_write_but_keeps_rw_exception is the pending live proof, due on the next push to macOS CI.", "Full worker-mode .git mutation matrix under real seatbelt is incomplete."],
       "follow_up_phases": [8],
-      "required_live_evidence": [{"type": "live-platform test", "targets": ["macos"], "phase": 8, "reason": "Run write/.git/--rw negative controls under real seatbelt."}],
+      "required_live_evidence": [{"type": "live-platform test", "targets": ["macos"], "phase": 8, "reason": "Execute the corrected --ro-project profile under real seatbelt: project-write, .git, and --rw negative controls, including a project rooted under /var/folders."}],
       "semantic_protocol": null,
       "violation_reproduction": null
     },

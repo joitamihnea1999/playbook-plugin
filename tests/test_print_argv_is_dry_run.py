@@ -20,6 +20,7 @@ Run: python3 tests/test_print_argv_is_dry_run.py
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -196,6 +197,217 @@ class PromptContainmentMatchesTheCliFlags(unittest.TestCase):
         spec = self._capture_spec("--stream")
         self.assertEqual(spec.contain, "outdir")
         self.assertEqual(tuple(map(str, spec.extra_rw)), ("/tmp/one", "/tmp/two"))
+
+
+# ── macOS seatbelt --ro-project containment, proven at the PROFILE-TEXT level ─
+#
+# Confirmed live on macOS CI (run 32381370391, job 96465123480):
+#
+#   AssertionError: 'blocked' unexpectedly found in ['allowed', '.git', 'blocked']
+#     : --ro-project prompt execution wrote the project root
+#
+# `build_seatbelt_profile` expressed the read-only project ONLY as the ABSENCE
+# of a `(require-not (subpath "<project>"))` inside one `(require-all …)` deny
+# block. `require-all` of `require-not`s denies a write only where NO exemption
+# matches — so any BROADER exemption cancels it. `_SYSTEM_RW_PATHS` includes
+# `/var/folders` (and `/private/var/folders`, `/tmp`, …), and macOS `mktemp`
+# places directories under `/var/folders`; a project rooted there matches
+# `(require-not (subpath "/var/folders"))`, so `require-all` is false for every
+# write under the project and nothing denies it — the project was fully writable
+# despite `--ro-project`. The `--rw` exception (which lives inside the block the
+# same way) still worked, which is why the CI failure allowed `allowed` but not
+# `blocked`.
+#
+# The working precedent in the same function is the `.git` deny: an
+# unconditional TERMINAL `(deny file-write* (subpath …))` appended after the
+# exemption block — seatbelt applies the LAST matching rule. The fix expresses
+# the read-only project the same way, then re-allows each `extra_rw` workspace
+# after it so a writable workspace inside the read-only project keeps access.
+#
+# These run on Linux even though seatbelt cannot execute here: they read the
+# generated profile text (literal-string assertions, so a reader can SEE why it
+# denies) and evaluate it with a small "last matching rule wins" seatbelt
+# interpreter. That proves the POLICY is correct; the end-to-end proof that
+# macOS ENFORCES it is the live-platform test above,
+# `test_ro_project_prompt_denies_project_write_but_keeps_rw_exception`, which
+# runs under real seatbelt on macOS CI only.
+
+
+def _under(path: str, base: str) -> bool:
+    base = base.rstrip("/")
+    return path == base or path.startswith(base + "/")
+
+
+def seatbelt_write_decision(profile: str, path: str) -> str:
+    """Return 'allow' or 'deny' for a file-write to `path` under `profile`.
+
+    Models enough of SBPL to evaluate what build_seatbelt_profile emits:
+    `(allow default)`, one `(deny file-write* (require-all (require-not …)))`
+    block, and terminal `(deny|allow file-write* (subpath "…"))` rules. macOS
+    applies the LAST matching rule; we mirror that so a Linux run proves what
+    the real kernel would decide.
+    """
+    require_nots: list[tuple[str, str]] = []  # (kind, value): "subpath"|"regex"
+    terminals: list[tuple[str, str]] = []     # (effect, subpath): "allow"|"deny"
+    in_require_all = False
+    for raw in profile.splitlines():
+        line = raw.strip()
+        if line.startswith("(require-all"):
+            in_require_all = True
+            continue
+        if in_require_all:
+            m = re.match(r'\(require-not \(subpath "(.+)"\)\)', line)
+            if m:
+                require_nots.append(("subpath", m.group(1)))
+                continue
+            m = re.match(r'\(require-not \(regex #"(.+)"\)\)', line)
+            if m:
+                require_nots.append(("regex", m.group(1)))
+                continue
+            if line.startswith(")"):
+                in_require_all = False
+            continue
+        m = re.match(r'\((deny|allow) file-write\* \(subpath "(.+)"\)\)', line)
+        if m:
+            terminals.append((m.group(1), m.group(2)))
+
+    def _matches(kind: str, value: str) -> bool:
+        return _under(path, value) if kind == "subpath" else re.search(value, path) is not None
+
+    decision = "allow"  # (allow default)
+    if require_nots and not any(_matches(k, v) for k, v in require_nots):
+        decision = "deny"  # the require-all block denies where no exemption matches
+    for effect, subpath in terminals:  # last matching rule wins
+        if _under(path, subpath):
+            decision = effect
+    return decision
+
+
+class SeatbeltPolicyInterpreterSanity(unittest.TestCase):
+    """The interpreter must model 'last matching rule wins', or the policy
+    assertions below would prove nothing."""
+
+    def test_last_matching_rule_wins(self):
+        prof = ('(allow default)\n'
+                '(deny file-write* (subpath "/a"))\n'
+                '(allow file-write* (subpath "/a/b"))')
+        self.assertEqual("deny", seatbelt_write_decision(prof, "/a/x"))
+        self.assertEqual("allow", seatbelt_write_decision(prof, "/a/b/x"))
+
+    def test_require_all_block_denies_only_where_no_exemption_matches(self):
+        prof = ('(allow default)\n'
+                '(deny file-write*\n    (require-all\n'
+                '        (require-not (subpath "/tmp"))\n    )\n)')
+        self.assertEqual("deny", seatbelt_write_decision(prof, "/etc/x"))
+        self.assertEqual("allow", seatbelt_write_decision(prof, "/tmp/x"))
+
+
+# Every temp root macOS mktemp / _SYSTEM_RW_PATHS can put a project under, plus a
+# non-temp home-side root (the case that already worked) as a control.
+_SEATBELT_PROJECT_ROOTS = [
+    f"{p}/xy/abc123/T/corpus-proj" for p in sandbox._SYSTEM_RW_PATHS
+] + ["/Users/ci/work/corpus-proj"]
+
+
+class RoProjectSeatbeltProfileDeniesWrites(unittest.TestCase):
+    """project_writable=False must deny writes to the project subpath — for a
+    project rooted under ANY of _SYSTEM_RW_PATHS, not only outside them."""
+
+    def _profile(self, project, extra_rw=None):
+        return sandbox.build_seatbelt_profile(
+            project, project + "/.git", extra_rw, project_writable=False)
+
+    def test_literal_terminal_deny_of_project_is_emitted(self):
+        # Literal-string assertion: a reader must be able to SEE why it denies.
+        for project in _SEATBELT_PROJECT_ROOTS:
+            with self.subTest(project=project):
+                profile = self._profile(project)
+                self.assertIn(
+                    f'(deny file-write* (subpath "{project}"))', profile,
+                    "the read-only project must be an explicit terminal deny, not "
+                    "merely an omitted require-not exemption:\n" + profile)
+
+    def test_project_write_is_denied_under_every_system_rw_root(self):
+        for project in _SEATBELT_PROJECT_ROOTS:
+            with self.subTest(project=project):
+                profile = self._profile(project)
+                self.assertEqual(
+                    "deny",
+                    seatbelt_write_decision(profile, project + "/pwned.txt"),
+                    "a --ro-project write to the project root must be denied even "
+                    "when the project lives under a system rw path:\n" + profile)
+
+    def test_git_stays_denied_in_ro_mode(self):
+        for project in _SEATBELT_PROJECT_ROOTS:
+            with self.subTest(project=project):
+                profile = self._profile(project)
+                self.assertEqual(
+                    "deny",
+                    seatbelt_write_decision(profile, project + "/.git/config"),
+                    ".git must stay read-only:\n" + profile)
+
+    def test_the_hosting_system_path_itself_stays_writable(self):
+        # The temp root must stay writable OUTSIDE the project — the agent binary
+        # and mktemp need it. Only the project subtree becomes read-only.
+        for sys_path in sandbox._SYSTEM_RW_PATHS:
+            project = f"{sys_path}/xy/abc123/T/corpus-proj"
+            with self.subTest(sys_path=sys_path):
+                profile = self._profile(project)
+                sibling = f"{sys_path}/xy/abc123/T/other-scratch"
+                self.assertEqual(
+                    "allow", seatbelt_write_decision(profile, sibling),
+                    f"{sys_path} must stay writable outside the project:\n" + profile)
+
+    def test_extra_rw_workspace_inside_ro_project_stays_writable(self):
+        # The normal workspace case: the --rw dir lives inside the project.
+        for project in _SEATBELT_PROJECT_ROOTS:
+            ws = project + "/allowed"
+            with self.subTest(project=project):
+                profile = self._profile(project, extra_rw=[ws])
+                self.assertEqual(
+                    "allow", seatbelt_write_decision(profile, ws + "/wrote"),
+                    "the --rw workspace inside a read-only project must stay "
+                    "writable:\n" + profile)
+                self.assertEqual(
+                    "deny", seatbelt_write_decision(profile, project + "/pwned.txt"),
+                    "only extra_rw is writable inside a read-only project:\n" + profile)
+                # The re-allow must textually FOLLOW the project deny (last wins).
+                self.assertLess(
+                    profile.index(f'(deny file-write* (subpath "{project}"))'),
+                    profile.index(f'(allow file-write* (subpath "{ws}"))'),
+                    "the extra_rw re-allow must come AFTER the project deny:\n" + profile)
+
+
+class WorkerModeSeatbeltProfileUnchanged(unittest.TestCase):
+    """The complement: project_writable=True keeps the project writable, and in
+    BOTH modes an extra_rw path inside the project stays writable."""
+
+    def test_project_stays_writable_in_worker_mode(self):
+        for project in _SEATBELT_PROJECT_ROOTS:
+            with self.subTest(project=project):
+                profile = sandbox.build_seatbelt_profile(
+                    project, project + "/.git", None, project_writable=True)
+                self.assertNotIn(
+                    f'(deny file-write* (subpath "{project}"))', profile,
+                    "worker mode must not deny the project:\n" + profile)
+                self.assertEqual(
+                    "allow", seatbelt_write_decision(profile, project + "/edit.txt"),
+                    "worker mode must keep the project writable:\n" + profile)
+                self.assertEqual(
+                    "deny", seatbelt_write_decision(profile, project + "/.git/config"),
+                    ".git must stay read-only even in worker mode:\n" + profile)
+
+    def test_extra_rw_inside_project_writable_in_both_modes(self):
+        project = "/Users/ci/work/corpus-proj"
+        ws = project + "/allowed"
+        for writable in (True, False):
+            with self.subTest(project_writable=writable):
+                profile = sandbox.build_seatbelt_profile(
+                    project, project + "/.git", [ws], project_writable=writable)
+                self.assertEqual(
+                    "allow", seatbelt_write_decision(profile, ws + "/wrote"),
+                    f"extra_rw must stay writable (project_writable={writable}):\n"
+                    + profile)
 
 
 if __name__ == "__main__":
