@@ -4,6 +4,13 @@
 Stdlib-only, Python 3 — must behave identically on Linux, macOS and
 Windows/Git Bash. Shell fixtures are invoked as `bash` subprocesses.
 Exit code is non-zero iff at least one check FAILed; SKIP never fails the run.
+
+The bash used for the shell-dependent checks is resolved once at startup: set
+$PLAYBOOK_VERIFY_BASH to an absolute path to override (CI exports it from inside
+its Git Bash step so Python does not pick up the Windows System32 WSL stub);
+otherwise `bash` on PATH is used. If the resolved bash is unusable (the WSL stub
+prints an install hint and exits non-zero), the shell checks SKIP — a missing
+usable bash is an environment fact, not a product defect.
 """
 
 from __future__ import annotations
@@ -22,6 +29,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PY_FLOOR = (3, 10)          # declared floor: docs/guarantee-ledger.md
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
+BASH_OVERRIDE_ENV = "PLAYBOOK_VERIFY_BASH"   # override: absolute path to the bash to use
+
+# Resolved once in main(): the bash all shell checks use, whether it works, and
+# how it was resolved / why it is unusable.
+BASH_PATH: str | None = None
+BASH_USABLE = False
+BASH_NOTE = ""
 
 results: list[dict] = []
 CHECKS: list[tuple] = []
@@ -72,6 +86,36 @@ def run(cmd: list[str], cwd: Path | str = ROOT, timeout: int = 900):
     return p.returncode, decode(p.stdout)
 
 
+def resolve_bash() -> tuple[str | None, str]:
+    """Pick the bash the shell checks will use, honouring $PLAYBOOK_VERIFY_BASH
+    (CI sets it so Python doesn't resolve the Windows System32 WSL stub), else
+    `bash` on PATH. Returns (path_or_None, how_it_was_resolved)."""
+    override = os.environ.get(BASH_OVERRIDE_ENV)
+    if override:
+        # A cygpath -w conversion drops the .exe; recover it so CreateProcess
+        # execs the real binary rather than falling through to a SKIP.
+        if not Path(override).exists() and Path(override + ".exe").exists():
+            override += ".exe"
+        return override, f"${BASH_OVERRIDE_ENV}"
+    found = shutil.which("bash")
+    return found, ("PATH" if found else "PATH (not found)")
+
+
+def bash_usable(path: str) -> tuple[bool, str]:
+    """True iff `path` runs a trivial command. The Windows System32 bash.exe is
+    the WSL launcher: with no distro it prints an install hint and exits
+    non-zero, so a presence check is not enough — probe for a sentinel back."""
+    try:
+        p = subprocess.run([path, "-c", "printf ok"], env=env(), timeout=30,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    out = decode(p.stdout)
+    if p.returncode == 0 and out.strip() == "ok":
+        return True, ""
+    return False, f"rc={p.returncode}: {tail(out, 1)}"
+
+
 def tail(text: str, n: int = 2) -> str:
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     return " / ".join(lines[-n:])[:220] if lines else "(no output)"
@@ -92,10 +136,38 @@ def cap(items: list[str], n: int = 20) -> list[str]:
     return items if len(items) <= n else items[:n] + [f"... and {len(items) - n} more"]
 
 
-def ut_fails(text: str) -> list[str]:
-    """FAIL:/ERROR: test identifiers from a unittest run."""
-    return cap([ln.strip() for ln in text.splitlines()
-                if ln.startswith(("FAIL:", "ERROR:"))])
+def ut_fails(text: str, per_cap: int = 15, overall_cap: int = 80) -> list[str]:
+    """Each unittest FAIL/ERROR as its identifier PLUS the message body that
+    follows it — the lines from the FAIL:/ERROR: header through the end of that
+    failure block (traceback + assertion message). Capped per failure and
+    overall, with a `... and N more` marker, so a multi-line assertion message
+    (e.g. a dumped seatbelt profile) reaches the log without flooding it."""
+    def rule(s: str, ch: str) -> bool:                 # unittest frames blocks with ==== / ----
+        s = s.strip()
+        return len(s) >= 20 and set(s) == {ch}
+
+    raw = text.splitlines()
+    out: list[str] = []
+    i, n = 0, len(raw)
+    while i < n:
+        if not raw[i].startswith(("FAIL:", "ERROR:")):
+            i += 1
+            continue
+        block = [raw[i].strip()]
+        i += 1
+        if i < n and rule(raw[i], "-"):                # frame rule directly under the header
+            i += 1
+        while i < n and not rule(raw[i], "="):         # next block boundary
+            if rule(raw[i], "-") and i + 1 < n and raw[i + 1].strip().startswith("Ran "):
+                break                                  # final boundary before the summary
+            block.append(raw[i].rstrip())
+            i += 1
+        while block and not block[-1].strip():         # trim trailing blanks
+            block.pop()
+        if len(block) > per_cap:
+            block = block[:per_cap] + [f"    ... and {len(block) - per_cap} more lines"]
+        out.extend(block)
+    return cap(out, overall_cap)
 
 
 def sh_fails(text: str) -> list[str]:
@@ -119,10 +191,18 @@ def check(name, needs: dict[str, str] | None = None):
 
 def run_checks() -> None:
     for name, needs, fn in CHECKS:
-        missing = [(t, why) for t, why in needs.items() if shutil.which(t) is None]
-        if missing:
-            tool, why = missing[0]
-            record(name, SKIP, f"{tool} not found on PATH — {why}")
+        skip = None
+        for tool, why in needs.items():
+            if tool == "bash":                       # resolved+probed, not just present
+                if not BASH_USABLE:
+                    skip = (f"resolved bash unusable ({BASH_PATH}) — {BASH_NOTE}"
+                            if BASH_PATH else f"no bash resolved — {BASH_NOTE}")
+                    break
+            elif shutil.which(tool) is None:
+                skip = f"{tool} not found on PATH — {why}"
+                break
+        if skip:
+            record(name, SKIP, skip)
             continue
         t0 = time.time()
         lines: list[str] = []
@@ -185,7 +265,7 @@ def _unittest():
 @check("wrapper-multiuser fixture", {**BASH, **GIT})
 def _wrapper():
     with tempfile.TemporaryDirectory() as td:
-        rc, out = run(["bash", str(ROOT / "tests" / "wrapper-multiuser-fixture.sh")], cwd=td)
+        rc, out = run([BASH_PATH, str(ROOT / "tests" / "wrapper-multiuser-fixture.sh")], cwd=td)
     counts = [ln for ln in out.splitlines() if "passed," in ln and "failed" in ln]
     detail = counts[-1].strip() if counts else tail(out)
     if rc == 0:
@@ -196,7 +276,7 @@ def _wrapper():
 @check("merge-verify fixture", {**BASH, **GIT})
 def _merge():
     with tempfile.TemporaryDirectory() as td:
-        rc, out = run(["bash", str(ROOT / "tests" / "merge-verify-fixture.sh")], cwd=td)
+        rc, out = run([BASH_PATH, str(ROOT / "tests" / "merge-verify-fixture.sh")], cwd=td)
     counts = [ln for ln in out.splitlines() if "passed," in ln and "failed" in ln]
     detail = counts[-1].strip() if counts else tail(out)
     if rc == 0:
@@ -260,7 +340,7 @@ def _bashn():
     bad = []                                    # one entry per file, so len == distinct files
     files = [f for f in tracked() if is_shell(f)]
     for rel in files:
-        rc, out = run(["bash", "-n", rel], timeout=60)
+        rc, out = run([BASH_PATH, "-n", rel], timeout=60)
         if rc != 0:
             bad.append(f"{rel}: {tail(out, 1)}")
     if not bad:
@@ -281,12 +361,22 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable summary on stdout")
     args = ap.parse_args()
 
+    global BASH_PATH, BASH_USABLE, BASH_NOTE
+    BASH_PATH, how = resolve_bash()
+    if BASH_PATH is None:
+        BASH_USABLE, BASH_NOTE = False, how
+    else:
+        BASH_USABLE, why = bash_usable(BASH_PATH)
+        BASH_NOTE = how if BASH_USABLE else f"{how}: {why}"
+    bash_desc = f"{BASH_PATH or 'not found'}" + ("" if BASH_USABLE else " (unusable)")
+
     run_checks()
     failed = sum(1 for r in results if r["status"] == FAIL)
     summary = {
         "root": str(ROOT),
         "platform": sys.platform,
         "python": sys.version.split()[0],
+        "bash": {"path": BASH_PATH, "usable": BASH_USABLE, "resolved": BASH_NOTE},
         "checks": results,
         "totals": {s: sum(1 for r in results if r["status"] == s) for s in (PASS, FAIL, SKIP)},
         "exit_code": 1 if failed else 0,
@@ -295,7 +385,8 @@ def main() -> int:
         print(json.dumps(summary, indent=2))
     else:
         w = max(len(r["check"]) for r in results)
-        print(f"\n  playbook verify — {sys.platform}, python {summary['python']}\n")
+        print(f"\n  playbook verify — {sys.platform}, python {summary['python']}, "
+              f"bash {bash_desc}\n")
         for r in results:
             print(f"  {r['status']:<5} {r['check']:<{w}}  {r['seconds']:>6.1f}s  {r['detail']}")
             if r["status"] == FAIL:

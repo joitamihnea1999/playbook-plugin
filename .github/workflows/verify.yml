@@ -157,6 +157,16 @@ jobs:
       - name: scripts/verify
         run: |
           set -o pipefail
+          # This step's shell is Git Bash, but scripts/verify spawns bash from
+          # Python, which resolves it against the Windows PATH where the
+          # System32 WSL stub shadows Git Bash. Hand Python this shell's bash
+          # explicitly (Windows path, so CreateProcess can exec it).
+          BASH_PATH="$(command -v bash)"
+          if command -v cygpath >/dev/null 2>&1; then
+            BASH_PATH="$(cygpath -w "$BASH_PATH")"
+          fi
+          export PLAYBOOK_VERIFY_BASH="$BASH_PATH"
+          echo "PLAYBOOK_VERIFY_BASH=$BASH_PATH"
           python scripts/verify | tee verify-windows.txt
       - name: Step summary
         if: always()
