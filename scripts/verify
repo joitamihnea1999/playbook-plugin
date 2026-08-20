@@ -35,11 +35,41 @@ def env() -> dict:
     return e
 
 
+def decode(raw: bytes) -> str:
+    """Decode captured subprocess bytes defensively across platforms.
+
+    We capture bytes (not text=True): on Windows/Git Bash a child can emit
+    UTF-16, or interleave NUL bytes, which the old text-mode capture reduced to
+    a lone `^@` (NUL) — an unreadable detail line that looked like N broken
+    files when it was one decoding defect. Recover the text when we can;
+    otherwise say so explicitly with the raw length and leading bytes in hex,
+    and never return a NUL-only string.
+    """
+    if not raw:
+        return ""
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):            # UTF-16 with BOM
+        try:
+            return raw.decode("utf-16").replace("\x00", "")
+        except (UnicodeDecodeError, ValueError):
+            pass
+    if raw.count(0) * 4 > len(raw):                       # NUL-heavy → likely UTF-16
+        for enc in ("utf-16-le", "utf-16-be"):
+            try:
+                text = raw.decode(enc)
+                if "\x00" not in text:
+                    return text
+            except (UnicodeDecodeError, ValueError):
+                pass
+    text = raw.decode("utf-8", "replace").replace("\x00", "")
+    if text.strip():
+        return text
+    return f"<undecodable output: {len(raw)} bytes, first bytes: {raw[:32].hex(' ')}>"
+
+
 def run(cmd: list[str], cwd: Path | str = ROOT, timeout: int = 900):
     p = subprocess.run(cmd, cwd=str(cwd), env=env(), timeout=timeout,
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                       errors="replace")
-    return p.returncode, p.stdout
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return p.returncode, decode(p.stdout)
 
 
 def tail(text: str, n: int = 2) -> str:
@@ -108,10 +138,13 @@ def run_checks() -> None:
 
 
 def tracked(*suffixes: str) -> list[str]:
-    rc, out = run(["git", "ls-files", "-z"], timeout=120)
-    if rc != 0:
-        raise RuntimeError("git ls-files failed")
-    files = [f for f in out.split("\0") if f]
+    # NUL-separated by design — capture bytes and split before decoding each
+    # name, so decode()'s NUL-stripping never eats the separators.
+    p = subprocess.run(["git", "ls-files", "-z"], cwd=str(ROOT), env=env(),
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+    if p.returncode != 0:
+        raise RuntimeError(f"git ls-files failed: {decode(p.stdout)}")
+    files = [f.decode("utf-8", "replace") for f in p.stdout.split(b"\0") if f]
     return [f for f in files if not suffixes or f.endswith(suffixes)]
 
 
@@ -224,7 +257,7 @@ def _ast():
 
 @check("bash -n shell files", {**BASH, **GIT})
 def _bashn():
-    bad = []
+    bad = []                                    # one entry per file, so len == distinct files
     files = [f for f in tracked() if is_shell(f)]
     for rel in files:
         rc, out = run(["bash", "-n", rel], timeout=60)
@@ -232,7 +265,7 @@ def _bashn():
             bad.append(f"{rel}: {tail(out, 1)}")
     if not bad:
         return PASS, f"{len(files)} files"
-    return FAIL, f"{len(bad)} of {len(files)} files", cap(bad)
+    return FAIL, f"{len(bad)} of {len(files)} distinct files failed bash -n", cap(bad)
 
 
 @check("git diff --check", GIT)

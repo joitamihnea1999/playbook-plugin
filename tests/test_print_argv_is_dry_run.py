@@ -55,6 +55,29 @@ class PrintArgvNeverExecutes(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def _containment_diag(self, allowed: Path) -> str:
+        """The containment the --ro-project prompt path actually generates for
+        this scenario, rendered into the assertion message so a failure (esp. on
+        the macOS seatbelt backend, which no Linux CI leg exercises) reports the
+        real profile/argv delta instead of an opaque boolean mismatch."""
+        import platform
+        try:
+            if platform.system() == "Darwin":
+                body = sandbox.build_seatbelt_profile(
+                    self.proj, sandbox._git_dir_of(self.proj), [str(allowed)],
+                    project_writable=False)
+                header = "generated seatbelt profile (project_writable=False)"
+            else:
+                body = "\n".join(sandbox._wrapped_argv(
+                    "claude", ["<agent-argv>"], self.proj, [str(allowed)],
+                    project_writable=False))
+                header = f"generated wrapped argv ({platform.system()} backend)"
+        except Exception as exc:  # diagnostics must never mask the real failure
+            body, header = f"<could not build containment: {exc!r}>", "containment"
+        listing = sorted(p.name for p in self.proj.iterdir())
+        return (f"\n--- {header} ---\n{body}\n"
+                f"--- project root now contains: {listing} ---")
+
     def _run(self, *flags: str) -> subprocess.CompletedProcess:
         env = {k: v for k, v in os.environ.items() if k != "PLAYBOOK_SANDBOXED"}
         env["PYTHONPATH"] = str(PLUGIN)
@@ -113,10 +136,17 @@ class PrintArgvNeverExecutes(unittest.TestCase):
             "--agent", "claude", "--ro-project", "--rw", str(allowed),
             "--prompt", "hello",
         )
-        self.assertEqual(r.returncode, 0, r.stderr)
+        # When this fires on Darwin (the seatbelt backend) it must name the real
+        # delta, not just a boolean: print the exact containment the runner
+        # generates for this scenario so a headless CI run is diagnosable.
+        diag = self._containment_diag(allowed)
+        self.assertEqual(r.returncode, 0, r.stderr + diag)
         self.assertNotIn("blocked", [p.name for p in self.proj.iterdir()],
-                         "--ro-project prompt execution wrote the project root")
-        self.assertEqual((allowed / "wrote").read_text(encoding="utf-8"), "allowed")
+                         "--ro-project prompt execution wrote the project root" + diag)
+        wrote = allowed / "wrote"
+        self.assertTrue(wrote.exists(),
+                        "the --rw exception never received the write" + diag)
+        self.assertEqual(wrote.read_text(encoding="utf-8"), "allowed", diag)
 
     def test_other_inspection_flags_never_execute(self):
         for flags in (("--list-agents",), ("--list-models",),
