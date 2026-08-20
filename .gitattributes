@@ -1,0 +1,39 @@
+# Line-ending policy. Without this, a Windows checkout rewrites shell
+# scripts to CRLF (and worse, injects NUL/^@), so bash -n and the shell
+# fixtures corrupt. Text is auto-detected; anything that must be LF to
+# execute or be parsed is pinned to LF explicitly below.
+
+* text=auto
+
+# Pin LF for parsed/executed text formats.
+*.sh    text eol=lf
+*.zsh   text eol=lf
+*.py    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+
+# Extensionless executable scripts (enumerated from git ls-files, not guessed).
+arena/githooks/pre-push text eol=lf
+plugins/playbook/scripts/chat-log-hook text eol=lf
+plugins/playbook/scripts/codex-apply-patch-hook text eol=lf
+plugins/playbook/scripts/codex-stop-hook text eol=lf
+plugins/playbook/scripts/codex-user-prompt-hook text eol=lf
+plugins/playbook/scripts/command-guard-hook text eol=lf
+plugins/playbook/scripts/init text eol=lf
+plugins/playbook/scripts/monitor text eol=lf
+plugins/playbook/scripts/monitor-lib/launch-monitor text eol=lf
+plugins/playbook/scripts/playbook-agy text eol=lf
+plugins/playbook/scripts/playbook-codex text eol=lf
+plugins/playbook/scripts/playbook-grok text eol=lf
+plugins/playbook/scripts/playbook-pi text eol=lf
+plugins/playbook/scripts/sandbox text eol=lf
+plugins/playbook/scripts/session-end-hook text eol=lf
+plugins/playbook/scripts/session-start-hook text eol=lf
+plugins/playbook/scripts/state-echo-hook text eol=lf
+plugins/playbook/scripts/stop-hook text eol=lf
+plugins/playbook/scripts/task-gate-hook text eol=lf
+plugins/playbook/scripts/tasks text eol=lf
+
+# Binary assets — never normalize.
+*.pdf   binary
+*.png   binary

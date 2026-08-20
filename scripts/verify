@@ -57,8 +57,25 @@ def ut_tail(text: str) -> str:
     return tail(text)
 
 
-def record(name, status, detail="", started=None):
+def cap(items: list[str], n: int = 20) -> list[str]:
+    """First n detail lines, then a count of the remainder."""
+    return items if len(items) <= n else items[:n] + [f"... and {len(items) - n} more"]
+
+
+def ut_fails(text: str) -> list[str]:
+    """FAIL:/ERROR: test identifiers from a unittest run."""
+    return cap([ln.strip() for ln in text.splitlines()
+                if ln.startswith(("FAIL:", "ERROR:"))])
+
+
+def sh_fails(text: str) -> list[str]:
+    """Failing assertion lines from a shell fixture (it prints `  FAIL  ...`)."""
+    return cap([ln.strip() for ln in text.splitlines() if ln.strip().startswith("FAIL")])
+
+
+def record(name, status, detail="", started=None, lines=None):
     results.append({"check": name, "status": status, "detail": detail,
+                    "detail_lines": lines or [],
                     "seconds": round(time.time() - started, 1) if started else 0.0})
 
 
@@ -78,13 +95,16 @@ def run_checks() -> None:
             record(name, SKIP, f"{tool} not found on PATH — {why}")
             continue
         t0 = time.time()
+        lines: list[str] = []
         try:
-            status, detail = fn()
+            res = fn()
+            status, detail = res[0], res[1]
+            lines = res[2] if len(res) > 2 else []
         except subprocess.TimeoutExpired:
             status, detail = FAIL, "timed out"
         except Exception as exc:                        # a broken check is a FAIL
             status, detail = FAIL, f"{type(exc).__name__}: {exc}"
-        record(name, status, detail, t0)
+        record(name, status, detail, t0, lines)
 
 
 def tracked(*suffixes: str) -> list[str]:
@@ -124,7 +144,9 @@ BASH = {"bash": "shell fixtures need bash"}
 @check("unittest discover")
 def _unittest():
     rc, out = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"])
-    return (PASS if rc == 0 else FAIL), ut_tail(out)
+    if rc == 0:
+        return PASS, ut_tail(out)
+    return FAIL, ut_tail(out), ut_fails(out)
 
 
 @check("wrapper-multiuser fixture", {**BASH, **GIT})
@@ -133,7 +155,9 @@ def _wrapper():
         rc, out = run(["bash", str(ROOT / "tests" / "wrapper-multiuser-fixture.sh")], cwd=td)
     counts = [ln for ln in out.splitlines() if "passed," in ln and "failed" in ln]
     detail = counts[-1].strip() if counts else tail(out)
-    return (PASS if rc == 0 else FAIL), detail
+    if rc == 0:
+        return PASS, detail
+    return FAIL, detail, sh_fails(out)
 
 
 @check("merge-verify fixture", {**BASH, **GIT})
@@ -141,7 +165,10 @@ def _merge():
     with tempfile.TemporaryDirectory() as td:
         rc, out = run(["bash", str(ROOT / "tests" / "merge-verify-fixture.sh")], cwd=td)
     counts = [ln for ln in out.splitlines() if "passed," in ln and "failed" in ln]
-    return (PASS if rc == 0 else FAIL), (counts[-1].strip() if counts else tail(out))
+    detail = counts[-1].strip() if counts else tail(out)
+    if rc == 0:
+        return PASS, detail
+    return FAIL, detail, sh_fails(out)
 
 
 @check("guarantee ledger")
@@ -150,14 +177,18 @@ def _ledger():
     rc2, out2 = run([sys.executable, "-m", "unittest", "tests.test_guarantee_ledger", "-q"], timeout=300)
     if rc1 == 0 and rc2 == 0:
         return PASS, "--summary ok / unit tests ok"
-    return FAIL, f"--summary rc={rc1}: {tail(out1, 1)} | unittest rc={rc2}: {tail(out2, 1)}"
+    detail = f"--summary rc={rc1}: {tail(out1, 1)} | unittest rc={rc2}: {tail(out2, 1)}"
+    lines = ut_fails(out2) + ([f"--summary: {ln}" for ln in cap(out1.strip().splitlines())] if rc1 != 0 else [])
+    return FAIL, detail, lines
 
 
 @check("version + mirror parity")
 def _parity():
     rc, out = run([sys.executable, "-m", "unittest",
                    "tests.test_version_parity", "tests.test_mirror_sync", "-q"], timeout=600)
-    return (PASS if rc == 0 else FAIL), ut_tail(out)
+    if rc == 0:
+        return PASS, ut_tail(out)
+    return FAIL, ut_tail(out), ut_fails(out)
 
 
 @check("json strict parse", GIT)
@@ -169,7 +200,9 @@ def _json():
             json.loads((ROOT / rel).read_text(encoding="utf-8"), object_pairs_hook=no_dup_pairs)
         except Exception as exc:
             bad.append(f"{rel}: {exc}")
-    return (PASS, f"{len(files)} files, no duplicate members") if not bad else (FAIL, "; ".join(bad[:3]))
+    if not bad:
+        return PASS, f"{len(files)} files, no duplicate members"
+    return FAIL, f"{len(bad)} invalid of {len(files)}", cap(bad)
 
 
 @check(f"ast.parse @ py{PY_FLOOR[0]}.{PY_FLOOR[1]}", GIT)
@@ -184,7 +217,9 @@ def _ast():
             bad.append(f"{rel}:{exc.lineno}: {exc.msg}")
         except Exception as exc:
             bad.append(f"{rel}: {type(exc).__name__}: {exc}")
-    return (PASS, f"{len(files)} files") if not bad else (FAIL, "; ".join(bad[:3]))
+    if not bad:
+        return PASS, f"{len(files)} files"
+    return FAIL, f"{len(bad)} invalid of {len(files)}", cap(bad)
 
 
 @check("bash -n shell files", {**BASH, **GIT})
@@ -195,13 +230,17 @@ def _bashn():
         rc, out = run(["bash", "-n", rel], timeout=60)
         if rc != 0:
             bad.append(f"{rel}: {tail(out, 1)}")
-    return (PASS, f"{len(files)} files") if not bad else (FAIL, "; ".join(bad[:3]))
+    if not bad:
+        return PASS, f"{len(files)} files"
+    return FAIL, f"{len(bad)} of {len(files)} files", cap(bad)
 
 
 @check("git diff --check", GIT)
 def _diffcheck():
     rc, out = run(["git", "diff", "--check"], timeout=120)
-    return (PASS, "no whitespace errors") if rc == 0 else (FAIL, tail(out))
+    if rc == 0:
+        return PASS, "no whitespace errors"
+    return FAIL, tail(out), cap([ln.strip() for ln in out.splitlines() if ln.strip()])
 
 
 def main() -> int:
@@ -226,6 +265,9 @@ def main() -> int:
         print(f"\n  playbook verify — {sys.platform}, python {summary['python']}\n")
         for r in results:
             print(f"  {r['status']:<5} {r['check']:<{w}}  {r['seconds']:>6.1f}s  {r['detail']}")
+            if r["status"] == FAIL:
+                for ln in r["detail_lines"]:
+                    print(f"        {ln}")
         t = summary["totals"]
         print(f"\n  {t[PASS]} passed, {t[FAIL]} failed, {t[SKIP]} skipped\n")
     return summary["exit_code"]
