@@ -85,8 +85,46 @@ class _LedgerFixture(unittest.TestCase):
         return next(p for e in data["guarantees"] for p in e["proofs"]
                     if p["type"] != "missing")
 
+    # The ledger's only known_violation, PB-LANE-RESOLUTION, was closed by the
+    # 1.5.34 shell-logger correction, so the real ledger now carries none. The
+    # known_violation contract still has to be exercised — the arms below are
+    # the only thing standing between a future violation entry and a silently
+    # unvalidated one — so when the product has no open violation these helpers
+    # SYNTHESIZE a valid one on a mutable copy instead of quietly vanishing.
+    #
+    # The synthesized entry must be valid apart from the mutation under test:
+    # an extra unrelated error would keep every mutant red no matter which
+    # validator arm is neutralised, which is exactly how a diagnostic-arm sweep
+    # reports false coverage.
+    def synthesize_violation(self, data):
+        """Turn one real entry into a valid known_violation and return it."""
+        entry = next(e for e in data["guarantees"] if e["id"] == "PB-LANE-RESOLUTION")
+        entry["status"] = "known_violation"
+        entry["follow_up_phases"] = sorted({2, *entry["follow_up_phases"]})
+        entry["violation_reproduction"] = {
+            "type": "executable integration",
+            "path": "tests/wrapper-multiuser-fixture.sh",
+            "reference": "scenario:S15",
+            "invocation": (
+                "env -u PLAYBOOK_SESSION_ID -u PLAYBOOK_ROLE "
+                "BASH_ENV=<repo>/plugins/playbook/scripts/bash-log.sh "
+                "bash <repo>/tests/wrapper-multiuser-fixture.sh"
+            ),
+            "observed": (
+                "272 passed, 2 failed (exit 1): the logger created root "
+                ".agent/bash_history on a fresh multi-user clone."
+            ),
+            "platforms": ["linux"],
+            "artifacts": ["plugins/playbook/scripts/bash-log.sh"],
+            "phase": 2,
+        }
+        return entry
+
     def first_violation(self, data):
-        return next(e for e in data["guarantees"] if e["status"] == "known_violation")
+        for entry in data["guarantees"]:
+            if entry["status"] == "known_violation":
+                return entry
+        return self.synthesize_violation(data)
 
 
 class GuaranteeLedgerValidation(_LedgerFixture):
@@ -477,16 +515,51 @@ class GuaranteeLedgerValidation(_LedgerFixture):
             data, "pointer: owner references are only defined for JSON files")
 
     # ------------------------------------------- known_violation status contract
-    def test_the_ledger_records_the_confirmed_lane_violation(self):
-        entry = self.first_violation(self.ledger)
-        self.assertEqual("PB-LANE-RESOLUTION", entry["id"])
-        v = entry["violation_reproduction"]
-        self.assertEqual("tests/wrapper-multiuser-fixture.sh", v["path"])
-        self.assertEqual("scenario:S15", v["reference"])
-        self.assertIn("plugins/playbook/scripts/bash-log.sh", v["artifacts"])
-        self.assertEqual(["linux"], v["platforms"])
-        self.assertEqual(2, v["phase"])
-        self.assertIn(2, entry["follow_up_phases"])
+    def test_the_ledger_records_the_closed_lane_defect(self):
+        """PB-LANE-RESOLUTION: corrected in 1.5.34, and still not green.
+
+        The entry moved off `known_violation` because the candidate bundled
+        artifact no longer reproduces the defect — not because the guarantee is
+        fully evidenced. zsh is unexecuted, macOS/Windows are unverified, live
+        provider evidence is absent, and the installed copy is stale, so the
+        status is `partially_evidenced` with those limitations named.
+        """
+        entry = next(e for e in self.ledger["guarantees"]
+                     if e["id"] == "PB-LANE-RESOLUTION")
+        self.assertEqual("partially_evidenced", entry["status"])
+        self.assertIsNone(entry["violation_reproduction"],
+                          "a corrected artifact may not keep a reproduction")
+        self.assertNotIn(2, entry["follow_up_phases"],
+                         "the Phase 2 runtime correction is done")
+        self.assertIn(8, entry["follow_up_phases"],
+                      "the zsh/macOS/Windows/live cells remain Phase 8 work")
+
+        proof = next(p for p in entry["proofs"]
+                     if p["reference"].startswith("MarkerAbsentWithLanes."))
+        self.assertEqual("tests/test_provider_multiuser.py", proof["path"])
+        self.assertEqual("executable integration", proof["type"])
+        control = proof["negative_control"]
+        self.assertIsNotNone(control, "the fix needs a distinct adverse control")
+        self.assertNotEqual(proof["reference"], control["reference"])
+        self.assertTrue(control["reference"].startswith("LegitimateRootLane."),
+                        "the adverse control must be the root-lane exemption")
+
+        limitations = " ".join(entry["missing_evidence_or_limitation"])
+        for expected in ("zsh", "~/.claude/bash-log.sh", "Phase 8"):
+            self.assertIn(expected, limitations)
+
+    def test_the_real_ledger_has_no_open_known_violation(self):
+        violations = [e for e in self.ledger["guarantees"]
+                      if e["status"] == "known_violation"]
+        self.assertEqual([], [e["id"] for e in violations])
+        self.assertIn("Known violations of a stated guarantee: 0",
+                      MODULE.coverage_summary(self.ledger))
+
+    def test_the_synthesized_violation_is_otherwise_valid(self):
+        """The arms below only mean something on an otherwise-clean mutant."""
+        data = self.mutated()
+        self.synthesize_violation(data)
+        self.assertEqual([], self.errors(data))
 
     def test_known_violation_without_a_reproduction_rejected(self):
         data = self.mutated()
@@ -560,13 +633,15 @@ class GuaranteeLedgerValidation(_LedgerFixture):
             data, "only a known_violation may carry a violation_reproduction")
 
     def test_known_violation_is_not_counted_as_verified(self):
-        entries = self.ledger["guarantees"]
+        data = self.mutated()
+        self.first_violation(data)
+        entries = data["guarantees"]
         violations = [e for e in entries if e["status"] == "known_violation"]
         self.assertTrue(violations)
         for entry in violations:
             self.assertNotEqual(
                 "verified_by_current_executable_evidence", entry["status"])
-        summary = MODULE.coverage_summary(self.ledger)
+        summary = MODULE.coverage_summary(data)
         self.assertIn(f"Known violations of a stated guarantee: {len(violations)}", summary)
         gaps = [e for e in entries
                 if e["failure_consequence"] in {"Critical", "High"}

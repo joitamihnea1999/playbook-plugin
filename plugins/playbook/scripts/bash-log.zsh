@@ -32,7 +32,15 @@ while [[ "$_cpb_log_dir" != "/" ]]; do
         # retro/context on a multi-user repo and mix users' commands together.
         # An unusable marker means the owning lane is unknown: skip logging
         # rather than fall back to the shared root.
-        _cpb_log_lane="$_cpb_log_dir/.agent"
+        #
+        # The lane starts UNKNOWN — see bash-log.sh. Defaulting it to the root
+        # here made a fresh clone of a multi-user repo (lanes present, the
+        # gitignored marker absent) append to the SHARED root
+        # .agent/bash_history (PB-LANE-RESOLUTION, Critical). The four answers
+        # are bash-log.sh's, unchanged: marker -> that lane; no marker with root
+        # .agent/tasks/ or with no per-user lane -> the root IS a lane; no marker
+        # with a per-user lane -> owner unknown, skip; bad marker -> skip.
+        _cpb_log_lane=""
         if [[ -f "$_cpb_log_dir/.agent/current_user" ]]; then
             _cpb_log_user=""; _cpb_log_extra=""
             # One-line contract — see bash-log.sh for the rationale.
@@ -48,6 +56,28 @@ while [[ "$_cpb_log_dir" != "/" ]]; do
                 *[!a-zA-Z0-9_.-]*) break ;;
             esac
             _cpb_log_lane="$_cpb_log_dir/.agent/$_cpb_log_user"
+        elif [[ -d "$_cpb_log_dir/.agent/tasks" ]]; then
+            # No marker, but root .agent/tasks/ means the root IS itself a
+            # legitimate lane (the legacy and mixed layouts).
+            _cpb_log_lane="$_cpb_log_dir/.agent"
+        else
+            # No marker, no root lane: ownership is unknown ONLY if a per-user
+            # lane (a child of .agent/ containing tasks/) actually exists. With
+            # no lane there is nobody to contaminate and resolve_agent_dir
+            # answers the root, so skipping would lose history the CLI still
+            # reads. Tried last, so it never runs in the marker case or in any
+            # legacy/mixed project. See bash-log.sh for the full rationale.
+            #
+            # `(N)` is the one zsh-specific idiom here, and it is load-bearing:
+            # bash leaves an unmatched glob literal, while zsh's default NOMATCH
+            # would error instead. The qualifier is per-pattern NULL_GLOB — no
+            # shell option is set. `break 2` leaves both this scan and the walk,
+            # which is this file's existing "skip logging" idiom (bash-log.sh
+            # uses `return 0`).
+            for _cpb_log_sub in "$_cpb_log_dir/.agent"/*(N); do
+                [[ -d "$_cpb_log_sub/tasks" ]] && break 2
+            done
+            _cpb_log_lane="$_cpb_log_dir/.agent"
         fi
         [[ -d "$_cpb_log_lane" ]] || break
 
@@ -56,4 +86,4 @@ while [[ "$_cpb_log_dir" != "/" ]]; do
     fi
     _cpb_log_dir="${_cpb_log_dir:h}"
 done
-unset _cpb_log_dir _cpb_log_cmd _cpb_log_lane _cpb_log_user _cpb_log_extra
+unset _cpb_log_dir _cpb_log_cmd _cpb_log_lane _cpb_log_user _cpb_log_extra _cpb_log_sub

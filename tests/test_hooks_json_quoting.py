@@ -353,7 +353,10 @@ class StaleForeignCopyCollapse(unittest.TestCase):
     def test_equivalent_version_formatting_is_still_same_version(self):
         from tasks.hooks_check import _code_version
         code_v = _code_version()
-        for shown in (f"v{code_v}", "01.5.33"):
+        # Derived, never a literal: a hardcoded "01.5.33" stops being an
+        # equivalent formatting of the running version the moment the version
+        # is bumped, and this arm then asserts the opposite of its own name.
+        for shown in (f"v{code_v}", f"0{code_v}"):
             with self.subTest(version=shown):
                 self._stamp(self.foreign, shown)
                 self.assertGreater(len(self._foreign_rows()), 1)
