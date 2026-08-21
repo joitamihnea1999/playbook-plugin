@@ -67,6 +67,113 @@ AGENT_DIR="$(resolve_agent_dir "$PROJECT_DIR")"
 # Label paths relative to the project in the created/skipped summary.
 AGENT_REL="${AGENT_DIR#"$PROJECT_DIR"/}"
 
+# Resolve the host-shell rc file up front. It is one of the files the snapshot
+# below must protect, and the choice depends only on $SHELL / $HOME — nothing
+# init has created yet — so it is safe to decide here. (Section (e) reuses
+# RC_FILE and SOURCE_LINE; they are set once, here.)
+SHELL_NAME="$(basename "$SHELL" 2>/dev/null)"
+if [ "$SHELL_NAME" = "zsh" ]; then
+    RC_FILE="$HOME/.zshenv"
+    SOURCE_LINE='[ -f ~/.claude/bash-log.zsh ] && source ~/.claude/bash-log.zsh'
+else
+    # ~/.bashrc is interactive-only; CC runs non-interactive bash.
+    # BASH_ENV is sourced by bash for every non-interactive shell — the right hook.
+    # Prefer ~/.bash_profile (login shell sets env for all children); fall back to ~/.profile.
+    if [ -f "$HOME/.bash_profile" ] || [ ! -f "$HOME/.profile" ]; then
+        RC_FILE="$HOME/.bash_profile"
+    else
+        RC_FILE="$HOME/.profile"
+    fi
+    SOURCE_LINE='export BASH_ENV=~/.claude/bash-log.sh'
+fi
+
+# ── Transactional snapshot / rollback (PB-INSTALL-ROLLBACK) ─────────────────
+# Before the first mutation, snapshot every file init may modify and record
+# which dirs it may create, so ANY non-zero exit — a `set -e` abort, the soft
+# FAILED summary, or a trapped interrupt (Ctrl-C / SIGTERM) — restores the
+# pre-init state with no content loss and no half-provisioned "mixed" install.
+# The heavy lifting is a Python helper (init_txn.py); the shell keeps only a
+# tiny EXIT trap. Set PB_INIT_NO_TXN=1 to disable (the rollback test's negative
+# control uses this to prove the guarantee is what does the restoring).
+TXN_MANIFEST=""
+TXN_PROJECT_BACKUP=""
+TXN_USER_BACKUP=""
+if [ -z "${PB_INIT_NO_TXN:-}" ]; then
+    TXN_STAMP="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null).$$"
+    # Every file init may create OR modify (project realm + user realm).
+    TXN_FILES="$PROJECT_DIR/CLAUDE.md
+$PROJECT_DIR/.gitignore
+$PROJECT_DIR/MIND_MAP.md
+$PROJECT_DIR/.agent/config.json
+$AGENT_DIR/playbooks/README.md
+$PROJECT_DIR/.claude/settings.json
+$PROJECT_DIR/.claude/bin/tasks
+$PROJECT_DIR/.claude/bin/sandbox
+$PROJECT_DIR/.claude/bin/monitor
+$PROJECT_DIR/.claude/bin/playbook-codex
+$PROJECT_DIR/.claude/bin/playbook-agy
+$PROJECT_DIR/.claude/bin/playbook-grok
+$PROJECT_DIR/.claude/bin/playbook-pi
+$PROJECT_DIR/.claude/hooks/monitor-nudge.sh
+$AGENT_DIR/monitor/CLAUDE.md
+$AGENT_DIR/monitor/MONITOR_MIND_MAP.md
+$AGENT_DIR/monitor/rules.md
+$HOME/.claude/bash-log.sh
+$HOME/.claude/bash-log.zsh
+$HOME/.claude/settings.json
+$RC_FILE"
+    # Every directory init may create; the helper removes only the ones that did
+    # NOT pre-exist and are empty after file cleanup (deepest first). A freshly
+    # created .agent/ is kept because it then holds the backup.
+    TXN_DIRS="$AGENT_DIR/tasks
+$AGENT_DIR/playbooks
+$AGENT_DIR/monitor
+$PROJECT_DIR/.claude/bin
+$PROJECT_DIR/.claude/hooks
+$PROJECT_DIR/.claude
+$AGENT_DIR
+$PROJECT_DIR/.agent
+$HOME/.claude"
+    if ! TXN_OUT=$(PB_TXN_PROJECT_ROOT="$PROJECT_DIR" PB_TXN_HOME="$HOME" \
+        PB_TXN_STAMP="$TXN_STAMP" PB_TXN_FILES="$TXN_FILES" PB_TXN_DIRS="$TXN_DIRS" \
+        python3 "$SCRIPT_DIR/init_txn.py" begin 2>&1); then
+        echo "init: could not take the pre-init snapshot — aborting before any change." >&2
+        printf '%s\n' "$TXN_OUT" >&2
+        exit 1
+    fi
+    while IFS= read -r line; do
+        line=${line%$'\r'}
+        case "$line" in
+            MANIFEST:*)       TXN_MANIFEST="${line#MANIFEST:}" ;;
+            PROJECT_BACKUP:*) TXN_PROJECT_BACKUP="${line#PROJECT_BACKUP:}" ;;
+            USER_BACKUP:*)    TXN_USER_BACKUP="${line#USER_BACKUP:}" ;;
+        esac
+    done <<< "$TXN_OUT"
+fi
+
+# One EXIT trap, delegating to the helper — no per-stage bash bookkeeping. On a
+# clean (rc 0) exit the snapshot is kept as the undo point; on any failure it is
+# replayed to restore the pre-init state, then the original exit code stands.
+_pb_rollback_finalize() {
+    local rc=$?
+    trap - EXIT
+    [ -n "$TXN_MANIFEST" ] || exit "$rc"
+    [ "$rc" -eq 0 ] && exit 0
+    echo "" >&2
+    echo "playbook init FAILED (exit $rc) — restoring the pre-init state." >&2
+    if ! python3 "$SCRIPT_DIR/init_txn.py" restore --manifest "$TXN_MANIFEST" >&2; then
+        echo "init: rollback hit errors — inspect the preserved backup:" >&2
+        echo "  project: $TXN_PROJECT_BACKUP" >&2
+        echo "  user:    $TXN_USER_BACKUP" >&2
+    fi
+    exit "$rc"
+}
+if [ -n "$TXN_MANIFEST" ]; then
+    trap '_pb_rollback_finalize' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+fi
+
 CREATED=()
 SKIPPED=()
 FAILED=()
@@ -285,22 +392,8 @@ deploy_bash_log() {   # $1 = filename under $SCRIPT_DIR; deploys to ~/.claude/
     fi
 }
 
-SHELL_NAME="$(basename "$SHELL" 2>/dev/null)"
-if [ "$SHELL_NAME" = "zsh" ]; then
-    RC_FILE="$HOME/.zshenv"
-    SOURCE_LINE='[ -f ~/.claude/bash-log.zsh ] && source ~/.claude/bash-log.zsh'
-else
-    # ~/.bashrc is interactive-only; CC runs non-interactive bash.
-    # BASH_ENV is sourced by bash for every non-interactive shell — the right hook.
-    # Prefer ~/.bash_profile (login shell sets env for all children); fall back to ~/.profile.
-    if [ -f "$HOME/.bash_profile" ] || [ ! -f "$HOME/.profile" ]; then
-        RC_FILE="$HOME/.bash_profile"
-    else
-        RC_FILE="$HOME/.profile"
-    fi
-    SOURCE_LINE='export BASH_ENV=~/.claude/bash-log.sh'
-fi
-
+# SHELL_NAME, RC_FILE, and SOURCE_LINE were resolved up front (before the
+# snapshot), since the rc file is one of the snapshotted paths.
 # The bash variant is what BASH_ENV names, so it is unconditional.
 BASH_LOG_SRC="$SCRIPT_DIR/bash-log.sh"
 
@@ -521,5 +614,16 @@ if [ ${#FAILED[@]} -gt 0 ]; then
     for item in "${FAILED[@]}"; do
         echo "  ! $item"
     done
+    # A non-zero exit trips the EXIT trap, which rolls back to the pre-init
+    # state — no partial or mixed-version install is left behind.
     exit 1
+fi
+
+# Clean run: keep the snapshot as the documented undo path and point at it.
+if [ -n "$TXN_PROJECT_BACKUP" ]; then
+    echo ""
+    echo "Undo: this run's pre-init snapshot is kept at"
+    echo "  $TXN_PROJECT_BACKUP  (project files)"
+    echo "  $TXN_USER_BACKUP  (user files)"
+    echo "Restore it by hand, or delete it once you're happy with the setup."
 fi
