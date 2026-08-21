@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from tests._bashcheck import bash_or_skip
 import unittest
 from pathlib import Path
@@ -64,12 +65,23 @@ class ShellFixtures(unittest.TestCase):
                 if missing:
                     self.skipTest(f"{name}: missing binary(ies): {missing}")
                 try:
-                    r = subprocess.run(
-                        [bash_or_skip(), str(path)],
-                        cwd=str(_HERE.parent), env=_clean_env(),
-                        capture_output=True, text=True,
-                        timeout=_PER_FIXTURE_TIMEOUT,
-                    )
+                    # Run in a FRESH tempdir, not the repo root. The repo is
+                    # itself a dogfooded playbook project (real .agent/ lanes,
+                    # CLAUDE.md, MIND_MAP.md), and a fixture that walks up from
+                    # cwd or asserts on ".agent contents of a fresh clone" reads
+                    # that live state and reports spurious failures — the exact
+                    # cause of the wrapper-multiuser 271/2-vs-273/0 split between
+                    # this runner (was cwd=repo root) and scripts/verify (already
+                    # isolates in a TemporaryDirectory). Every fixture locates its
+                    # own inputs via an absolute $0-derived path, so a neutral cwd
+                    # is safe and matches the canonical gate.
+                    with tempfile.TemporaryDirectory() as td:
+                        r = subprocess.run(
+                            [bash_or_skip(), str(path)],
+                            cwd=td, env=_clean_env(),
+                            capture_output=True, text=True,
+                            timeout=_PER_FIXTURE_TIMEOUT,
+                        )
                 except subprocess.TimeoutExpired:
                     self.fail(f"{name}: timed out after {_PER_FIXTURE_TIMEOUT}s")
                 if r.returncode != 0:

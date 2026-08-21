@@ -547,7 +547,14 @@ def same_dir(a, b):
 
 try:
     project = sys.argv[1] if len(sys.argv) > 1 else ""
-    root = os.path.expanduser(os.path.join("~", ".claude", "plugins"))
+    # Derive the plugins root from $HOME, matching the bash last-resort
+    # `find ~/.claude/plugins` below (bash `~` is $HOME). os.path.expanduser('~')
+    # prefers USERPROFILE over $HOME on Windows, so it could look in a different
+    # home than the shell that runs the wrapper — the resolver and its own
+    # fallback would then disagree. Fall back to expanduser only if $HOME is
+    # unset. No-op on POSIX and on Windows where $HOME == USERPROFILE.
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    root = os.path.join(home, ".claude", "plugins")
     cands = []  # (rank, version_key, last_updated, path)
     try:
         with open(os.path.join(root, "installed_plugins.json")) as fh:

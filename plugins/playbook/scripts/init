@@ -319,9 +319,16 @@ import json, os, tempfile
 # I4: path via env, not interpolated (single-quote paths would SyntaxError).
 path = os.environ['PB_CC_SETTINGS_PATH']
 # Always bash-log.sh — CC's Bash tool is /bin/bash regardless of user's login shell.
-# Forward-slash the path: on Windows expanduser yields backslashes, but BASH_ENV
-# is read by Git-Bash which needs a POSIX-sourceable path (C:/Users/... works).
-dest = os.path.expanduser('~/.claude/bash-log.sh').replace(os.sep, '/')
+# Point BASH_ENV at the SAME dir deploy_bash_log wrote to, which uses the shell's
+# $HOME. On Windows os.path.expanduser('~') prefers USERPROFILE over $HOME, so it
+# could name a DIFFERENT dir than where the file was deployed and leave BASH_ENV
+# dangling — the exact dangling-reference bug this path exists to prevent. Derive
+# from $HOME (always set under the bash that runs init); fall back to expanduser
+# only if it is somehow unset. Forward-slash the result: BASH_ENV is read by
+# Git-Bash, which needs a POSIX-sourceable path (C:/Users/... works). No-op on
+# POSIX, where $HOME == expanduser('~').
+home = os.environ.get('HOME') or os.path.expanduser('~')
+dest = os.path.join(home, '.claude', 'bash-log.sh').replace(os.sep, '/')
 try:
     data = json.loads(open(path).read()) if os.path.exists(path) else {}
     env = data.setdefault('env', {})

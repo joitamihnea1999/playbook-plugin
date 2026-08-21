@@ -28,6 +28,16 @@ FAIL=0
 pass() { echo "  PASS  $*"; PASS=$((PASS+1)); }
 fail() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
+# Portable file checksum: git-bash ships neither shasum nor sha256sum reliably,
+# so fall back to python3 (already required by this suite). Only the STABILITY
+# of the digest across reads matters here, not which algorithm produces it.
+_sum() {
+    if command -v shasum >/dev/null 2>&1; then shasum "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$1"
+    fi
+}
+
 # assert_wrapper_healthy FILE NAME LABEL — non-empty, +x, marker, correct script
 # name substituted, no leftover placeholder.
 assert_wrapper_healthy() {
@@ -79,7 +89,7 @@ S4="$WORK/s4"; mkdir -p "$S4/.claude/bin"
 # custom-file guard would skip regeneration and the kill window never opens).
 printf '#!/bin/bash\n# playbook-managed\nOLD REAL CONTENT\n' > "$S4/.claude/bin/tasks"
 chmod +x "$S4/.claude/bin/tasks"
-OLD_SUM="$(shasum "$S4/.claude/bin/tasks" | awk '{print $1}')"
+OLD_SUM="$(_sum "$S4/.claude/bin/tasks")"
 SIGNAL="$S4/mv-reached"
 # Separate PROCESS (distinct $$), with `mv` shadowed to stall after signalling.
 bash -c '
@@ -94,8 +104,8 @@ kill -9 "$KILL_PID" 2>/dev/null
 pkill -9 -P "$KILL_PID" 2>/dev/null   # reap the stalling sleep child if still attached
 wait "$KILL_PID" 2>/dev/null
 NOW_BYTES="$(wc -c < "$S4/.claude/bin/tasks" | tr -d ' ')"
-NOW_SUM="$(shasum "$S4/.claude/bin/tasks" | awk '{print $1}')"
-NEW_SUM="$(source "$LIB"; TMPD="$S4/ref"; mkdir -p "$TMPD"; create_wrapper "$TMPD" tasks; shasum "$TMPD/.claude/bin/tasks" | awk '{print $1}')"
+NOW_SUM="$(_sum "$S4/.claude/bin/tasks")"
+NEW_SUM="$(source "$LIB"; TMPD="$S4/ref"; mkdir -p "$TMPD"; create_wrapper "$TMPD" tasks; _sum "$TMPD/.claude/bin/tasks")"
 if [ "$NOW_BYTES" -gt 0 ]; then pass "S4 live wrapper never 0 bytes after kill (${NOW_BYTES}B)"; else fail "S4 live wrapper truncated to 0 bytes"; fi
 if [ "$NOW_SUM" = "$OLD_SUM" ] || [ "$NOW_SUM" = "$NEW_SUM" ]; then
     pass "S4 live wrapper is exactly OLD or NEW content (no partial write)"
