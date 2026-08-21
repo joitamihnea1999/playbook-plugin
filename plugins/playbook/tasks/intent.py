@@ -340,7 +340,18 @@ def make_default_runner(project_path: Path, *, timeout_secs: int = 300):
     # this, `tasks intent` would silently ignore judge_budget_usd.
     from tasks.core import resolve_judge_budget
     budget_usd = resolve_judge_budget(project_path)
-    cfg = load_judge_config()
+    # Anchor the judge spec to the SAME project root as the budget above.
+    # load_judge_config() with no root walks up from cwd — which, when this
+    # runner is exercised from a checkout nested under a playbook-managed
+    # ancestor `.agent/`, resolves the ANCESTOR's models.json instead of this
+    # project's. Its own docstring says callers that know the root must pass it;
+    # omitting it let the intent runner (and its tests) escape into an ancestor
+    # judge panel, silently building a non-default adapter — and, when that
+    # judge's CLI was installed, launching a real judge on the ancestor's
+    # budget. Passing project_path preserves the intended ancestor walk-up for
+    # genuine nested checkouts (project_path is still the checkout root) while
+    # closing the cwd/project divergence.
+    cfg = load_judge_config(project_path)
     # F13 (panel finding): align the unset-config fallback with the all-Claude
     # default the 1.5.12 flip established (review.py falls back to "claude").
     # Only reached if a project nulls default_judge; the shipped models.json
