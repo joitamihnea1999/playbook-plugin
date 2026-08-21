@@ -118,6 +118,20 @@ def read_tools_counter(session_dir: Path) -> int:
 
 
 def main() -> int:
+    # This is an ENFORCING guard. On Windows stdin/stdout default to the console
+    # codepage (cp1252), which cannot encode the "→" in BARE_MSG (U+2192) — so
+    # `print(BARE_MSG…)` raised UnicodeEncodeError, the top-level except swallowed
+    # it as exit 1, and the hook treats any non-2 exit as ALLOW: every bare batch
+    # close fail-opened on Windows. (Messages carrying only "—" happened to
+    # encode as cp1252 0x97 and fired, which is why annotated/born-checked cases
+    # blocked while bare ones slipped through — the tell in the CI artifact.)
+    # Force UTF-8 so the block message always encodes and the guard always fires.
+    # No-op on POSIX, where the streams are already UTF-8. Matches
+    # hook-payload-normalize.py and tasks/cli.py.
+    for _stream in (sys.stdin, sys.stdout):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
     args = sys.argv[1:]
 
     def opt(name: str) -> "str | None":

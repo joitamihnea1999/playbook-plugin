@@ -39,6 +39,12 @@ class AuditSweepFailClosed(unittest.TestCase):
         # Restore perms at teardown so TemporaryDirectory can clean up.
         self.addCleanup(lambda: os.chmod(sub, stat.S_IRWXU))
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "needs a POSIX unreadable dir: os.chmod(dir, 0) does not "
+                     "block directory traversal on Windows, so the find scan "
+                     "completes and the incomplete-scan precondition is "
+                     "unreachable. The fail-closed behaviour itself is platform-"
+                     "independent and is exercised on linux/macOS.")
     def test_merge_artifacts_errors_on_incomplete_scan(self):
         self._make_unreadable_subdir()
         result = run_sweep(sweep_by_name("merge-artifacts"), self.project)
@@ -46,6 +52,10 @@ class AuditSweepFailClosed(unittest.TestCase):
                          f"find error mis-reported as {result['status']} "
                          f"(rc={result['rc']}) — false clean (I6)")
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "needs a POSIX unreadable dir (see above): os.chmod(dir, 0) "
+                     "is a no-op for traversal on Windows, so grep completes and "
+                     "the incomplete-scan precondition cannot be established.")
     def test_conflict_markers_errors_on_incomplete_scan(self):
         # Control: the grep-based sweep already ERRORs on the same fixture.
         self._make_unreadable_subdir()

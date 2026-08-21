@@ -90,9 +90,14 @@ PAYLOADS = {
 }
 
 
+# The normalizer forces UTF-8 stdout (see its main()); decode its output as
+# UTF-8 too. Without encoding=, text=True uses the locale codec — cp1252 on
+# Windows — which mojibakes the UTF-8 bytes the producer wrote (café → cafÃ©).
+# That was a decode defect in THIS harness, not the product.
 def emit_fields(raw: str) -> "list[str]":
     r = subprocess.run([sys.executable, str(NORMALIZER), "--emit-fields"],
-                       input=raw, capture_output=True, text=True, timeout=60)
+                       input=raw, capture_output=True, text=True,
+                       encoding="utf-8", timeout=60)
     assert r.returncode == 0, r.stderr
     out = r.stdout
     assert out.endswith("\0"), "every record must be NUL-terminated"
@@ -101,7 +106,8 @@ def emit_fields(raw: str) -> "list[str]":
 
 def plain_normalize(raw: str) -> str:
     r = subprocess.run([sys.executable, str(NORMALIZER)],
-                       input=raw, capture_output=True, text=True, timeout=60)
+                       input=raw, capture_output=True, text=True,
+                       encoding="utf-8", timeout=60)
     return r.stdout
 
 
@@ -129,7 +135,12 @@ def old_command(raw):
 
 
 def old_normpath(fp):
-    return os.path.normpath(fp)
+    # The fused extractor deliberately forward-slashes normpath's output
+    # (extract_fields: `os.path.normpath(path).replace(os.sep, "/")`) so the
+    # gate's `*/.agent/*` exemption matches on Windows, where normpath would
+    # otherwise reintroduce backslashes. The oracle mirrors that intent; no-op on
+    # POSIX where os.sep == "/".
+    return os.path.normpath(fp).replace(os.sep, "/")
 
 
 def oracle(value: str) -> str:
@@ -226,7 +237,9 @@ class ParityWithThePerFieldExtraction(unittest.TestCase):
         """The NEW-1 property: `.agent/../src/main.py` must resolve to a code
         path, or the gate exempts a write that lands on real code."""
         fields = emit_fields(json.dumps(PAYLOADS["traversal path"]))
-        self.assertEqual(fields[3], os.path.join("src", "main.py"))
+        # normpath's output is forward-slashed by the extractor (see old_normpath),
+        # so the resolved path is "src/main.py" on every platform, not os.sep-joined.
+        self.assertEqual(fields[3], "src/main.py")
         self.assertNotIn(".agent", fields[3])
 
 

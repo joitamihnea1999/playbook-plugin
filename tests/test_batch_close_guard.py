@@ -173,6 +173,36 @@ class WindowsBackslashPayload(unittest.TestCase):
                          f"batch guard did not fire on a backslash path: {r.stderr.decode()}")
 
 
+class Cp1252StdoutDoesNotFailOpen(unittest.TestCase):
+    """Regression for the Windows fail-open (CI run 32454916957): gate-batch-check
+    printed its block message to a cp1252 stdout, and BARE_MSG carries "→"
+    (U+2192, absent from cp1252). The UnicodeEncodeError was swallowed as exit 1,
+    which the hook treats as ALLOW — so every BARE batch close slipped through on
+    Windows while annotated/born-checked ones (message encodable as cp1252)
+    blocked. Simulated on any host by forcing PYTHONIOENCODING=cp1252; red against
+    the pre-fix helper, which exits 1 here instead of 2.
+    """
+
+    def _run(self, payload: dict) -> subprocess.CompletedProcess:
+        env = dict(os.environ, PYTHONIOENCODING="cp1252")
+        return subprocess.run(
+            [sys.executable, str(HELPER), "--tool", "Edit",
+             "--file", "/x/.agent/tasks/001-t/task.md", "--session-dir", "/nope"],
+            input=json.dumps(payload).encode(), capture_output=True, env=env,
+            timeout=60)
+
+    def test_bare_batch_blocks_even_when_stdout_is_cp1252(self):
+        payload = {"tool_name": "Edit", "tool_input": {
+            "file_path": "/x/.agent/tasks/001-t/task.md",
+            "old_string": "\n".join(G[:2]),
+            "new_string": "\n".join(checked(g) for g in G[:2])}}
+        r = self._run(payload)
+        self.assertEqual(r.returncode, 2,
+                         "bare batch fail-opened on a cp1252 stdout (Windows)")
+        # The message that carries the arrow must have been emitted (as UTF-8).
+        self.assertIn("outcome note", r.stdout.decode("utf-8"))
+
+
 class BatchBlocks(unittest.TestCase):
     def test_bare_3_batch_blocked(self):
         # THE negative control: the fabricated bare batch stays forbidden.

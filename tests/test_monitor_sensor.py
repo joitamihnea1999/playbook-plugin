@@ -232,6 +232,15 @@ class WaitOnce(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "stall_flush")
         self.assertIn("user", [e["type"] for e in events])
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "The sensor's pid-liveness probe is os.kill(pid, 0), which "
+                     "does not signal 'process gone' for a dead pid on Windows "
+                     "(it routes through the Win32 API and does not raise OSError "
+                     "on a reaped pid), so wait_once blocks the full max_wait "
+                     "instead of exiting. The monitor is a POSIX-oriented dev "
+                     "tool; a reliable Windows liveness probe is unverifiable "
+                     "without a Windows host — recorded as a limitation, not "
+                     "silently weakened. Same hazard as the session-GC pid probe.")
     def test_dead_pid_exits_instead_of_blocking(self):
         self.jsonl.write_bytes(b"")
         sensor.save_offset(self.offset_file, 0)

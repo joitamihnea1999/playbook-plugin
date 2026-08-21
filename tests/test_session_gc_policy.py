@@ -79,6 +79,12 @@ class TestSessionIsDead(unittest.TestCase):
         d = self.make("pid-4242", pointer_age_s=2 * DAY)
         self.assertFalse(self.dead(d, own="pid-4242"))
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "POSIX-only: reclaiming a NON-own pid-* dir requires the "
+                     "liveness probe. On Windows _session_is_dead keeps every "
+                     "pid-* dir (os.kill(pid,0) routes through TerminateProcess; "
+                     "MSYS pids do not map to native) — the Windows keep-all "
+                     "policy is pinned by TestWindowsKeepsPidDirs instead.")
     def test_own_session_is_kept_even_when_its_name_fails_kill(self):
         """`pid-win-fallback` is the Windows constant: non-numeric, so liveness
         can never vouch for it. Self-exclusion is its ONLY keep path."""
@@ -95,6 +101,9 @@ class TestSessionIsDead(unittest.TestCase):
         d = self.make(f"pid-{reaped_pid()}", pointer_age_s=0)
         self.assertTrue(self.dead(d))
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "POSIX-only: on Windows every pid-* dir is kept, never "
+                     "reclaimed (see TestWindowsKeepsPidDirs).")
     def test_non_numeric_pid_name_is_reclaimed(self):
         self.assertTrue(self.dead(self.make("pid-12ab")))
         self.assertTrue(self.dead(self.make("pid-")))
@@ -104,6 +113,11 @@ class TestSessionIsDead(unittest.TestCase):
         self.assertFalse(self.dead(self.make(f"pid-{os.getpid()}", pointer_age_s=None)))
         self.assertTrue(self.dead(self.make(f"pid-{reaped_pid()}", pointer_age_s=None)))
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "POSIX-only: the OverflowError arises inside the os.kill "
+                     "liveness probe, which Windows never runs (all pid-* kept — "
+                     "see TestWindowsKeepsPidDirs). The no-crash guarantee for a "
+                     "huge pid name is a POSIX-probe property.")
     def test_huge_numeric_pid_does_not_crash(self):
         """`int()` accepts it but os.kill overflows C pid_t, and OverflowError is
         NOT an OSError — with it uncaught, ONE such directory made every `tasks`
