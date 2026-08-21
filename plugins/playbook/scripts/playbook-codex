@@ -24,6 +24,13 @@ EOF
         ;;
 esac
 
+# Playbook runtime is stdlib-only — any python3 ≥ 3.10 works. This launcher and
+# every hook the codex session spawns need it; refuse < 3.10 up front with a clear
+# message instead of a parser traceback mid-session. (--help above is python-free.)
+# See CLAUDE.md "Runtime invariant" and memory project-stdlib-only-runtime.
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null \
+    || { echo "Playbook needs python3 >= 3.10 (found: $(python3 --version 2>&1))" >&2; exit 1; }
+
 # Root + lane resolution come from the shared hook library — never re-vendored
 # here. A wrapper that walks for `.agent/tasks/` alone is blind to the
 # multi-user layout (`.agent/<user>/tasks/`) and provisions the wrong lane.

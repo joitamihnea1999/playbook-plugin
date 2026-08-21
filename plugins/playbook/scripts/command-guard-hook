@@ -9,6 +9,17 @@
 # `exec` hands stdin straight through: no cat, no second process.
 if [ "${PLAYBOOK_ROLE:-}" = "monitor" ]; then exit 0; fi
 command -v python3 >/dev/null 2>&1 || exit 0          # no python → fail open
+# python3 < 3.10 cannot even parse command_guard.py's dependencies (3.10-only
+# `match` syntax) → the guard could not run. Same owner policy as a missing
+# helper below: fail OPEN, loudly, and BEFORE the exec that would otherwise
+# print a bare SyntaxError. Advisory hook → allow the call and say so; never
+# change allow/block semantics on an interpreter fault.
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null || {
+    echo "[command-guard-hook] WARNING: python3 < 3.10 ($(python3 --version 2>&1)) —" \
+         "Playbook needs python3 >= 3.10; the destructive-command guard is DISABLED" \
+         "for this call (failing open). Upgrade python3 to restore it." >&2
+    exit 0
+}
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 # "The guard could not run" => fail OPEN, loudly (owner decision, uniform policy).
 # A missing/unreadable command_guard.py used to `exec python3 <missing>` → python

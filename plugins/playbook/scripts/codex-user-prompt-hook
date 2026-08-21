@@ -19,6 +19,20 @@ import sys
 from pathlib import Path
 
 
+def _floor_ok(version_info) -> bool:
+    """Python-floor gate, run BEFORE the provider import. provider.codex_hooks
+    uses 3.10-only `match` syntax, so importing it under < 3.10 raises
+    SyntaxError. This hook only records state and cannot block, so below the
+    floor it fails OPEN loudly — same polarity as every other failure here.
+    Returns True when the interpreter meets the floor."""
+    if version_info[:2] >= (3, 10):
+        return True
+    v = f"{version_info[0]}.{version_info[1]}"
+    print(f"[codex-user-prompt-hook] python3 {v} < 3.10 — Playbook needs "
+          f"python3 >= 3.10; skipping (fail-open).", file=sys.stderr)
+    return False
+
+
 def _bootstrap_imports() -> None:
     script_dir = Path(__file__).resolve().parent
     candidates = [script_dir / "lib", script_dir.parent / "src"]
@@ -61,6 +75,8 @@ def main() -> int:
     # malformed `.agent/current_user` — without this handler that escaped as a
     # traceback and exit 1, contradicting the policy provider/paths.py
     # documents ("the Codex hooks catch Exception").
+    if not _floor_ok(sys.version_info):
+        return 0
     try:
         _bootstrap_imports()
         from provider.codex_hooks import append_prompt_to_chat_log, save_turn_baseline
