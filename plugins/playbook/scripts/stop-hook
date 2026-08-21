@@ -88,6 +88,14 @@ fi
 # Find task file
 TASK_FILE=$(find "$AGENT_DIR/tasks" -maxdepth 2 -name "task.md" -path "*/${TASK}-*/*" 2>/dev/null | head -1)
 
+# Unresolvable pointer (task file not found — a stale/hand-written pointer to a
+# deleted or renamed task dir) ⇒ ALLOW the stop. There are no gates to enforce,
+# so there is nothing to hold the turn open on. This DELIBERATELY differs from
+# task-gate-hook, which BLOCKS an unresolvable pointer: that hook answers a
+# different question — "may this code edit be AUTHORIZED?" — and must fail closed
+# when it cannot resolve the active task; this hook only asks "are there open
+# gates to finish?", and an absent task has none. The two should NOT be forced to
+# agree. (See docs/guarantee-ledger.json PB-COMMAND-FAILURE-POLICY.)
 if [ -z "$TASK_FILE" ]; then
     exit 0
 fi

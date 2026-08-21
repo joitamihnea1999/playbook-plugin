@@ -86,13 +86,18 @@ mv "$NUDGE_FILE" "$DELIVERING" 2>/dev/null || exit 0
 
 # Read content
 NUDGE_CONTENT=$(cat "$DELIVERING")
-rm -f "$DELIVERING"
 
-# Skip if content is empty after read
-[ -z "$NUDGE_CONTENT" ] && exit 0
+# Skip if content is empty after read (drop the claimed empty file)
+[ -z "$NUDGE_CONTENT" ] && { rm -f "$DELIVERING"; exit 0; }
 
-# Emit additionalContext — this is what gets injected into the agent's context
-python3 -c "
+# Emit additionalContext — this is what gets injected into the agent's context.
+# The nudge was already CLAIMED (moved) above, so a failed emit (e.g. python3
+# missing) used to consume-and-drop it under `set -e`. Build the JSON first, and
+# only clear the claim on a SUCCESSFUL emit; on failure RESTORE the file so a
+# later session can still deliver it — a nudge is delivered at-least-once, never
+# silently lost. (stderr, not stdout, would carry any diagnostic — but here we
+# simply leave the nudge for next time.)
+if NUDGE_JSON=$(python3 -c "
 import json, sys, os
 nudge = sys.stdin.read().strip()
 event = os.environ.get('EVENT_NAME', 'UserPromptSubmit')
@@ -103,7 +108,13 @@ out = {
     }
 }
 print(json.dumps(out))
-" <<< "$NUDGE_CONTENT"
+" <<< "$NUDGE_CONTENT" 2>/dev/null) && [ -n "$NUDGE_JSON" ]; then
+    printf '%s\n' "$NUDGE_JSON"
+    rm -f "$DELIVERING"
+else
+    mv "$DELIVERING" "$NUDGE_FILE" 2>/dev/null || true
+    exit 0
+fi
 
 # Log to chat_log
 LOCAL_LOG="$AGENT_DIR/chat_log.md"

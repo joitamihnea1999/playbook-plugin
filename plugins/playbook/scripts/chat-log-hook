@@ -137,7 +137,13 @@ fi
 
 # Try to extract prompt from JSON, fallback to raw input if not JSON
 if command -v jq &> /dev/null; then
-    USER_MESSAGE=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
+    # `|| true`: on malformed JSON jq exits non-zero (4 on a parse error) and,
+    # under `set -e`, that status propagated out of the assignment and ABORTED
+    # the hook before the raw-input fallback below could run — making the
+    # fallback dead code (and, on a jq build that returns 2, a spurious
+    # UserPromptSubmit block). Swallow jq's status so the `[ -z ]` fallback is
+    # always reachable.
+    USER_MESSAGE=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null || true)
     if [ -z "$USER_MESSAGE" ]; then
         USER_MESSAGE="$INPUT"
     fi

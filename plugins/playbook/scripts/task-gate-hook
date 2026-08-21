@@ -256,13 +256,29 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
     if [ -f "$STATE_FILE" ] && echo "$FP_SLASH" | grep -qE '\.agent(/[^/]+)?/tasks/[^/]+/task\.md$'; then
         ACTIVE_TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
         if [ -n "$ACTIVE_TASK" ] && echo "$FP_SLASH" | grep -q "/${ACTIVE_TASK}-"; then
-            BATCH_RC=0
-            BATCH_MSG=$(echo "$INPUT" | python3 "$HOOK_DIR/gate-batch-check.py" \
-                --tool "$TOOL_NAME" --file "$FILE_PATH" \
-                --session-dir "$SESSION_DIR" 2>/dev/null) || BATCH_RC=$?
-            if [ "$BATCH_RC" = "2" ]; then
-                echo "$BATCH_MSG" >&2
-                exit 2
+            # "The guard could not run" ⇒ fail OPEN, loudly (uniform policy).
+            # `python3 <missing-file>` exits 2, which is INDISTINGUISHABLE from
+            # gate-batch-check's own legitimate block-with-exit-2 — so a missing
+            # helper used to block the edit with an empty message, contradicting
+            # the helper's documented "fails OPEN on its own errors" contract.
+            # Decide by file existence BEFORE invoking (never guess from the exit
+            # code): if the helper is absent/unreadable, warn on stderr and skip
+            # the batch guard. When it IS present, its exit 2 is honoured exactly
+            # as before — a genuine block is never suppressed.
+            BATCH_HELPER="$HOOK_DIR/gate-batch-check.py"
+            if [ ! -r "$BATCH_HELPER" ]; then
+                echo "[task-gate-hook] WARNING: helper not readable ($BATCH_HELPER)" \
+                     "— the annotated batch-close guard is DISABLED for this edit" \
+                     "(failing open). Reinstall/repair the Playbook plugin." >&2
+            else
+                BATCH_RC=0
+                BATCH_MSG=$(echo "$INPUT" | python3 "$BATCH_HELPER" \
+                    --tool "$TOOL_NAME" --file "$FILE_PATH" \
+                    --session-dir "$SESSION_DIR" 2>/dev/null) || BATCH_RC=$?
+                if [ "$BATCH_RC" = "2" ]; then
+                    echo "$BATCH_MSG" >&2
+                    exit 2
+                fi
             fi
         fi
     fi

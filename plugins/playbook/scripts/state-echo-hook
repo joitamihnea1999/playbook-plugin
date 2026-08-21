@@ -430,9 +430,17 @@ if [ "$PLAYBOOK_WRITE_FAILED" = true ] && [ "${PLAYBOOK_SANDBOXED:-}" != "1" ]; 
 # ⚠ gate-logging write FAILED — session state / gate history not updated (retro attribution will degrade). Run \`tasks doctor\` and check .agent dir writability + AV locks."
 fi
 
-# Format as hook JSON
-JSON_CONTEXT=$(echo "$CONTEXT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().rstrip()))" 2>/dev/null || echo "\"$CONTEXT\"")
-
-cat <<EOF
+# Format as hook JSON. The old fallback `|| echo "\"$CONTEXT\""` did NOT escape
+# newlines, so when python3 was unavailable it emitted an unescaped multi-line
+# string as additionalContext — invalid JSON the host silently discards. This
+# hook is advisory, so emit NOTHING (a valid empty `{}` response) rather than a
+# malformed envelope: no gate echo is strictly better than corrupt output. When
+# python3 is present the escaping is exact, exactly as before.
+JSON_CONTEXT=$(echo "$CONTEXT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().rstrip()))" 2>/dev/null || true)
+if [ -n "$JSON_CONTEXT" ]; then
+    cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":${JSON_CONTEXT}}}
 EOF
+else
+    echo '{}'
+fi

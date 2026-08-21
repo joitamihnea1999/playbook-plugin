@@ -10,4 +10,21 @@
 if [ "${PLAYBOOK_ROLE:-}" = "monitor" ]; then exit 0; fi
 command -v python3 >/dev/null 2>&1 || exit 0          # no python → fail open
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec python3 "$HOOK_DIR/command_guard.py"
+# "The guard could not run" ⇒ fail OPEN, loudly (owner decision, uniform policy).
+# A missing/unreadable command_guard.py used to `exec python3 <missing>` → python
+# exits 2 → PreToolUse reads 2 as BLOCK → EVERY shell call wedged on a partial
+# install. The fail-open logic lives INSIDE that file, so it can't rescue its own
+# absence: guard the file here, exactly like the interpreter check above. Warn on
+# stderr (never stdout: stdout.errors is strict; stderr is backslashreplace and
+# cannot raise) so a partial install is diagnosable, not silent. The OS sandbox —
+# not this pattern hook — is the security boundary, so allowing a shell call when
+# the guard is absent is the correct trade (see docs/guarantee-ledger.json
+# PB-COMMAND-FAILURE-POLICY).
+GUARD="$HOOK_DIR/command_guard.py"
+if [ ! -r "$GUARD" ]; then
+    echo "[command-guard-hook] WARNING: helper not readable ($GUARD) — the" \
+         "destructive-command guard is DISABLED for this call (failing open)." \
+         "Reinstall/repair the Playbook plugin to restore it." >&2
+    exit 0
+fi
+exec python3 "$GUARD"
