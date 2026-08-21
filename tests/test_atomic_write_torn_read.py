@@ -74,6 +74,19 @@ class AtomicWriteTornRead(unittest.TestCase):
         self.assertEqual(torn, 0,
                          f"_atomic_write produced {torn} torn read(s) — not atomic")
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits")
+    def test_atomic_write_preserves_mode(self):
+        # Defect close (multi-user repos): task.md is created umask-masked (0644
+        # typical), but _atomic_write's mkstemp temp was 0600, so the FIRST edit
+        # silently stripped group/other read — a second user could no longer read
+        # the shared task.md. Routing through the primitive preserves the mode.
+        self.path.write_text(_CONTENT_A, encoding="utf-8")
+        import os
+        os.chmod(self.path, 0o644)
+        _atomic_write(self.path, _CONTENT_B)
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o644,
+                         "_atomic_write must preserve task.md's permission bits")
+
     def test_plain_write_text_can_tear(self):
         # The bug demonstration: a plain writer exposes the truncate→write
         # window. (Best-effort: if the scheduler never lands the reader in the

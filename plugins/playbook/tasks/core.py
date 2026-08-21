@@ -9,8 +9,9 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
+
+from tasks.atomic import atomic_write
 
 VERSION = "1.5.34"
 
@@ -1731,7 +1732,7 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
             print(f"[playbook] standing_gates: {_msg}", file=sys.stderr)
 
     task_file = task_dir / "task.md"
-    task_file.write_text(content, encoding="utf-8")
+    _atomic_write(task_file, content)
 
     return task_file
 
@@ -1804,23 +1805,16 @@ def _is_blocked(task_file: Path) -> bool:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    """All task.md writers route here: write to a same-directory temp file, then
-    os.replace. A concurrent reader never sees a sheared file, and interleaved
-    writers lose whole versions rather than producing half-merged lines —
-    multi-user repos are a supported layout, so this is load-bearing, not
-    ceremony. Same-directory temp keeps the replace on one filesystem."""
-    p = Path(path)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, str(p))
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """All task.md writers route here: same-directory temp + os.replace, so a
+    concurrent reader never sees a sheared file and interleaved writers lose
+    whole versions rather than producing half-merged lines — multi-user repos
+    are a supported layout, so this is load-bearing, not ceremony.
+
+    Thin wrapper over the package primitive (tasks.atomic.atomic_write), which
+    additionally preserves task.md's permission bits across the rewrite (the old
+    mkstemp temp was 0600, silently stripping group/other read from a shared
+    task.md on the first edit) and fsyncs before the replace."""
+    atomic_write(path, text)
 
 
 def _set_status(task_file: Path, value: str) -> None:
@@ -2001,8 +1995,9 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
     if checked_text is None:
         return {"error": f"No unchecked gate in {task_name}"}
 
-    # Write back
-    task_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Write back (atomic: this rewrites an existing task.md a reader may be
+    # holding open — a plain write_text would expose a truncate→write torn read).
+    _atomic_write(task_file, "\n".join(lines) + "\n")
 
     # Collect next gates (up to 3) after the one we just checked
     upcoming = []
