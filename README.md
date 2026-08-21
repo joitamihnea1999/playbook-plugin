@@ -1,6 +1,6 @@
 # Playbook
 
-A plugin for building software you can trust with coding agents — one workflow across Claude Code, Codex, Antigravity, Grok, and Pi. The agent remembers your project across sessions, works in small reviewed tasks, and tests as it builds.
+A plugin for building software you can trust with coding agents — a Claude Code workflow with a cross-provider review panel (Grok and Codex judges supported; Antigravity and Pi experimental). The agent remembers your project across sessions, works in small reviewed tasks, and tests as it builds.
 
 > **Fork notice** — This is an independent fork of [Claude Playbook](https://github.com/horiacristescu/claude-playbook-plugin), created by **Horia Cristescu**, maintained by **Marius Cristescu** for our own feature development. It ships as a separate marketplace (`playbook-x-marketplace`), so install *either* this fork or the upstream — never both at once. The [Install](#install) section below points at this fork.
 
@@ -50,7 +50,7 @@ Because state lives in the file and not in memory, execution survives context co
 
 **The sandbox** lets you run the agent in full bypass-permissions mode - no prompts, no interruptions. The tradeoff is that write blast radius is contained at the OS level: your project directory is writable, `.git` is read-only, and **writes** outside the project are blocked. It's write containment, not a read or network jail — the filesystem stays readable and the network stays reachable (judges rely on that to call model APIs). You get the speed of unattended execution without the risk of it *changing* anything it shouldn't.
 
-**Five providers.** The same workflow runs on Claude Code, Codex, Antigravity (agy), Grok, and Pi - as the main agent (via the `playbook-*` launchers) and as judges on the review panel. ([Provider matrix](docs/providers.md).)
+**Providers — support is scoped by capability** (owner decision 2026-08-21). **Claude Code** is the supported main agent (its hooks gate a live coding agent) *and* a judge. **Grok** and **Codex** are supported review-panel judges (live-verified 2026-08-22); their main-agent enforcement paths ship but are experimental. **Antigravity (agy)** and **Pi** are experimental everywhere — the adapter code ships and is retained, with no support claim. ([Provider matrix](docs/providers.md).)
 
 **Shared repos.** Several people — or several workstations — can drive the same repo without trampling each other: agent runtime state is namespaced per user under `.agent/<user>/`, and a dedicated merge skill keeps those lanes from cross-contaminating when branches meet. ([Per-user lanes](docs/architecture.md#per-user-lanes).)
 
@@ -69,7 +69,7 @@ claude plugin install playbook@playbook-x-marketplace
 
 Restart Claude Code, then in any project tell the agent `/playbook:init`. This creates `CLAUDE.md`, `MIND_MAP.md`, and `.claude/bin/` - the `tasks` CLI plus a launcher per agent (`playbook-codex`, `playbook-agy`, `playbook-grok`, `playbook-pi`).
 
-**Driving an agent other than Claude Code?** Add its bootstrap file - and its hook integration, where the agent supports one:
+**Driving an agent other than Claude Code?** Supported agent-mode enforcement is Claude-only; the non-Claude main-agent paths below ship but are experimental (Grok and Codex are supported as *judges*, not as agents). Add the bootstrap file - and its hook integration, where the agent supports one:
 
 ```
 tasks init --provider codex --hooks     # writes AGENTS.md + the apply_patch edit gate

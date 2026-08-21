@@ -125,8 +125,11 @@ it can never wedge a session.
 - **Disable** entirely: `{"command_guard": false}`.
 
 It's a safety interlock against the agent's *mistake*, not an adversary — for
-adversarial containment run the agent in the sandbox (OS-level). Active on all
-three providers (Claude, grok, codex).
+adversarial containment run the agent in the sandbox (OS-level). Like the rest
+of the hook enforcement, it is a **supported** interlock only on Claude (owner
+decision 2026-08-21); the grok and codex command-guard paths ship but are
+experimental, and antigravity/pi are experimental everywhere. See the
+[provider support matrix](providers.md#support-matrix).
 
 ### An unset `## Risk` is held to the high-consequence bar
 
@@ -163,12 +166,12 @@ the console note + receipt clause, no block.
 
 ## `.agent/models.json` — judge panel pins
 
-Judge selection lives in `models.json`: the plugin ships defaults in `provider/models.json`, and each install can shadow them per key with a gitignored `.agent/models.json`:
+Judge selection lives in `models.json`: the plugin ships defaults in `provider/models.json`, and each install can shadow them per key with a gitignored `.agent/models.json`. **Supported judge seats are Claude, Grok, and Codex** — live-verified 2026-08-22 (the pins `opus`, `sonnet`, `codex:gpt-5.6-terra:high`, `codex:gpt-5.6-sol:high`, and `grok:grok-4.6:high` all responded on the owner's account); Antigravity (`agy`) and Pi seats are experimental (see the [provider support matrix](providers.md#support-matrix)):
 
 ```json
 {
   "default_judge": "claude",
-  "panel": ["opus", "claude:claude-sonnet-5", "codex:gpt-5.5:xhigh", "agy", "grok:grok-4.5"],
+  "panel": ["opus", "claude:claude-sonnet-5", "codex:gpt-5.6-terra:high", "grok:grok-4.6"],
   "aliases": {"opus": ["claude", "claude-opus-4-8", []]}
 }
 ```
