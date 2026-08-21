@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from tasks.atomic import atomic_write
 from tasks.core import list_tasks, require_lane_marker, resolve_agent_dir
 from tasks.mindmap import _bootstrap_mind_map
 from tasks.shared import find_project_root
@@ -71,7 +72,7 @@ def cmd_init(cmd_args):
     claude_md = target / "CLAUDE.md"
     if not claude_md.exists():
         from tasks.template import claude_md as claude_md_template
-        claude_md.write_text(claude_md_template(title), encoding="utf-8")
+        atomic_write(claude_md, claude_md_template(title))
         print("  CLAUDE.md      created")
     else:
         print("  CLAUDE.md      exists")

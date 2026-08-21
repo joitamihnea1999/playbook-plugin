@@ -21,6 +21,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from tasks.atomic import atomic_write
+
 # Per-layer evidence budget. Large chat spans / diffs get head+tail trimmed so
 # the default judge model isn't blown past its context (same idea as
 # cli._load_mind_map). 20K chars ~= 5K tokens/layer.
@@ -432,10 +434,9 @@ def write_run(task_dir: Path, slices: dict[str, Slice], reports: dict[str, str],
     run_dir = task_dir / "intent" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)  # never clobber a prior run
     for layer in LAYERS:
-        (run_dir / f"{layer}.md").write_text(reports[layer], encoding="utf-8")
+        atomic_write(run_dir / f"{layer}.md", reports[layer])
     task_num = task_dir.name.split("-", 1)[0]
-    (run_dir / "review.md").write_text(
-        build_review(task_num, slices, reports), encoding="utf-8")
+    atomic_write(run_dir / "review.md", build_review(task_num, slices, reports))
     return run_dir
 
 
@@ -452,7 +453,9 @@ def append_intent(intent_md: Path, task_num: str, run_id: str, ratified: str) ->
     if marker in existing:
         return  # idempotent — this exact run already ratified
     entry = (f"\n## task {task_num} · {run_id}\n{marker}\n\n{ratified.strip()}\n")
-    intent_md.write_text(existing.rstrip() + "\n" + entry, encoding="utf-8")
+    # Read-modify-write of the whole file (not an O_APPEND) → atomic, so an
+    # interrupt can't truncate ratified intent to a fragment.
+    atomic_write(intent_md, existing.rstrip() + "\n" + entry)
 
 
 def last_intent_entry(intent_md: Path, task_num: str) -> str | None:
