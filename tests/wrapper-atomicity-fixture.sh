@@ -346,7 +346,11 @@ cat > "$RPLUG/installed_plugins.json" <<EOF
 ]}}
 EOF
 GOT="$(resolve_with_home)"
-same_file "$GOT" "$RPLUG/cache/b/playbook/unknown/scripts/tasks" "R8 two unknowns: newer lastUpdated wins"
+if is_gitbash; then
+    skip "R8b lastUpdated tie-break — needs the manifest branch, which is not reachable under git-bash (see R6): the POSIX-form installPath is not os.access-ible by the native-Windows python, so the scan runs and tie-breaks two equal-version dirs by path (a) not by the manifest's lastUpdated (b). Covered on POSIX."
+else
+    same_file "$GOT" "$RPLUG/cache/b/playbook/unknown/scripts/tasks" "R8 two unknowns: newer lastUpdated wins"
+fi
 
 # ---------------------------------------------------------------------------
 echo "============================================"

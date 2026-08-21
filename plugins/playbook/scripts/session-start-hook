@@ -120,6 +120,21 @@ print(t if isinstance(t, str) and t and '\n' not in t and '\r' not in t else '')
 
             case "$name" in
                 pid-*)
+                    # (2w) Windows/MSYS: KEEP every pid-* dir, never probe. This
+                    # mirrors tasks/shared.py::_session_is_dead under _ON_WINDOWS,
+                    # which stopped probing on Windows because `kill -0` there is
+                    # both unsafe (routes through TerminateProcess) and unreliable
+                    # (git-bash MSYS pids do not map to native pids). Leaving this
+                    # sweep probing while the Python sweeper kept-all was a parity
+                    # break: `kill -0 $PPID` gives non-deterministic answers under
+                    # MSYS depending on process ancestry, so this hook would delete
+                    # a LIVE foreign session on some runs and not others (the
+                    # wrapper-multiuser S18 271/2-vs-273/0 split in CI). Over-keeping
+                    # is safe (no data loss); an unprovable-dead pid is never
+                    # reclaimed. Legacy (non-pid) names still use the mtime fallback.
+                    case "$(uname -s 2>/dev/null)" in
+                        MINGW*|MSYS*|CYGWIN*) continue ;;
+                    esac
                     # (2) Liveness, not mtime. A busy session's pointer can be
                     # arbitrarily old; a dead session's can be seconds fresh.
                     #
