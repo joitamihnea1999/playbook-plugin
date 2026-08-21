@@ -49,6 +49,26 @@ assert_eq() {
     if [ "$got" = "$want" ]; then pass "$label"; else fail "$label — expected [$want], got [$got]"; fi
 }
 
+# Canonicalise a path to a comparable form. On git-bash the same file has two
+# textual forms — the POSIX mount path ($HOME as bash sees it, /tmp/…) and the
+# native Windows path (C:/Users/RUNNER~1/…) that MSYS hands to a native-Windows
+# python via the HOME env var. settings.json's BASH_ENV is written by python, so
+# it is Windows-form; the fixture builds its expectation from bash's $RUN_HOME,
+# so it is POSIX-form. Both name the SAME file. Resolve through cd+pwd so the
+# comparison is by identity, not by which spelling git-bash chose. No-op on POSIX.
+canon() {
+    if [ -e "$1" ]; then
+        ( cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$1")" )
+    else
+        printf '%s' "$1"
+    fi
+}
+assert_same_file() {
+    local got="$1" want="$2" label="$3"
+    if [ "$(canon "$got")" = "$(canon "$want")" ]; then pass "$label"
+    else fail "$label — expected [$want], got [$got]"; fi
+}
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -94,7 +114,7 @@ echo "=== I1: zsh host gets BOTH variants, and BASH_ENV points at a file that EX
         || fail "I1 bash-log.zsh missing on a zsh host"
 
     target="$(bash_env_of "$RUN_HOME")"
-    assert_eq "$target" "$RUN_HOME/.claude/bash-log.sh" "I1 settings.json BASH_ENV points at bash-log.sh"
+    assert_same_file "$target" "$RUN_HOME/.claude/bash-log.sh" "I1 settings.json BASH_ENV points at bash-log.sh"
     [ -n "$target" ] && [ -f "$target" ] \
         && pass "I1 BASH_ENV target exists on disk (no dangling reference)" \
         || fail "I1 BASH_ENV names a nonexistent file: $target"
@@ -113,7 +133,7 @@ echo "=== I2: bash host keeps today's behaviour ==="
     [ ! -f "$RUN_HOME/.claude/bash-log.zsh" ] \
         && pass "I2 bash-log.zsh NOT deployed (no interactive zsh to serve)" \
         || fail "I2 deployed the zsh variant on a bash host"
-    assert_eq "$(bash_env_of "$RUN_HOME")" "$RUN_HOME/.claude/bash-log.sh" \
+    assert_same_file "$(bash_env_of "$RUN_HOME")" "$RUN_HOME/.claude/bash-log.sh" \
         "I2 settings.json BASH_ENV set"
     assert_eq "$(grep -c 'claude/bash-log' "$RUN_RC_FILE" 2>/dev/null || true)" "1" \
         "I2 .bash_profile has exactly one BASH_ENV line"

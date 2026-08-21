@@ -85,8 +85,15 @@ class ShellFixtures(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     self.fail(f"{name}: timed out after {_PER_FIXTURE_TIMEOUT}s")
                 if r.returncode != 0:
-                    tail = "\n".join((r.stdout + r.stderr).splitlines()[-25:])
-                    self.fail(f"{name} failed (rc={r.returncode}):\n{tail}")
+                    lines = (r.stdout + r.stderr).splitlines()
+                    # Surface EVERY failing assertion, not just the tail: a
+                    # fixture can print 250+ PASS lines and the two FAILs that
+                    # matter scroll off a 25-line tail (the wrapper-multiuser
+                    # blind spot in CI run 32454916957).
+                    fails = [ln for ln in lines if "FAIL" in ln]
+                    detail = "\n".join(fails) if fails else ""
+                    detail += "\n--- last 25 lines ---\n" + "\n".join(lines[-25:])
+                    self.fail(f"{name} failed (rc={r.returncode}):\n{detail}")
 
 
 if __name__ == "__main__":
