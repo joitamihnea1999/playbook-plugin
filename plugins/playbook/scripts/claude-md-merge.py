@@ -63,6 +63,7 @@ GITIGNORE_MARKER = "# --- playbook runtime state (machine-local; managed by play
 GITIGNORE_ENTRIES = (
     ".agent/sessions/",
     ".agent/*/sessions/",
+    ".agent/backups/",
     ".agent/bash_history",
     ".agent/*/bash_history",
     ".agent/chat_log.md",
