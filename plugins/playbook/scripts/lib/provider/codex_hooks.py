@@ -166,9 +166,15 @@ def enable_codex_hooks_feature(config_path: Path) -> bool:
 
     Returns True when the file content changed.
     """
+    # Deferred import: this is a SETUP-path function (called only from the codex
+    # adapter's setup via provider/adapters/codex.py, where the tasks package IS
+    # importable), never from the codex-*-hook bootstrap (scripts/lib on path,
+    # no tasks/). See provider/paths.py for why provider avoids top-level tasks
+    # imports. Atomic so a crash mid-write can't leave config.toml truncated.
+    from tasks.atomic import atomic_write
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists():
-        config_path.write_text("[features]\nhooks = true\n", encoding="utf-8")
+        atomic_write(config_path, "[features]\nhooks = true\n")
         return True
 
     original = config_path.read_text(encoding="utf-8")
@@ -225,7 +231,7 @@ def enable_codex_hooks_feature(config_path: Path) -> bool:
 
     if new_text == original:
         return False
-    config_path.write_text(new_text, encoding="utf-8")
+    atomic_write(config_path, new_text)
     return True
 
 
@@ -363,6 +369,9 @@ def install_project_hooks(project_root: Path) -> Path:
     back up the broken file as `hooks.json.broken-<timestamp>` and start fresh
     rather than crashing or silently overwriting.
     """
+    # Deferred import — setup-path only (see enable_codex_hooks_feature); never
+    # reached from a codex-*-hook where tasks/ is off sys.path.
+    from tasks.atomic import atomic_write
     hooks_dir = project_root / ".codex"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = hooks_dir / "hooks.json"
@@ -381,7 +390,7 @@ def install_project_hooks(project_root: Path) -> Path:
                 # Back up the broken file rather than discarding silently.
                 backup_suffix = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
                 backup = hooks_dir / f"hooks.json.broken-{backup_suffix}"
-                backup.write_text(hooks_path.read_text(encoding="utf-8"), encoding="utf-8")
+                atomic_write(backup, hooks_path.read_text(encoding="utf-8"))
                 print(
                     f"[codex_hooks] {hooks_path} was unparseable ({exc}); "
                     f"backed up to {backup} and re-initializing.",
@@ -395,7 +404,7 @@ def install_project_hooks(project_root: Path) -> Path:
         existing = {**existing, "hooks": {}}
 
     merged = merge_hooks(existing, render_playbook_hooks())
-    hooks_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    atomic_write(hooks_path, json.dumps(merged, indent=2) + "\n")
     return hooks_path
 
 
@@ -747,6 +756,16 @@ def _normalize_prompt(prompt: str) -> str:
     return text
 
 
+# ── Hook-time chat-log / counter writers ────────────────────────────────────
+# Everything below runs INSIDE the codex-*-hook subprocesses (append_prompt /
+# save_turn_baseline / stop-decision), which bootstrap with scripts/lib on
+# sys.path where `import tasks.*` does NOT resolve (provider/paths.py). They
+# therefore CANNOT route through tasks.atomic.atomic_write and are deliberately
+# left as plain writes. Two further reasons reinforce this: the chat-log and
+# session counters are the DATA files of the chat-log-hook flock protocol (an
+# os.replace would swap the inode from under a locked incrementer), and the
+# chat-log body itself is an append-only log (out of scope). Only the SETUP-path
+# writers above (config.toml, .codex/hooks.json) use the primitive.
 def _migrate_chat_log_if_needed(log_path: Path, counter_path: Path) -> None:
     if not log_path.exists():
         return
