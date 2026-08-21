@@ -25,12 +25,11 @@ Leaf imports only (core/shared); never a command module.
 from __future__ import annotations
 
 import datetime
-import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
+from tasks.atomic import atomic_write
 from tasks.core import resolve_agent_dir
 from tasks.shared import find_project_root
 
@@ -40,20 +39,11 @@ _FENCE = "```"
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    """Write `text` to `path` all-or-nothing (temp file in the same dir, then
-    os.replace) and WITHOUT newline translation, so a CRLF task.md is preserved
-    byte-for-byte and a crash mid-write can never leave a truncated trace."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".compact-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Write `text` to `path` all-or-nothing WITHOUT newline translation, so a
+    CRLF task.md is preserved byte-for-byte and a crash mid-write can never
+    leave a truncated trace. Thin wrapper over the package primitive; the
+    `newline=""` is what keeps a CRLF file from being rewritten LF-only."""
+    atomic_write(path, text, newline="")
 _GATE_RE = re.compile(r"^\s*- \[[ xX]\]")
 _PROTECTED_HEADING_RE = re.compile(
     r"^##\s+(Intent|Why|Design|Work Plan|Parked|Status|Risk|References)\b", re.IGNORECASE)

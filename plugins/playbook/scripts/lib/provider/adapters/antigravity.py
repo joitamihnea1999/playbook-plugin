@@ -243,11 +243,16 @@ class AntigravityAdapter(ProviderAdapter):
         Returns the manifest root path suitable for `agy plugin install <path>`.
         """
         from tasks.core import VERSION
+        # Deferred import — setup-path only (adapter manifest build), where the
+        # tasks package is importable (see provider/paths.py; same context that
+        # already imports tasks.core.VERSION just above). Atomic so a crash can't
+        # leave truncated installed-metadata / hook JSON that agy would reject.
+        from tasks.atomic import atomic_write
         cache_dir = Path.home() / ".cache" / "claude-playbook" / "agy-plugin" / self._PLUGIN_NAME
         cache_dir.mkdir(parents=True, exist_ok=True)
-        (cache_dir / "plugin.json").write_text(
+        atomic_write(
+            cache_dir / "plugin.json",
             json.dumps({"name": self._PLUGIN_NAME, "version": VERSION}, indent=2),
-            encoding="utf-8",
         )
         hooks_dir = cache_dir / "hooks"
         hooks_dir.mkdir(exist_ok=True)
@@ -272,9 +277,7 @@ class AntigravityAdapter(ProviderAdapter):
                 "Stop":              [_entry("stop-hook")],
             }
         }
-        (hooks_dir / "hooks.json").write_text(
-            json.dumps(hooks_doc, indent=2), encoding="utf-8",
-        )
+        atomic_write(hooks_dir / "hooks.json", json.dumps(hooks_doc, indent=2))
         return cache_dir
 
     def _register_with_agy(self, agy_bin: str, cache_dir: Path) -> None:

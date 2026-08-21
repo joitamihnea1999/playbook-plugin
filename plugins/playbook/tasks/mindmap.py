@@ -22,6 +22,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+from tasks.atomic import atomic_write
 from tasks.shared import find_project_root
 
 
@@ -806,8 +807,9 @@ def cmd_mindmap_sync(cmd_args):
             overflow_content = overflow_raw   # sort-only: preserve newlines
             fixed = 0
         overflow_content, sort_changed, sort_msg = sort_overflow_by_id(overflow_content)
-        with overflow_file.open("w", encoding="utf-8", newline="") as _f:
-            _f.write(overflow_content)   # newline-preserving write (3.8-safe)
+        # Atomic, newline-preserving rewrite of MIND_MAP_OVERFLOW.md: an interrupt
+        # mid-sync must not truncate the overflow ledger.
+        atomic_write(overflow_file, overflow_content, newline="")
         done = []
         if fixed:
             done.append(f"synced {fixed} node(s) main→overflow")

@@ -363,19 +363,15 @@ class GrokAdapter(ProviderAdapter):
         target = grok_enforcement_hooks_path()
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = build_enforcement_hooks_payload(plugin_root)
-        # Atomic write: temp in same dir + os.replace (crash mid-write must not
-        # leave truncated JSON that Grok would reject → silent fail-open).
+        # Atomic write: crash mid-write must not leave truncated JSON that Grok
+        # would reject → silent fail-open. Route through the tasks-package
+        # primitive (same-dir temp + fsync + os.replace, temp cleanup on
+        # failure). Deferred import, mirroring install_bootstrap above: this is
+        # a setup-path method, never reached from the Codex hook bootstrap where
+        # `import tasks.*` does not resolve (see provider/paths.py).
+        from tasks.atomic import atomic_write
         text = json.dumps(payload, indent=2) + "\n"
-        tmp = target.with_name(target.name + f".tmp.{os.getpid()}")
-        try:
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, target)
-        finally:
-            if tmp.exists():
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+        atomic_write(target, text)
         print(f"  grok hooks   wrote always-trusted {target}")
         print("               PreToolUse task-gate + PostToolUse state-echo + chat-log +")
         print("               session/stop hooks (absolute bash paths; spaced roots OK)")

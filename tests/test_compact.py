@@ -218,8 +218,8 @@ class Compact(unittest.TestCase):
         # block must not be left in the archive (else a retry double-appends),
         # task.md must be untouched, and there must be no traceback.
         from unittest import mock
-        import tasks.compact as C
-        with mock.patch.object(C.os, "replace", side_effect=OSError("boom")):
+        import tasks.atomic as A  # the atomic write now lives in the primitive
+        with mock.patch.object(A.os, "replace", side_effect=OSError("boom")):
             code, _, err = self._run("12")
         self.assertEqual(code, 1)
         self.assertIn("rolled back", err)

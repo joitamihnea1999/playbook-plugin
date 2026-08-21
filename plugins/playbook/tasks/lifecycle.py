@@ -19,6 +19,7 @@ from __future__ import annotations
 import shutil
 import sys
 from pathlib import Path
+from tasks.atomic import atomic_write
 from tasks.core import (
     PLAYBOOKS, _atomic_write, _find_playbook_skill, create_task,
     resolve_agent_dir, resolve_session_id,
@@ -598,9 +599,11 @@ def cmd_work(cmd_args):
             elif not prev_status.startswith("done"):
                 print(f"--force: switching away from task {prev_task} with open gates (left in_progress).")
 
-    # Write task number to per-session current_state
+    # Write task number to per-session current_state (atomic: a hook may read
+    # this concurrently; not flock-guarded, so a plain truncate could be seen
+    # empty). current_state carries no lock protocol — only os.replace changes.
     session_dir.mkdir(parents=True, exist_ok=True)
-    session_state.write_text(f"{task_num}\n", encoding="utf-8")
+    atomic_write(session_state, f"{task_num}\n")
 
     # Session GC runs in _gc_dead_sessions() at the CLI entry point — and
     # ALSO in scripts/session-start-hook, which sweeps the same directory at
@@ -1013,7 +1016,7 @@ def cmd_freehand(cmd_args):
         session_id = resolve_session_id()
         session_dir = agent_dir / "sessions" / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
-        (session_dir / "current_state").write_text(f"{task_num}\n", encoding="utf-8")
+        atomic_write(session_dir / "current_state", f"{task_num}\n")
         print(f"Created and activated task {task_num}")
     else:
         # Work mode: insert freehand block into current task

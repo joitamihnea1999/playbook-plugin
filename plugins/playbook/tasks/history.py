@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from tasks.atomic import atomic_write
 from tasks.core import resolve_agent_dir
 from tasks.shared import find_project_root
 
@@ -447,7 +448,9 @@ def cmd_tag(cmd_args):
             if existing_tag.match(stripped):
                 print(f"  {stripped}")
     else:
-        chat_log.write_text("".join(output), encoding="utf-8")
+        # Full rewrite of chat_log.md (tag insertion), NOT an append — atomic so
+        # an interrupt can't truncate the whole conversation log to a fragment.
+        atomic_write(chat_log, "".join(output))
         print(f"Inserted {tags_inserted} tags into chat_log.md")
 
 def cmd_retro(cmd_args):
@@ -512,7 +515,7 @@ def cmd_retro(cmd_args):
     task_dir = tasks_dir_path / folder_name
     task_dir.mkdir(parents=True)
     task_file = task_dir / "task.md"
-    task_file.write_text(retro_content, encoding="utf-8")
+    atomic_write(task_file, retro_content)
 
     print(f"Created: {task_file.relative_to(project_path)}")
     print(f"Retro task T{task_num:03d} — {len(tasks)} tasks in window, "

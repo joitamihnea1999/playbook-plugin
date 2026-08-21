@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from tasks.atomic import atomic_write
 from tasks.core import resolve_agent_dir, run_merge_doctor
 from tasks.mindmap import _parse_nodes
 from tasks.shared import find_project_root
@@ -211,7 +212,7 @@ def _rename_colliding_tasks(project_path: Path, agent_dir: Path,
                 count=1,
                 flags=re.MULTILINE,
             )
-            task_md.write_text(text, encoding="utf-8")
+            atomic_write(task_md, text)
 
     # Clear chat_log_offset for all sessions — stale after renames + upcoming ref rewrite
     sessions_dir = agent_dir / "sessions"
@@ -259,7 +260,7 @@ def _rewrite_task_refs(project_path: Path, agent_dir: Path, rename_map: dict[int
                     original = task_md.read_text(encoding="utf-8")
                     updated = _apply(original)
                     if updated != original:
-                        task_md.write_text(updated, encoding="utf-8")
+                        atomic_write(task_md, updated)
 
     # Rewrite chat_log.md
     chat_log = agent_dir / "chat_log.md"
@@ -270,7 +271,7 @@ def _rewrite_task_refs(project_path: Path, agent_dir: Path, rename_map: dict[int
             if lossy:
                 print(f"[playbook] warning: {chat_log} has non-UTF-8 bytes; the "
                       f"rewrite normalizes them to U+FFFD (N3).", file=sys.stderr)
-            chat_log.write_text(updated, encoding="utf-8")
+            atomic_write(chat_log, updated)
 
     # Rewrite current_state in dead sessions; live sessions were already rejected upstream
     sessions_dir = agent_dir / "sessions"
@@ -286,7 +287,7 @@ def _rewrite_task_refs(project_path: Path, agent_dir: Path, rename_map: dict[int
             except ValueError:
                 continue
             if task_num in rename_map:
-                state_file.write_text(str(rename_map[task_num]) + "\n", encoding="utf-8")
+                atomic_write(state_file, str(rename_map[task_num]) + "\n")
 
 
 def _prepare_merge_chatlog(project_path: Path, agent_dir: Path, target: str,
@@ -354,7 +355,12 @@ def _prepare_merge_chatlog(project_path: Path, agent_dir: Path, target: str,
     if _chat_lossy:
         print(f"[playbook] warning: {chat_log} has non-UTF-8 bytes; the "
               f"re-sequence normalizes them to U+FFFD (N3).", file=sys.stderr)
-    chat_log.write_text(updated, encoding="utf-8")
+    atomic_write(chat_log, updated)
+    # chat_log_counter is the DATA file of the chat-log-hook flock protocol
+    # (scripts/chat-log-hook locks chat_log_counter.lock and rewrites this file
+    # in place under that lock). Left as a plain in-place write on purpose: an
+    # os.replace here would swap the inode out from under a concurrent locked
+    # incrementer, breaking the increment's mutual exclusion. Do not "atomic-ize".
     (agent_dir / "chat_log_counter").write_text(str(new_highest) + "\n", encoding="utf-8")
 
 
