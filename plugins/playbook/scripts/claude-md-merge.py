@@ -40,9 +40,21 @@ and exit 1 on failure. Pure stdlib; importable for tests.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 from pathlib import Path
+
+# The atomic-write primitive lives in the tasks package (tasks/atomic.py, sibling
+# of this scripts/ dir). This standalone init script is NOT run with the tasks
+# package on sys.path, so path-load the single stdlib-only file by location —
+# the same idiom scripts/verify uses to load product code from a dev script,
+# keeping ONE primitive rather than a copy. atomic.py always ships beside tasks/.
+_ATOMIC_PATH = Path(__file__).resolve().parent.parent / "tasks" / "atomic.py"
+_atomic_spec = importlib.util.spec_from_file_location("_pb_atomic_write", _ATOMIC_PATH)
+_atomic_mod = importlib.util.module_from_spec(_atomic_spec)
+_atomic_spec.loader.exec_module(_atomic_mod)
+atomic_write = _atomic_mod.atomic_write
 
 HEADER_RE = re.compile(r"\A\s*<!--.*?-->\s*\n", re.DOTALL)
 PLACEHOLDER_TITLE = "# Project Name"
@@ -153,10 +165,10 @@ def main(argv: "list[str]") -> int:
         existing = claude_md.read_text(encoding="utf-8", errors="replace") if claude_md.exists() else None
         merged = merge_claude_md(template_text, existing, name)
         if existing is None:
-            claude_md.write_text(merged, encoding="utf-8")
+            atomic_write(claude_md, merged)
             print("CLAUDE.md:CREATED")
         elif merged != existing:
-            claude_md.write_text(merged, encoding="utf-8")
+            atomic_write(claude_md, merged)
             print("CLAUDE.md:MERGED")
         else:
             print("CLAUDE.md:UNCHANGED")
@@ -171,7 +183,7 @@ def main(argv: "list[str]") -> int:
         if updated is None:
             print(".gitignore:UNCHANGED")
         else:
-            gitignore.write_text(updated, encoding="utf-8")
+            atomic_write(gitignore, updated)
             print(".gitignore:CREATED" if existing is None else ".gitignore:APPENDED")
     except OSError as e:
         print(f"ERROR:.gitignore: {e}")
