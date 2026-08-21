@@ -22,6 +22,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from tasks.atomic import atomic_write
 from tasks.core import resolve_agent_dir
 from tasks.mindmap import _load_mind_map
 from tasks.shared import find_project_root
@@ -219,16 +220,12 @@ def _write_review_findings(task_file: Path, review_mode: str, findings: str) -> 
     new_text = before + section + after
 
     # Atomic: task.md IS the execution trace, so an interrupt must not truncate
-    # it. Same-directory temp + os.replace, mirroring models_check.py.
-    tmp = task_file.with_suffix(f".tmp.{os.getpid()}")
+    # it. Package primitive: same-dir temp + fsync + os.replace, cleaning up the
+    # temp itself on failure. Keep this writer's soft contract of returning an
+    # error string (not raising) on an I/O failure.
     try:
-        tmp.write_text(new_text, encoding="utf-8")
-        os.replace(tmp, task_file)
+        atomic_write(task_file, new_text)
     except OSError as e:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
         return f"could not write {task_file.name}: {e}"
     return None
 

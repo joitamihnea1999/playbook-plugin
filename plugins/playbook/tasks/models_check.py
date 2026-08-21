@@ -55,6 +55,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from tasks.atomic import atomic_write
+
 CODEX_CACHE_PATH = Path.home() / ".codex" / "models_cache.json"
 CACHE_STALE_DAYS = 7
 PROBE_TIMEOUT_SECS = 120
@@ -825,9 +827,9 @@ def _write_panel(path: Path, existing: dict, new_panel: Optional[list[str]],
         "`tasks models set`; audit with `tasks models check`.",
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)  # atomic — an interrupt can't truncate models.json
+    # Atomic — an interrupt can't truncate models.json (package primitive:
+    # same-dir temp + fsync + os.replace, preserving the file's mode).
+    atomic_write(path, json.dumps(existing, indent=2) + "\n")
     print(f"Wrote {path}")
 
 
