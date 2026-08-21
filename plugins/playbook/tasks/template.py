@@ -906,10 +906,17 @@ Commands:
   retro [--since N]   Project retrospective
                       Collect Playbook artifacts for a global retro archive
   context <N>         Extract chat messages for a task
+  intent <N>          Vertical retro of one finished task → INTENT.md
+  timeline            Internal retro-support: chronological tasks + messages
+  tagger              Internal retro-support: tag tasks for retro analysis
+  tag                 Internal retro-support: apply a retro tag
   log [N] [--width W]  Compact one-line-per-message chat log (last N, body cropped to W; default all/500)
   prepare-merge [--target <branch>] [--dry-run]
                       Renumber tasks, re-sequence chat_log, report MIND_MAP collisions
                       so the branch merges cleanly into target (default: main)
+  merge-doctor        Audit a multi-user repo before/after a merge (contamination,
+                      stranded conflict markers, legacy .agent paths)
+  mindmap-sync        Mind-map merge support (conflict-marker-safe sync)
   doctor [--verbose]  Harness health check (--verbose: enumerate findings in
                       stale/foreign install copies too, not just the live one)
   environment         Advisory: optional tools that improve the setup + install hints [--json] [--suggest-only]
