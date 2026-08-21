@@ -13,7 +13,7 @@ from pathlib import Path
 
 from tasks.atomic import atomic_write
 
-VERSION = "1.5.34"
+VERSION = "1.5.35"
 
 AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "agy", "grok", "pi"})
 

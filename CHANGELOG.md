@@ -2,6 +2,150 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.35] — 2026-08-21
+
+Five stabilization batches, no user-facing feature changes. Each tightens a
+claim the guarantee ledger could not yet back, and moves the corresponding
+ledger entry off `missing_evidence`. No behaviour changes for a correctly
+provisioned install; the sandbox and init changes are opt-in or failure-path.
+
+### Changed
+
+- **Python floor declared as 3.10 on every surface.** Three surfaces disagreed:
+  `tasks doctor` accepted `>= 3.8` while docs/CI and `scripts/tasks` required
+  3.10. The shipped modules use 3.10-only `match` syntax, so an older
+  interpreter cannot even parse them. `diagnostics.py` now extracts a pure,
+  testable `_python_floor_verdict` and requires `>= 3.10` in `tasks doctor`. A
+  cheap pre-import floor guard was added to every entry point that lacked one —
+  `init`, the four provider launchers (`playbook-agy`/`codex`/`grok`/`pi`), and
+  the codex python hooks (gating *before* the 3.10-only provider import).
+  `command-guard-hook` and the codex hooks preserve their allow/block polarity:
+  the advisory ones fail **open** loudly, the enforcing apply-patch `PreToolUse`
+  read stays fail-closed. `docs/architecture.md` (Layout) states the floor
+  explicitly.
+
+- **Sandbox claims narrowed to write-only containment.** The ledger and docs
+  claimed judges were read- and network-isolated; they are not. bwrap (Linux)
+  and seatbelt (macOS) deny project **writes** only — the filesystem stays
+  readable and the network stays reachable **by design**, because judges invoke
+  provider CLIs that call model APIs. `architecture.md` and `README.md` now use
+  the honest write-only wording, state that reads and network are permitted,
+  name the `--no-network` opt-in and its bwrap-only limitation, and keep the
+  uncontained-Windows caveat. "read-only" now explicitly means write-denial,
+  nothing more.
+
+### Added
+
+- **Opt-in `--no-network` bwrap jail.** `build_bwrap_argv` gains
+  `no_network=True`, which appends `--unshare-net`; the default is unchanged (no
+  `--unshare-net`, whole filesystem `--ro-bind / /`). It is threaded through
+  `_wrapped_argv`/`run`/`popen` (default `False`, never the judge path) and
+  exposed as `bin/sandbox --no-network`. `network_isolation_available()` mirrors
+  the backend choice, and the opt-in **fails loudly** on any non-bwrap backend
+  (macOS seatbelt, Windows, nested) rather than emitting a no-op; it is also
+  rejected alongside `--prompt` (the subagent path). A live bwrap test proves
+  `--unshare-net` really collapses the netns to loopback.
+
+- **Windows uncontained path pinned.** `containment_available()` is now `False`
+  on Windows (there is no backend), backed by a bwrap-present negative control
+  so the assertion is not vacuous. On Windows/Git Bash judges run **uncontained**
+  — write-denial is a no-op and the before/after working-tree tamper guard is
+  the only defense.
+
+- **One tested atomic-write primitive (`tasks/atomic.py`).** Same-directory
+  tempfile + `os.replace`, flush+fsync (opt-out), permission preservation across
+  rewrite, and temp cleanup on any `BaseException` (a kill between write and
+  replace). Text (with newline control) and bytes. Tested for torn-read under a
+  concurrent reader, concurrent-writer no-half-merge, mode preservation +
+  non-0600 new files, and interrupt cleanup; Windows `os.replace` semantics are
+  proven by the CI windows lane.
+
+  Consequence-bearing writers across the `tasks` import domain were migrated to
+  route through it: `core._atomic_write` (now a thin wrapper, and two remnant
+  `task.md` writers made atomic), the compact/`models_check`/review/grok ad-hoc
+  temp+replace copies, task-state lifecycle/history/merge_prep rewriters,
+  project-setup `CLAUDE.md`/`MIND_MAP.md` scaffolding, `INTENT.md` and mindmap
+  overflow rewriters, review verdict logs, and the codex/antigravity/grok
+  setup-path config, hook, and installed-metadata writes (deferred import,
+  provider mirror re-synced). `scripts/init` path-loads the single stdlib-only
+  `tasks/atomic.py` by file location rather than keeping a copy.
+
+  Writers **deliberately left plain** and documented in-code as exceptions: the
+  append-only `chat_log`/`bash_history` bodies; the chat-log-hook flock-protocol
+  counter **data** files (an `os.replace` would swap the inode from under a
+  locked incrementer); hook-time writers that run where `tasks/` is off
+  `sys.path` (codex hook bootstrap, `adapter` chat-log offset); and
+  standalone-script contexts with no import path to the package (the deployed
+  `sensor.py` monitor artifact, throwaway temps).
+
+- **Transactional init rollback.** `scripts/init` previously had no rollback of
+  any kind: a failure partway through left a half-provisioned, possibly
+  mixed-version install and could clobber a hand-written `CLAUDE.md`,
+  `.gitignore`, or shell rc file with no way back. `init` now snapshots every
+  file it may modify (project + user realm) and records the dirs it may create
+  **before** the first mutation, then restores on **any** non-zero exit — a
+  `set -e` abort, the soft FAILED summary, or a trapped interrupt
+  (SIGINT/SIGTERM). The logic lives in a small stdlib-only helper
+  (`init_txn.py`, `begin`/`restore`) that reuses `tasks/atomic.py`; the shell
+  keeps only a one-line EXIT trap plus INT/TERM. Backups are retained as the
+  documented undo path (project under `.agent/backups/`, user under
+  `~/.playbook-init-backups/`) and their location is printed on success.
+  `PB_INIT_NO_TXN=1` disables the machinery (and is the test negative control).
+  Covered by three induced-failure integration vectors (read-only `.claude/bin`
+  hard abort, read-only `~/.claude` permission-denied soft FAILED, trapped
+  SIGTERM) plus a negative control and an idempotent re-init check. Upgrade
+  remains snapshot-less (it is a Claude skill, not this script).
+
+### Fixed
+
+- **Architecture hook table corrected.** The `PreToolUse` matcher now lists
+  `MultiEdit|NotebookEdit` (present in `hooks.json`, omitted from the doc); the
+  batch-close guard (Guard 0 manual-creation block + Guard 0.5 annotated
+  batch-close, delegating to `gate-batch-check.py`) is now documented; and
+  `SessionStart` is corrected — it persists the session id via
+  `CLAUDE_ENV_FILE` and does **not** print orientation (that is
+  `tasks bootstrap`).
+
+- **Six undocumented CLI commands added to `tasks --help`.** `usage_text()`
+  omitted `intent`, `timeline`, `tagger`, `tag`, `mindmap-sync`, and
+  `merge-doctor`. Each now has a one-line entry, guarded by a new
+  `UsageTextCoverage` test asserting every dispatched command in `cli.py`
+  `COMMANDS` appears as its own usage entry (aliases `ls`/`judge` exempted).
+
+- **README audit re-baselined** at HEAD (v1.5.34 @ `797ce0e`) as part of the
+  docs-truth batch.
+
+### Guarantee ledger
+
+Re-derived from `docs/guarantee-ledger.json` over `4c9b1a0..HEAD`:
+
+- **PB-PYTHON-FLOOR:** `missing_evidence` → `partially_evidenced`. Proofs now
+  cite `tests/test_python_floor.py` (doctor verdict unit tests, the codex
+  apply-patch fail-closed gate, and subprocess shell-entrypoint guards, each
+  with negative controls). The real minimum/latest interpreter matrix across
+  linux/macos/windows-git-bash remains Phase-8 live-platform work.
+- **PB-SANDBOX-READ-NETWORK:** `missing_evidence` → `partially_evidenced`. The
+  statement was rewritten to the true write-only boundary; proofs cite the argv
+  unit tests (no `--unshare-net` by default, readable root, opt-in flag,
+  fail-loud on non-bwrap backends) plus a live bwrap network-isolation
+  integration test. `applicable_platforms` extended to include
+  `windows-git-bash` (uncontained). Live end-to-end read/network measurement
+  from a real judge stays Phase 8.
+- **PB-INSTALL-ROLLBACK:** `missing_evidence` → `partially_evidenced`. Owner now
+  names `init_txn.py` (`begin`/`restore`); proofs are the three executable
+  integration vectors plus a negative control. Limitations record that upgrade
+  is still snapshot-less and that windows-git-bash interruption + power-loss
+  durability remain Phase-8 live evidence.
+- **PB-CONFIG-ATOMIC-DURABILITY:** status **unchanged** at
+  `partially_evidenced`, but reframed from a universal claim to a measured
+  bound — writers routing through one tested primitive, with the named
+  exceptions above. `tasks/atomic.py` was added as an owner and the
+  concurrent-writer, interruption-cleanup, and permission-preservation proofs
+  from `test_atomic_write_primitive.py` were cited; the "not yet migrated"
+  limitation was retired. Routing completeness stays code-review-enforced (no
+  automated all-writers check) and a real cross-platform interrupt matrix is a
+  live-platform follow-up.
+
 ## [1.5.34] — 2026-08-19
 
 A single Critical correction, scoped narrowly: on a fresh clone of a multi-user
