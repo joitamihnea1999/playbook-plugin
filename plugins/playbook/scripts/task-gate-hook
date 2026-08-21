@@ -256,7 +256,7 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
     if [ -f "$STATE_FILE" ] && echo "$FP_SLASH" | grep -qE '\.agent(/[^/]+)?/tasks/[^/]+/task\.md$'; then
         ACTIVE_TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
         if [ -n "$ACTIVE_TASK" ] && echo "$FP_SLASH" | grep -q "/${ACTIVE_TASK}-"; then
-            # "The guard could not run" ⇒ fail OPEN, loudly (uniform policy).
+            # "The guard could not run" => fail OPEN, loudly (uniform policy).
             # `python3 <missing-file>` exits 2, which is INDISTINGUISHABLE from
             # gate-batch-check's own legitimate block-with-exit-2 — so a missing
             # helper used to block the edit with an empty message, contradicting

@@ -10,7 +10,7 @@
 if [ "${PLAYBOOK_ROLE:-}" = "monitor" ]; then exit 0; fi
 command -v python3 >/dev/null 2>&1 || exit 0          # no python → fail open
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-# "The guard could not run" ⇒ fail OPEN, loudly (owner decision, uniform policy).
+# "The guard could not run" => fail OPEN, loudly (owner decision, uniform policy).
 # A missing/unreadable command_guard.py used to `exec python3 <missing>` → python
 # exits 2 → PreToolUse reads 2 as BLOCK → EVERY shell call wedged on a partial
 # install. The fail-open logic lives INSIDE that file, so it can't rescue its own

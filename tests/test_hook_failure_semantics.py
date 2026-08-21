@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforcement failure semantics: "the guard could not run" ⇒ fail OPEN, loudly.
+"""Enforcement failure semantics: "the guard could not run" => fail OPEN, loudly.
 
 Audit (origin/main 24d37ee) found enforcing hooks that fail CLOSED — wedging the
 session — when a helper file is missing, because `python3 <missing-file>` exits 2
@@ -97,30 +97,35 @@ class CommandGuardMissingHelper(unittest.TestCase):
         (self.scr / "command_guard.py").unlink()
         r = _run(self.scr / "command-guard-hook", self._payload("ls -la"), self.p.proj)
         self.assertEqual(r.returncode, 0,
-                         f"missing command_guard.py blocked a safe shell call (wedge): {r.stderr.decode()}")
+                         f"missing command_guard.py blocked a safe shell call (wedge): {r.stderr.decode('utf-8', 'replace')}")
 
     def test_missing_helper_warns_loudly_naming_path(self):
         (self.scr / "command_guard.py").unlink()
         r = _run(self.scr / "command-guard-hook", self._payload("ls -la"), self.p.proj)
-        err = r.stderr.decode()
+        err = r.stderr.decode('utf-8', 'replace')
         self.assertIn("command_guard.py", err,
                       f"fail-open was silent; stderr must name the missing helper: {err!r}")
 
     def test_unreadable_helper_fails_open(self):
+        # POSIX-only: chmod 000 does not remove read on native Windows, and
+        # os.geteuid is absent there. The missing-file case above covers the
+        # cross-platform "helper cannot run" polarity.
+        if os.name == "nt" or not hasattr(os, "geteuid"):
+            self.skipTest("chmod-based unreadability is POSIX-only")
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permission bits")
         helper = self.scr / "command_guard.py"
         helper.chmod(0o000)
         self.addCleanup(lambda: helper.chmod(0o644))
         r = _run(self.scr / "command-guard-hook", self._payload("ls -la"), self.p.proj)
-        if os.geteuid() == 0:
-            self.skipTest("root ignores file permission bits")
         self.assertEqual(r.returncode, 0,
-                         f"unreadable command_guard.py wedged shell: {r.stderr.decode()}")
+                         f"unreadable command_guard.py wedged shell: {r.stderr.decode('utf-8', 'replace')}")
 
     def test_genuine_dangerous_command_still_blocks_with_helper_present(self):
         r = _run(self.scr / "command-guard-hook",
                  self._payload("git push --force origin main"), self.p.proj)
         self.assertEqual(r.returncode, 2,
-                         f"real dangerous command must still block: {r.stdout.decode()} {r.stderr.decode()}")
+                         f"real dangerous command must still block: {r.stdout.decode('utf-8', 'replace')} {r.stderr.decode('utf-8', 'replace')}")
 
 
 # --------------------------------------------------------------------------- #
@@ -145,20 +150,20 @@ class BatchGuardMissingHelper(unittest.TestCase):
         (self.scr / "gate-batch-check.py").unlink()
         r = _run(self.scr / "task-gate-hook", self._batch_close_payload(), self.p.proj)
         self.assertEqual(r.returncode, 0,
-                         f"missing gate-batch-check.py blocked a task.md edit: {r.stderr.decode()!r}")
+                         f"missing gate-batch-check.py blocked a task.md edit: {r.stderr.decode('utf-8', 'replace')!r}")
 
     def test_missing_helper_warns_loudly_naming_path(self):
         (self.scr / "gate-batch-check.py").unlink()
         r = _run(self.scr / "task-gate-hook", self._batch_close_payload(), self.p.proj)
-        err = r.stderr.decode()
+        err = r.stderr.decode('utf-8', 'replace')
         self.assertIn("gate-batch-check.py", err,
                       f"fail-open was silent; stderr must name the missing helper: {err!r}")
 
     def test_genuine_bare_batch_still_blocks_with_helper_present(self):
         r = _run(self.scr / "task-gate-hook", self._batch_close_payload(), self.p.proj)
         self.assertEqual(r.returncode, 2,
-                         f"a real bare batch close must still block: {r.stdout.decode()} {r.stderr.decode()}")
-        self.assertIn("BLOCKED", r.stderr.decode())
+                         f"a real bare batch close must still block: {r.stdout.decode('utf-8', 'replace')} {r.stderr.decode('utf-8', 'replace')}")
+        self.assertIn("BLOCKED", r.stderr.decode('utf-8', 'replace'))
 
 
 # --------------------------------------------------------------------------- #
@@ -206,8 +211,8 @@ class StateEchoNoPython(unittest.TestCase):
                  {"hook_event_name": "PostToolUse", "tool_name": "Bash",
                   "tool_input": {"command": "ls"}},
                  self.p.proj, env_extra={"PATH": path})
-        self.assertEqual(r.returncode, 0, r.stderr.decode())
-        out = r.stdout.decode().strip()
+        self.assertEqual(r.returncode, 0, r.stderr.decode('utf-8', 'replace'))
+        out = r.stdout.decode('utf-8', 'replace').strip()
         self.assertTrue(out, "state-echo emitted nothing at all")
         try:
             json.loads(out)
@@ -296,7 +301,7 @@ class StopHookStalePointerIntent(unittest.TestCase):
         (p.session_dir / "current_state").write_text("777\n", encoding="utf-8")  # no such task
         r = _run(SCRIPTS / "stop-hook", {"hook_event_name": "Stop", "stop_hook_active": False}, p.proj)
         self.assertEqual(r.returncode, 0,
-                         f"stale-pointer stop must remain allowed: {r.stderr.decode()}")
+                         f"stale-pointer stop must remain allowed: {r.stderr.decode('utf-8', 'replace')}")
 
 
 if __name__ == "__main__":

@@ -286,7 +286,7 @@
       "applicable_platforms": ["linux", "macos", "windows-git-bash"],
       "applicable_providers": ["claude", "codex", "grok"],
       "status": "partially_evidenced",
-      "missing_evidence_or_limitation": ["Hook timeout behaviour is source-read only: a PreToolUse hook killed at the host's timeout exits non-2 and is treated as allow, but no test exercises a killed hook (the fused-field work exists to stay under the limit). The now-uniform 'guard could not run ⇒ fail open, loudly' policy and the malformed-project-regex safety are both bound by executable evidence above; the OS sandbox, not this pattern hook, is the security boundary."],
+      "missing_evidence_or_limitation": ["Hook timeout behaviour is source-read only: a PreToolUse hook killed at the host's timeout exits non-2 and is treated as allow, but no test exercises a killed hook (the fused-field work exists to stay under the limit). The now-uniform 'guard could not run => fail open, loudly' policy and the malformed-project-regex safety are both bound by executable evidence above; the OS sandbox, not this pattern hook, is the security boundary."],
       "follow_up_phases": [2],
       "required_live_evidence": [],
       "semantic_protocol": null,
