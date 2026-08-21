@@ -47,6 +47,14 @@ USAGE
         ;;
 esac
 
+# Playbook runtime is stdlib-only — any python3 ≥ 3.10 works. init shells out to
+# python3 (settings merge, claude-md-merge.py) and provisions state a < 3.10
+# interpreter could not run; refuse early, before any provisioning, with a clear
+# message instead of a mid-run parser traceback. (--help above stays python-free.)
+# See CLAUDE.md "Runtime invariant" and memory project-stdlib-only-runtime.
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null \
+    || { echo "Playbook needs python3 >= 3.10 (found: $(python3 --version 2>&1))" >&2; exit 1; }
+
 PROJECT_NAME="${1:-$(basename "$PWD")}"
 
 # Everything init provisions is per-user runtime state, so it belongs in the

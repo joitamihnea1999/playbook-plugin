@@ -34,6 +34,26 @@ import sys
 from pathlib import Path
 
 
+def _floor_exit(version_info, event: str):
+    """Python-floor gate, run BEFORE the provider import. provider.codex_hooks
+    uses 3.10-only `match` syntax, so importing it under < 3.10 raises
+    SyntaxError — caught below as a bare "internal error: invalid syntax". Gate
+    first so the operator gets a clear version message, and preserve this hook's
+    per-event polarity: PreToolUse is the enforcing deny-without-task read and
+    must fail CLOSED (2); PostToolUse / unknown fail OPEN (0). Returns the exit
+    code to use below the floor, or None when the interpreter is supported."""
+    if version_info[:2] >= (3, 10):
+        return None
+    v = f"{version_info[0]}.{version_info[1]}"
+    if event == "PreToolUse":
+        print(f"[codex-apply-patch-hook] python3 {v} < 3.10 — Playbook needs "
+              f"python3 >= 3.10; refusing the edit (fail-closed).", file=sys.stderr)
+        return 2
+    print(f"[codex-apply-patch-hook] python3 {v} < 3.10 — Playbook needs "
+          f"python3 >= 3.10; skipping (fail-open).", file=sys.stderr)
+    return 0
+
+
 def _bootstrap_imports() -> None:
     script_dir = Path(__file__).resolve().parent
     candidates = [script_dir / "lib", script_dir.parent / "src"]
@@ -97,6 +117,10 @@ def main() -> int:
         return 0
 
     _write_sentinel(event or "unknown")
+
+    floor = _floor_exit(sys.version_info, event)
+    if floor is not None:
+        return floor
 
     try:
         _bootstrap_imports()

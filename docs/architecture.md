@@ -13,7 +13,7 @@ The plugin (`plugins/playbook/` in this repo) has four user-visible parts plus t
 - `tasks/` — the Python package behind the `tasks` CLI (dispatcher sets `PYTHONPATH` here).
 - `provider/` — provider adapters and judge-dispatch machinery ([providers](providers.md)).
 
-Everything is plain files — bash entry points, Python 3 stdlib, markdown as the runtime language. No build step, no dependencies.
+Everything is plain files — bash entry points, Python 3.10+ stdlib, markdown as the runtime language. No build step, no dependencies. Python 3.10 is the declared floor everywhere (shipped modules use 3.10-only `match` syntax): every entry point refuses an older interpreter up front, and `tasks doctor` diagnoses it.
 
 ## Hooks & enforcement
 

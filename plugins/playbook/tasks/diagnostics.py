@@ -21,6 +21,28 @@ from tasks.shared import (
 )
 
 
+PY_FLOOR = (3, 10)  # declared floor everywhere (docs/guarantee-ledger.md,
+#                     scripts/tasks + every shell entrypoint, CI). Shipped
+#                     modules use 3.10-only `match` syntax (tasks/core.py,
+#                     provider/codex_hooks.py, …), so an older interpreter can
+#                     not even parse them — doctor must diagnose that, not
+#                     wave a 3.8 interpreter through (task fix/python-floor).
+
+
+def _python_floor_verdict(major: int, minor: int) -> tuple[bool, str]:
+    """Doctor's Python-floor check as a pure, testable seam (mirrors
+    `_resolver_parity_verdict`). Reports whether a (major, minor) interpreter
+    meets the 3.10 floor and a human detail string. Doctor previously accepted
+    >= 3.8, disagreeing with the docs, CI, and `scripts/tasks` (which already
+    refuses < 3.10); this reconciles the three surfaces on 3.10."""
+    ok = (major, minor) >= PY_FLOOR
+    detail = f"{major}.{minor}"
+    if not ok:
+        detail += f" < {PY_FLOOR[0]}.{PY_FLOOR[1]} (Playbook needs python3 "
+        detail += f">= {PY_FLOOR[0]}.{PY_FLOOR[1]})"
+    return ok, detail
+
+
 def _resolver_parity_verdict(has_root: bool, py_sid: str, bash_sid: str) -> tuple[bool, str]:
     """Decide whether the Python and bash session-id resolvers agree — the
     split-brain guard, made hermetic (1.5.17).
@@ -436,7 +458,8 @@ def cmd_doctor(cmd_args):
     import platform
     py_ver = platform.python_version()
     major, minor = sys.version_info[:2]
-    check("python: version >= 3.8", major >= 3 and minor >= 8, py_ver)
+    floor_ok, floor_detail = _python_floor_verdict(major, minor)
+    check("python: version >= 3.10", floor_ok, py_ver if floor_ok else floor_detail)
 
     # 7. write_text encoding (check installed plugin scripts)
     import re as _re
