@@ -978,14 +978,14 @@ def cmd_single_review(cmd, cmd_args):
         if partial:
             partial_log = task_file.parent / (
                 _judge_log_name(backend).removesuffix(".log") + ".partial.log")
-            partial_log.write_text(
+            atomic_write(
+                partial_log,
                 f"# INCOMPLETE {review_label} — the judge was killed at the hard "
                 f"timeout ({review_timeout_label}) mid-response.\n"
                 f"# This is what it had written by then. It is NOT a finished "
                 f"review: findings may be cut off and it reached no conclusion.\n"
                 f"# The previous complete review, if any, is untouched in "
                 f"{_judge_log_name(backend)}.\n\n{partial}\n",
-                encoding="utf-8",
             )
             saved_note = (f" Partial output ({len(partial)} chars) saved to "
                           f"{partial_log.relative_to(project_path)}.")
@@ -1378,7 +1378,7 @@ def cmd_single_review(cmd, cmd_args):
                        + (" | ".join(context_receipts) if context_receipts
                           else "full task.md + mind map delivered (no truncation)")
                        + "\n\n")
-        judge_log.write_text(_ctx_header + saved_review_text, encoding="utf-8")
+        atomic_write(judge_log, _ctx_header + saved_review_text)
         print(f"\nSaved: {judge_log.relative_to(project_path)}", flush=True)
 
     # Model-unavailable hard stop (task 012), same contract as the panel:

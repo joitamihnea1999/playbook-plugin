@@ -58,12 +58,12 @@ def cmd_init(cmd_args):
     # Create MIND_MAP.md
     mind_map = target / "MIND_MAP.md"
     if not mind_map.exists():
-        mind_map.write_text(f"""# {title}
+        atomic_write(mind_map, f"""# {title}
 
 ## Architecture
 
 (describe your project architecture here)
-""", encoding="utf-8")
+""")
         print("  MIND_MAP.md    created")
     else:
         print("  MIND_MAP.md    exists")
