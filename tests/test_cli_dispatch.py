@@ -38,8 +38,16 @@ _PLAYBOOK = _HERE.parent / "plugins" / "playbook"
 sys.path.insert(0, str(_PLAYBOOK))
 
 from tasks.cli import COMMANDS  # noqa: E402
+from tasks.template import usage_text  # noqa: E402
 
 _CLI_SRC = _PLAYBOOK / "tasks" / "cli.py"
+
+# Commands intentionally folded into another command's usage entry rather than
+# given their own line:
+#   ls    — documented as the `list [--pending]` alias.
+#   judge — the low-level runner; usage steers users to plan-review/impl-review.
+# Everything else must earn its own line (see UsageTextCoverage).
+_USAGE_ALIASES = {"ls", "judge"}
 
 # Matches only the top-level dispatch lines (`if cmd == "…"` / `elif cmd in (…)`);
 # `review_cmd ==` inside an arm does not start with `if cmd`/`elif cmd`.
@@ -170,6 +178,45 @@ class DispatchLiveSmoke(unittest.TestCase):
         r = self._run_bare("no-such-command")
         self.assertIn("Unknown command:", r.stdout + r.stderr)
         self.assertNotEqual(r.returncode, 0)
+
+
+class UsageTextCoverage(unittest.TestCase):
+    """`tasks --help` must document every dispatchable command as its own entry,
+    so help can never silently under-document a shipped command again (the drift
+    this test was born from: intent/timeline/tagger/tag/merge-doctor/mindmap-sync
+    all dispatched but absent from usage_text).
+
+    A command counts as documented only when some usage line, stripped of leading
+    whitespace, STARTS with the token at a word boundary — not a bare substring.
+    Substring matching would be fooled: the arg placeholder `[intent]` would
+    satisfy the `intent` command, and `judge` inside `Multi-model judge panel`
+    would satisfy `judge`.
+    """
+
+    _CMD_RES = {c: re.compile(r"^" + re.escape(c) + r"(?![\w-])") for c in COMMANDS}
+
+    def _documented(self, tok: str) -> bool:
+        pat = self._CMD_RES[tok]
+        return any(pat.match(ln.strip()) for ln in usage_text().splitlines())
+
+    def test_every_command_documented_in_usage(self):
+        missing = sorted(
+            c for c in COMMANDS
+            if c not in _USAGE_ALIASES and not self._documented(c))
+        self.assertEqual(
+            missing, [],
+            "tasks --help (template.usage_text) does not document these commands "
+            f"as their own entry: {missing}. Add a one-line entry per command — "
+            "or, if one is intentionally folded into another's entry, add it to "
+            "_USAGE_ALIASES with a comment saying why.",
+        )
+
+    def test_usage_aliases_are_real_commands(self):
+        # Guard the exemption set itself: every alias exempted above must be a
+        # real dispatch command, else the exemption is quietly masking a typo.
+        self.assertLessEqual(
+            _USAGE_ALIASES, set(COMMANDS),
+            f"_USAGE_ALIASES names non-commands: {_USAGE_ALIASES - set(COMMANDS)}")
 
 
 if __name__ == "__main__":
