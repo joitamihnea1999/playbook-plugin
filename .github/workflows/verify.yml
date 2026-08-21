@@ -138,12 +138,12 @@ jobs:
           name: verify-macos-py3.10
           path: verify-macos.txt
 
-  # DISCOVERY, not a gate: Windows/Git Bash has never run this suite. Promote to
-  # required (drop continue-on-error) once it goes green.
+  # REQUIRED: Windows/Git Bash went green during discovery and is now a gate. It
+  # exercises what no other lane can — the bash-resolution path where the
+  # System32 WSL stub shadows Git Bash on PATH, and MSYS path/pid handling.
   windows:
-    name: windows / py3.10 git-bash (discovery)
+    name: windows / py3.10 git-bash
     runs-on: windows-latest
-    continue-on-error: true
     defaults:
       run:
         shell: bash          # Git Bash / MSYS on windows-latest
@@ -174,9 +174,9 @@ jobs:
       # GitHub log truncates and 400+ failures become unattributable. Capture the
       # COMPLETE, uncapped detail to a file and upload it: the whole unittest
       # suite at -v (every test id + full traceback) plus each shell fixture's
-      # full output. Diagnostic only — `|| true` keeps it from failing the job
-      # (the lane is continue-on-error anyway), and this step exists solely to
-      # make the artifact whole. Linux/macOS are untouched — this is a
+      # full output. Diagnostic only — `|| true` keeps this step from failing the
+      # job; the real gate is the scripts/verify step above, and this step exists
+      # solely to make the artifact whole. Linux/macOS are untouched — this is a
       # Windows-job-only step.
       - name: Full failure detail (attributable artifact)
         if: always()
@@ -188,8 +188,8 @@ jobs:
           # bash-spawning surfaces (audit sweeps, merge-verify) resolve `bash`
           # from Python, where the System32 WSL stub shadows Git Bash. Point them
           # at THIS shell's bash so those checks exercise a real bash instead of
-          # the stub (which would fail-close/false-green). Discovery-only,
-          # Windows-only — Linux/macOS never reach this step.
+          # the stub (which would fail-close/false-green). Windows-only —
+          # Linux/macOS never reach this step.
           BASH_PATH="$(command -v bash)"
           if command -v cygpath >/dev/null 2>&1; then
             BASH_PATH="$(cygpath -w "$BASH_PATH")"

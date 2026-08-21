@@ -5,18 +5,22 @@ Stdlib-only, Python 3 — must behave identically on Linux, macOS and
 Windows/Git Bash. Shell fixtures are invoked as `bash` subprocesses.
 Exit code is non-zero iff at least one check FAILed; SKIP never fails the run.
 
-The bash used for the shell-dependent checks is resolved once at startup: set
-$PLAYBOOK_VERIFY_BASH to an absolute path to override (CI exports it from inside
-its Git Bash step so Python does not pick up the Windows System32 WSL stub);
-otherwise `bash` on PATH is used. If the resolved bash is unusable (the WSL stub
-prints an install hint and exits non-zero), the shell checks SKIP — a missing
-usable bash is an environment fact, not a product defect.
+The bash used for the shell-dependent checks is resolved once at startup by the
+SHARED resolver in product code (`plugins/playbook/tasks/bash_resolver.py`),
+path-loaded below so this dev script depends on the product, never the reverse.
+Set $PLAYBOOK_BASH to an absolute path to override; $PLAYBOOK_VERIFY_BASH is
+honoured as a documented fallback (CI exports it from inside its Git Bash step so
+Python does not pick up the Windows System32 WSL stub); otherwise `bash` on PATH
+is used. If the resolved bash is unusable (the WSL stub prints an install hint
+and exits non-zero), the shell checks SKIP — a missing usable bash is an
+environment fact, not a product defect.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import os
 import shutil
@@ -29,7 +33,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PY_FLOOR = (3, 10)          # declared floor: docs/guarantee-ledger.md
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
-BASH_OVERRIDE_ENV = "PLAYBOOK_VERIFY_BASH"   # override: absolute path to the bash to use
+
+# The one "which bash, and is it usable" policy lives in PRODUCT code; this dev
+# script imports it (inverting the old direction where product copied it). It is
+# stdlib-only, so path-load it — scripts/ is not on the tasks package path.
+_BR = ROOT / "plugins" / "playbook" / "tasks" / "bash_resolver.py"
+_br_spec = importlib.util.spec_from_file_location("_pb_bash_resolver", _BR)
+_bash_resolver = importlib.util.module_from_spec(_br_spec)
+_br_spec.loader.exec_module(_bash_resolver)
+resolve_bash = _bash_resolver.resolve_bash   # (path|None, how)
+bash_usable = _bash_resolver.bash_usable     # (usable, why); strips dogfood env like env()
 
 # Resolved once in main(): the bash all shell checks use, whether it works, and
 # how it was resolved / why it is unusable.
@@ -84,36 +97,6 @@ def run(cmd: list[str], cwd: Path | str = ROOT, timeout: int = 900):
     p = subprocess.run(cmd, cwd=str(cwd), env=env(), timeout=timeout,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return p.returncode, decode(p.stdout)
-
-
-def resolve_bash() -> tuple[str | None, str]:
-    """Pick the bash the shell checks will use, honouring $PLAYBOOK_VERIFY_BASH
-    (CI sets it so Python doesn't resolve the Windows System32 WSL stub), else
-    `bash` on PATH. Returns (path_or_None, how_it_was_resolved)."""
-    override = os.environ.get(BASH_OVERRIDE_ENV)
-    if override:
-        # A cygpath -w conversion drops the .exe; recover it so CreateProcess
-        # execs the real binary rather than falling through to a SKIP.
-        if not Path(override).exists() and Path(override + ".exe").exists():
-            override += ".exe"
-        return override, f"${BASH_OVERRIDE_ENV}"
-    found = shutil.which("bash")
-    return found, ("PATH" if found else "PATH (not found)")
-
-
-def bash_usable(path: str) -> tuple[bool, str]:
-    """True iff `path` runs a trivial command. The Windows System32 bash.exe is
-    the WSL launcher: with no distro it prints an install hint and exits
-    non-zero, so a presence check is not enough — probe for a sentinel back."""
-    try:
-        p = subprocess.run([path, "-c", "printf ok"], env=env(), timeout=30,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"{type(exc).__name__}: {exc}"
-    out = decode(p.stdout)
-    if p.returncode == 0 and out.strip() == "ok":
-        return True, ""
-    return False, f"rc={p.returncode}: {tail(out, 1)}"
 
 
 def tail(text: str, n: int = 2) -> str:

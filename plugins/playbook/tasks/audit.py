@@ -35,50 +35,12 @@ from __future__ import annotations
 import datetime
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
+from tasks.bash_resolver import usable_bash
 from tasks.core import load_config
-
-# Resolved once per process: a bash that actually runs, or (None, why-not).
-_RESOLVED_BASH: "tuple[str | None, str] | None" = None
-
-
-def _usable_bash() -> "tuple[str | None, str]":
-    """A bash that runs a sentinel, or (None, reason). See run_sweep for why.
-
-    On Windows a bare `bash` on PATH is usually the System32 WSL launcher: with
-    no distro installed it prints an install hint and exits NON-ZERO. Fed to a
-    sweep that would read as exit 1 = "clean" (classify), turning every audit
-    into a false-green that never actually scanned. A presence check is not
-    enough — probe for a sentinel. Honour $PLAYBOOK_VERIFY_BASH first (CI points
-    it at Git Bash for exactly this reason). Cached per process.
-    """
-    global _RESOLVED_BASH
-    if _RESOLVED_BASH is not None:
-        return _RESOLVED_BASH
-    candidate = os.environ.get("PLAYBOOK_VERIFY_BASH") or shutil.which("bash")
-    # A cygpath -w conversion can drop the .exe; recover it.
-    if candidate and not os.path.exists(candidate) and os.path.exists(candidate + ".exe"):
-        candidate += ".exe"
-    if not candidate:
-        _RESOLVED_BASH = (None, "no bash found on PATH")
-        return _RESOLVED_BASH
-    try:
-        p = subprocess.run([candidate, "-c", "printf ok"],
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           timeout=30)
-    except (OSError, subprocess.SubprocessError) as exc:
-        _RESOLVED_BASH = (None, f"{type(exc).__name__}: {exc}")
-        return _RESOLVED_BASH
-    if p.returncode == 0 and (p.stdout or b"").strip() == b"ok":
-        _RESOLVED_BASH = (candidate, "")
-    else:
-        _RESOLVED_BASH = (None, f"bash at {candidate} is not usable (rc={p.returncode}) "
-                                "— likely the Windows WSL stub")
-    return _RESOLVED_BASH
 
 # --exclude-dir keeps the sweeps off build output and the workspace's own state,
 # so a `- [ ]` in a task.md or a marker in node_modules is never a finding.
@@ -161,7 +123,7 @@ def run_sweep(sweep: dict, project_path, timeout_secs=300) -> dict:
     meant to precede. A timeout is rc 124 → classified ERROR — the sweep did NOT
     complete its scan, which is never a pass."""
     command = sweep["command"]
-    bash, why = _usable_bash()
+    bash, why = usable_bash()
     if bash is None:
         # Fail CLOSED: with no bash that can run the scan, the sweep did NOT run,
         # and an unrun scan can certify nothing. rc 126 → ERROR, never "clean" —

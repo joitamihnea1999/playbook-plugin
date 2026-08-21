@@ -153,10 +153,13 @@ class NoUsableBashFailsClosed(unittest.TestCase):
     """
 
     def setUp(self):
-        import tasks.audit as audit_mod
-        self.audit = audit_mod
+        # The resolver's per-process cache now lives in the shared resolver
+        # (tasks/bash_resolver.py), which audit.py delegates to; reset THAT to
+        # force re-resolution against the stub.
+        import tasks.bash_resolver as resolver_mod
+        self.resolver = resolver_mod
         self._real_env = os.environ.get("PLAYBOOK_VERIFY_BASH")
-        self._real_cache = audit_mod._RESOLVED_BASH
+        self._real_cache = resolver_mod._RESOLVED_BASH
         self.tmp = Path(tempfile.mkdtemp())
         stub = self.tmp / "wsl-stub.sh"
         # Mimic the WSL launcher: print an install hint, exit non-zero, and
@@ -167,10 +170,10 @@ class NoUsableBashFailsClosed(unittest.TestCase):
             "exit 1\n", encoding="utf-8")
         stub.chmod(0o755)
         os.environ["PLAYBOOK_VERIFY_BASH"] = str(stub)
-        audit_mod._RESOLVED_BASH = None  # force re-resolution against the stub
+        resolver_mod._RESOLVED_BASH = None  # force re-resolution against the stub
 
         def _restore():
-            audit_mod._RESOLVED_BASH = self._real_cache
+            resolver_mod._RESOLVED_BASH = self._real_cache
             if self._real_env is None:
                 os.environ.pop("PLAYBOOK_VERIFY_BASH", None)
             else:

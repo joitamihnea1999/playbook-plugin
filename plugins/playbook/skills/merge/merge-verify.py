@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Run the project's declared post-merge soundness command — or say why it didn't.
 
-Ships in the `merge` skill directory next to `ref-integrity.py` (pure stdlib, no
-imports across the skill/package boundary — the skill must work standalone).
+Ships in the `merge` skill directory next to `ref-integrity.py` (pure stdlib; it
+`import`s nothing across the skill/package boundary — the skill must work
+standalone. Its ONE cross-boundary reach is a path-load of the shared bash
+resolver, `tasks/bash_resolver.py`, done relative to this file so it needs no
+`tasks` package on sys.path; see `_bash_resolver`).
 
 The merge skill verifies *the merge*: mind-map integrity, contamination, and code
 identity are all repo-agnostic. Whether the *branches* are healthy is the
@@ -39,53 +42,50 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 GREEN, FAILED, BLOCKED, SKIPPED = 0, 1, 2, 3
 
-# Resolved once per process: a bash that actually runs, or (None, why-not).
-_RESOLVED_BASH = None
+# THE single "which bash, and is it usable" policy lives in product code
+# (tasks/bash_resolver.py). This skill runs STANDALONE — invoked from an
+# arbitrary repo with no `tasks` package on sys.path, and path-loaded by the
+# close gate — so it cannot `import tasks.*`; it reaches the resolver by loading
+# that one file relative to itself. Cached per process.
+_BASH_RESOLVER = None
 
 
-def _usable_bash():
-    """A bash that runs a sentinel, or (None, reason).
+def _bash_resolver():
+    """The one bash resolver, path-loaded so this skill stays standalone.
 
-    Never invoke a bare `bash`: on Windows the process-creation search finds the
-    System32 WSL launcher before Git Bash on PATH, and with no distro it prints
-    an install hint and exits NON-ZERO — the declared command NEVER runs, yet the
-    exit code (1) would read as FAILED and, worse, a stub exiting 0 would read as
-    GREEN, stamping a red tree green. Resolve an absolute path with shutil.which
-    (which bypasses the System32 priority) and PROBE it for a sentinel; honour
-    $PLAYBOOK_VERIFY_BASH first (CI points it at Git Bash for exactly this).
-    Cached per process. No-op on Linux/macOS, where `bash` on PATH is usable.
+    On a broken/partial install (the file is missing or corrupt) synthesize a
+    fail-CLOSED stand-in whose `usable_bash()` reports no bash, so a missing
+    resolver degrades to "no usable bash" rather than a traceback — the same
+    posture as every other no-bash path here.
     """
-    global _RESOLVED_BASH
-    if _RESOLVED_BASH is not None:
-        return _RESOLVED_BASH
-    candidate = os.environ.get("PLAYBOOK_VERIFY_BASH") or shutil.which("bash")
-    if candidate and not os.path.exists(candidate) and os.path.exists(candidate + ".exe"):
-        candidate += ".exe"
-    if not candidate:
-        _RESOLVED_BASH = (None, "no bash found on PATH")
-        return _RESOLVED_BASH
-    try:
-        p = subprocess.run([candidate, "-c", "printf ok"],
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           timeout=30)
-    except (OSError, subprocess.SubprocessError) as exc:
-        _RESOLVED_BASH = (None, f"{type(exc).__name__}: {exc}")
-        return _RESOLVED_BASH
-    if p.returncode == 0 and (p.stdout or b"").strip() == b"ok":
-        _RESOLVED_BASH = (candidate, "")
-    else:
-        _RESOLVED_BASH = (None, f"bash at {candidate} is not usable (rc={p.returncode}) "
-                                "— likely the Windows WSL stub")
-    return _RESOLVED_BASH
+    global _BASH_RESOLVER
+    if _BASH_RESOLVER is None:
+        try:
+            path = Path(__file__).resolve().parents[2] / "tasks" / "bash_resolver.py"
+            spec = importlib.util.spec_from_file_location("_playbook_bash_resolver", path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"cannot load {path}")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as exc:
+            class _Unavailable:
+                _why = f"bash resolver unavailable: {exc}"
+
+                def usable_bash(self):
+                    return None, self._why
+            mod = _Unavailable()
+        _BASH_RESOLVER = mod
+    return _BASH_RESOLVER
 # `--plan` classifies without running, so it must not be able to return the one
 # code the push gate accepts. Only an actual run may yield GREEN.
 CONFIGURED = 4
@@ -197,7 +197,7 @@ def run_command_capture(command, project_root=".", timeout_secs=None):
     returns rc 124 (the conventional timeout code, non-zero, so the gate reads
     FAILED) with the marker FIRST in the output so a receipt's first line names
     the timeout, then whatever the command had written."""
-    bash, why = _usable_bash()
+    bash, why = _bash_resolver().usable_bash()
     if bash is None:
         # Fail CLOSED: with no bash to run it, the command did NOT run, and an
         # unrun verify is not a pass. Non-zero rc so the gate reads FAILED.
@@ -262,7 +262,7 @@ def main(argv=None):
     # applies the fail-fast preamble (set -e / pipefail) so an early failing step
     # fails the gate — a green stamp on a red tree is the whole defect this
     # prevents.
-    bash, why = _usable_bash()
+    bash, why = _bash_resolver().usable_bash()
     if bash is None:
         # Fail CLOSED: no bash means the command cannot run, and a verify that
         # cannot run is not GREEN. Report FAILED so the push gate refuses.
