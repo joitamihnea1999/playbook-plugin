@@ -661,3 +661,54 @@ heal_empty_wrappers() {
     done
     return 0
 }
+
+# _json_str VALUE
+# Minimal JSON string-body escaper in pure bash (no interpreter startup): escape
+# backslash and double-quote, and neutralize the control bytes that would break a
+# single-line record — tab -> \t, CR dropped, newline -> space. `hook`/`decision`
+# values are our own literals and need none of this; paths/commands/reasons do.
+# Bash 3.2 safe (parameter expansion + ANSI-C quoting only). Exotic control bytes
+# (other than \t\r\n) are left as-is — vanishingly rare in a tool path/command,
+# and the journal is best-effort; this never affects any decision.
+_json_str() {
+    local s="$1"
+    s="${s//\\/\\\\}"          # backslash FIRST
+    s="${s//\"/\\\"}"          # double quote
+    s="${s//$'\t'/\\t}"        # tab -> \t
+    s="${s//$'\r'/}"           # CR dropped
+    s="${s//$'\n'/ }"          # newline -> space (keep the record one line)
+    printf '%s' "$s"
+}
+
+# journal_enforcement AGENT_DIR HOOK DECISION REASON [SESSION_ID] [TOOL] [PATH] [COMMAND]
+# Best-effort append-only enforcement-journal record. HARD CONTRACT (mirrors
+# pb_journal.py): a journal failure must NEVER change a decision, so every step
+# swallows its error and the function always returns 0. Writes ONLY when the
+# resolved lane dir already exists (playbook-managed) — the `journal/` subdir is
+# created inside that existing lane, `.agent` itself is never minted here. One
+# `printf >>` append per record; single-line records under PIPE_BUF are atomic
+# against concurrent appenders (see pb_journal.py docstring for the honest bound).
+# No fsync, no locking, no interpreter startup.
+journal_enforcement() {
+    local agent_dir="$1" hook="$2" decision="$3" reason="$4"
+    local session_id="${5:-}" tool="${6:-}" path="${7:-}" command="${8:-}"
+    [ -n "$agent_dir" ] && [ -d "$agent_dir" ] || return 0
+    local jdir="$agent_dir/journal"
+    [ -d "$jdir" ] || mkdir -p "$jdir" 2>/dev/null || return 0
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 0
+    local line
+    line="{\"ts\":\"$ts\",\"session_id\":\"$(_json_str "$session_id")\""
+    line="$line,\"hook\":\"$hook\",\"decision\":\"$decision\""
+    line="$line,\"reason\":\"$(_json_str "$reason")\""
+    [ -n "$tool" ] && line="$line,\"tool\":\"$(_json_str "$tool")\""
+    [ -n "$path" ] && line="$line,\"path\":\"$(_json_str "$path")\""
+    if [ -n "$command" ]; then
+        # command head only: first line, capped at 200 chars — never full content.
+        local head="${command%%$'\n'*}"
+        line="$line,\"command\":\"$(_json_str "${head:0:200}")\""
+    fi
+    line="$line}"
+    printf '%s\n' "$line" >> "$jdir/enforcement.jsonl" 2>/dev/null || return 0
+    return 0
+}
