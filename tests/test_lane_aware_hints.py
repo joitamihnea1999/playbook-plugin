@@ -32,7 +32,8 @@ def _run(proj: Path, *args) -> subprocess.CompletedProcess:
     env["PLAYBOOK_SESSION_ID"] = "pid-999999995"
     return subprocess.run(
         [sys.executable, "-m", "tasks.cli", *args],
-        cwd=proj, env=env, capture_output=True, text=True, timeout=120,
+        cwd=proj, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=120,
     )
 
 

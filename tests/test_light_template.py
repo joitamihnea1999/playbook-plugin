@@ -68,7 +68,8 @@ class Fixture:
                    PLAYBOOK_SESSION_ID=SESSION)
         return subprocess.run([sys.executable, "-m", "tasks.cli", *args],
                               cwd=self.proj, env=env, capture_output=True,
-                              text=True, timeout=120)
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=120)
 
     def make_light_task(self, risk: "str | None", *, checked: bool,
                         judge_md: "str | None" = None,

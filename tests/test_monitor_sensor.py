@@ -372,6 +372,12 @@ class BootstrapGuards(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("invalid SESSION_ID", r.stderr)
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "Exercises the mtime-guess jsonl fallback, whose project-slug "
+                     "scheme (`tr '/' '-'` of a POSIX path) has no analogue for a "
+                     "Windows drive/backslash path — the fixture jsonl cannot be "
+                     "placed where the fallback would find it. The primary "
+                     "transcript-pointer binding path is covered on Windows.")
     def test_happy_path_emits_commands_and_seeds_offset_at_eof(self):
         home = Path(tempfile.mkdtemp()) / "home"
         proj = Path(tempfile.mkdtemp()) / "proj"

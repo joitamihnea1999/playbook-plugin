@@ -854,6 +854,16 @@ echo "=== S18: SessionStart GC must not delete a live session (field report 2026
     # -mtime` buckets by whole days while Python compares epoch seconds, so
     # near-boundary parity is a documented tolerance, not a tested guarantee.
     HOOK="$SCRIPTS/session-start-hook"
+    # On Windows the bash hook runs under git-bash (MSYS pids, real `kill -0`),
+    # but the Python sweeper runs under NATIVE python, where a pid probe is both
+    # unsafe and namespace-blind — so it keeps every pid-* dir (tasks/shared.py
+    # ::_session_is_dead). Three sub-checks below assert POSIX process semantics
+    # the two consumers CANNOT share there; they are win-only-guarded and
+    # unreachable on Linux/macOS (uname -s is Linux/Darwin).
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
+        *)                    IS_WINDOWS=0 ;;
+    esac
     # Mutants must live BESIDE gate-echo-lib.sh: the hook sources it from
     # `dirname $0` under `set -e`, so a mutant dropped in $WORK dies at the
     # source line and sweeps nothing — every control would then "pass" by
@@ -942,8 +952,20 @@ from tasks.shared import _gc_dead_sessions
 _gc_dead_sessions(Path(sys.argv[1]))' "$d2" 2>&1)"; pyrc=$?
     set -e
     assert_eq "$pyrc" "0" "S18/A2 python sweeper runs clean${pyout:+ ($pyout)}"
-    assert_eq "$(survivors "$d2/.agent/sessions")" "$got" \
-        "S18/A2 bash and python sweepers keep the SAME set (one policy, not two)"
+    if [ "$IS_WINDOWS" = 1 ]; then
+        # The two consumers CANNOT keep the same set here: git-bash `kill -0`
+        # reads MSYS pids, native python cannot probe them safely and keeps ALL
+        # pid-* dirs. Strict parity is POSIX-only. What still MUST hold is the
+        # safety property the field bug was about — the python sweeper never
+        # deletes a live session — so assert the live foreign one survived.
+        [ -d "$d2/.agent/sessions/pid-$OTHER" ] \
+            && pass "S18/A2 (windows) python sweeper KEEPS the live foreign session (no destroy)" \
+            || fail "S18/A2 (windows) python sweeper deleted a live foreign session"
+        pass "S18/A2 bash/python set-parity skipped (windows: MSYS vs native pid namespaces cannot agree)"
+    else
+        assert_eq "$(survivors "$d2/.agent/sessions")" "$got" \
+            "S18/A2 bash and python sweepers keep the SAME set (one policy, not two)"
+    fi
 
     # ── Negative control 1: self-exclusion ───────────────────────────────────
     # For a LIVE NUMERIC own pid, self-exclusion and liveness overlap — deleting
@@ -1038,6 +1060,15 @@ _gc_dead_sessions(Path(sys.argv[1]))' "$d2" 2>&1)"; pyrc=$?
         || fail "S18 symlink: DESTROYED the symlink target — rm -rf followed the link"
 
     # Negative control: restore the trailing-slash glob and the target dies.
+    # POSIX-only: it depends on `rm -rf "link/"` FOLLOWING a real symlink into
+    # its target. Under git-bash that does not reproduce — a real symlink often
+    # needs privilege (ln -s degrades to a copy/stub) and MSYS `rm -rf link/`
+    # does not follow the link the way BSD/GNU rm does — so the control cannot
+    # demonstrate the bug and would be VACUOUS. Skip it there with a reason; the
+    # primary "did NOT follow the link" assertion above still runs on Windows.
+    if [ "$IS_WINDOWS" = 1 ]; then
+        pass "S18 symlink NC skipped (windows: MSYS ln/rm cannot reproduce the POSIX rm -rf link/ follow-through — control would be vacuous)"
+    else
     sed 's|for d in "$SESSIONS_DIR"/\*; do|for d in "$SESSIONS_DIR"/*/; do|' \
         "$HOOK" > "$MUT/session-start-hook"
     assert_eq "$(grep -c 'SESSIONS_DIR"/\*/; do' "$MUT/session-start-hook")" "1" \
@@ -1053,11 +1084,19 @@ _gc_dead_sessions(Path(sys.argv[1]))' "$d2" 2>&1)"; pyrc=$?
     [ ! -f "$d9/precious/keepme.txt" ] \
         && pass "S18 symlink NC: trailing-slash glob DOES destroy the target (control is live)" \
         || fail "S18 symlink NC VACUOUS: target survived the buggy glob"
+    fi
 
     # ── EPERM means alive, not dead (impl panel) ─────────────────────────────
     # kill -0 on another user's live process fails with EPERM. Treating that as
     # dead would delete a live session — and the old mtime-only sweep kept it.
-    if [ "$(id -u)" != 0 ]; then
+    # POSIX-only: Windows has no EPERM-from-signalling-a-foreign-process
+    # semantic, and MSYS `kill -0 1` names no live root-owned init, so the fake
+    # `pid-1` victim is not "another user's live session" there. On native
+    # Windows the python sweeper keeps every pid-* anyway (no probe), so the
+    # cross-user-delete this guards against cannot occur.
+    if [ "$IS_WINDOWS" = 1 ]; then
+        pass "S18 EPERM skipped (windows: no EPERM/foreign-live-process semantic; pid-* are never probed)"
+    elif [ "$(id -u)" != 0 ]; then
         d10="$WORK/s18 eperm"; build_project "$d10" legacy
         mkdir -p "$d10/.agent/sessions/pid-1"          # launchd/init: alive, root-owned
         printf '001\n' > "$d10/.agent/sessions/pid-1/current_state"

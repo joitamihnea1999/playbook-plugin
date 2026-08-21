@@ -111,6 +111,10 @@ class TestSessionIsDead(unittest.TestCase):
         d = self.make("pid-99999999999999999999")
         self.assertTrue(self.dead(d))
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "POSIX-only: no os.getuid, and no EPERM-from-signalling-a-"
+                     "foreign-process semantic on Windows — pid-* liveness is not "
+                     "probed there at all (see TestWindowsKeepsPidDirs)")
     def test_live_process_owned_by_another_user_is_kept(self):
         """EPERM means the process EXISTS. Reclaiming it would be cross-user data
         loss, and the old mtime-only sweep kept such a session."""
@@ -123,6 +127,73 @@ class TestSessionIsDead(unittest.TestCase):
         self.assertFalse(self.dead(self.make("uuid-fresh", pointer_age_s=60)))
         self.assertTrue(self.dead(self.make("uuid-stale", pointer_age_s=2 * DAY)))
         self.assertTrue(self.dead(self.make("default", pointer_age_s=None)))
+
+
+class TestWindowsKeepsPidDirs(unittest.TestCase):
+    """On Windows the pid-* liveness probe is unsafe (os.kill routes through
+    TerminateProcess) and meaningless (git-bash writes MSYS pids that native
+    Python cannot resolve), so the sweep must KEEP every pid-* dir there rather
+    than reclaim one it cannot prove dead. Simulated by flipping the module
+    constant so the guarantee is testable on any host, red against the pre-fix
+    code that always probed.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.sessions = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.cutoff = time.time() - DAY
+        self._real_win = shared._ON_WINDOWS
+        self._real_kill = shared.os.kill
+        shared._ON_WINDOWS = True
+
+        # Delegating recorder: real behaviour preserved (so reaped_pid() and dir
+        # setup still work), but any probe from inside _session_is_dead is
+        # counted. Reset to 0 right before the call under test.
+        self.kills = 0
+
+        def _recording_kill(pid, sig):
+            self.kills += 1
+            return self._real_kill(pid, sig)
+        shared.os.kill = _recording_kill
+
+        def _restore():
+            shared._ON_WINDOWS = self._real_win
+            shared.os.kill = self._real_kill
+        self.addCleanup(_restore)
+
+    def make(self, name: str, pointer_age_s: float | None = 0.0) -> Path:
+        d = self.sessions / name
+        d.mkdir(parents=True)
+        if pointer_age_s is not None:
+            f = d / "current_state"
+            f.write_text("001\n", encoding="utf-8")
+            t = time.time() - pointer_age_s
+            os.utime(f, (t, t))
+        return d
+
+    def test_a_dead_looking_pid_dir_is_kept_without_probing(self):
+        """The reaped-pid case that POSIX reclaims: on Windows it must survive,
+        and the probe must never fire (os.kill can TerminateProcess a live one)."""
+        d = self.make(f"pid-{reaped_pid()}", pointer_age_s=0)
+        self.kills = 0
+        self.assertFalse(shared._session_is_dead(d, "", self.cutoff))
+        self.assertEqual(self.kills, 0, "the sweep probed a pid on Windows")
+
+    def test_numeric_and_non_numeric_pid_names_are_all_kept(self):
+        for name in ("pid-1", "pid-99999999999999999999", "pid-12ab",
+                     "pid-win-fallback"):
+            d = self.make(name, pointer_age_s=5 * DAY)
+            self.assertFalse(shared._session_is_dead(d, "pid-own", self.cutoff),
+                             f"{name} was reclaimed on Windows")
+
+    def test_legacy_non_pid_names_still_use_the_mtime_fallback(self):
+        """The Windows guard is pid-only: legacy names still stat-and-sweep,
+        which is safe (no process probe involved)."""
+        self.assertFalse(shared._session_is_dead(
+            self.make("uuid-fresh", pointer_age_s=60), "", self.cutoff))
+        self.assertTrue(shared._session_is_dead(
+            self.make("uuid-stale", pointer_age_s=2 * DAY), "", self.cutoff))
 
 
 class TestGcSelfExclusionWithoutEnv(unittest.TestCase):

@@ -184,6 +184,18 @@ jobs:
           # Match scripts/verify's env hygiene so a dogfooding logger cannot
           # forge results (see scripts/verify `env()`).
           unset BASH_ENV PLAYBOOK_SESSION_ID PLAYBOOK_ROLE PLAYBOOK_EVAL_CONFIG
+          # Same bash hand-off as the scripts/verify step above: the product's
+          # bash-spawning surfaces (audit sweeps, merge-verify) resolve `bash`
+          # from Python, where the System32 WSL stub shadows Git Bash. Point them
+          # at THIS shell's bash so those checks exercise a real bash instead of
+          # the stub (which would fail-close/false-green). Discovery-only,
+          # Windows-only — Linux/macOS never reach this step.
+          BASH_PATH="$(command -v bash)"
+          if command -v cygpath >/dev/null 2>&1; then
+            BASH_PATH="$(cygpath -w "$BASH_PATH")"
+          fi
+          export PLAYBOOK_VERIFY_BASH="$BASH_PATH"
+          echo "PLAYBOOK_VERIFY_BASH=$BASH_PATH"
           {
             echo "===== unittest discover -v (full, uncapped) ====="
             python -m unittest discover -s tests -v 2>&1 || true

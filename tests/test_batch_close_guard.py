@@ -156,6 +156,23 @@ class BatchAllowances(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr.decode())
 
 
+class WindowsBackslashPayload(unittest.TestCase):
+    """On Windows the tool payload carries a backslash file_path. The gate's
+    `/`-anchored task.md match must still recognise it, or the batch-close guard
+    silently never runs and every bare batch slips through. Simulated on any host
+    by backslashing the path; red against the pre-fix `/`-only match.
+    """
+
+    def test_bare_batch_still_blocked_when_path_uses_backslashes(self):
+        f = ProjectFixture()
+        payload = f.edit_payload(G[:2], [checked(g) for g in G[:2]])
+        # A native-Windows payload: separators are backslashes.
+        payload["tool_input"]["file_path"] = str(f.task_file).replace("/", "\\")
+        r = f.run_hook(payload)
+        self.assertEqual(r.returncode, 2,
+                         f"batch guard did not fire on a backslash path: {r.stderr.decode()}")
+
+
 class BatchBlocks(unittest.TestCase):
     def test_bare_3_batch_blocked(self):
         # THE negative control: the fabricated bare batch stays forbidden.

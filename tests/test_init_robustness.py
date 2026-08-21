@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from tests._bashcheck import bash_or_skip
 import tempfile
 import unittest
@@ -56,6 +57,48 @@ class InitRobustness(unittest.TestCase):
     @staticmethod
     def _provisioned(project: Path) -> list[str]:
         return [p.name for p in project.iterdir() if p.name != ".git"]
+
+    def _run_init_with_crlf_merge(self, project: Path, name="proj"):
+        """Run the real init, but make ONLY the claude-md-merge.py call emit CRLF
+        — exactly what Python text-mode stdout does on Windows. A `python3` shim
+        on PATH intercepts that one call and appends a CR to each line; every
+        other python3 call in init passes through untouched. Faithful reproduction
+        of the Windows failure on a POSIX host.
+        """
+        project.mkdir(parents=True, exist_ok=True)
+        shim_dir = Path(self._tmp.name) / "crlf-shim"
+        shim_dir.mkdir(exist_ok=True)
+        shim = shim_dir / "python3"
+        shim.write_text(
+            "#!/bin/bash\n"
+            "for a in \"$@\"; do case \"$a\" in\n"
+            "  *claude-md-merge.py)\n"
+            f"    out=$(\"{sys.executable}\" \"$@\"); rc=$?\n"
+            "    printf '%s\\n' \"$out\" | sed 's/$/\\r/'\n"
+            "    exit $rc ;;\n"
+            "esac; done\n"
+            f"exec \"{sys.executable}\" \"$@\"\n",
+            encoding="utf-8")
+        shim.chmod(0o755)
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
+        return subprocess.run(
+            [bash_or_skip(), str(INIT), name],
+            cwd=project, env=env, text=True, capture_output=True,
+        )
+
+    def test_init_survives_crlf_status_from_the_merge_step(self):
+        """Windows Python emits `CLAUDE.md:CREATED\\r\\n`; the init read-loop must
+        tolerate the trailing CR or it drops every status into the FAILED
+        catch-all and exits 1 though init did all its work."""
+        project = Path(self._tmp.name) / "crlf"
+        r = self._run_init_with_crlf_merge(project)
+        self.assertEqual(r.returncode, 0,
+                         f"init exited {r.returncode} on CRLF merge output:\n{r.stdout}")
+        self.assertNotIn("unexpected output", r.stdout,
+                         "a CR-terminated status slipped into the FAILED catch-all")
+        self.assertIn("CLAUDE.md", r.stdout)
 
     def test_help_prints_usage_and_provisions_nothing(self):
         """`init --help` used to be adopted as the project DISPLAY NAME: init ran

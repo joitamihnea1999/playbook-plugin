@@ -113,7 +113,10 @@ def readme_drift(
     repo = find_source_repo(project_path, module_file, plugins_home)
     if repo is None:
         return []
-    skill = repo / SKILL_REL
+    # .as_posix(): this path is interpolated into a user-facing "read and follow
+    # <path>" instruction; native str(Path) would render it with backslashes on
+    # Windows. Forward slashes are a stable, portable instruction. No-op on POSIX.
+    skill = (repo / SKILL_REL).as_posix()
     baseline_path = repo / BASELINE_REL
 
     if not baseline_path.is_file():

@@ -260,6 +260,42 @@ class TestExitCodes(unittest.TestCase):
         self.assertEqual(rc, SKIPPED)
 
 
+class TestNoUsableBashFailsClosed(unittest.TestCase):
+    """When bash cannot run the command, the verify must NEVER report GREEN.
+
+    On Windows a bare `bash` is the System32 WSL launcher; a stub exiting 0 would
+    stamp a red tree GREEN, and one exiting 1 would never run the command yet
+    read as FAILED. Simulated on any host with $PLAYBOOK_VERIFY_BASH pointing at
+    a stub. Red against the pre-fix code that invoked a bare `bash`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.stub = Path(self.tmp.name) / "wsl-stub.sh"
+        # WSL-launcher shape: exit 0 WITHOUT running the handed script — the most
+        # dangerous case, because a false 0 is the false-green.
+        self.stub.write_text(
+            "#!/bin/sh\necho 'no WSL distro' >&2\nexit 0\n", encoding="utf-8")
+        self.stub.chmod(0o755)
+
+    def _run_with_stub(self, root):
+        env = {**os.environ, "PLAYBOOK_VERIFY_BASH": str(self.stub)}
+        proc = subprocess.run(
+            [sys.executable, str(_MERGE_VERIFY), "-C", str(root)],
+            capture_output=True, text=True, env=env)
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def test_a_would_be_green_command_does_not_report_green(self):
+        _write_config(self.root, {"merge_verify": {"command": "true"}})
+        rc, out = self._run_with_stub(self.root)
+        self.assertNotEqual(rc, GREEN,
+                            "a stub bash that never ran the command reported GREEN")
+        self.assertEqual(rc, FAILED)
+        self.assertIn("no usable bash", out)
+
+
 class TestCommandTransport(unittest.TestCase):
     """A declared command is arbitrary project text; running it must not change
     its meaning. `bash -lc '<command>'` breaks on embedded single quotes."""

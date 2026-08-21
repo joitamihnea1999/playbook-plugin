@@ -40,6 +40,20 @@ class CodexManagementPathTraversal(unittest.TestCase):
     def test_plain_code_path_is_not_management(self):
         self.assertFalse(_is_management_path("/proj/src/main.py"))
 
+    def test_genuine_management_path_survives_windows_normpath(self):
+        """On Windows os.path.normpath re-introduces `\\`, so the `/`-split saw one
+        element and a real management path was NOT exempted → gate blocked task
+        edits. Simulated with ntpath on any host; red before the post-normpath
+        separator re-normalization."""
+        import ntpath
+        from unittest import mock
+        with mock.patch("os.path.normpath", ntpath.normpath), \
+             mock.patch("os.sep", "\\"):
+            self.assertTrue(_is_management_path("/proj/.agent/tasks/001-x/task.md"))
+            self.assertTrue(_is_management_path("/proj/.claude/settings.json"))
+            # the traversal negative must still hold under the same simulation
+            self.assertFalse(_is_management_path("/proj/.agent/../src/main.py"))
+
 
 class GatePathTraversal(unittest.TestCase):
     def setUp(self):

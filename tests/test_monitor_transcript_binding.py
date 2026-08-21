@@ -123,6 +123,11 @@ class BootstrapBinding(unittest.TestCase):
                          out.split("RECENT EVENTS")[0],
                          "identity section must name the bound file, not the decoy")
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "Exercises the mtime-guess jsonl fallback, whose project-slug "
+                     "scheme has no analogue for a Windows drive/backslash path — "
+                     "the fixture jsonl cannot be placed where the fallback looks. "
+                     "The primary pointer-binding path is covered on Windows.")
     def test_no_pointer_falls_back_loudly(self):
         proj = _project()
         home = Path(tempfile.mkdtemp())

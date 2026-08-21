@@ -17,6 +17,10 @@ import time
 from pathlib import Path
 from tasks.core import resolve_agent_dir, resolve_session_id
 
+# On native Windows a `pid-*` session dir CANNOT be probed for liveness safely,
+# so the sweep must never reclaim one there (see _session_is_dead). Computed once.
+_ON_WINDOWS = os.name == "nt"
+
 
 def find_project_root() -> Path:
     """Find project root by looking for the nearest .agent/tasks/ directory."""
@@ -72,6 +76,20 @@ def _session_is_dead(session_dir: Path, own_session: str, cutoff: float) -> bool
     if own_session and name == own_session:
         return False                      # never our own session
     if name.startswith("pid-"):
+        if _ON_WINDOWS:
+            # Windows has NEITHER semantic this policy relies on. os.kill(pid, 0)
+            # is not a liveness probe there: CPython routes any signal other than
+            # CTRL_C/CTRL_BREAK straight to TerminateProcess, so os.kill(pid, 0)
+            # would KILL a process it can open — using it to "check" a session
+            # could destroy a live one. And the pid-* dirs are written by the
+            # git-bash SessionStart hook using MSYS pseudo-pids, which do not map
+            # to native Windows pids at all, so a native probe cannot even name
+            # the right process. With no way to establish deadness safely, KEEP:
+            # never reclaim a session we cannot prove dead. Reclaiming dead pid-*
+            # dirs on Windows is left to the git-bash hook, whose `kill -0` runs
+            # in the same MSYS namespace that wrote the names. (Ledger: this
+            # limits the session-GC guarantee on windows — reported, not silent.)
+            return False
         try:
             os.kill(int(name[4:]), 0)
             return False                  # alive — keep

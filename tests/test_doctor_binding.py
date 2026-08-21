@@ -77,6 +77,10 @@ def run_doctor(proj: Path, home: Path, extra_env: dict | None = None) -> str:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(PLUGIN)
     env["HOME"] = str(home)
+    # Path.home() reads USERPROFILE (not HOME) on Windows, so doctor's grok-cache
+    # scan would otherwise search the developer's real profile and miss the
+    # fixture. Point both at the controlled home. Harmless on POSIX (uses HOME).
+    env["USERPROFILE"] = str(home)
     env.pop("CLAUDE_PLUGIN_ROOT", None)
     env.update(extra_env or {})
     r = subprocess.run([sys.executable, "-m", "tasks.cli", "doctor"],

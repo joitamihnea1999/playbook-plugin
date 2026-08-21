@@ -464,6 +464,12 @@ else
     MERGE_RC=$?
 fi
 while IFS= read -r line; do
+    # claude-md-merge.py prints via Python text-mode stdout, which on Windows
+    # emits CRLF; command substitution keeps the embedded CR, so `$line` arrives
+    # as `CLAUDE.md:CREATED\r` and matches NONE of the exact patterns below,
+    # dropping every status into the catch-all → a spurious FAILED → exit 1 even
+    # though init did all its work. Strip a trailing CR. No-op on Linux/macOS.
+    line=${line%$'\r'}
     case "$line" in
         CLAUDE.md:CREATED)    CREATED+=("CLAUDE.md (from template)") ;;
         CLAUDE.md:MERGED)     CREATED+=("CLAUDE.md (template sections merged — project content preserved)") ;;

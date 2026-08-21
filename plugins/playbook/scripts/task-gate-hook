@@ -247,10 +247,15 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
         FILE_PATH=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('file_path',''))" 2>/dev/null || echo "")
     fi
 
-    # Check if this targets the active task's task.md
-    if [ -f "$STATE_FILE" ] && echo "$FILE_PATH" | grep -qE '\.agent(/[^/]+)?/tasks/[^/]+/task\.md$'; then
+    # Check if this targets the active task's task.md. Match on a slash-normalized
+    # copy: on Windows the tool payload carries a backslash path
+    # (`...\.agent\tasks\001-x\task.md`), which these `/`-anchored patterns would
+    # never match — so the batch-close guard would silently never run and every
+    # bare batch would slip through. No-op on Linux/macOS (paths hold no `\`).
+    FP_SLASH="${FILE_PATH//\\//}"
+    if [ -f "$STATE_FILE" ] && echo "$FP_SLASH" | grep -qE '\.agent(/[^/]+)?/tasks/[^/]+/task\.md$'; then
         ACTIVE_TASK=$(head -1 "$STATE_FILE" | tr -d '[:space:]')
-        if [ -n "$ACTIVE_TASK" ] && echo "$FILE_PATH" | grep -q "/${ACTIVE_TASK}-"; then
+        if [ -n "$ACTIVE_TASK" ] && echo "$FP_SLASH" | grep -q "/${ACTIVE_TASK}-"; then
             BATCH_RC=0
             BATCH_MSG=$(echo "$INPUT" | python3 "$HOOK_DIR/gate-batch-check.py" \
                 --tool "$TOOL_NAME" --file "$FILE_PATH" \

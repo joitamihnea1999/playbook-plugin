@@ -68,6 +68,7 @@ class MergePrepRenumberBase(unittest.TestCase):
         return subprocess.run(
             [sys.executable, "-m", "tasks.cli", *args],
             cwd=self.project, env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
         )
 
     def _setup_collision(self, num, slug_target, slug_current):

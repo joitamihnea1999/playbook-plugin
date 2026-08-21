@@ -41,11 +41,51 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 
 GREEN, FAILED, BLOCKED, SKIPPED = 0, 1, 2, 3
+
+# Resolved once per process: a bash that actually runs, or (None, why-not).
+_RESOLVED_BASH = None
+
+
+def _usable_bash():
+    """A bash that runs a sentinel, or (None, reason).
+
+    Never invoke a bare `bash`: on Windows the process-creation search finds the
+    System32 WSL launcher before Git Bash on PATH, and with no distro it prints
+    an install hint and exits NON-ZERO — the declared command NEVER runs, yet the
+    exit code (1) would read as FAILED and, worse, a stub exiting 0 would read as
+    GREEN, stamping a red tree green. Resolve an absolute path with shutil.which
+    (which bypasses the System32 priority) and PROBE it for a sentinel; honour
+    $PLAYBOOK_VERIFY_BASH first (CI points it at Git Bash for exactly this).
+    Cached per process. No-op on Linux/macOS, where `bash` on PATH is usable.
+    """
+    global _RESOLVED_BASH
+    if _RESOLVED_BASH is not None:
+        return _RESOLVED_BASH
+    candidate = os.environ.get("PLAYBOOK_VERIFY_BASH") or shutil.which("bash")
+    if candidate and not os.path.exists(candidate) and os.path.exists(candidate + ".exe"):
+        candidate += ".exe"
+    if not candidate:
+        _RESOLVED_BASH = (None, "no bash found on PATH")
+        return _RESOLVED_BASH
+    try:
+        p = subprocess.run([candidate, "-c", "printf ok"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _RESOLVED_BASH = (None, f"{type(exc).__name__}: {exc}")
+        return _RESOLVED_BASH
+    if p.returncode == 0 and (p.stdout or b"").strip() == b"ok":
+        _RESOLVED_BASH = (candidate, "")
+    else:
+        _RESOLVED_BASH = (None, f"bash at {candidate} is not usable (rc={p.returncode}) "
+                                "— likely the Windows WSL stub")
+    return _RESOLVED_BASH
 # `--plan` classifies without running, so it must not be able to return the one
 # code the push gate accepts. Only an actual run may yield GREEN.
 CONFIGURED = 4
@@ -131,7 +171,11 @@ def _write_script(command):
     an early failing step fail; pipefail stops a trailing `| tail` swallowing the
     real status. Caller unlinks."""
     fd, script = tempfile.mkstemp(prefix="verify-", suffix=".sh")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    # newline="\n": without it, Windows text-mode translates the preamble/command
+    # `\n`→`\r\n`, and git-bash then runs a CRLF script whose `set -e`/`set -o
+    # pipefail` and command lines are CR-corrupted — even a green command exits
+    # non-zero, failing the gate. No-op on POSIX.
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(PREAMBLE)
         fh.write(command)
         if not command.endswith("\n"):
@@ -153,10 +197,16 @@ def run_command_capture(command, project_root=".", timeout_secs=None):
     returns rc 124 (the conventional timeout code, non-zero, so the gate reads
     FAILED) with the marker FIRST in the output so a receipt's first line names
     the timeout, then whatever the command had written."""
+    bash, why = _usable_bash()
+    if bash is None:
+        # Fail CLOSED: with no bash to run it, the command did NOT run, and an
+        # unrun verify is not a pass. Non-zero rc so the gate reads FAILED.
+        return 126, (f"(no usable bash to run the verify command: {why} — "
+                     "command NOT run, cannot certify green)")
     script = _write_script(command)
     try:
         proc = subprocess.run(
-            ["bash", script], cwd=project_root or ".",
+            [bash, script], cwd=project_root or ".",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, errors="replace", timeout=timeout_secs,
         )
@@ -212,10 +262,16 @@ def main(argv=None):
     # applies the fail-fast preamble (set -e / pipefail) so an early failing step
     # fails the gate — a green stamp on a red tree is the whole defect this
     # prevents.
+    bash, why = _usable_bash()
+    if bash is None:
+        # Fail CLOSED: no bash means the command cannot run, and a verify that
+        # cannot run is not GREEN. Report FAILED so the push gate refuses.
+        print(f"merge-verify: FAILED — no usable bash to run the command: {why}")
+        return FAILED
     script = _write_script(command)
     try:
         print(f"merge-verify: running — {command}", flush=True)
-        rc = subprocess.call(["bash", script], cwd=root or ".")
+        rc = subprocess.call([bash, script], cwd=root or ".")
     finally:
         try:
             os.unlink(script)

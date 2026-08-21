@@ -45,6 +45,7 @@ def _project(parked_in_001: bool) -> Path:
 def _activate(proj: Path):
     return subprocess.run([sys.executable, "-m", "tasks.cli", "work", "2"],
                           cwd=proj, env=ENV, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
                           timeout=60)
 
 

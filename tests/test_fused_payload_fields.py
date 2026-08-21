@@ -305,6 +305,27 @@ class NulFraming(unittest.TestCase):
         self.assertEqual(fields[4], "echo \"a'b\" $HOME `id`")
 
 
+class WindowsConsoleEncoding(unittest.TestCase):
+    """The enforcing normalizer must not crash writing a non-ASCII field to a
+    non-UTF-8 stdout. On Windows the default is cp1252, which cannot encode the
+    U+FFFD that _wire_safe emits for a lone surrogate — the producer would die
+    mid-frame and the consumer fall onto its slow recovery path. Simulated here
+    by forcing PYTHONIOENCODING=cp1252; red before main() reconfigures to UTF-8.
+    """
+
+    def test_surrogate_payload_does_not_crash_under_cp1252_stdout(self):
+        env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+        r = subprocess.run(
+            [sys.executable, str(NORMALIZER), "--emit-fields"],
+            input=json.dumps(PAYLOADS["surrogate path"]),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=env, timeout=60)
+        self.assertEqual(r.returncode, 0,
+                         f"normalizer crashed writing to a cp1252 stdout:\n{r.stderr}")
+        self.assertTrue(r.stdout.endswith("\0"))
+        self.assertIn("src/a�.py", r.stdout)
+
+
 class TranscriptSanitization(unittest.TestCase):
     def test_clean_transcript_path_passes(self):
         fields = emit_fields(json.dumps(PAYLOADS["transcript path"]))

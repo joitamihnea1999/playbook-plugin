@@ -175,6 +175,9 @@ class TestResolveAgentDir(TempProjectCase):
         except Exception as exc:  # noqa: BLE001 - that's the point of the test
             self.assertNotIsInstance(exc, SystemExit)
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "POSIX-only: chmod(0o000) does not make a file unreadable to "
+                     "its owner on Windows, and os.geteuid is absent there")
     def test_unreadable_marker_raises_rather_than_degrading(self):
         # Task 021's I2 lesson: a present-but-unreadable marker must not be
         # reported as "legacy layout" — that is how state splits in two.
@@ -235,7 +238,13 @@ class TestResolverParity(TempProjectCase):
         proc = subprocess.run(
             [bash_or_skip(), "-c", script], capture_output=True, text=True
         )
-        return proc.returncode, proc.stdout.strip()
+        # bash appends `/.agent[/<lane>]` with FORWARD slashes onto the project
+        # path it was handed, so on Windows the result is mixed
+        # (`C:\proj\...\legacy/.agent`) while `expected` is a native `str(Path)`
+        # (`...\legacy\.agent`). Same directory, different separator — normalize
+        # to native so the parity check compares directories, not slashes. No-op
+        # off Windows: POSIX paths contain no `\`, and os.sep is `/` there.
+        return proc.returncode, proc.stdout.strip().replace("/", os.sep)
 
     def _python_core_resolve(self, project: Path):
         """Run tasks/core.py's resolve_agent_dir out-of-process (it may exit)."""
@@ -583,6 +592,11 @@ class TestCodexHooksPaths(TempProjectCase):
         activate(lane, "pid-3", 5)
         self.assertTrue(self.ch.has_active_task(p, "pid-3"))
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "POSIX-only: chmod(0o500) does not remove owner write on "
+                     "Windows and os.access(W_OK) only reflects the read-only "
+                     "attribute, so the lane-vs-root writability split is not "
+                     "observable there; os.geteuid is also absent")
     def test_agent_dir_writable_tests_the_lane(self):
         p = make_project(self.tmp / "wr", "multiuser", marker="alice")
         self.assertTrue(self.ch._agent_dir_writable(p))
@@ -893,7 +907,11 @@ class TestCodexHookRootWalk(TempProjectCase):
             cwd=str(p), capture_output=True, text=True, env=env,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.strip(), "/explicit/override")
+        # _find_project_root returns Path(env_root) (like every other branch), so
+        # str() is native-separator: `/explicit/override` on POSIX, but
+        # `\explicit\override` on Windows. Compare against the same Path rendering
+        # rather than a POSIX literal — the override still wins, which is the point.
+        self.assertEqual(proc.stdout.strip(), str(Path("/explicit/override")))
 
 
 # ── 4. Split-brain end-to-end ────────────────────────────────────────────────
@@ -906,6 +924,12 @@ class TestSplitBrainEndToEnd(TempProjectCase):
     running the real three together proves they converged.
     """
 
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "POSIX-only: runs the `playbook-codex` bash launcher and a "
+                     "`#!/bin/bash` codex shim as direct subprocess execs, which "
+                     "native Windows cannot do (WinError 193 — shebang dispatch "
+                     "is not a Windows exec). The per-surface lane resolution this "
+                     "composes is covered on Windows by TestResolverParity.")
     def test_wrapper_cli_and_hook_share_one_lane(self):
         project = make_project(self.tmp / "e2e", "multiuser", marker="alice")
         lane = project / ".agent" / "alice"
@@ -1104,10 +1128,16 @@ class LoggerProbeCase(unittest.TestCase):
 
     # ── observations ─────────────────────────────────────────────────────
     def histories(self, project: Path) -> list[str]:
-        """Every bash_history under the project, as `.agent`-relative paths."""
+        """Every bash_history under the project, as `.agent`-relative paths.
+
+        `.as_posix()` (not `str()`): the lane names here are compared against
+        forward-slash literals like `alice/bash_history`, and native `str()`
+        would yield `alice\\bash_history` on Windows. as_posix() is the same
+        value off Windows, so Linux/macOS behaviour is unchanged.
+        """
         agent = project / ".agent"
         return sorted(
-            str(p.relative_to(agent))
+            p.relative_to(agent).as_posix()
             for p in agent.rglob("bash_history")
         )
 

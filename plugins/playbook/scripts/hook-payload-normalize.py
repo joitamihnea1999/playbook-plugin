@@ -221,7 +221,10 @@ def extract_fields(payload):
     return (
         tool_name,
         path,
-        os.path.normpath(path),
+        # normpath re-introduces `\` on Windows; the gate matches this field
+        # against `*/.agent/*` (forward-slash), so a native-separator value would
+        # break the exemption. Re-normalize to `/`. No-op on POSIX (os.sep=="/").
+        os.path.normpath(path).replace(os.sep, "/"),
         command,
         _wire_safe(transcript),
     )
@@ -250,6 +253,15 @@ def emit_fields(raw):
 
 
 def main():
+    # This is an ENFORCING hook. On Windows, stdin/stdout default to the console
+    # codepage (cp1252), so reading a UTF-8 payload or writing a field that holds
+    # a non-ASCII char (e.g. the U+FFFD _wire_safe emits for a lone surrogate)
+    # raises UnicodeEncodeError — the producer dies mid-frame and the consumer is
+    # forced onto its slower recovery path. Force UTF-8, matching tasks/cli.py.
+    # No-op on POSIX, where the streams are already UTF-8.
+    for _stream in (sys.stdin, sys.stdout):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
     raw = sys.stdin.read()
     if "--emit-fields" in sys.argv[1:]:
         emit_fields(raw)

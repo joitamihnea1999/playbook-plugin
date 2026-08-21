@@ -78,6 +78,10 @@ MODELS_JSON="$SHIPPED_MODELS_JSON"
 # `mapfile`) so this works on macOS's bash 3.2.
 ALLOWED_MODELS=()
 while IFS= read -r _mid; do
+  # Windows python3 stdout is text-mode → CRLF; `read` keeps the trailing CR, so
+  # each allow-list entry would be "model\r" and never match the clean requested
+  # model. Strip it. No-op on POSIX (no CR).
+  _mid="${_mid%$'\r'}"
   [ -n "$_mid" ] && ALLOWED_MODELS+=("$_mid")
 done < <(python3 -c '
 import json, sys

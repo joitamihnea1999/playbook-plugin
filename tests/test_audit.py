@@ -14,6 +14,7 @@ fail the audit while advisory ones don't; config sweeps merge with the defaults.
 Run: python3 tests/test_audit.py
 """
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -139,6 +140,62 @@ class Severity(unittest.TestCase):
     def test_clean_passes(self):
         p = self._proj_with([{"name": "a", "command": "exit 1", "severity": "error"}])
         self.assertTrue(run_audit(p)["passed"])
+
+
+class NoUsableBashFailsClosed(unittest.TestCase):
+    """When bash cannot run the scan, the audit must ERROR, never certify clean.
+
+    On Windows a bare `bash` on PATH is the System32 WSL launcher; with no distro
+    it exits non-zero, which classify() would read as exit 1 = "clean" — a
+    false-green that never scanned. Simulated here on any host by pointing
+    $PLAYBOOK_VERIFY_BASH at a stub that behaves like the WSL launcher. Red
+    against the pre-fix code that invoked a bare `bash` and ignored the resolver.
+    """
+
+    def setUp(self):
+        import tasks.audit as audit_mod
+        self.audit = audit_mod
+        self._real_env = os.environ.get("PLAYBOOK_VERIFY_BASH")
+        self._real_cache = audit_mod._RESOLVED_BASH
+        self.tmp = Path(tempfile.mkdtemp())
+        stub = self.tmp / "wsl-stub.sh"
+        # Mimic the WSL launcher: print an install hint, exit non-zero, and
+        # crucially NEVER run the script it was handed.
+        stub.write_text(
+            "#!/bin/sh\n"
+            "echo 'Windows Subsystem for Linux has no installed distributions.' >&2\n"
+            "exit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        os.environ["PLAYBOOK_VERIFY_BASH"] = str(stub)
+        audit_mod._RESOLVED_BASH = None  # force re-resolution against the stub
+
+        def _restore():
+            audit_mod._RESOLVED_BASH = self._real_cache
+            if self._real_env is None:
+                os.environ.pop("PLAYBOOK_VERIFY_BASH", None)
+            else:
+                os.environ["PLAYBOOK_VERIFY_BASH"] = self._real_env
+        self.addCleanup(_restore)
+
+    def test_sweep_that_would_find_dirt_errors_when_bash_is_unusable(self):
+        p = Path(tempfile.mkdtemp())
+        (p / "src").mkdir()
+        (p / "src" / "bad.py").write_text(
+            "a = 1\n<<<<<<< HEAD\nb = 2\n>>>>>>> feature\n", encoding="utf-8")
+        r = run_sweep(sweep_by_name("conflict-markers"), p)
+        self.assertEqual(r["status"], "error",
+                         "an unrun scan was certified as something other than error")
+        self.assertNotEqual(r["status"], "clean")
+
+    def test_audit_does_not_pass_when_no_bash(self):
+        p = Path(tempfile.mkdtemp())
+        (p / ".agent").mkdir()
+        (p / ".agent" / "config.json").write_text(json.dumps(
+            {"audit": {"disable_defaults": True,
+                       "sweeps": [{"name": "a", "command": "exit 1",
+                                   "severity": "advisory"}]}}))
+        self.assertFalse(run_audit(p)["passed"],
+                         "audit passed though no sweep could actually run")
 
 
 class ResolveSweeps(unittest.TestCase):
