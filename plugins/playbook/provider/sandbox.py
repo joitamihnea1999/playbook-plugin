@@ -461,19 +461,34 @@ def build_bwrap_argv(
     extra_rw: Iterable[str] | None = None,
     *,
     project_writable: bool = True,
+    no_network: bool = False,
 ) -> list[str]:
     """Generate the bwrap argv: read-only root, bind project + tmp + per-agent
     home subpaths read-write, bind git_dir read-only.
 
+    This is WRITE containment: `--ro-bind / /` leaves the whole filesystem
+    READABLE (nothing outside the project is hidden), and by default there is NO
+    network isolation — the judge path relies on the network because judges
+    invoke provider CLIs that call model APIs.
+
     project_writable=False is the contained "outdir" mode: the project/corpus is
     bound read-only; the only writable project-side location is extra_rw (the
     workspace). Home subpaths stay writable for the agent's config/caches.
+
+    no_network=True is the OPT-IN network jail: it appends `--unshare-net`, which
+    drops the sandbox into a fresh network namespace (loopback only). It is never
+    a default and is never wired into the judge path — the judge needs the
+    network. Only bwrap supports it; macOS seatbelt and Windows have no
+    equivalent, and the launcher fails loudly there rather than pretend (see
+    `network_isolation_available` / `_wrapped_argv`).
     """
     project = str(Path(project_dir).resolve())
     home = Path.home()
     rw_paths = _normalize_rw(extra_rw)
 
     argv = ["bwrap", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"]
+    if no_network:
+        argv.append("--unshare-net")
 
     # ORDER IS LOAD-BEARING: in bwrap, later binds stack over earlier ones.
     # The broad read-write mounts (/tmp, the write log, per-agent home subpaths)
@@ -607,13 +622,20 @@ def _wrapped_argv(
     project: Path,
     extra_rw: Iterable[str] | None,
     project_writable: bool,
+    no_network: bool = False,
 ) -> list[str]:
     """Compose bypass-flag injection + seatbelt/bwrap wrapping into the final
     argv. Shared by run() (blocking) and popen() (streaming) so containment is
     generated in exactly one place. If already inside a sandbox (ours OR a
     foreign one we can't nest in), returns the inner argv with bypass flags only.
+
+    no_network=True (opt-in only, never the judge path) is honored solely on the
+    bwrap backend; on any other backend it raises rather than silently emit a
+    no-op — see `_NO_NETWORK_UNSUPPORTED`.
     """
     inner_argv = _compose_agent_argv(agent, agent_args)
+    if no_network and not network_isolation_available():
+        raise RuntimeError(_NO_NETWORK_UNSUPPORTED)
     if is_sandboxed():
         return inner_argv
     if platform.system() == "Darwin" and shutil.which("sandbox-exec"):
@@ -626,7 +648,8 @@ def _wrapped_argv(
         return inner_argv
     if shutil.which("bwrap"):
         git_dir = _git_dir_of(project)
-        return build_bwrap_argv(project, git_dir, inner_argv, extra_rw, project_writable=project_writable)
+        return build_bwrap_argv(project, git_dir, inner_argv, extra_rw,
+                                project_writable=project_writable, no_network=no_network)
     # No sandbox primitive available — exec directly with bypass.
     return inner_argv
 
@@ -648,6 +671,30 @@ def containment_available() -> bool:
     return False
 
 
+# The opt-in network jail (`--no-network` / no_network=True) exists ONLY on the
+# Linux bwrap backend. On every other path — macOS seatbelt, Windows, or nested
+# inside a foreign sandbox we cannot re-wrap — there is no `--unshare-net`
+# equivalent, so the launcher REFUSES rather than emit a no-op that pretends the
+# network is contained.
+_NO_NETWORK_UNSUPPORTED = (
+    "--no-network requires the Linux bubblewrap (bwrap) backend. Network "
+    "isolation is not supported on macOS seatbelt, on Windows, or when nested "
+    "inside another sandbox — refusing to run rather than pretend the network "
+    "is contained."
+)
+
+
+def network_isolation_available() -> bool:
+    """True iff a fresh (non-nested) run would go through the bwrap backend, the
+    only one that can honor `--unshare-net`. Mirrors `_wrapped_argv`'s backend
+    choice so callers can gate the opt-in before invoking it."""
+    if is_sandboxed():
+        return False
+    if platform.system() == "Darwin" and shutil.which("sandbox-exec"):
+        return False  # seatbelt (usable or nested) — never reaches bwrap
+    return bool(shutil.which("bwrap"))
+
+
 def _child_env(env: dict[str, str] | None) -> dict[str, str]:
     child_env = dict(os.environ) if env is None else dict(env)
     child_env["PLAYBOOK_SANDBOXED"] = "1"
@@ -663,16 +710,20 @@ def run(
     capture_output: bool = False,
     check: bool = False,
     project_writable: bool = True,
+    no_network: bool = False,
     **kwargs,
 ) -> subprocess.CompletedProcess:
     """Run an agent under sandbox containment. Composes bypass-flag injection
     into argv, generates seatbelt/bwrap wrapping, exports PLAYBOOK_SANDBOXED=1
     in child env. If already inside a sandbox (ours OR a foreign one we can't
     nest in), skips wrapping but still injects bypass flags.
+
+    no_network is the opt-in bwrap network jail; it defaults off and is never set
+    by the judge path (judges need the network).
     """
     project = Path(project_root).resolve()
     child_env = _child_env(env)
-    wrapped = _wrapped_argv(agent, agent_args, project, extra_rw, project_writable)
+    wrapped = _wrapped_argv(agent, agent_args, project, extra_rw, project_writable, no_network)
 
     if kwargs.get("text") or isinstance(kwargs.get("input"), str):
         # Windows text-mode pipes default to the ANSI code page (cp1252);
@@ -773,6 +824,7 @@ def popen(
     extra_rw: Iterable[str] | None = None,
     env: dict[str, str] | None = None,
     project_writable: bool = True,
+    no_network: bool = False,
     **kwargs,
 ) -> subprocess.Popen:
     """Non-blocking variant of run() — returns a live Popen for streaming.
@@ -781,10 +833,13 @@ def popen(
     caller drives stdout incrementally (e.g. line-by-line stream-json → events
     for a chat sidebar). Defaults stdout to PIPE and text mode so callers can
     iterate `proc.stdout`; override via kwargs.
+
+    no_network is the opt-in bwrap network jail; it defaults off and is never set
+    by the judge path.
     """
     project = Path(project_root).resolve()
     child_env = _child_env(env)
-    wrapped = _wrapped_argv(agent, agent_args, project, extra_rw, project_writable)
+    wrapped = _wrapped_argv(agent, agent_args, project, extra_rw, project_writable, no_network)
 
     kwargs.setdefault("stdout", subprocess.PIPE)
     kwargs.setdefault("text", True)
@@ -875,6 +930,11 @@ def _main(argv: list[str]) -> int:
     parser.add_argument("--print-argv", action="store_true",
                         help="Print the fully wrapped argv (one arg per line) "
                              "instead of executing — inspectable containment")
+    parser.add_argument("--no-network", action="store_true",
+                        help="OPT-IN network jail: add bwrap --unshare-net "
+                             "(Linux only). Fails loudly on macOS seatbelt / "
+                             "Windows / nested sandboxes (no --unshare-net "
+                             "equivalent). Never a default; never the judge path.")
     parser.add_argument("--project-root", default=None,
                         help="Project root (default: cwd)")
     parser.add_argument("--prompt", default=None,
@@ -888,6 +948,15 @@ def _main(argv: list[str]) -> int:
                         help="Args passed verbatim to the agent binary")
 
     args = parser.parse_args(argv)
+
+    # --no-network is opt-in on the raw/--print-argv paths only. It is NOT
+    # threaded through the --prompt (subagent) runner, which is also the judge
+    # path — so reject the combination loudly instead of silently ignoring it.
+    if args.no_network and args.prompt is not None:
+        print("Error: --no-network is not supported with --prompt (the subagent "
+              "path, which the judge path shares). Use raw `-- <agent args>`.",
+              file=sys.stderr)
+        return 2
 
     if args.list_agents:
         print("Sandbox agent capability matrix:")
@@ -969,13 +1038,24 @@ def _main(argv: list[str]) -> int:
         return res.returncode
 
     if args.print_argv:
-        for a in _wrapped_argv(agent, forwarded, project, args.rw,
-                               project_writable=not args.ro_project):
+        try:
+            wrapped = _wrapped_argv(agent, forwarded, project, args.rw,
+                                    project_writable=not args.ro_project,
+                                    no_network=args.no_network)
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+        for a in wrapped:
             print(a)
         return 0
 
-    result = run(agent, forwarded, project, extra_rw=args.rw,
-                 project_writable=not args.ro_project)
+    try:
+        result = run(agent, forwarded, project, extra_rw=args.rw,
+                     project_writable=not args.ro_project,
+                     no_network=args.no_network)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     return result.returncode
 
 

@@ -48,7 +48,7 @@ Because state lives in the file and not in memory, execution survives context co
 
 **Tests** make the consequences of a wrong change visible immediately - the agent sees the failure and corrects course. The better the tests, the longer it can run unsupervised. Playbook leans heavily on this: the task.md template puts a test gate after each work gate, and we recommend expanding test coverage as part of every task.
 
-**The sandbox** lets you run the agent in full bypass-permissions mode - no prompts, no interruptions. The tradeoff is that blast radius is contained at the OS level: your project directory is writable, `.git` is read-only, and everything outside the project is blocked. You get the speed of unattended execution without the risk of it touching anything it shouldn't.
+**The sandbox** lets you run the agent in full bypass-permissions mode - no prompts, no interruptions. The tradeoff is that write blast radius is contained at the OS level: your project directory is writable, `.git` is read-only, and **writes** outside the project are blocked. It's write containment, not a read or network jail — the filesystem stays readable and the network stays reachable (judges rely on that to call model APIs). You get the speed of unattended execution without the risk of it *changing* anything it shouldn't.
 
 **Five providers.** The same workflow runs on Claude Code, Codex, Antigravity (agy), Grok, and Pi - as the main agent (via the `playbook-*` launchers) and as judges on the review panel. ([Provider matrix](docs/providers.md).)
 
@@ -113,7 +113,7 @@ For hands-off execution, run in sandbox mode - `--dangerously-skip-permissions` 
 sandbox
 ```
 
-The sandbox uses macOS seatbelt or Linux bubblewrap. Your project directory is writable, `.git` is read-only, everything outside is blocked at the kernel level. The agent runs without permission prompts but can't escape the containment even if it tries. You still steer by chatting.
+The sandbox uses macOS seatbelt or Linux bubblewrap. Your project directory is writable, `.git` is read-only, and **writes** outside the project are blocked at the kernel level — reads and network access are not (this is write containment, not a read or network jail). The agent runs without permission prompts but can't escape the write containment even if it tries. You still steer by chatting.
 
 When you want to drive yourself - quick experiments, exploration, no gate pressure - say so and the agent switches to freehand mode (`/playbook:freehand`); the hooks relax until the next task.
 
