@@ -59,7 +59,7 @@ if [ -z "$SESSION_ID" ]; then
 fi
 
 # Validate SESSION_ID — prevents path traversal + sandbox profile injection.
-# Playbook uses pid-based session IDs only (T112). pid-<digits>.
+# Playbook uses pid-based session IDs only: pid-<digits>.
 if ! echo "$SESSION_ID" | grep -Eq '^pid-[0-9]+$'; then
     echo "bootstrap.sh: error: invalid SESSION_ID '$SESSION_ID'" >&2
     echo "  Expected: pid-<digits>" >&2

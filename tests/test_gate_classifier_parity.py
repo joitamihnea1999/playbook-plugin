@@ -71,6 +71,25 @@ VECTORS = [
     # rule — these used to diverge (bash saw ".py"/".toml", python saw none).
     ("..py", False), ("...toml", False), ("weird/...css", False),
     ("src/...css", True), ("bin/..js", True),
+    # Dotfiles: a leading-dot basename has NO extension (splitext parity), so
+    # it falls to the dir rule; a dotfile with a real trailing extension keeps
+    # that extension on both sides.
+    (".env", False), ("src/.env", True), ("src/.env.local", True),
+    (".eslintrc.json", False), (".config.py", True), ("src/.gitignore", True),
+    ("config/.gitignore", False), (".github/workflows/ci.yml", True),
+    # Unicode paths: classification is by ASCII extension / code-dir component
+    # and must not depend on the bytes around them, on either surface.
+    ("src/café/módulo.py", True), ("docs/说明.md", False),
+    ("нота/файл.rs", True), ("データ/メモ.txt", False),
+    # Trailing-newline payload fields: both sides classify the stripped path
+    # (python rstrips CR/LF; bash's `$(…)` ext extraction drops a trailing \n,
+    # and the dir rule catches the CRLF vectors regardless of the extension).
+    ("a.py\n", True), ("src/a.py\r\n", True), ("notes.md\r\n", False),
+    # KNOWN residual divergence, deliberately NOT a vector: a bare CR-suffixed
+    # code path outside any code dir ("a.py\r", "a.py\r\n") — bash keeps the
+    # \r inside the extension and falls through to ALLOW, python rstrips the
+    # CR and gates. Pinning either side here would either encode a fail-open
+    # as truth or turn this net red; it is recorded for an owner decision.
 ]
 
 

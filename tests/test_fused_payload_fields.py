@@ -87,19 +87,43 @@ PAYLOADS = {
                             "tool_input": {
                                 "file_path": "/tmp/.agent/decoy",
                                 "notebook_path": "src/live.ipynb"}},
+    # The dual of "both notebook paths": for a NON-notebook tool the decoy sits
+    # in notebook_path and file_path is the live target.
+    "both paths, edit tool": {"tool_name": "Edit",
+                              "tool_input": {
+                                  "file_path": "src/real.py",
+                                  "notebook_path": "/tmp/.agent/decoy.ipynb"}},
+    # NotebookEdit whose payload only carries file_path: the effective path is
+    # EMPTY (NotebookEdit acts on notebook_path, and a decoy field must not
+    # substitute for it) — downstream the gate fail-closes on the empty path.
+    "notebook missing its path": {"tool_name": "NotebookEdit",
+                                  "tool_input": {"file_path": "src/nb.ipynb"}},
+    "unicode notebook": {"tool_name": "NotebookEdit",
+                         "tool_input": {"notebook_path": "ノート/分析.ipynb"}},
+    # CRLF inside payload fields is DATA on the NUL-framed wire, not a frame
+    # or record boundary — a line-based protocol would truncate these.
+    "crlf path": {"tool_name": "Edit",
+                  "tool_input": {"file_path": "src/a.py\r\n"}},
+    "crlf command": {"tool_name": "Bash",
+                     "tool_input": {"command": "set -e\r\nmake test\r\n"}},
+    "dotfile path": {"tool_name": "Write",
+                     "tool_input": {"file_path": "src/.env"}},
 }
 
 
 # The normalizer forces UTF-8 stdout (see its main()); decode its output as
-# UTF-8 too. Without encoding=, text=True uses the locale codec — cp1252 on
-# Windows — which mojibakes the UTF-8 bytes the producer wrote (café → cafÃ©).
-# That was a decode defect in THIS harness, not the product.
+# UTF-8 too — without that, a locale codec (cp1252 on Windows) mojibakes the
+# UTF-8 bytes the producer wrote (café → cafÃ©). Read the pipe in BINARY and
+# decode by hand: subprocess text mode also applies universal-newline
+# translation, which rewrites a \r\n inside a field to \n — mangling exactly
+# the bytes the CRLF vectors pin. The real consumer (bash `read -r -d ''`)
+# sees the raw bytes, so the harness must too.
 def emit_fields(raw: str) -> "list[str]":
     r = subprocess.run([sys.executable, str(NORMALIZER), "--emit-fields"],
-                       input=raw, capture_output=True, text=True,
-                       encoding="utf-8", timeout=60)
-    assert r.returncode == 0, r.stderr
-    out = r.stdout
+                       input=raw.encode("utf-8"), capture_output=True,
+                       timeout=60)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    out = r.stdout.decode("utf-8")
     assert out.endswith("\0"), "every record must be NUL-terminated"
     return out[:-1].split("\0")
 
@@ -317,6 +341,45 @@ class NulFraming(unittest.TestCase):
         fields = emit_fields(json.dumps(PAYLOADS["quotes in command"]))
         self.assertEqual(fields[4], "echo \"a'b\" $HOME `id`")
 
+    def test_crlf_in_path_and_command_is_data_not_a_record_boundary(self):
+        """CR/LF inside a field must reach the gate byte-for-byte: only NUL
+        frames the wire, and truncating at a CR would judge a different path
+        or command than the one about to run."""
+        fields = emit_fields(json.dumps(PAYLOADS["crlf path"]))
+        self.assertEqual(len(fields), N_FIELDS)
+        self.assertEqual(fields[2], "src/a.py\r\n")
+        fields = emit_fields(json.dumps(PAYLOADS["crlf command"]))
+        self.assertEqual(len(fields), N_FIELDS)
+        self.assertEqual(fields[4], "set -e\r\nmake test\r\n")
+
+    def test_unicode_notebook_path_survives_intact(self):
+        fields = emit_fields(json.dumps(PAYLOADS["unicode notebook"]))
+        self.assertEqual(fields[2], "ノート/分析.ipynb")
+
+
+class PathFieldRouting(unittest.TestCase):
+    """When BOTH path fields are present, the tool decides which one is live —
+    the other is a decoy that must not leak into the gate's judgment."""
+
+    def test_edit_with_decoy_notebook_path_reads_file_path(self):
+        fields = emit_fields(json.dumps(PAYLOADS["both paths, edit tool"]))
+        self.assertEqual(fields[2], "src/real.py")
+        self.assertNotIn(".agent", fields[3],
+                         "the decoy notebook_path reached the exemption test")
+
+    def test_notebook_edit_with_decoy_file_path_reads_notebook_path(self):
+        fields = emit_fields(json.dumps(PAYLOADS["both notebook paths"]))
+        self.assertEqual(fields[2], "src/live.ipynb")
+        self.assertNotIn(".agent", fields[3])
+
+    def test_notebook_edit_without_notebook_path_has_no_effective_path(self):
+        """file_path is NOT a substitute for NotebookEdit's notebook_path: the
+        effective path is empty and normpath degrades to '.', so the gate's
+        empty-path schema check fail-closes rather than judging the decoy."""
+        fields = emit_fields(json.dumps(PAYLOADS["notebook missing its path"]))
+        self.assertEqual(fields[2], "")
+        self.assertEqual(fields[3], ".")
+
 
 class WindowsConsoleEncoding(unittest.TestCase):
     """The enforcing normalizer must not crash writing a non-ASCII field to a
@@ -428,6 +491,32 @@ class EnforcingGateConsumesTheWholeFrame(unittest.TestCase):
             self._gate(PAYLOADS["surrogate path"]).returncode, 2)
         self.assertEqual(
             self._gate(PAYLOADS["both notebook paths"]).returncode, 2)
+
+    def test_edit_with_decoy_notebook_path_blocks_on_the_real_target(self):
+        """The decoy management-looking notebook_path must not exempt the
+        Edit's real file_path from the no-task gate."""
+        self.assertEqual(
+            self._gate(PAYLOADS["both paths, edit tool"]).returncode, 2)
+
+    def test_notebook_edit_missing_its_path_fails_closed(self):
+        self.assertEqual(
+            self._gate(PAYLOADS["notebook missing its path"]).returncode, 2)
+
+    def test_crlf_suffixed_code_path_still_blocks(self):
+        self.assertEqual(self._gate(PAYLOADS["crlf path"]).returncode, 2)
+
+    def test_unicode_notebook_path_still_blocks(self):
+        self.assertEqual(self._gate(PAYLOADS["unicode notebook"]).returncode, 2)
+
+    def test_dotfile_under_a_code_dir_still_blocks(self):
+        self.assertEqual(self._gate(PAYLOADS["dotfile path"]).returncode, 2)
+
+    def test_dotfile_under_management_dir_remains_allowed(self):
+        self.assertEqual(self._gate(
+            {"tool_name": "Write",
+             "tool_input": {"file_path":
+                            str(self.project / ".agent" / ".env")}}
+        ).returncode, 0)
 
     def test_read_without_a_path_remains_allowed(self):
         self.assertEqual(self._gate({"tool_name": "Read"}).returncode, 0)
