@@ -61,6 +61,22 @@ class CodexManagementPathTraversal(unittest.TestCase):
         self.assertFalse(_is_management_path("/proj/.agentx/file.py"))
         self.assertFalse(_is_management_path("/proj/my.claude/file.py"))
 
+    def test_cr_suffix_does_not_forge_or_break_management(self):
+        # The bare-CR trick (fix/cr-path-parity) rides the TRAILING path
+        # component, so it can neither forge a `.agent`/`.claude` component nor
+        # break a genuine one that sits earlier in the path — the management
+        # exemption stays consistent under it (no divergence, no fix needed).
+        # A trailing CR on a code file is still NOT management (would fall to the
+        # code-file test and gate):
+        self.assertFalse(_is_management_path("/proj/src/main.py\r"))
+        self.assertFalse(_is_management_path("/proj/src/main.py\r\n"))
+        # A CR-mangled `.agent`/`.claude` token is not the component (fail-safe):
+        self.assertFalse(_is_management_path("/proj/.agent\r/main.py"))
+        # A genuine management path with a trailing CR on the LAST component is
+        # still management — the exempted component is unmangled:
+        self.assertTrue(_is_management_path("/proj/.agent/tasks/001-x/task.md\r"))
+        self.assertTrue(_is_management_path("/proj/.claude/settings.json\r\n"))
+
     def test_unicode_management_path_is_management(self):
         self.assertTrue(
             _is_management_path("/proj/.agent/tasks/001-задача/task.md"))
@@ -139,6 +155,28 @@ class GatePathTraversal(unittest.TestCase):
         r = self._run(p)
         self.assertEqual(r.returncode, 0,
                          f"unicode .agent path was blocked: {r.stderr}")
+
+    def test_bare_cr_code_path_still_blocked(self):
+        # End-to-end (fix/cr-path-parity): a code file with a trailing CR and NO
+        # code-dir component reaches is_code_file_path as the classifier's only
+        # gate. Before the fix bash kept the \r inside the extension, missed the
+        # code-ext match, found no code dir, and FAILED OPEN (rc 0) — while the
+        # Codex/Python twin gated the same path. Must block with no active task.
+        r = self._run(str(self.project / "main.py") + "\r")
+        self.assertEqual(r.returncode, 2,
+                         f"bare-CR code path bypassed the gate (rc={r.returncode})")
+
+    def test_crlf_code_path_still_blocked(self):
+        r = self._run(str(self.project / "main.py") + "\r\n")
+        self.assertEqual(r.returncode, 2,
+                         f"CRLF code path bypassed the gate (rc={r.returncode})")
+
+    def test_cr_doc_path_still_allowed(self):
+        # Negative control: a trailing CR on a NON-code file must not start
+        # blocking edits it never blocked — README.md\r stays exempt.
+        r = self._run(str(self.project / "README.md") + "\r")
+        self.assertEqual(r.returncode, 0,
+                         f"CR doc path was wrongly blocked: {r.stderr}")
 
 
 if __name__ == "__main__":

@@ -365,6 +365,17 @@ read_counter_int() {
 is_code_file_path() {
     local file_path="$1"
     local norm="${file_path//\\//}"          # backslashes -> slashes (Python parity)
+    # Strip trailing CR/LF (Python parity: norm = ....rstrip("\r\n")). Without
+    # this a crafted trailing \r stays inside the extension (".py\r"), defeats
+    # the code-ext match, finds no code dir, and falls through to ALLOW — while
+    # the Python twin gates the same path (a fail-open on the Claude enforcement
+    # path). Strip ALL trailing \r/\n so \r, \n, and \r\n classify identically.
+    while [ -n "$norm" ]; do
+        case "$norm" in
+            *[$'\r\n']) norm="${norm%?}" ;;
+            *) break ;;
+        esac
+    done
     local base="${norm##*/}"                 # basename
     # Strip LEADING dots before finding the extension, so a dots-then-name
     # basename (".gitignore", "..py", "...toml") has NO extension — matching
