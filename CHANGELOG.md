@@ -2,6 +2,103 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.36] — 2026-08-22
+
+A provider-scope decision plus a batch of enforcement-parity and hermeticity
+fixes. One user-facing scope change — the supported-provider matrix narrows —
+and several correctness fixes on the Claude enforcement path surfaced by
+widening the bash↔python gate parity nets. Enforcement *decisions* are
+unchanged for a correctly provisioned Claude install; the behaviour that does
+change is narrow and additive — a new **log-only** enforcement-decision journal
+(an always-on append to `.agent/<lane>/journal/enforcement.jsonl` that, by
+tested construction, never alters a decision), a **Windows-only** fix to the
+fused-wire byte fidelity, and a crafted trailing-CR gate fail-open closed on the
+Claude enforcement path.
+
+### Changed
+
+- **Supported-provider matrix narrowed (owner decision, 2026-08-21) —
+  user-facing.** Claude is now the **sole supported agent**: its bash hooks are
+  the authoritative enforcement path. **Grok and Codex remain supported judges**
+  for review/panels, carrying dated 2026-08-22 live evidence (opus, sonnet,
+  codex:gpt-5.6-terra:high, codex:gpt-5.6-sol:high, grok:grok-4.6:high all
+  responded). **Antigravity and Pi are experimental** and unsupported — their
+  adapter code is retained but they are removed from every guarantee's provider
+  coverage. Docs consolidated into one support matrix in `providers.md`; README,
+  `architecture.md`, and `configuration.md` dropped "all/every provider"
+  enforcement phrasing. Who is affected: antigravity/pi users should treat the
+  workflow as unverified; grok/codex keep judge/panel support only.
+
+- **Dormant spec-only policy surface retired (~650 lines).** The never-built
+  T112 message/tool/stop policy path — `evaluate_message` / `evaluate_tool_call`
+  / `evaluate_stop`, the `Decision` dataclass, the `ProviderAdapter.on_*` hook
+  entries, `events.py`, and `ClaudeAdapter.from_hook_stdin` — had no caller
+  anywhere in the tree and, per the same owner decision, never will. Removed.
+  The kept half of `policy.py` (`_is_code_file_path` / `_is_management_path`,
+  the Python side of the bash↔python gate parity) stays and is now the sole
+  cross-provider contract, so the parity tables were **widened** (dotfiles,
+  unicode paths, trailing-LF/CRLF payload fields) to carry that weight. Mirror
+  re-synced. (The two enforcement fixes below were caught by that same sweep.)
+
+### Fixed
+
+- **A trailing CR on a code path can no longer defeat the gate (Claude
+  enforcement path).** A crafted payload path with a trailing CR (`a.py\r`) was
+  ALLOWED by the bash `is_code_file_path` — the `\r` stayed inside the extracted
+  extension, missed the code-ext case, and fell through to ALLOW — while the
+  Python twin gated it: a narrow fail-open. The bash classifier now strips all
+  trailing `\r`/`\n` before classification, mirroring Python's `.rstrip("\r\n")`;
+  the single fix point also closes the end-to-end `task-gate-hook`.
+
+- **Windows newline translation no longer corrupts the fused NUL-framed wire.**
+  The fused-field producer's `sys.stdout` translated every `\n` to `\r\n` (and
+  stdin folded it back on read), so on Windows the enforcing bash consumer
+  received altered field bytes. Fixed with `newline=""` on the stream
+  reconfigure — newlines are DATA on this wire, only NUL delimits. A no-op on
+  POSIX for every payload the hooks emit today.
+
+- **Test-suite hermeticity: judge-spec resolution anchored to the project root,
+  not cwd.** `make_default_runner` resolved the judge *spec* via a cwd walk-up;
+  when the suite ran from a checkout nested under a playbook-managed ancestor
+  `.agent/` (the dogfooded layout), that walk-up escaped the temp project into
+  the ancestor's live `models.json` and could launch a REAL judge on the
+  ancestor's budget instead of a stub. Now passes `project_path`, keeping
+  resolution inside the checkout root. Found by dogfooding on day one (CI never
+  saw it — CI checkouts have clean ancestry); blast radius exactly one escaping
+  test, zero after the fix.
+
+### Guarantee ledger
+
+Re-derived from `git diff bdc02b4..HEAD -- docs/guarantee-ledger.json`
+(`ledger_version` 2026-08-20 → 2026-08-22):
+
+- **116 → 117 guarantees.** One new entry, **`PB-ENFORCEMENT-JOURNAL`**: a
+  best-effort, append-only, log-only journal of enforcement decisions
+  (owner-approved feature-freeze exception, 2026-08-21). Each decision appends
+  one JSON line to the lane-resolved `.agent/<lane>/journal/enforcement.jsonl`
+  (ts, session_id, hook, decision, reason, and the minimal inputs at hand —
+  never file contents). Tested red-first with negative controls: **a journal
+  failure never changes a decision** (every write is swallowed) at near-zero
+  latency (one `printf >>` / one `O_APPEND os.write`, no fsync, no locking).
+  The owner's arena replay confirmed **0/5 decision delta**. No reader tooling
+  yet (deferred to 1.6).
+- **Provider coverage narrowed** to match the support decision: 109 guarantee
+  entries had their applicable-provider set narrowed; provider cells **546 →
+  265** (net **−281**: 282 cells removed, offset by the +1 new claude cell).
+  Per provider — antigravity **107 → 0**, pi **107 → 0** (dropped entirely),
+  codex **109 → 75**, grok **110 → 76**, claude **113 → 114** (the +1 is the
+  new journal entry). Statuses were re-derived per schema; no proof flips.
+
+### Notes
+
+- **Docs audit baseline unchanged this release.** The README audit stamp and
+  `docs/readme-audit-baseline.json` version markers advance to 1.5.36 (the stamp
+  version is version-locked to `plugin.json`), but the audit *provenance* is
+  deliberately left honest: `audited_commit` stays `797ce0e` and the audit date
+  stays 2026-08-21 — the docs were **not** re-audited against the 1.5.36
+  covered-path changes. A dedicated readme-audit pass will clear the remaining
+  drift before the docs are asserted current at a later version.
+
 ## [1.5.35] — 2026-08-21
 
 Five stabilization batches, no user-facing feature changes. Each tightens a
