@@ -107,6 +107,21 @@ def annotation_ok(extension: str) -> bool:
     return len(re.sub(r"\s", "", extension)) >= ANNOTATION_FLOOR
 
 
+def _load_journal():
+    """Load the shared enforcement-journal helper (sibling file). Fail-open."""
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parent / "pb_journal.py"
+        spec = importlib.util.spec_from_file_location("_pb_journal", str(path))
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
 def read_tools_counter(session_dir: Path) -> int:
     try:
         for line in (session_dir / "counters").read_text(encoding="utf-8").splitlines():
@@ -139,7 +154,23 @@ def main() -> int:
 
     tool = opt("--tool") or ""
     file_path = opt("--file") or ""
-    session_dir = Path(opt("--session-dir") or ".")
+    sd_raw = opt("--session-dir")
+    session_dir = Path(sd_raw or ".")
+
+    def _journal_block(reason: str) -> None:
+        # Best-effort enforcement-journal (log-only). Only when a real
+        # --session-dir was given (its parent's parent IS the resolved lane
+        # dir: .agent[/<user>]); never guess a lane from cwd. Wrapped AND the
+        # helper swallows errors — journalling can never change the block.
+        if not sd_raw:
+            return
+        try:
+            j = _load_journal()
+            if j is not None:
+                j.append(session_dir.parent.parent, "batch-close", "block", reason,
+                         session_id=session_dir.name, tool=tool, path=file_path)
+        except Exception:
+            pass
 
     d = json.load(sys.stdin)
     ti = d.get("tool_input", {}) or {}
@@ -191,10 +222,12 @@ def main() -> int:
                 rendered.append("      closest open gate (restore byte-for-byte, "
                                 f"then append your outcome):\n      - [ ] {close[0]}")
         print(BORN_MSG.format(lines="\n".join(rendered)))
+        _journal_block("born-checked")
         return 2
 
     if n > BATCH_CEILING:
         print(CEILING_MSG.format(n=n, ceiling=BATCH_CEILING))
+        _journal_block("batch-ceiling")
         return 2
 
     bare = [(body, ext) for body, ext in newly if not annotation_ok(ext)]
@@ -202,6 +235,7 @@ def main() -> int:
         print(BARE_MSG.format(
             n=n, k=len(bare) * occurrences, floor=ANNOTATION_FLOOR,
             lines="\n".join(f"  - [x] {b}" for b, _ in bare)))
+        _journal_block("bare-batch")
         return 2
 
     # Allowed batch — consecutive-batch guard (judge Finding 2).
@@ -216,6 +250,7 @@ def main() -> int:
         # allowed batch: end-of-task ticking pattern. Marker NOT updated — a
         # real tool call is the only way forward.
         print(CONSECUTIVE_MSG)
+        _journal_block("consecutive-batch")
         return 2
     try:
         marker.write_text(str(tools_now), encoding="utf-8")

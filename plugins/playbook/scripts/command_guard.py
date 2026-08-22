@@ -187,6 +187,22 @@ def _load_cfg(root):
         return {}
 
 
+def _load_journal():
+    """Load the shared enforcement-journal helper (sibling file). Fail-open:
+    None on any error so journalling can never wedge the guard."""
+    try:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pb_journal.py")
+        spec = importlib.util.spec_from_file_location("_pb_journal", path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
 def _normalize_payload(payload):
     """Apply the provider-dialect normalizer in-process.
 
@@ -244,6 +260,19 @@ def main() -> int:
         return 0
 
     shown = command if isinstance(command, str) else " ".join(str(p) for p in command)
+
+    # Enforcement-journal (log-only, best-effort): record the block. Wrapped AND
+    # the helper itself swallows errors — journalling can never change the block.
+    try:
+        j = _load_journal()
+        if j is not None:
+            j.append(j.resolve_lane_dir(root), "command-guard", "block",
+                     name or "dangerous-command",
+                     session_id=os.environ.get("PLAYBOOK_SESSION_ID", ""),
+                     tool=payload.get("tool_name", ""), command=shown)
+    except Exception:
+        pass
+
     sys.stderr.write(
         f"BLOCKED — destructive/irreversible command ({name}): {why}.\n"
         f"  command: {shown.strip()[:200]}\n"

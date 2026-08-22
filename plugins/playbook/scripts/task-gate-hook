@@ -177,7 +177,8 @@ STATE_FILE="$SESSION_DIR/current_state"
 # exist, which the guards below already read as "no active task" (fail-closed,
 # the correct answer when we cannot tell whose lane this is). Never exit here:
 # a hook that aborts takes the whole session down.
-if [ -z "$(lanes_without_marker "$PROJECT_DIR")" ]; then
+PB_FRESH_CLONE_LANES="$(lanes_without_marker "$PROJECT_DIR")"
+if [ -z "$PB_FRESH_CLONE_LANES" ]; then
     # NEW-2: guard the mkdir — under `set -e` an unwritable/full (ENOSPC,
     # read-only, wrong-perms) sessions dir made this abort with exit 1, a
     # NON-blocking code, so the ENFORCING gate stopped enforcing globally
@@ -186,6 +187,13 @@ if [ -z "$(lanes_without_marker "$PROJECT_DIR")" ]; then
     # Mirrors the guard the non-enforcing state-echo hook already had.
     mkdir -p "$SESSION_DIR" 2>/dev/null || true
 fi
+
+# Enforcement-journal target (log-only, best-effort). The resolved lane — but
+# NEVER in the fresh-clone shape (lanes exist, no marker): writing a root
+# journal there would mint phantom root-lane state (see S15). Empty disables
+# journalling; journal_enforcement no-ops on an empty dir.
+PB_JOURNAL_DIR=""
+[ -z "$PB_FRESH_CLONE_LANES" ] && PB_JOURNAL_DIR="$AGENT_DIR"
 
 # --- Eval mode: skip guards if pretool_guard=off (keep session injection in Guard 2) ---
 if [ -n "$PLAYBOOK_EVAL_CONFIG" ] && [ -f "$PLAYBOOK_EVAL_CONFIG" ]; then
@@ -218,6 +226,8 @@ if [ "$TOOL_NAME" = "Write" ]; then
     # Check if it's a task.md in .agent/tasks/ that doesn't exist yet
     if echo "$FILE_PATH" | grep -qE '\.agent(/[^/]+)?/tasks/[^/]+/task\.md$'; then
         if [ ! -f "$FILE_PATH" ]; then
+            journal_enforcement "$PB_JOURNAL_DIR" task-gate block "manual task.md creation" \
+                "$SESSION_ID" "$TOOL_NAME" "$FILE_PATH"
             cat >&2 <<'MSG'
 BLOCKED: Only `.claude/bin/tasks new` creates task.md files.
 
@@ -316,10 +326,16 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ] \
         exit 0
     fi
 
+    # Enforcement-journal (log-only) — the reason recorded at the final block
+    # below; refined to a more specific string on the done-task arm.
+    BLOCK_REASON="no active task"
+
     # I1: malformed marker — FAIL CLOSED. We cannot resolve which lane owns the
     # tasks, so no code edit is authorized (.agent/.claude edits were already
     # allowed above, so the marker stays fixable).
     if [ "${MARKER_INVALID:-false}" = true ]; then
+        journal_enforcement "$PB_JOURNAL_DIR" task-gate block "marker invalid" \
+            "$SESSION_ID" "$TOOL_NAME" "$NORM_PATH"
         cat >&2 <<'MSG'
 BLOCKED: .agent/current_user is malformed — cannot resolve your lane.
 Fix it to a single username line (letters, digits, and ._- only), e.g.:
@@ -364,8 +380,11 @@ MSG
                     # ## Status header like core._extract_status. Empty/unparsable
                     # or any active status → authorize (never a new false block).
                     case "$STATUS" in
-                        done*) ;;      # done task → fall through to BLOCK
-                        *) exit 0 ;;   # active (or unreadable) → authorize
+                        done*) BLOCK_REASON="pointer to done task" ;;  # fall through to BLOCK
+                        *)     # active (or unreadable) → authorize
+                            journal_enforcement "$PB_JOURNAL_DIR" task-gate allow "active task" \
+                                "$SESSION_ID" "$TOOL_NAME" "$NORM_PATH"
+                            exit 0 ;;
                     esac
                 fi
                 ;;
@@ -373,6 +392,8 @@ MSG
     fi
 
     # No active task — block code edit
+    journal_enforcement "$PB_JOURNAL_DIR" task-gate block "$BLOCK_REASON" \
+        "$SESSION_ID" "$TOOL_NAME" "$NORM_PATH"
     cat >&2 <<'MSG'
 BLOCKED: No active task.
 

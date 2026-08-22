@@ -44,6 +44,12 @@ INPUT=$(cat)
 STOP_ACTIVE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stop_hook_active', False))" 2>/dev/null || echo "False")
 SESSION_ID="$(resolve_session_id)"
 
+# Enforcement-journal target (log-only, best-effort). The resolved lane, but
+# NEVER in the fresh-clone shape (lanes exist, no marker): a root journal there
+# would mint phantom root-lane state (see S15). Empty disables journalling.
+PB_JOURNAL_DIR=""
+[ -z "$(lanes_without_marker "$PROJECT_DIR")" ] && PB_JOURNAL_DIR="$AGENT_DIR"
+
 # Safety valve: if already blocked once, allow stopping to prevent loops
 if [ "$STOP_ACTIVE" = "True" ]; then
     exit 0
@@ -52,6 +58,7 @@ fi
 # I1: malformed marker — FAIL CLOSED (block the stop, never abort-open). Placed
 # AFTER the stop_hook_active valve so a re-issued stop still ends the turn.
 if [ "${MARKER_INVALID:-false}" = true ]; then
+    journal_enforcement "$PB_JOURNAL_DIR" stop block "marker invalid" "$SESSION_ID"
     cat >&2 <<'MSG'
 BLOCKED: .agent/current_user is malformed — cannot resolve your lane to check
 task gates. Fix it to a single username line (letters, digits, and ._- only),
@@ -153,6 +160,7 @@ case "$FIRST_GATE" in
         ;;
 esac
 
+journal_enforcement "$PB_JOURNAL_DIR" stop block "unchecked gates" "$SESSION_ID"
 cat >&2 <<MSG
 BLOCKED: ${UNCHECKED} unchecked gate(s) in task ${TASK}.
 
