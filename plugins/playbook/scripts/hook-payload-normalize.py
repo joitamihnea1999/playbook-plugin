@@ -258,10 +258,15 @@ def main():
     # a non-ASCII char (e.g. the U+FFFD _wire_safe emits for a lone surrogate)
     # raises UnicodeEncodeError — the producer dies mid-frame and the consumer is
     # forced onto its slower recovery path. Force UTF-8, matching tasks/cli.py.
-    # No-op on POSIX, where the streams are already UTF-8.
+    # newline="" disables newline TRANSLATION on the same streams: Windows
+    # stdout otherwise rewrites every '\n' in a field to '\r\n' (and stdin folds
+    # '\r\n' to '\n' on read), so the NUL-framed wire delivered altered bytes to
+    # the enforcing bash consumer and the byte-identity payload echo was not
+    # byte-identical. Newlines are DATA on this wire — only NUL delimits.
+    # Encoding is a no-op on POSIX, where the streams are already UTF-8.
     for _stream in (sys.stdin, sys.stdout):
         if hasattr(_stream, "reconfigure"):
-            _stream.reconfigure(encoding="utf-8", errors="replace")
+            _stream.reconfigure(encoding="utf-8", errors="replace", newline="")
     raw = sys.stdin.read()
     if "--emit-fields" in sys.argv[1:]:
         emit_fields(raw)
