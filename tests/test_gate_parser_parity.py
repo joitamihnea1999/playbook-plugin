@@ -51,6 +51,10 @@ CASES = [
     ("indented real gate", "- [x] a\n    - [ ] nested\n", True),
     ("capitalised checked mark only", "- [X] done\n", False),
     ("CRLF open gate", "- [x] a\r\n- [ ] b\r\n", True),
+    ("CRLF all checked", "- [x] a\r\n- [x] b\r\n", False),
+    ("unicode gate text, one open", "- [x] éöк done\n- [ ] задача: run 测试\n", True),
+    ("unicode gate text, all checked", "- [x] 完了 ✓\n", False),
+    ("tab-indented open gate", "- [x] a\n\t- [ ] tabbed\n", True),
     # Documented residual: a fenced line-start marker is counted by ALL three —
     # consistently wrong, not silently divergent. Parity still holds (all True).
     ("fenced line-start example (wrong-together, but agreeing)",

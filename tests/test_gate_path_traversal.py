@@ -40,6 +40,31 @@ class CodexManagementPathTraversal(unittest.TestCase):
     def test_plain_code_path_is_not_management(self):
         self.assertFalse(_is_management_path("/proj/src/main.py"))
 
+    def test_deep_traversal_out_of_management_is_not_management(self):
+        """`..` that starts INSIDE the management tree must still resolve out."""
+        self.assertFalse(
+            _is_management_path("/proj/.agent/tasks/../../src/main.py"))
+        self.assertFalse(
+            _is_management_path("/proj/x/.claude/../../src/a.py"))
+
+    def test_backslash_traversal_is_resolved_too(self):
+        """Backslashes normalize to `/` BEFORE `..` resolution, so a Windows-
+        spelled traversal cannot dodge the normpath."""
+        self.assertFalse(_is_management_path(".agent\\..\\src\\main.py"))
+
+    def test_traversal_that_lands_back_inside_agent_is_management(self):
+        # Negative control for the traversal rule: resolution, not the mere
+        # presence of `..`, decides — this path genuinely ends under .agent/.
+        self.assertTrue(_is_management_path("/proj/.agent/../.agent/x"))
+
+    def test_lookalike_components_are_not_management(self):
+        self.assertFalse(_is_management_path("/proj/.agentx/file.py"))
+        self.assertFalse(_is_management_path("/proj/my.claude/file.py"))
+
+    def test_unicode_management_path_is_management(self):
+        self.assertTrue(
+            _is_management_path("/proj/.agent/tasks/001-задача/task.md"))
+
     def test_genuine_management_path_survives_windows_normpath(self):
         """On Windows os.path.normpath re-introduces `\\`, so the `/`-split saw one
         element and a real management path was NOT exempted → gate blocked task
@@ -95,6 +120,25 @@ class GatePathTraversal(unittest.TestCase):
         # Negative control: a normal code file with no task still blocks.
         r = self._run(str(self.project / "src" / "main.py"))
         self.assertEqual(r.returncode, 2)
+
+    def test_deep_traversal_from_inside_agent_is_blocked(self):
+        p = str(self.project / ".agent" / "tasks" / ".." / ".." / "src" / "main.py")
+        r = self._run(p)
+        self.assertEqual(r.returncode, 2,
+                         f".agent/tasks/../../ traversal bypassed the gate (rc={r.returncode})")
+
+    def test_lookalike_agent_dir_is_not_exempt(self):
+        r = self._run(str(self.project / ".agentx" / "file.py"))
+        self.assertEqual(r.returncode, 2,
+                         f".agentx/ lookalike was exempted (rc={r.returncode})")
+
+    def test_unicode_management_path_still_allowed(self):
+        # Negative control: a genuine .agent/ path stays exempt regardless of
+        # the bytes inside the task-dir name.
+        p = str(self.project / ".agent" / "tasks" / "001-задача" / "task.md")
+        r = self._run(p)
+        self.assertEqual(r.returncode, 0,
+                         f"unicode .agent path was blocked: {r.stderr}")
 
 
 if __name__ == "__main__":
