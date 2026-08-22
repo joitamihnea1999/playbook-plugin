@@ -239,6 +239,14 @@ BASH = {"bash": "shell fixtures need bash"}
 
 @check("unittest discover")
 def _unittest():
+    # The dogfooded-ancestry leak class (a test escaping its temp fixture into
+    # an ancestor `.agent/` via a cwd walk-up) is guarded from INSIDE the suite
+    # by tests/test_intent_ancestry_isolation.py, which plants and tears down its
+    # own poison ancestry without perturbing global cwd/env. Running the whole
+    # suite from a poison-ancestry cwd was tried and rejected: it leaks cwd +
+    # PYTHONPATH into every subprocess-spawning test and broke the Windows shell
+    # fixtures (a false positive, not a real leak). See that test's module
+    # docstring.
     rc, out = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"])
     if rc == 0:
         return PASS, ut_tail(out)
