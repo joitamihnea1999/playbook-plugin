@@ -85,11 +85,17 @@ VECTORS = [
     # (python rstrips CR/LF; bash's `$(…)` ext extraction drops a trailing \n,
     # and the dir rule catches the CRLF vectors regardless of the extension).
     ("a.py\n", True), ("src/a.py\r\n", True), ("notes.md\r\n", False),
-    # KNOWN residual divergence, deliberately NOT a vector: a bare CR-suffixed
-    # code path outside any code dir ("a.py\r", "a.py\r\n") — bash keeps the
-    # \r inside the extension and falls through to ALLOW, python rstrips the
-    # CR and gates. Pinning either side here would either encode a fail-open
-    # as truth or turn this net red; it is recorded for an owner decision.
+    # Bare CR-suffixed code path OUTSIDE any code dir (fix/cr-path-parity): a
+    # trailing \r or \r\n must not stay inside the extension and defeat the
+    # code-ext match. Python already rstrips CR/LF and gates these; bash used to
+    # keep the \r in the extension (".py\r"), miss the code-ext case, find no
+    # code-dir component, and fall through to ALLOW — a fail-open on the Claude
+    # enforcement path for a crafted payload. Both twins now strip and gate.
+    ("a.py\r", True), ("a.py\r\n", True), ("app.ts\r", True),
+    # Doc/data side of the same trick: a bare CR keeps the doc classification on
+    # both twins (bash used to reach the same False by fall-through; now it
+    # reaches it for the right reason — the stripped ".md" hits the doc list).
+    ("notes.md\r", False), ("data.json\r\n", False),
 ]
 
 

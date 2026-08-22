@@ -48,6 +48,14 @@ MUST_BLOCK = [
     "sqlite3 app.db 'DROP TABLE t'",
     "foo && rm -rf /",           # dangerous in a later segment
     "cat x | rm -rf /",          # dangerous after a pipe
+    # Bare-CR trick (fix/cr-path-parity): a trailing \r / \r\n must not let a
+    # dangerous command slip past the command-position match. Python `.split()`
+    # and the `\b`/`\s` boundaries treat CR as whitespace, so these still block
+    # (negative-control lock-in — no guard change was needed here).
+    "rm -rf /\r",
+    "rm -rf /\r\n",
+    "git push --force\r",
+    "git reset --hard\r",
 ]
 
 MUST_ALLOW = [
@@ -75,6 +83,10 @@ MUST_ALLOW = [
     # empty / benign
     "ls -la",
     "python3 -m pytest",
+    # Bare-CR trick, benign side: a trailing CR on a safe lookalike must not
+    # start false-positiving (the dangerous text is still DATA, not a command).
+    'echo "rm -rf /"\r',
+    "rm -rf ./build\r",
 ]
 
 
