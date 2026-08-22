@@ -473,7 +473,7 @@ def apply_patch_pre_decision(
     The caller (scripts/codex-apply-patch-hook) translates a deny into
     `print(reason, file=sys.stderr); sys.exit(2)` per W0(e) decision.
 
-    Policy mirrors Claude's `evaluate_tool_call`:
+    Policy mirrors Claude's bash task-gate-hook:
       - With active task: always allow.
       - Without active task: deny ONLY for code-file paths under non-management
         directories. README.md, Dockerfile, .env, etc. are allowed (Claude parity).

@@ -31,9 +31,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..adapter import ProviderAdapter, Invocation
-from ..capabilities import ProviderCapabilities, SessionFacts
+from ..capabilities import ProviderCapabilities
 from ..codex_hooks import codex_config_path, enable_codex_hooks_feature, install_project_hooks
-from ..policy import Decision
 
 # Threshold for filtering AGENTS.md injections (very long "user" messages)
 _AGENTS_MD_LENGTH_THRESHOLD = 2000

@@ -36,8 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..adapter import ProviderAdapter, Invocation
-from ..capabilities import ProviderCapabilities, SessionFacts
-from ..policy import Decision
+from ..capabilities import ProviderCapabilities
 
 
 _USER_REQUEST_RE = re.compile(

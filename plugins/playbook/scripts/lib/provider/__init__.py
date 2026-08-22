@@ -1,36 +1,26 @@
 """
-Provider harness architecture — cross-provider enforcement model.
+Provider harness — cross-provider adapter layer.
 
-This package defines the shared data model and policy interface for Claude,
-Codex, Antigravity (agy), and pi (local Qwen via oMLX). All concrete provider
-logic lives in adapter subclasses; the policy functions here are pure over
-loaded facts.
-
-Integration status: spec-only (T111). Bash hooks are unchanged.
-Wiring (hooks calling these functions) is T112.
+Concrete adapters (Claude, Codex, Antigravity/agy, Grok, pi) implement the
+ProviderAdapter ABC: identity, bootstrap, hook install, interactive/headless
+launch, capability detection, and chat-log capture. Enforcement itself runs in
+the provider hooks — Claude's bash hooks are the authoritative path, and the
+opt-in Codex apply_patch gate lives in codex_hooks.py; both gates share the
+path classifiers in policy.py.
 
 Layout:
     capabilities.py  — ProviderCapabilities, SessionFacts
-    events.py        — Event types (MessageEvent, ToolEvent, StopEvent)
-    policy.py        — Decision, evaluate_message, evaluate_tool_call, evaluate_stop
+    policy.py        — shared gate path classifiers (parity-pinned against bash)
     adapter.py       — ProviderAdapter ABC
+    adapters/        — concrete adapters
+    codex_hooks.py   — Codex hooks feature + apply_patch gate
 """
 
 from .capabilities import ProviderCapabilities, SessionFacts
-from .events import MessageEvent, ToolEvent, StopEvent, Event
-from .policy import Decision, evaluate_message, evaluate_tool_call, evaluate_stop
 from .adapter import ProviderAdapter
 
 __all__ = [
     "ProviderCapabilities",
     "SessionFacts",
-    "MessageEvent",
-    "ToolEvent",
-    "StopEvent",
-    "Event",
-    "Decision",
-    "evaluate_message",
-    "evaluate_tool_call",
-    "evaluate_stop",
     "ProviderAdapter",
 ]

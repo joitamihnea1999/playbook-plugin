@@ -12,9 +12,10 @@ Chat log capture: reads session JSONL at
 incrementally by byte offset. Does NOT parse from hook stdin — file-based
 capture is provider-portable and survives stdin truncation.
 
-Integration: spec-only in T111. The existing bash hooks (task-gate-hook,
-chat-log-hook, stop-hook, state-echo-hook) are the authoritative
-implementation. This adapter documents the intended Python interface for T112.
+Enforcement: the bash hooks (task-gate-hook, chat-log-hook, stop-hook,
+state-echo-hook) are the authoritative implementation — this adapter never
+sits on an enforcement path. It exists for the shared headless/judge/panel
+surface and chat-log capture.
 """
 
 from __future__ import annotations
@@ -25,9 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..adapter import ProviderAdapter, Invocation
-from ..capabilities import ProviderCapabilities, SessionFacts
-from ..events import MessageEvent, ToolEvent, StopEvent
-from ..policy import Decision
+from ..capabilities import ProviderCapabilities
 
 
 class ClaudeAdapter(ProviderAdapter):
@@ -169,12 +168,12 @@ class ClaudeAdapter(ProviderAdapter):
     # ── Hooks ─────────────────────────────────────────────────────────────────
 
     def install_hooks(self, project_root: Path) -> None:
-        """Hook entries are written to .claude/settings.json by tasks init.
-        Implementation deferred to T112 (no hook changes in T111)."""
+        """No-op for Claude: hook entries in .claude/settings.json are managed
+        by `tasks init`, not the adapter."""
 
     def uninstall_hooks(self, project_root: Path) -> None:
-        """Remove Playbook entries from .claude/settings.json hooks.
-        Implementation deferred to T112."""
+        """No-op for Claude: hook entries in .claude/settings.json are managed
+        outside the adapter (edit settings.json to remove them)."""
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -289,15 +288,3 @@ class ClaudeAdapter(ProviderAdapter):
         slug = str(self._project_root).replace("/", "-")
         base = Path.home() / ".claude" / "projects" / slug
         return base
-
-    @classmethod
-    def from_hook_stdin(cls, stdin_json: dict, project_root: Path) -> "ClaudeAdapter":
-        """Construct adapter from a hook's parsed stdin payload.
-
-        Usage in hook scripts (once wired in T112):
-            import json, sys
-            payload = json.load(sys.stdin)
-            adapter = ClaudeAdapter.from_hook_stdin(payload, find_project_root())
-        """
-        session_id = stdin_json.get("session_id", "default")
-        return cls(session_id=session_id, project_root=project_root)

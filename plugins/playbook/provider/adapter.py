@@ -1,9 +1,11 @@
 """
 ProviderAdapter — abstract base class for all provider adapters.
 
-Each concrete adapter (ClaudeAdapter, CodexAdapter, AntigravityAdapter) implements
-this interface. The policy engine and hook scripts call the interface only —
-never provider-specific code directly.
+Each concrete adapter (ClaudeAdapter, CodexAdapter, AntigravityAdapter, …)
+implements this interface. Callers (panel-review, judge, sandbox CLI, subagent
+streaming) use the interface only — never provider-specific code directly.
+Enforcement does NOT flow through the adapters: Claude's bash hooks and the
+opt-in Codex gate (provider.codex_hooks) are the enforcement paths.
 
 T134 added three CLI-discovery methods to the ABC: binary_name(), panel_variants(),
 run_headless_judge(). These let panel-review iterate registered adapter classes
@@ -17,8 +19,6 @@ from pathlib import Path
 from typing import Optional
 
 from .capabilities import ProviderCapabilities, SessionFacts
-from .events import MessageEvent, ToolEvent, StopEvent
-from .policy import Decision
 
 
 @dataclass
@@ -49,7 +49,6 @@ class ProviderAdapter(ABC):
         4. Lifecycle  — launch_interactive, launch_headless
         5. Capability — detect_capabilities
         6. Chat log   — session_log_path, read_new_messages
-        7. Hook entry — on_user_message, on_tool_use, on_stop
     """
 
     # ── 0. CLI identity (class-level) ────────────────────────────────────────
@@ -262,67 +261,7 @@ class ProviderAdapter(ABC):
         Returns ([], since_offset) if session_log_path() is None.
         """
 
-    # ── 7. Hook entry points ─────────────────────────────────────────────────
-
-    def on_user_message(self, payload: dict) -> Decision:
-        """Called from UserPromptSubmit hook (or file-based message delivery).
-
-        Default: delegates to evaluate_message(). Adapters may override to
-        parse provider-specific payload format before constructing MessageEvent.
-        """
-        from .policy import evaluate_message
-        from .events import MessageEvent
-        import datetime
-        caps = self._get_capabilities()
-        facts = self._load_session_facts()
-        text = payload.get("user_message", payload.get("text", ""))
-        event = MessageEvent(text=text, timestamp=datetime.datetime.utcnow())
-        return evaluate_message(caps, facts, event)
-
-    def on_tool_use(self, payload: dict) -> Decision:
-        """Called from PreToolUse hook. Returns block/allow/warn/skip.
-
-        Default: delegates to evaluate_tool_call(). Not called for providers
-        without script-based pre-tool hooks (Codex caveats: apply_patch + exec_command matchers).
-        """
-        from .policy import evaluate_tool_call
-        from .events import ToolEvent
-        caps = self._get_capabilities()
-        facts = self._load_session_facts()
-        tool_input = payload.get("tool_input", {})
-        event = ToolEvent(
-            tool_name=payload.get("tool_name", ""),
-            tool_input=tool_input,
-            file_path=tool_input.get("path", tool_input.get("file_path", "")),
-            is_pre=True,
-        )
-        return evaluate_tool_call(caps, facts, event)
-
-    def on_stop(self, payload: dict) -> Decision:
-        """Called from Stop/AfterAgent/session-end hook.
-
-        The universal enforcement point — every provider with any hook support
-        must reach this. Returns block to prevent exit on violations.
-        """
-        from .policy import evaluate_stop
-        from .events import StopEvent
-        caps = self._get_capabilities()
-        facts = self._load_session_facts()
-        event = StopEvent(stop_reason=payload.get("stop_reason", ""))
-        return evaluate_stop(caps, facts, event)
-
     # ── Internal ─────────────────────────────────────────────────────────────
-
-    def _get_capabilities(self) -> ProviderCapabilities:
-        """Return cached capabilities, detecting on first call.
-
-        detect_capabilities() contract: "called once at session start, result
-        cached by caller." This method is the cache — on_user_message/on_tool_use/
-        on_stop all call _get_capabilities(), never detect_capabilities() directly.
-        """
-        if not hasattr(self, "_cached_capabilities"):
-            self._cached_capabilities: ProviderCapabilities = self.detect_capabilities()
-        return self._cached_capabilities
 
     def _agent_dir(self) -> Path | None:
         """Per-user lane (or root `.agent/` in legacy layout), or None.
