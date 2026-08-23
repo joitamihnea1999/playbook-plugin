@@ -84,8 +84,13 @@ Rules, all loud: the key is **opt-in** (absent means task generation is byte-ide
 ## `.agent/config.json` — `fingerprint_exclude` (project policy)
 
 Panels stamp the tree-state fingerprint they reviewed; close compares it and
-records `FRESH`/`STALE` in the receipt, and an **irreversible** close resting
-on a stale panel BLOCKS (see below). The fingerprint already ignores `.agent/`
+records `FRESH`/`STALE` in the receipt, and — **when policy requires a panel
+for that close** (`panel_required_for`) — a close held to the high-consequence
+bar (**assertive, irreversible, or an unset/`unclassified` `## Risk`**) resting
+on a stale panel BLOCKS (see below). Under the seeded default
+`panel_required_for: ["assertive","irreversible"]` that covers assertive and
+irreversible; `unclassified` is caught only where policy also requires a panel
+for it (e.g. `"all"`). The fingerprint already ignores `.agent/`
 — workflow bookkeeping is not code. If your project has **owner-declared
 bookkeeping outside `.agent/`** that standing gates write after the last panel
 (the canonical case: a `journal/` directory), declare it:
@@ -149,20 +154,111 @@ distinguishes two facts that were previously conflated:
 Setting `## Risk` to one word clears it. `## Risk Routing` in the light template
 is a gate checklist, not the classification field, and does not trigger this.
 
-### The irreversible freshness gate (`--stale-panel-ok`)
+### The freshness gate (`--stale-panel-ok`)
 
-When `## Risk` is `irreversible`, panel evidence is required by
-`panel_required_for`, and the newest impl round's stamp no longer matches the
-tree, `tasks work done` blocks: the panel's verdict predates the code being
-closed. Two exits, both on the record —
+The gate fires only when policy requires a panel for the close
+(`panel_required_for`). When that holds and the close is held to the
+high-consequence bar — `## Risk` is `assertive` or `irreversible`, **or it is
+left unset/`unclassified`** (held to that same bar everywhere else) — and the
+newest impl round's stamp no longer matches the tree, `tasks work done` blocks:
+the panel's verdict predates the code being closed — a claim (assertive), an
+unrecoverable act (irreversible), or work whose risk was never classified,
+signed off by a panel that predates the code, is a decision about code that was
+never reviewed. (Blocking only assertive/irreversible would make blanking
+`## Risk` strictly more lenient on freshness than honest classification.) Note
+the precondition: under the seeded default `panel_required_for:
+["assertive","irreversible"]`, `unclassified` does not require a panel, so its
+freshness block engages only where policy also requires a panel for it (e.g.
+`"all"`). Two exits, both on the record —
 
 - re-run `tasks panel-review <N> --mode impl` (fresh evidence), or
 - `tasks work done --stale-panel-ok --reason "..."` — closes, and the reason
   lands in the receipt's freshness clause (`STALE, accepted: "..."`).
 
 `--stale-panel-ok` suppresses only this gate; verify failures, gate bounces,
-and the panel-evidence requirement are untouched. Every other risk class gets
-the console note + receipt clause, no block.
+and the panel-evidence requirement are untouched. `--force --reason` remains the
+blunt whole-policy hatch. A `reversible` risk always stays advisory (console
+note + receipt clause, no block), as does any close for which policy does not
+require a panel.
+
+### The verify-contract guard (a change to `verify` is made visible)
+
+`verify` lives in `.agent/config.json`, which is on the management path and so
+is **exempt from the code-edit gate** — an agent can edit it without an active
+task. That is deliberate (task bookkeeping must stay editable), but it means the
+verify command itself could be silently weakened or deleted and tasks then
+closed against a hollow bar. Two guards make such a change visible, without
+hard-blocking a legitimate improvement:
+
+- **Journalled at close.** Every close records the verify commands it ran in the
+  enforcement journal (`.agent/**/journal/enforcement.jsonl`, `hook: "close"`,
+  `decision: "verify-contract"`) in addition to naming them in the task's
+  `## Verification Receipt`. The commands are newline-escaped onto a single line,
+  so a multi-line verify command is kept intact (not chopped at its first
+  newline, which would silently drop every command after it). The `command`
+  field is still capped at pb_journal's 200-**byte** head limit (byte, not
+  character — 200 multi-byte chars would blow the `PIPE_BUF` atomic-single-write
+  bound) — so a very long command set is truncated there; the task's `## Verification Receipt`
+  remains the authoritative, uncapped per-command list. Best-effort and
+  log-only: a journal failure never changes or blocks a close.
+- **Flagged by `tasks audit`.** The `verify-contract-change` sweep flags any
+  command that was run at **some past close** (the union of every close receipt
+  across **all lanes** — the contract is repo-global — so a weaken-then-close, a
+  fresh lane, or a different user's history cannot hide a weakening) but is no
+  longer in the current contract **for the risk that close ran under**. The
+  comparison is *per-risk*: a command recorded at a `reversible` close is checked
+  against today's `reversible` bar, so moving a command out of `_always` and into
+  a single risk key — which quietly drops it from every *other* risk's bar — is
+  caught, where an all-risk-union check would have called it "still present". It
+  reports an **advisory** finding naming the dropped command. Advisory, not
+  error: adding a command (a stronger bar) is never flagged, only a removal, and
+  the sweep surfaces it for a human rather than hard-blocking.
+- **Acknowledging an intentional removal.** A legitimate rename or drop
+  (`npm test` → `pnpm test`) would otherwise fire on every audit forever. List
+  the removed command(s) under `verify_contract_ack`:
+
+  ```json
+  {"verify": "pnpm test", "verify_contract_ack": ["npm test"]}
+  ```
+
+  An acknowledged removal is **not fully silenced** — it is downgraded from an
+  advisory finding to an **informational (`info`) line** (below advisory, never
+  failing the audit) that still names the removed command and its ack. This is
+  deliberate: `verify_contract_ack` lives on the *same gate-exempt
+  `.agent/config.json` path the guard watches*, so the actor who deletes `verify`
+  can add the dropped command to the ack list in the very same write. That means
+  self-acknowledgment cannot be *prevented* — so the guarantee is **visibility,
+  not prevention**: an acknowledged removal always leaves a visible line for a
+  human to confirm. Only the named commands are downgraded; any *other* drop
+  still fires at advisory severity.
+
+Resilience and bounds: the very **first close** in a repo has no prior receipt,
+so the sweep is clean by design — there is no baseline until one close has
+recorded one, and because the comparison is per-risk, a risk class's own bar is
+baselined only once that class has closed at least once (weakening a risk-keyed
+command before its first close is not yet visible). The comparison is per-command
+first line (cmd1), what the receipt records, so a change confined to lines 2+ of
+a multi-line command is not distinguished; a clean sweep therefore means "no
+first-line command was dropped", not "verify was never touched". A verify command
+containing a literal backtick is not reliably tracked: the backtick-delimited
+receipt encoding cannot represent it, so the recorded form is truncated at the
+first backtick. Usually this over-flags (a persistent false advisory, clearable
+with `verify_contract_ack`), but if a weakening removes exactly the text after
+that first backtick the change can also be **missed**. Backticks in a `verify`
+command are therefore unsupported for drift detection — use `$(…)` command
+substitution instead; a lossless receipt encoding is future work. The comparison
+is **set-based per risk**, so it flags a *dropped* command, not a **reordering**
+(every command still runs, just in a new order — that is not a weakening the
+sweep claims to catch). `verify_contract_ack` matches by command **string across
+all risk classes** (it is not risk-qualified), so acknowledging a command's
+removal accepts it wherever it was dropped. The sweep baselines off the **committed**
+`## Verification Receipt` sections (which survive clones), not the gitignored
+enforcement journal; neither the receipts, the journal, nor the ack list is
+tamper-proof against an agent with raw filesystem access — nor against a
+concurrent close of the *same task* overwriting a strong receipt with a weak one
+— so this is best-effort *visibility*, and the OS sandbox plus human review
+remain the real containment. The journal keeps the full per-close trail for
+forensics.
 
 ## `.agent/models.json` — judge panel pins
 

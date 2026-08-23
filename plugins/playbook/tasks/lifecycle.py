@@ -6,7 +6,7 @@ Boundary: every command that moves a task through its life. `work <N>`
 switch-bounce — `--force` leaves a task honestly open, never silently done)
 and `work done`, the ONLY writer of `done` (the 1.4.7 principle): the verify
 contract via shared's `_merge_verify_module`, the risk-keyed evidence bar,
-the F18 irreversible freshness gate, the receipt, dirty-close honesty, parked
+the F18 assertive/irreversible freshness gate, the receipt, dirty-close honesty, parked
 surfacing, the retro trigger. Plus `new` (creation + stubs), `blocked` (the
 honest pause), `parked` (the standing query), and `freehand`. All policy
 DECISIONS live in tasks.core (`close_decision`, `freshness_gate_decision`,
@@ -177,8 +177,8 @@ def cmd_work(cmd_args):
     if task_num != "done" and task_num.isdigit():
         task_num = task_num.zfill(3)
     force = any(a in ("--force", "-f") for a in cmd_args[1:])
-    # --stale-panel-ok: the NARROW exit from the F18 irreversible freshness
-    # gate — suppresses only that gate, only with a --reason, and the
+    # --stale-panel-ok: the NARROW exit from the F18 freshness gate (assertive
+    # OR irreversible, since T1) — suppresses only that gate, only with a --reason, and the
     # reason is recorded in the receipt's freshness clause. Deliberately
     # not folded into --force: batch-5 field data shows agents take the
     # cheapest sanctioned exit under friction, and the cheap exit must not
@@ -312,9 +312,10 @@ def cmd_work(cmd_args):
 
                 # F18: panel freshness — computed BEFORE the close is
                 # earned, recorded in the receipt for every close with an
-                # impl round, and GATING for irreversible closes that rest
-                # on panel evidence (design-1.5.6.md; blind judge
-                # conditional-PASS, all conditions built).
+                # impl round, and GATING for assertive/irreversible closes
+                # that rest on panel evidence (design-1.5.6.md; blind judge
+                # conditional-PASS, all conditions built; assertive added by
+                # T1, owner decision 2026-08-23).
                 from tasks.core import (
                     freshness_gate_decision, parse_judge_rounds,
                     tree_state_fingerprint,
@@ -423,6 +424,45 @@ def cmd_work(cmd_args):
                     dirty_files=_dirty, freshness=_freshness)
                 upsert_task_section(task_file, "Verification Receipt", receipt)
                 _set_status(task_file, "done")
+                # T5: record the verify contract this close ran in the
+                # enforcement journal too. `.agent/config.json` (which declares
+                # `verify`) is gate-exempt, so a silently weakened verify could
+                # close against a hollow bar; the receipt already names the
+                # commands, and this adds a durable forensic line. Best-effort
+                # and fully wrapped: a journal failure must NEVER change or break
+                # a close (same contract as the hook emitters). Loaded like
+                # command_guard's helper so its absence can't break the CLI.
+                try:
+                    import importlib.util as _ilu
+                    _pbj_path = (Path(__file__).resolve().parent.parent
+                                 / "scripts" / "pb_journal.py")
+                    _spec = _ilu.spec_from_file_location("_pb_journal_close", _pbj_path)
+                    if _spec is not None and _spec.loader is not None:
+                        _pbj = _ilu.module_from_spec(_spec)
+                        _spec.loader.exec_module(_pbj)
+                        # Single-line-safe encoding: escape newlines in each
+                        # command BEFORE joining. pb_journal._head keeps only the
+                        # FIRST line of the `command` field (to hold the record
+                        # under PIPE_BUF for the atomic single-write contract), so
+                        # a raw newline inside any one verify command would drop
+                        # every command after it from the journal record (panel
+                        # round-3 sonnet). Escaping to a literal `\n` keeps the
+                        # whole set on one line; the _head length cap still bounds
+                        # it, so the atomicity contract is preserved.
+                        def _flat(c):
+                            return (c.replace("\r\n", "\\n")
+                                     .replace("\n", "\\n").replace("\r", "\\n"))
+                        _vcmds = "; ".join(_flat(c) for _l, c in commands) or "(none declared)"
+                        # Short FIXED reason (like every other emitter); the
+                        # commands go in the `command` field, which pb_journal
+                        # caps — a verbatim reason would be uncapped and could
+                        # push the record past PIPE_BUF, breaking its atomic
+                        # single-write contract under concurrent closes (panel).
+                        _pbj.append(agent_dir, "close", "verify-contract",
+                                    "verify contract",
+                                    session_id=session_id, command=_vcmds)
+                except Exception:
+                    pass
                 if _dirty:
                     print(f"⚠ {_dirty} modified/untracked file(s) — this close's "
                           "receipt describes UNCOMMITTED work. Commit before ending "

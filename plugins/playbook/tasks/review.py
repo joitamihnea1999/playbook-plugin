@@ -80,6 +80,56 @@ def _panel_triage_frame() -> list[str]:
     ]
 
 
+# Per-file content-hash cap for the dirty-tree tamper signal. A file already
+# dirty at snapshot time keeps an identical porcelain LINE when only its content
+# changes, so porcelain alone is content-blind; we additionally hash each dirty
+# file's bytes. Reading is bounded so a huge dirty artifact can't stall a review
+# — an oversize file records an honest `unhashed:too-large` marker (never a
+# silent skip), an accepted, visible limitation.
+_TAMPER_HASH_CAP = 5 * 1024 * 1024  # 5 MiB per file
+# Cumulative ceiling across ALL dirty files in one snapshot: `-uall` enumerates
+# untracked files individually, so a huge non-ignored tree could otherwise make
+# every review read gigabytes twice. Files past the ceiling get an honest
+# `unhashed:budget-exceeded` marker.
+_TAMPER_TOTAL_BUDGET = 200 * 1024 * 1024  # 200 MiB
+
+
+def _porcelain_z_paths(z: bytes) -> "list[str]":
+    """Working-tree paths from `git status --porcelain -z -uall` output (BYTES).
+
+    `-z` is NUL-terminated and — unlike the human-readable form — emits paths
+    RAW (no C-quoting of non-ASCII/special chars) and splits a rename/copy into
+    two separate NUL fields (`XY <new>\\0<old>\\0`) instead of the ambiguous
+    ` <orig> -> <dest> ` on one line. Line-splitting the readable form misparsed
+    both a git-quoted name (e.g. `über.py`) and any literal filename containing
+    ` -> ` (T3 panel round 2 — opus/sonnet/grok), silently dropping them from
+    the content-hash set.
+
+    Consumes BYTES and `os.fsdecode`s each path: decoding the stream as UTF-8
+    with `errors="replace"` (or universal-newlines `text=True`) corrupted names
+    containing `\\r` or invalid UTF-8, resolving them to non-existent paths that
+    were then silently skipped (T3 panel round 3 — grok). `fsdecode` round-trips
+    any real on-disk name back to something `Path` can open.
+
+    Each record is `XY <path>`; bytes 0-1 are the status, index 2 a space, 3+ the
+    path. For an `R`/`C` status the NEXT field is the source path — consume and
+    skip it (we want the destination, the file that now exists)."""
+    import os as _os
+    paths: list[str] = []
+    fields = z.split(b"\0")
+    i = 0
+    while i < len(fields):
+        rec = fields[i]
+        if len(rec) < 4:
+            i += 1
+            continue
+        status, path = rec[:2], _os.fsdecode(rec[3:])
+        if path:
+            paths.append(path)
+        i += 2 if status[:1] in (b"R", b"C") else 1
+    return paths
+
+
 def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     """Capture the repo's mutable state before spawning judges, so a rogue judge
     that writes the working tree can be detected afterward (#1 tamper guard).
@@ -90,15 +140,25 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     (Windows) or when already nested — there this snapshot/compare is the ONLY
     tamper defense, so it is mandatory, not belt-and-braces.
 
-    Two best-effort signals:
+    Three best-effort signals:
       - `git status --porcelain`: repo-wide; catches edits to tracked files and
         new non-ignored files (e.g. a rogue's task_audit.md). Gitignored runtime
         churn (.agent/**/sessions, chat_log, bash_history) is excluded by design,
         so legitimate judge-session hook writes don't false-positive. None when
         the project is not a git repo.
+      - `dirty_hashes`: sha256 of the CONTENT of each dirty / untracked file
+        (enumerated from `--porcelain -z` so quoted/special-char and ` -> ` names
+        parse correctly; capped at `_TAMPER_HASH_CAP`; oversize → an
+        `unhashed:too-large:<size>` marker, read error → `unhashed:error`). This
+        closes the dirty-tree gap: a file already dirty before the review keeps
+        an identical porcelain line when only its content changes, so the line
+        diff alone would miss a rogue's content-only edit to it. Empty when the
+        project isn't a git repo (no porcelain to enumerate from).
       - sha256 of task.md: the primary tamper target (the rogue rewrote work-plan
         gates); the only signal when the project isn't a git repo.
     """
+    import hashlib
+    import os
     import subprocess
     porcelain = None
     try:
@@ -115,11 +175,61 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
             porcelain = r.stdout
     except (OSError, subprocess.SubprocessError):
         porcelain = None
+    # A SEPARATE `-z` read for content-hash path enumeration: the human-readable
+    # form above stays the opaque line-diff signal (quoting can't break a
+    # before==after equality check), while `-z` gives raw, unambiguous paths to
+    # actually open and hash.
+    z_out = None
+    try:
+        rz = subprocess.run(
+            # BYTES (no text=/encoding): the NUL stream is decoded per-path with
+            # os.fsdecode so `\r`/non-UTF-8 names survive (round-3 grok).
+            ["git", "-C", str(project_path), "status", "--porcelain", "-z", "-uall"],
+            capture_output=True, timeout=30,
+        )
+        if rz.returncode == 0:
+            z_out = rz.stdout            # bytes
+    except (OSError, subprocess.SubprocessError):
+        z_out = None
+    dirty_hashes: dict[str, str] = {}
+    if z_out:
+        budget = _TAMPER_TOTAL_BUDGET       # cumulative-bytes ceiling across the run
+        for rel in _porcelain_z_paths(z_out):
+            fp = project_path / rel
+            try:
+                if fp.is_symlink():
+                    # Hash the LINK TEXT, not the referent: `read_bytes` follows a
+                    # symlink, so a retarget to a same-content file would be
+                    # invisible (round-4 grok). os.readlink captures the target.
+                    dirty_hashes[rel] = "symlink:" + hashlib.sha256(
+                        os.fsencode(os.readlink(fp))).hexdigest()
+                    continue
+                if not fp.is_file():           # deleted/dir/gitlink → covered elsewhere
+                    continue
+                sz = fp.stat().st_size
+                if sz > _TAMPER_HASH_CAP:
+                    dirty_hashes[rel] = f"unhashed:too-large:{sz}"
+                elif budget <= 0:
+                    # Total-bytes budget exhausted: a huge dirty/untracked tree
+                    # (e.g. a fresh repo with no .gitignore for node_modules)
+                    # must not make every review hash gigabytes twice. Honest
+                    # marker, never a silent skip (round-4 opus).
+                    dirty_hashes[rel] = "unhashed:budget-exceeded"
+                else:
+                    dirty_hashes[rel] = hashlib.sha256(fp.read_bytes()).hexdigest()
+                    budget -= sz
+            except OSError:
+                dirty_hashes[rel] = "unhashed:error"
     task_hash = None
     if task_file and task_file.exists():
-        import hashlib
         task_hash = hashlib.sha256(task_file.read_bytes()).hexdigest()
-    return {"porcelain": porcelain, "task_hash": task_hash}
+    # `z_read_ok` lets _detect_tamper fail CLOSED when the content-hash guard
+    # could not run: if the readable `git status` succeeded (a git repo) but the
+    # separate `-z` read failed, `dirty_hashes` is empty and the content-hash
+    # compare would silently pass — so surface a degraded-guard warning instead
+    # of a quiet miss (round-5 opus/grok).
+    return {"porcelain": porcelain, "task_hash": task_hash,
+            "dirty_hashes": dirty_hashes, "z_read_ok": z_out is not None}
 
 
 # Each mode accepts BOTH placeholder generations: pre-1.5.2 templates say
@@ -247,34 +357,104 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     """Compare current repo state against a `_snapshot_repo_state` result.
     Returns human-readable change descriptions (empty list = no tamper).
 
-    Known gap: a judge editing a file that was ALREADY dirty before the run
-    produces an identical porcelain line, so a content-only change to an
-    already-modified non-task.md file is not caught. task.md itself is covered
-    by its hash regardless. Acceptable — the rogue incident created new files
-    and rewrote task.md, both caught here."""
+    Closed gap (T3): a judge editing a file that was ALREADY dirty before the
+    run produces an identical porcelain line, but its content hash in
+    `dirty_hashes` changes, so a content-only edit to an already-modified
+    non-task.md file is now caught; a revert-to-clean or untracked deletion is
+    caught by the REMOVED-porcelain-line diff. task.md is covered by its own
+    hash (and excluded from the dirty-hash compare to avoid a duplicate report).
+    Residual limitations (accepted, not silent): (1) a file larger than
+    `_TAMPER_HASH_CAP`, or files past the `_TAMPER_TOTAL_BUDGET` cumulative
+    ceiling, record an honest `unhashed:*` marker, so an edit that keeps such a
+    file in the same marker state both times is not distinguished; (2) the
+    regular-file signature is content bytes only, so a mode-bit-only change (e.g.
+    `chmod +x`, no byte edit) is not caught; (3) only regular files and symlinks
+    are hashed (symlinks by link text), so an edit inside an already-dirty
+    submodule/gitlink (its porcelain line stays ` M <sub>`) is not caught. The
+    readable-line diff may also OVER-report a benign index-only change (e.g. a
+    `git add` that flips ` M f`→`M  f`) as a working-tree change — a safe
+    direction (never a missed edit), and one that does not arise while judges
+    run read-only."""
     after = _snapshot_repo_state(project_path, task_file)
     changes: list[str] = []
+    # F22: the conversation monitor writes trace.md/session.md under
+    # `.agent/monitor/` (or `.agent/<user>/monitor/`) WHILE panels run — a
+    # sanctioned concurrent writer whose own sandbox confines it to exactly that
+    # directory, so churn there is expected, not a judge writing the repo.
+    # Everything else under .agent still flags. Two matchers: one for porcelain
+    # LINES, one for the bare paths keyed in `dirty_hashes`.
+    _monitor_re = re.compile(r"^..\s+\"?\.agent(/[^/]+)?/monitor/")
+    _monitor_path_re = re.compile(r"^\.agent(/[^/]+)?/monitor/")
     b_porc, a_porc = before.get("porcelain"), after.get("porcelain")
+    # Fail CLOSED if the content-hash guard could not run: a git repo whose `-z`
+    # enumeration failed on either snapshot has an empty/partial `dirty_hashes`,
+    # so a content-only edit to an already-dirty file would slip the compare
+    # SILENTLY. Surface it loudly rather than pass a hollow check (round-5).
+    if a_porc is not None and not after.get("z_read_ok", False):
+        changes.append("content-hash guard degraded: could not enumerate dirty "
+                       "files at close (`git status -z` failed)")
+    if b_porc is not None and not before.get("z_read_ok", False):
+        changes.append("content-hash guard degraded: dirty files were not "
+                       "enumerable at review start (`git status -z` failed)")
+    if (b_porc is None) != (a_porc is None):
+        # git↔non-git transition WHILE a review runs: `git status` succeeded once
+        # and failed the other time — the most likely cause is a rogue deleting
+        # `.git/` (catastrophic, history-destroying tamper) or otherwise breaking
+        # the repo. Without this, both porcelain reads being unequal-but-one-None
+        # skips the line diff and `dirty_hashes` is empty, so total repo
+        # destruction produced ZERO signal (round-4 sonnet, Critical).
+        changes.append("git repository state became unreadable during review "
+                       "(.git removed or repo broken?)")
     if b_porc is not None and a_porc is not None and b_porc != a_porc:
-        # F22: the conversation monitor writes trace.md/session.md under
-        # `.agent/monitor/` (or `.agent/<user>/monitor/`) WHILE panels run —
-        # a sanctioned concurrent writer whose own sandbox confines it to
-        # exactly that directory, so churn there is expected, not a judge
-        # writing the repo. Everything else under .agent still flags.
-        _monitor_re = re.compile(r"^..\s+\"?\.agent(/[^/]+)?/monitor/")
-        new_lines = set(a_porc.splitlines()) - set(b_porc.splitlines())
-        for line in sorted(new_lines):
+        b_lines, a_lines = set(b_porc.splitlines()), set(a_porc.splitlines())
+        # NEW porcelain lines: a rogue created/modified a tracked or untracked
+        # file. REMOVED lines: a rogue reverted an already-dirty file to clean or
+        # deleted an untracked one — also a working-tree mutation, and one the
+        # content-hash diff below cannot see (the path is gone from `after`).
+        for line in sorted(a_lines - b_lines):
             if _monitor_re.match(line):
                 continue
             changes.append(f"working tree: {line.strip()}")
+        for line in sorted(b_lines - a_lines):
+            if _monitor_re.match(line):
+                continue
+            changes.append(f"working tree reverted/removed: {line.strip()}")
+    # Content edits to files that were ALREADY dirty at snapshot time — an
+    # identical porcelain line, so only the content hash reveals them. Compare
+    # paths present in BOTH snapshots (new / removed paths are named by the
+    # porcelain-line diff above). Skip the monitor dir and task.md (task_hash
+    # covers it). `.as_posix()`: dirty_hashes keys come from git porcelain, which
+    # always uses '/', so the task.md path must be normalised to '/' or the
+    # de-dup never matches on windows-git-bash (task.md would report twice).
+    _task_rel = None
+    if task_file is not None:
+        try:
+            _task_rel = task_file.relative_to(project_path).as_posix()
+        except (ValueError, AttributeError):
+            _task_rel = task_file.name
+    b_dirty = before.get("dirty_hashes") or {}
+    a_dirty = after.get("dirty_hashes") or {}
+    for rel in sorted(set(b_dirty) & set(a_dirty)):
+        if _monitor_path_re.match(rel) or rel == _task_rel:
+            continue
+        if b_dirty[rel] != a_dirty[rel]:
+            changes.append(f"working tree content changed: {rel}")
     b_hash, a_hash = before.get("task_hash"), after.get("task_hash")
-    if b_hash and a_hash and b_hash != a_hash:
+    if b_hash:
         rel: Path | str = task_file
         try:
             rel = task_file.relative_to(project_path)
         except (ValueError, AttributeError):
             pass
-        changes.append(f"task.md content changed ({rel})")
+        if not a_hash:
+            # task.md existed at snapshot but is gone now — a rogue deleted it.
+            # In a git repo the porcelain diff also flags this, but in the
+            # non-git fallback the task hash is the ONLY signal, and a bare
+            # `b_hash and a_hash` compare would short-circuit on the deletion
+            # (round-3 sonnet, Critical).
+            changes.append(f"task.md deleted ({rel})")
+        elif b_hash != a_hash:
+            changes.append(f"task.md content changed ({rel})")
     return changes
 
 

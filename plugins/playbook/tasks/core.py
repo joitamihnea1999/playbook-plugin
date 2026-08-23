@@ -1215,7 +1215,8 @@ def has_review_evidence(task_file, impl_only: bool = False) -> bool:
     return False
 
 
-def resolve_verify_commands(project_path: Path, risk: str = DEFAULT_RISK) -> "list[tuple[str, str]]":
+def resolve_verify_commands(project_path: Path, risk: str = DEFAULT_RISK,
+                            cfg: "dict | None" = None) -> "list[tuple[str, str]]":
     """Ordered (source_label, command) list to run at close for a task of `risk`.
 
     Config `verify` in .agent/config.json:
@@ -1224,8 +1225,14 @@ def resolve_verify_commands(project_path: Path, risk: str = DEFAULT_RISK) -> "li
                    "assertive": ["check:claims"]}  → extra for that risk class
     Values are a string or a list of strings. With no `verify` key, fall back to
     the legacy `merge_verify.command` as the base bar (the seed this generalizes).
-    Returns [] when nothing is declared — the caller warns and allows the close."""
-    cfg = load_config(project_path)
+    Returns [] when nothing is declared — the caller warns and allows the close.
+
+    `cfg`: pass an already-loaded config to resolve against a single immutable
+    SNAPSHOT. The drift sweep resolves several risks in one pass; without a shared
+    snapshot each call reloads `.agent/config.json`, and a concurrent edit between
+    calls could synthesize a state that never existed on disk (panel round-11)."""
+    if cfg is None:
+        cfg = load_config(project_path)
     v = cfg.get("verify")
     out: "list[tuple[str, str]]" = []
     if isinstance(v, str):
@@ -1301,9 +1308,19 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
                             evidence_carries: bool, round_fp: str, now_fp: str,
                             force: bool, stale_ok: bool,
                             stale_reason: "str | None") -> "tuple[bool, str]":
-    """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built):
-    an IRREVERSIBLE close resting on panel evidence must not silently rest on
-    a verdict that predates the closed code. Pure policy → (allowed, block_reason).
+    """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built);
+    extended by T1 (owner decision 2026-08-23) to every risk held to the
+    high-consequence bar — ASSERTIVE, IRREVERSIBLE, and an unset/UNCLASSIFIED
+    `## Risk` — leaving only `reversible` advisory: a close resting on panel
+    evidence must not silently rest on a verdict that predates the closed code,
+    because a claim (assertive), an unrecoverable act (irreversible), or work
+    whose risk was never classified (held to the high bar everywhere else — see
+    close_decision + `panel_required_for:"all"`) signed off by a panel that
+    predates the code is a decision about code that was never reviewed. Blocking
+    only assertive/irreversible would make blanking `## Risk` strictly more
+    lenient on freshness than honest classification — the 1.5.32
+    "cheapest-path-through-the-strictest-gate" fail-open, reopened (panel
+    finding O1). Pure policy → (allowed, block_reason).
 
     The gate is deliberately narrow (judge C3): it applies only when the panel
     evidence would actually CARRY this close — rounds[0] is an impl round with
@@ -1311,14 +1328,17 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
     falls through to the panel-evidence block instead of double-blocking, and
     only when both fingerprints exist and disagree. --force bypasses close
     policy wholesale as always (A8 — one blunt hatch, unchanged semantics);
-    `--stale-panel-ok --reason "..."` is the narrow exit, and the reason is
-    recorded in the receipt's freshness clause. Advisory (console note +
-    receipt clause, no block) remains the behavior for every other risk:
+    `--stale-panel-ok --reason "..."` is the narrow exit (T1: the same two
+    escapes for every gated risk — user decision 2026-08-23), and the reason
+    is recorded in the receipt's freshness clause. Advisory (console note +
+    receipt clause, no block) remains the behavior for `reversible` alone:
     batch 5 showed re-panels happen voluntarily when the delta is material —
-    the block is reserved for the one place a wrong close cannot be undone."""
+    the block is reserved for work a wrong close cannot be walked back on."""
     if force:
         return True, ""
-    if risk != "irreversible" or not panel_required or not evidence_carries:
+    # Allow ONLY the explicitly-reversible risk (fail-closed: an unexpected
+    # token blocks). assertive / irreversible / unclassified all gate — O1.
+    if risk == "reversible" or not panel_required or not evidence_carries:
         return True, ""
     if not round_fp or not now_fp or round_fp == now_fp:
         return True, ""
@@ -1329,7 +1349,7 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
                        "delta doesn't need a re-panel\" — the acceptance must "
                        "be on the record.")
     return False, (
-        "risk is irreversible and the code state changed after the newest impl "
+        f"risk is {risk} and the code state changed after the newest impl "
         f"panel (tree-state {round_fp} → {now_fp}) — the panel's verdict "
         "predates the code being closed.\n"
         "  Either re-run:  tasks panel-review <N> --mode impl\n"
@@ -1356,7 +1376,11 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
         commit_label += f" (+{dirty_files} uncommitted file(s) — verified code is NOT in this commit)"
     out = [f"### {ts} · risk {risk} · commit {commit_label}"]
     if reason:
-        out.append(f"- **Forced close, reason:** {reason.strip()}")
+        # Collapse to ONE line: a multi-line --reason would otherwise inject its
+        # own lines (e.g. a `## Notes`) into the receipt, and a section parser
+        # reading the receipt would stop at that heading before the command list
+        # — a false clean for the verify-contract drift sweep (panel round-9).
+        out.append(f"- **Forced close, reason:** {' '.join(reason.split())}")
     # F18 Leg 1: panel freshness is part of the durable record for EVERY close
     # where an impl round exists (the F17 advisory was console-only and its
     # firing at task 010 stayed unwitnessable forever). `freshness` is a dict:
@@ -1373,7 +1397,7 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
                 line += " (code changed after newest impl panel)"
                 ar = freshness.get("accepted_reason")
                 if ar:
-                    line += f', accepted: "{ar.strip()}"'
+                    line += f', accepted: "{" ".join(ar.split())}"'
             out.append(line)
     if not entries:
         out.append("- **Verification:** NONE DECLARED — nothing was verified at close. "
@@ -1830,6 +1854,43 @@ def _set_status(task_file: Path, value: str) -> None:
         _atomic_write(task_file, "".join(lines))
 
 
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _closed_fence_line_indices(lines: "list[str]") -> set:
+    """Line indices inside a properly CLOSED CommonMark code fence — the ONE
+    scanner shared by the receipt WRITER (upsert_task_section) and the audit
+    READER (verify-contract drift sweep) so they can never disagree on what a
+    fence is (panel rounds 8-10). Rules: opener = <=3 leading spaces + a run of
+    >=3 backticks/tildes, and a BACKTICK opener's info string may not contain a
+    backtick (else it is not a fence). Closer = <=3 spaces + a run of the SAME
+    char at least as long, followed by WHITESPACE ONLY. An UNCLOSED fence
+    contributes nothing (fail closed for the reader: a malformed fence never
+    hides a receipt; fail open for the writer: it never treats a live heading as
+    fenced)."""
+    skip: set = set()
+    fence_char = ""
+    fence_len = 0
+    open_i = -1
+    for i, ln in enumerate(lines):
+        s = ln.lstrip("﻿")
+        m = _FENCE_OPEN_RE.match(s)
+        if fence_char:
+            if (m and m.group(1)[0] == fence_char
+                    and len(m.group(1)) >= fence_len
+                    and m.group(2).strip() == ""):
+                skip.update(range(open_i, i + 1))
+                fence_char, fence_len, open_i = "", 0, -1
+            continue
+        if m:
+            char = m.group(1)[0]
+            info = m.group(2)
+            if char == "`" and "`" in info:
+                continue
+            fence_char, fence_len, open_i = char, len(m.group(1)), i
+    return skip
+
+
 def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
     """ONE `## {heading}` per task.md, newest entry FIRST beneath it.
 
@@ -1842,8 +1903,17 @@ def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
     text = p.read_text(encoding="utf-8", errors="replace")
     marker = f"## {heading}"
     lines = text.splitlines()
+    # Skip a heading that sits inside a properly CLOSED ``` / ~~~ fence — a task
+    # may quote the ritual (or a receipt example) in a fenced block, and writing
+    # the real section INTO that fence would strand it where a fence-aware reader
+    # (e.g. the verify-contract drift sweep, T5) never looks: writer and reader
+    # must agree on what counts as a real heading (panel round-9 grok/codex).
+    fenced = _closed_fence_line_indices(lines)
     for i, ln in enumerate(lines):
-        if ln.strip() == marker:
+        # strip + lstrip BOM exactly like the audit reader (str.strip does NOT
+        # remove a BOM), so writer and reader normalize a heading identically
+        # and cannot disagree on which line is the section (panel round-12 opus).
+        if i not in fenced and ln.strip().lstrip("\ufeff") == marker:
             new = lines[:i + 1] + ["", *entry.rstrip("\n").splitlines()] + lines[i + 1:]
             _atomic_write(p, "\n".join(new) + "\n")
             return
