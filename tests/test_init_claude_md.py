@@ -100,6 +100,10 @@ class MergeGitignore(unittest.TestCase):
         self.assertIn(".agent/sessions/", out)
         self.assertIn(".agent/*/sessions/", out)  # multi-user lanes covered
         self.assertIn(".agent/models.json", out)
+        # T2: the enforcement journal is machine-local runtime state (the block
+        # predated it), both root and per-user lanes.
+        self.assertIn(".agent/journal/", out)
+        self.assertIn(".agent/*/journal/", out)
 
     def test_appends_once_preserving_content(self):
         existing = "# mine\n__pycache__/\n"

@@ -107,6 +107,25 @@ class MustAllow(unittest.TestCase):
 class HookBehavior(unittest.TestCase):
     HOOK = _HERE.parent / "plugins" / "playbook" / "scripts" / "command_guard.py"
 
+    def setUp(self):
+        # Isolated cwd that OWNS a throwaway `.agent/tasks/`: the guard journals
+        # a block to the lane it resolves by walking UP from cwd, so running from
+        # the test-runner's own cwd inside a playbook-managed workspace leaks the
+        # "rm -rf /" vector into the REAL `.agent/journal/enforcement.jsonl`.
+        # Anchoring every guard run to a temp dir that ITSELF has `.agent/tasks`
+        # binds `_find_root()` (command_guard.py) to this throwaway dir so it
+        # can never walk out to a real ancestor — even if TMPDIR/%TEMP% happens
+        # to sit inside a playbook tree (the fragile "no `.agent` ancestor"
+        # assumption a bare tempdir would rely on). Its journal writes land in
+        # the temp `.agent/journal/` and vanish with it. This mirrors
+        # test_enforcement_journal / test_hook_failure_semantics and is pinned
+        # by tests/test_journal_ancestry_isolation.py.
+        import tempfile
+        from pathlib import Path
+        self._iso = tempfile.TemporaryDirectory(prefix="pb-guard-iso-")
+        self.addCleanup(self._iso.cleanup)
+        (Path(self._iso.name) / ".agent" / "tasks").mkdir(parents=True)
+
     def _run(self, payload_json, env=None):
         import os
         e = dict(os.environ)
@@ -114,7 +133,8 @@ class HookBehavior(unittest.TestCase):
         if env:
             e.update(env)
         return subprocess.run(["python3", str(self.HOOK)], input=payload_json,
-                              capture_output=True, text=True, env=e)
+                              capture_output=True, text=True, env=e,
+                              cwd=self._iso.name)
 
     def test_blocks_dangerous_bash_payload(self):
         r = self._run('{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}')
@@ -147,7 +167,8 @@ class HookBehavior(unittest.TestCase):
         if env:
             e.update(env)
         return subprocess.run([bash_or_skip(), str(hook)], input=payload_json,
-                              capture_output=True, text=True, env=e)
+                              capture_output=True, text=True, env=e,
+                              cwd=self._iso.name)
 
     def test_grok_camelcase_shell_payload_is_normalized_and_blocked(self):
         # grok delivers camelCase toolName/toolInput and renames Bash→Shell; the

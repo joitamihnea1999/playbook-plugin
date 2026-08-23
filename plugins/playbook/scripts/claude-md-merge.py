@@ -70,6 +70,8 @@ GITIGNORE_ENTRIES = (
     ".agent/*/chat_log.md",
     ".agent/chat_log_counter*",
     ".agent/*/chat_log_counter*",
+    ".agent/journal/",
+    ".agent/*/journal/",
     ".agent/current_user",
     ".agent/models.json",
 )
