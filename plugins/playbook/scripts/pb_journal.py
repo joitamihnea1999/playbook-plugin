@@ -131,9 +131,14 @@ def _utcnow() -> str:
 
 
 def _head(command, limit: int = _HEAD_LIMIT) -> str:
-    """Command head only — first line, capped. Never the full payload."""
+    """Command head only — first line, capped to `limit` BYTES (UTF-8), never the
+    full payload. Byte-capping (not character-capping) is what actually keeps the
+    record under PIPE_BUF: 200 multi-byte characters (e.g. emoji) are up to 800
+    bytes and would blow the 512-byte atomic-write bound (panel). A truncated
+    trailing multi-byte sequence is dropped (errors='ignore'), never emitted
+    half-encoded."""
     s = str(command).strip().split("\n", 1)[0]
-    return s[:limit]
+    return s.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
 def _warn(exc: Exception) -> None:

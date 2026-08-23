@@ -46,7 +46,14 @@ def _atomic_write(path: Path, text: str) -> None:
     atomic_write(path, text, newline="")
 _GATE_RE = re.compile(r"^\s*- \[[ xX]\]")
 _PROTECTED_HEADING_RE = re.compile(
-    r"^##\s+(Intent|Why|Design|Work Plan|Parked|Status|Risk|References)\b", re.IGNORECASE)
+    r"^##\s+(Intent|Why|Design|Work Plan|Parked|Status|Risk|References"
+    r"|Verification Receipt|Pre-Panel Audit)\b", re.IGNORECASE)
+# A single close's receipt ENTRY (`### <ts> · risk <r> · commit <sha>`) must not
+# be archivable even when its `## Verification Receipt` heading stays outside the
+# block: the verify-contract drift sweep baselines off these entries, and moving
+# one to task-archive.md (under `## Compacted`) would launder a weakening (T5,
+# round-8 panel).
+_RECEIPT_ENTRY_RE = re.compile(r"^\s*###\s+.+·\s*risk\s+\S+\s*·\s*commit\b")
 
 
 def _find_task_md(project_path: Path, task_num: str) -> "Path | None":
@@ -97,7 +104,40 @@ def _validate(block_lines: "list[str]") -> "str | None":
             return "contains a <!-- pin --> (must survive trims — never archive it)"
         if _PROTECTED_HEADING_RE.match(ln):
             return f"contains a protected section heading ({ln.strip()[:60]!r})"
+        if _RECEIPT_ENTRY_RE.match(ln):
+            return f"contains a verification-receipt entry ({ln.strip()[:60]!r})"
     return None
+
+
+def _protected_section_spans(lines: "list[str]") -> "list[tuple[int, int]]":
+    """Inclusive (start, end) line ranges of every `## Verification Receipt` /
+    `## Pre-Panel Audit` SECTION (heading through the line before the next
+    top-level `## `). Matched on the STRIPPED line, exactly like the audit
+    reader, so an indented ` ## Verification Receipt` is covered too (panel
+    round-9 codex). A block overlapping any of these must be refused: protecting
+    only the heading/entry LINES missed a block that wraps just the `- [PASS]`
+    command bullets, stranding them in the archive and emptying the drift
+    baseline (panel round-9 grok)."""
+    from tasks.core import _closed_fence_line_indices
+    fenced = _closed_fence_line_indices(lines)   # ONE shared CommonMark scanner
+    protected = ("## Verification Receipt", "## Pre-Panel Audit")
+    spans: "list[tuple[int, int]]" = []
+    i, n = 0, len(lines)
+    while i < n:
+        if i not in fenced and lines[i].strip() in protected:
+            # The section ends at the next REAL (non-fenced) top-level heading. A
+            # `## ` line inside a code fence (a decoy example) or otherwise must
+            # NOT terminate the span early, or a block wrapping the command
+            # bullets below it would escape the overlap check (panel round-11
+            # sonnet, Critical) — same fence rule the reader and writer use.
+            j = i + 1
+            while j < n and not (j not in fenced and lines[j].strip().startswith("## ")):
+                j += 1
+            spans.append((i, j - 1))
+            i = j
+        else:
+            i += 1
+    return spans
 
 
 def cmd_compact(cmd_args) -> None:
@@ -133,13 +173,22 @@ def cmd_compact(cmd_args) -> None:
         return
 
     # Validate every block BEFORE touching anything (all-or-nothing).
+    protected_spans = _protected_section_spans(lines)
     for start, end in spans:
         inner = lines[start + 1:end]
         why = _validate(inner)
+        if not why:
+            # Refuse a block whose moved span (start+1 .. end-1) overlaps ANY
+            # protected section, even if no protected LINE is literally inside it
+            # (e.g. a block wrapping only the receipt's `- [PASS]` bullets).
+            for ps, pe in protected_spans:
+                if start + 1 <= pe and end - 1 >= ps:
+                    why = "overlaps a protected section (Verification Receipt / Pre-Panel Audit)"
+                    break
         if why:
             print(f"Error: refusing to compact the block at lines {start + 1}-{end + 1}: "
                   f"it {why}. Move only review-round narrative — never gates, "
-                  "Intent/Design/Parked, or pinned content. Nothing moved.",
+                  "Intent/Design/Parked, receipts, or pinned content. Nothing moved.",
                   file=sys.stderr)
             sys.exit(1)
 

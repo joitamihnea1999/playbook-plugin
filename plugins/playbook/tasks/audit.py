@@ -15,10 +15,13 @@ convention, stated so no sweep can be a false green:
                          "clean"; treating exit 2 as clean is the false green this
                          exists to prevent.
 
-Two severities: `error` sweeps FAIL the audit when they find something (unambiguous
+Three severities: `error` sweeps FAIL the audit when they find something (unambiguous
 breakage — conflict markers, .orig/.rej files); `advisory` sweeps surface findings
-without failing (TODO/FIXME are legitimate, just worth not making a judge find).
-An ERROR from ANY sweep fails the audit regardless of severity.
+without failing (TODO/FIXME are legitimate, just worth not making a judge find);
+`info` is below advisory — a visibility-only line that is never actionable and never
+fails the audit (e.g. an acknowledged verify-contract removal, surfaced because its
+ack lives on a self-servable path). An ERROR from ANY sweep fails the audit
+regardless of severity; advisory and info never fail it.
 
 Every default sweep has a negative control in tests/test_audit.py proving it fires
 on a crafted dirty fixture — a sweep that cannot detect its own target is worse
@@ -81,7 +84,7 @@ DEFAULT_SWEEPS = [
     },
 ]
 
-_VALID_SEVERITY = ("error", "advisory")
+_VALID_SEVERITY = ("error", "advisory", "info")
 
 
 def resolve_sweeps(project_path) -> "list[dict]":
@@ -612,6 +615,232 @@ def check_mindmap_wellformed(project_path) -> "dict | None":
     }
 
 
+# The verify command is declared in the gate-exempt `.agent/config.json`, so it
+# can be weakened/deleted unwatched and tasks then closed against a hollow bar.
+# Every close receipt NAMES the commands it ran; this sweep flags any command
+# that was run at SOME past close but is no longer in the current contract — a
+# removed/weakened bar, made visible (T5).
+_VC_CMD_RE = re.compile(r"^\s*- \[[^\]]+\] `([^`]*)`")
+_VC_ENTRY_RE = re.compile(r"^### (\S+) · risk (\S+) · commit")
+
+
+def _recorded_verify_commands(project_path) -> "tuple[dict, str | None]":
+    """(mapping risk → union of every cmd1 recorded at a close of THAT risk,
+    across every lane's tasks; latest-receipt-timestamp). Empty mapping + None
+    when no receipt exists anywhere (first close — no baseline).
+
+    Keyed BY RISK, not a flat all-risk union: a close of risk R records whatever
+    the current config resolves for R, and the sweep must check each recorded
+    command against the contract for THAT SAME risk. A flat union hid a cross-key
+    move — a command shifted from `_always` to a single risk key still appears
+    in *some* risk's current surface, so a flat "is it anywhere?" read stays
+    clean while every other risk's bar silently lost it (panel round-3
+    grok/opus). Per-risk comparison catches it.
+
+    Still a union WITHIN each risk, not most-recent-only: a close records
+    whatever the CURRENT config resolves, so a weaken-then-close would launder a
+    most-recent baseline clean forever (panel opus). Every command ever run at a
+    given risk stays flagged regardless of laundering.
+
+    Each receipt section can hold several `### <ts> · risk <r>` entries
+    (newest-first); each entry owns the command lines beneath it until the next
+    entry, so an entry's commands are attributed to ITS risk. Sections are found
+    by an EXACT heading line, scanned fence-aware so a prose mention (panel grok)
+    or a ``` fenced/duplicate heading example (panel codex) is not mistaken for a
+    real receipt, and EVERY such section in a file is read (not just the first).
+    Both `task.md` and `task-archive.md` are scanned so a compacted receipt still
+    baselines (panel sonnet/grok). Timestamps parse with fromisoformat, naive
+    stamps normalized to UTC so aware/naive never crash the compare (panel)."""
+    import datetime as _dt
+    recorded: "dict[str, set]" = {}
+    latest_ts = None
+    latest_dt = None
+    # Scan EVERY lane's task history, not just the caller's: `verify` in
+    # `.agent/config.json` is a repo-global contract, so a weakening another
+    # lane recorded must still baseline a fresh lane (panel: per-lane baseline
+    # defeats a shared contract). Root lane + per-user lanes.
+    agent = Path(project_path) / ".agent"
+    receipts: "list[Path]" = []
+    if agent.is_dir():
+        # task.md AND task-archive.md: `tasks compact` now refuses to move a
+        # receipt, but a receipt archived before that guard (or by hand) must
+        # still baseline, or compaction would launder a weakening clean (panel
+        # round-6 sonnet/grok). Reader-side defence in depth for the compact fix.
+        for pat in ("tasks/*/task.md", "*/tasks/*/task.md",
+                    "tasks/*/task-archive.md", "*/tasks/*/task-archive.md"):
+            receipts += sorted(agent.glob(pat))
+    for tf in receipts:
+        try:
+            lines = tf.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        # Skip only lines inside a properly CLOSED fence (a decoy example);
+        # everything else — including an unclosed or 4-space-indented
+        # pseudo-fence — is read, so a malformed fence cannot hide a real
+        # receipt (fail closed, panel round-8). Treat EVERY
+        # `## Verification Receipt` section in the file (not just the first),
+        # attributing each `### … · risk …` entry's command lines to its risk.
+        from tasks.core import _closed_fence_line_indices
+        skip = _closed_fence_line_indices(lines)   # ONE shared CommonMark scanner
+        in_receipt = False
+        cur_risk = None
+        for i, ln in enumerate(lines):
+            if i in skip:
+                continue
+            # Match on the STRIPPED line everywhere (heading, entry, and command
+            # bullet), so a legally 1-3-space-indented `### \u2026 \u00b7 risk \u2026` entry is
+            # not orphaned from its command bullets (panel round-10 grok).
+            s = ln.strip().lstrip("\ufeff")
+            if s.startswith("## "):
+                in_receipt = (s == "## Verification Receipt")
+                cur_risk = None
+                continue
+            if not in_receipt:
+                continue
+            em = _VC_ENTRY_RE.match(s)
+            if em:
+                cur_risk = em.group(2)
+                ts = em.group(1)
+                try:
+                    d = _dt.datetime.fromisoformat(ts)
+                    # The entry regex accepts both offset-aware (`...+00:00`) and
+                    # naive receipt timestamps; normalize a naive stamp to UTC so
+                    # the `>` below never compares aware-vs-naive (which raises
+                    # TypeError, NOT ValueError — and run_audit does not wrap this
+                    # check, so an unhandled raise would abort the whole audit and
+                    # silently disable detection). latest_ts is display-only, so a
+                    # best-effort ordering here must never take down the sweep.
+                    if d.tzinfo is None:
+                        d = d.replace(tzinfo=_dt.timezone.utc)
+                except (ValueError, TypeError):
+                    d = None
+                if d is not None and (latest_dt is None or d > latest_dt):
+                    latest_dt, latest_ts = d, ts
+                continue
+            cm = _VC_CMD_RE.match(s)
+            if cm and cur_risk is not None:
+                recorded.setdefault(cur_risk, set()).add(cm.group(1))
+    return recorded, latest_ts
+
+
+def check_verify_contract_change(project_path) -> "dict | None":
+    """Advisory sweep: was the `verify` contract weakened since a past close?
+
+    Flags any command recorded at a past close that is no longer in the CURRENT
+    contract FOR THE SAME RISK the close ran under. Comparing per-risk (not
+    against a flat all-risk union) catches a cross-key move: a command shifted
+    from `_always` into one risk key stays in *that* risk's surface but is gone
+    from every other risk's bar, which a flat "is it anywhere?" read missed
+    (panel round-3). Advisory, not error: the sweep cannot prove intent, so it
+    surfaces the removal for acknowledgement rather than hard-blocking — a legit
+    replacement is acknowledged, a real weakening is caught. Union-within-risk so
+    a weaken-then-close cannot launder it clean.
+
+    `verify_contract_ack` lives on the SAME gate-exempt `.agent/config.json` path
+    this guards, so the actor who drops `verify` can acknowledge the drop in the
+    same write — prevention is structurally impossible, so an acknowledged
+    removal is never FULLY silenced: it degrades to an INFORMATIONAL (info,
+    below advisory) line naming the command and the ack, still visible, never
+    failing the audit (owner decision round-3). Visibility, not prevention, is
+    the guarantee; the OS sandbox + human review are the containment.
+
+    Returns None when there is nothing to surface — no prior receipt (the FIRST
+    close has no baseline, exempt by design) or no command was dropped — matching
+    the other built-in checks that stay silent unless they have a finding.
+
+    Bound (accepted): comparison is per-command cmd1 (first line), because that
+    is what the receipt records; a change confined to lines 2+ of a multi-line
+    command is not distinguished. A clean sweep means 'no first-line command was
+    dropped', not 'verify was never touched' — the enforcement journal retains
+    the full per-close trail."""
+    from tasks.core import load_config, resolve_verify_commands
+    recorded, latest_ts = _recorded_verify_commands(project_path)
+    if not recorded:
+        return None                              # no baseline (first close)
+    # `verify_contract_ack`: commands whose removal the owner has explicitly
+    # accepted. An ack does not ERASE the removal (the ack is on the gate-exempt
+    # path — see docstring); it downgrades it from a finding to informational. It
+    # matches by command string across all risks (not risk-qualified). Malformed
+    # entries are ignored.
+    # ONE immutable config snapshot for the ack AND every risk resolution below:
+    # a concurrent cross-risk edit between separate loads could otherwise
+    # synthesize a state that never existed on disk (panel round-11 codex).
+    cfg = load_config(project_path)
+    _ack = cfg.get("verify_contract_ack") if isinstance(cfg, dict) else None
+    ack = {a for a in _ack if isinstance(a, str)} if isinstance(_ack, list) else set()
+    # Compare PER RISK and keep the risk attribution all the way through the
+    # report: a command dropped from one risk's bar can still be current in
+    # another's, so a flattened "dropped: [X] / current: [X]" line reads as a
+    # self-contradiction an agent dismisses (panel round-7/8). Each output line
+    # names its risk instead.
+    removed_by_risk: "dict[str, list]" = {}      # risk -> sorted UNacknowledged drops
+    acked_by_risk: "dict[str, list]" = {}        # risk -> sorted acknowledged drops
+    current_by_risk: "dict[str, list]" = {}      # risk -> sorted current bar
+    for risk, cmds in sorted(recorded.items()):
+        current_r = {c.strip().splitlines()[0]
+                     for _lbl, c in resolve_verify_commands(project_path, risk, cfg=cfg)
+                     if c.strip()}
+        current_by_risk[risk] = sorted(current_r)
+        dropped = cmds - current_r
+        if not dropped:
+            continue
+        un = sorted(dropped - ack)
+        ac = sorted(dropped & ack)
+        if un:
+            removed_by_risk[risk] = un
+        if ac:
+            acked_by_risk[risk] = ac
+    if not removed_by_risk and not acked_by_risk:
+        return None                              # nothing dropped — clean
+
+    def _lines(mapping):
+        return [f"  [{r}] dropped: {mapping[r]}; {r} now runs: "
+                f"{current_by_risk.get(r) or ['(none declared)']}"
+                for r in sorted(mapping)]
+
+    if removed_by_risk:
+        out = ["verify command(s) recorded at a past close are no longer in the "
+               "contract for the risk that close ran under (weakened?) — latest "
+               f"close {latest_ts or '(unknown)'}:"]
+        out += _lines(removed_by_risk)
+        if acked_by_risk:
+            out += ["  acknowledged (informational, still recorded):"]
+            out += _lines(acked_by_risk)
+        out.append(
+            "  If a removal is intentional, add the command to "
+            "`verify_contract_ack` in .agent/config.json to downgrade it to an "
+            "informational line (still visible — an ack never fully silences a "
+            "removal); otherwise restore the `verify` command.")
+        return {
+            "name": "verify-contract-change",
+            "severity": "advisory",
+            "why": ("a verify command run at a past close is gone from the "
+                    "gate-exempt .agent/config.json — a silently weakened verify "
+                    "closes tasks against a hollow bar; acknowledge if intentional"),
+            "status": "findings",
+            "output": "\n".join(out),
+        }
+    # Only acknowledged removals remain: informational, never a finding, never
+    # failing the audit — but never fully silenced (the ack list is self-servable).
+    out = ["verify command(s) recorded at a past close were removed and "
+           "ACKNOWLEDGED in .agent/config.json — latest close "
+           f"{latest_ts or '(unknown)'}:"]
+    out += _lines(acked_by_risk)
+    out.append(
+        "  Informational only (the ack list is on the same gate-exempt path it "
+        "guards, so this is visibility, not prevention). Confirm the removal was "
+        "intended.")
+    return {
+        "name": "verify-contract-change",
+        "severity": "info",
+        "why": ("a verify command run at a past close was removed but "
+                "acknowledged in .agent/config.json — surfaced for visibility, "
+                "below finding severity, never fails the audit"),
+        "status": "findings",
+        "output": "\n".join(out),
+    }
+
+
 def run_audit(project_path) -> dict:
     """Run every resolved sweep plus the built-in mind-map staleness check.
     Returns {results, passed}. The audit FAILS when any sweep ERRORED (a broken
@@ -627,21 +856,33 @@ def run_audit(project_path) -> dict:
         timeout = 300
     results = [run_sweep(s, project_path, timeout_secs=timeout)
                for s in resolve_sweeps(project_path)]
-    mm = check_mindmap_staleness(project_path)
-    if mm is not None:
-        results.append(mm)
-    tb = check_task_bloat(project_path)
-    if tb is not None:
-        results.append(tb)
-    nf = check_mindmap_node_freshness(project_path)
-    if nf is not None:
-        results.append(nf)
-    dl = check_mindmap_dangling_links(project_path)
-    if dl is not None:
-        results.append(dl)
-    wf = check_mindmap_wellformed(project_path)
-    if wf is not None:
-        results.append(wf)
+    # Built-in checks run through an ISOLATING wrapper: unlike resolved sweeps
+    # (which go through run_sweep and never raise), these are plain functions, and
+    # run_audit used to call them unwrapped — so a single raise (e.g. the round-5
+    # aware/naive-timestamp TypeError, or a future edit, or a malformed config)
+    # aborted the ENTIRE audit, silently disabling every other sweep including
+    # this integrity guard (panel round-8 opus). A raise now degrades to one
+    # error-status result: one broken instrument can't take down the panel.
+    for name, check in (
+        ("mindmap-stale-refs", check_mindmap_staleness),
+        ("task-bloat", check_task_bloat),
+        ("mindmap-node-freshness", check_mindmap_node_freshness),
+        ("mindmap-dangling-links", check_mindmap_dangling_links),
+        ("mindmap-wellformed", check_mindmap_wellformed),
+        ("verify-contract-change", check_verify_contract_change),  # T5 drift
+    ):
+        try:
+            r = check(project_path)
+        except Exception as exc:                  # noqa: BLE001 — degrade, never abort
+            r = {
+                "name": name,
+                "severity": "error",              # a broken instrument can't certify clean
+                "why": "the built-in check raised — audit cannot certify it clean",
+                "status": "error",
+                "output": f"{type(exc).__name__}: {exc}",
+            }
+        if r is not None:
+            results.append(r)
     passed = not any(
         r["status"] == "error" or (r["status"] == "findings" and r["severity"] == "error")
         for r in results
@@ -690,7 +931,7 @@ def format_audit_receipt(audit: dict, *, timestamp: str | None = None, head_sha:
         tag = {"clean": "CLEAN", "findings": f"FINDINGS", "error": "ERROR"}[r["status"]]
         n = len(_finding_lines(r["output"], limit=10_000)) if r["status"] != "clean" else 0
         count = f"({n})" if r["status"] == "findings" else ""
-        sev = "" if r["severity"] == "error" else " ·advisory"
+        sev = {"error": "", "info": " ·info"}.get(r["severity"], " ·advisory")
         out.append(f"    - [{tag}{count}] {r['name']}{sev} — {r['why']}")
         if r["status"] in ("findings", "error"):
             for ln in _finding_lines(r["output"], limit=5):

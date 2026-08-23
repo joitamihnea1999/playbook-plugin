@@ -175,6 +175,92 @@ class Compact(unittest.TestCase):
         self.assertIn("protected section heading", err)
         self.assertIn("something precious", self.task_md.read_text(encoding="utf-8"))
 
+    def test_block_with_verification_receipt_is_refused(self):
+        # T5 (round-6 panel, sonnet/grok convergent): the verify-contract drift
+        # sweep baselines off the committed `## Verification Receipt` sections;
+        # archiving one to task-archive.md would drop it from the anti-laundering
+        # union. The template already SAYS receipts are never archived — enforce
+        # it: a block wrapping the receipt heading must be refused.
+        code, _, err = self._corrupt_and_run(BODY.replace(
+            "### Round 1 findings",
+            "## Verification Receipt\n### 2026-01-01 · risk reversible · commit abc\n"
+            "    - [PASS] `python3 scripts/verify` (verify)"))
+        self.assertEqual(code, 1)
+        self.assertIn("protected section heading", err)
+        self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
+
+    def test_block_with_a_receipt_entry_is_refused(self):
+        # T5 (round-8 panel, codex-sol): protecting only the `## Verification
+        # Receipt` HEADING is not enough — an older `### <ts> · risk …` ENTRY can
+        # be wrapped alone (heading stays outside the block), archived under
+        # `## Compacted`, and the drift sweep never sees it → laundering. A block
+        # containing a receipt entry line must itself be refused.
+        code, _, err = self._corrupt_and_run(BODY.replace(
+            "### Round 1 findings",
+            "### 2026-01-01T00:00:00+00:00 · risk reversible · commit abc1234\n"
+            "    - [PASS] `python3 scripts/verify` (verify)"))
+        self.assertEqual(code, 1)
+        self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
+
+    def test_block_overlapping_only_receipt_bullets_is_refused(self):
+        # T5 (round-9 panel, grok): protecting the heading + `### entry` lines
+        # still let a block wrap ONLY the `- [PASS] \`cmd\`` bullets — the sweep
+        # unions exactly those, so archiving them (heading/entry left behind)
+        # empties the baseline. A block overlapping the receipt SECTION span is
+        # now refused wholesale.
+        body = (
+            "# 012\nlive line\n\n## Verification Receipt\n\n"
+            "### 2026-01-01T00:00:00+00:00 · risk reversible · commit abc1234\n"
+            "<!-- archive:start -->\n    - [PASS] `python3 scripts/verify` (verify)\n"
+            "<!-- archive:end -->\n\n## Parked\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, _, err = self._run("12")
+        self.assertEqual(code, 1)
+        self.assertIn("protected section", err)
+        self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
+
+    def test_block_with_indented_receipt_heading_is_refused(self):
+        # T5 (round-9 panel, codex): compact matched protected headings with `^##`
+        # while the audit reader strips indentation — an indented ` ## Verification
+        # Receipt` evaded protection but the reader would lose it once archived.
+        # The section-span scan strips too, so the indented heading is covered.
+        code, _, err = self._corrupt_and_run(BODY.replace(
+            "### Round 1 findings",
+            "  ## Verification Receipt\n"
+            "### 2026-01-01T00:00:00+00:00 · risk reversible · commit abc1234"))
+        self.assertEqual(code, 1)
+        # the indented receipt heading was NOT archived — still in task.md
+        self.assertIn("Verification Receipt", self.task_md.read_text(encoding="utf-8"))
+
+    def test_receipt_section_span_is_fence_aware(self):
+        # T5 (round-11 panel, sonnet CRITICAL): _protected_section_spans ended the
+        # receipt-section span at the FIRST `## ` line, even one inside a fence or
+        # a stray heading — so a block wrapping the `- [PASS]` bullets BELOW that
+        # line escaped the overlap check and got archived → laundering. The span
+        # scan must skip fenced `## ` lines (reusing the shared fence scanner).
+        body = (
+            "# 012\nlive\n\n## Verification Receipt\n\n"
+            "### 2026-01-01T00:00:00+00:00 · risk reversible · commit abc1234\n"
+            "- **Commands:**\n"
+            "```\n## decoy\n```\n"
+            "<!-- archive:start -->\n"
+            "    - [PASS] `python3 scripts/verify` (verify)\n"
+            "<!-- archive:end -->\n\n## Parked\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, _, err = self._run("12")
+        self.assertEqual(code, 1, "fenced heading truncated the protected span")
+        self.assertIn("protected section", err)
+        self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
+
+    def test_block_with_pre_panel_audit_is_refused(self):
+        # Same reasoning for the audit receipt: the panel's freshness check reads
+        # `## Pre-Panel Audit`, so it must not be archivable either.
+        code, _, err = self._corrupt_and_run(BODY.replace(
+            "### Round 1 findings", "## Pre-Panel Audit\nsomething audited"))
+        self.assertEqual(code, 1)
+        self.assertIn("protected section heading", err)
+        self.assertIn("something audited", self.task_md.read_text(encoding="utf-8"))
+
 
     # --- 1.5.26 hardening (audit findings) --------------------------------
 
