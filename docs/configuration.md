@@ -84,8 +84,13 @@ Rules, all loud: the key is **opt-in** (absent means task generation is byte-ide
 ## `.agent/config.json` — `fingerprint_exclude` (project policy)
 
 Panels stamp the tree-state fingerprint they reviewed; close compares it and
-records `FRESH`/`STALE` in the receipt, and an **irreversible** close resting
-on a stale panel BLOCKS (see below). The fingerprint already ignores `.agent/`
+records `FRESH`/`STALE` in the receipt, and — **when policy requires a panel
+for that close** (`panel_required_for`) — a close held to the high-consequence
+bar (**assertive, irreversible, or an unset/`unclassified` `## Risk`**) resting
+on a stale panel BLOCKS (see below). Under the seeded default
+`panel_required_for: ["assertive","irreversible"]` that covers assertive and
+irreversible; `unclassified` is caught only where policy also requires a panel
+for it (e.g. `"all"`). The fingerprint already ignores `.agent/`
 — workflow bookkeeping is not code. If your project has **owner-declared
 bookkeeping outside `.agent/`** that standing gates write after the last panel
 (the canonical case: a `journal/` directory), declare it:
@@ -149,20 +154,32 @@ distinguishes two facts that were previously conflated:
 Setting `## Risk` to one word clears it. `## Risk Routing` in the light template
 is a gate checklist, not the classification field, and does not trigger this.
 
-### The irreversible freshness gate (`--stale-panel-ok`)
+### The freshness gate (`--stale-panel-ok`)
 
-When `## Risk` is `irreversible`, panel evidence is required by
-`panel_required_for`, and the newest impl round's stamp no longer matches the
-tree, `tasks work done` blocks: the panel's verdict predates the code being
-closed. Two exits, both on the record —
+The gate fires only when policy requires a panel for the close
+(`panel_required_for`). When that holds and the close is held to the
+high-consequence bar — `## Risk` is `assertive` or `irreversible`, **or it is
+left unset/`unclassified`** (held to that same bar everywhere else) — and the
+newest impl round's stamp no longer matches the tree, `tasks work done` blocks:
+the panel's verdict predates the code being closed — a claim (assertive), an
+unrecoverable act (irreversible), or work whose risk was never classified,
+signed off by a panel that predates the code, is a decision about code that was
+never reviewed. (Blocking only assertive/irreversible would make blanking
+`## Risk` strictly more lenient on freshness than honest classification.) Note
+the precondition: under the seeded default `panel_required_for:
+["assertive","irreversible"]`, `unclassified` does not require a panel, so its
+freshness block engages only where policy also requires a panel for it (e.g.
+`"all"`). Two exits, both on the record —
 
 - re-run `tasks panel-review <N> --mode impl` (fresh evidence), or
 - `tasks work done --stale-panel-ok --reason "..."` — closes, and the reason
   lands in the receipt's freshness clause (`STALE, accepted: "..."`).
 
 `--stale-panel-ok` suppresses only this gate; verify failures, gate bounces,
-and the panel-evidence requirement are untouched. Every other risk class gets
-the console note + receipt clause, no block.
+and the panel-evidence requirement are untouched. `--force --reason` remains the
+blunt whole-policy hatch. A `reversible` risk always stays advisory (console
+note + receipt clause, no block), as does any close for which policy does not
+require a panel.
 
 ## `.agent/models.json` — judge panel pins
 

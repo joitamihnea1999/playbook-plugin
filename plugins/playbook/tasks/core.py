@@ -1301,9 +1301,19 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
                             evidence_carries: bool, round_fp: str, now_fp: str,
                             force: bool, stale_ok: bool,
                             stale_reason: "str | None") -> "tuple[bool, str]":
-    """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built):
-    an IRREVERSIBLE close resting on panel evidence must not silently rest on
-    a verdict that predates the closed code. Pure policy → (allowed, block_reason).
+    """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built);
+    extended by T1 (owner decision 2026-08-23) to every risk held to the
+    high-consequence bar — ASSERTIVE, IRREVERSIBLE, and an unset/UNCLASSIFIED
+    `## Risk` — leaving only `reversible` advisory: a close resting on panel
+    evidence must not silently rest on a verdict that predates the closed code,
+    because a claim (assertive), an unrecoverable act (irreversible), or work
+    whose risk was never classified (held to the high bar everywhere else — see
+    close_decision + `panel_required_for:"all"`) signed off by a panel that
+    predates the code is a decision about code that was never reviewed. Blocking
+    only assertive/irreversible would make blanking `## Risk` strictly more
+    lenient on freshness than honest classification — the 1.5.32
+    "cheapest-path-through-the-strictest-gate" fail-open, reopened (panel
+    finding O1). Pure policy → (allowed, block_reason).
 
     The gate is deliberately narrow (judge C3): it applies only when the panel
     evidence would actually CARRY this close — rounds[0] is an impl round with
@@ -1311,14 +1321,17 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
     falls through to the panel-evidence block instead of double-blocking, and
     only when both fingerprints exist and disagree. --force bypasses close
     policy wholesale as always (A8 — one blunt hatch, unchanged semantics);
-    `--stale-panel-ok --reason "..."` is the narrow exit, and the reason is
-    recorded in the receipt's freshness clause. Advisory (console note +
-    receipt clause, no block) remains the behavior for every other risk:
+    `--stale-panel-ok --reason "..."` is the narrow exit (T1: the same two
+    escapes for every gated risk — user decision 2026-08-23), and the reason
+    is recorded in the receipt's freshness clause. Advisory (console note +
+    receipt clause, no block) remains the behavior for `reversible` alone:
     batch 5 showed re-panels happen voluntarily when the delta is material —
-    the block is reserved for the one place a wrong close cannot be undone."""
+    the block is reserved for work a wrong close cannot be walked back on."""
     if force:
         return True, ""
-    if risk != "irreversible" or not panel_required or not evidence_carries:
+    # Allow ONLY the explicitly-reversible risk (fail-closed: an unexpected
+    # token blocks). assertive / irreversible / unclassified all gate — O1.
+    if risk == "reversible" or not panel_required or not evidence_carries:
         return True, ""
     if not round_fp or not now_fp or round_fp == now_fp:
         return True, ""
@@ -1329,7 +1342,7 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
                        "delta doesn't need a re-panel\" — the acceptance must "
                        "be on the record.")
     return False, (
-        "risk is irreversible and the code state changed after the newest impl "
+        f"risk is {risk} and the code state changed after the newest impl "
         f"panel (tree-state {round_fp} → {now_fp}) — the panel's verdict "
         "predates the code being closed.\n"
         "  Either re-run:  tasks panel-review <N> --mode impl\n"

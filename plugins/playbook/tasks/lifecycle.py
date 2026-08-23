@@ -6,7 +6,7 @@ Boundary: every command that moves a task through its life. `work <N>`
 switch-bounce — `--force` leaves a task honestly open, never silently done)
 and `work done`, the ONLY writer of `done` (the 1.4.7 principle): the verify
 contract via shared's `_merge_verify_module`, the risk-keyed evidence bar,
-the F18 irreversible freshness gate, the receipt, dirty-close honesty, parked
+the F18 assertive/irreversible freshness gate, the receipt, dirty-close honesty, parked
 surfacing, the retro trigger. Plus `new` (creation + stubs), `blocked` (the
 honest pause), `parked` (the standing query), and `freehand`. All policy
 DECISIONS live in tasks.core (`close_decision`, `freshness_gate_decision`,
@@ -177,8 +177,8 @@ def cmd_work(cmd_args):
     if task_num != "done" and task_num.isdigit():
         task_num = task_num.zfill(3)
     force = any(a in ("--force", "-f") for a in cmd_args[1:])
-    # --stale-panel-ok: the NARROW exit from the F18 irreversible freshness
-    # gate — suppresses only that gate, only with a --reason, and the
+    # --stale-panel-ok: the NARROW exit from the F18 freshness gate (assertive
+    # OR irreversible, since T1) — suppresses only that gate, only with a --reason, and the
     # reason is recorded in the receipt's freshness clause. Deliberately
     # not folded into --force: batch-5 field data shows agents take the
     # cheapest sanctioned exit under friction, and the cheap exit must not
@@ -312,9 +312,10 @@ def cmd_work(cmd_args):
 
                 # F18: panel freshness — computed BEFORE the close is
                 # earned, recorded in the receipt for every close with an
-                # impl round, and GATING for irreversible closes that rest
-                # on panel evidence (design-1.5.6.md; blind judge
-                # conditional-PASS, all conditions built).
+                # impl round, and GATING for assertive/irreversible closes
+                # that rest on panel evidence (design-1.5.6.md; blind judge
+                # conditional-PASS, all conditions built; assertive added by
+                # T1, owner decision 2026-08-23).
                 from tasks.core import (
                     freshness_gate_decision, parse_judge_rounds,
                     tree_state_fingerprint,

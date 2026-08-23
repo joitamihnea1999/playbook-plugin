@@ -139,12 +139,64 @@ class GateDecision(unittest.TestCase):
 
     def test_gate_scope_negative_controls(self):
         # Each condition individually off → allowed (the gate is narrow).
-        for tweak in ({"risk": "reversible"}, {"risk": "assertive"},
+        # NOTE (T1, 2026-08-23): {"risk": "assertive"} and — after panel finding
+        # O1 — {"risk": "unclassified"} MOVED OUT of this allowed set. Both now
+        # block on a stale carrying panel (see test_stale_assertive_blocks /
+        # test_stale_unclassified_blocks); only `reversible` stays advisory.
+        # Rewriting, not deleting, the old contract.
+        for tweak in ({"risk": "reversible"},
                       {"panel_required": False}, {"evidence_carries": False},
                       {"round_fp": ""}, {"now_fp": ""},
                       {"now_fp": "a" * 12}, {"force": True}):
             allowed, _ = freshness_gate_decision(**{**self.KW, **tweak})
             self.assertTrue(allowed, f"gate overreached with {tweak}")
+
+    def test_stale_assertive_blocks(self):
+        # T1: an assertive close resting on a stale panel must block, because a
+        # claim signed off by a panel that predates the code is a claim about
+        # code that was never reviewed. Same message shape as irreversible.
+        allowed, why = freshness_gate_decision(
+            **{**self.KW, "risk": "assertive"})
+        self.assertFalse(allowed, "assertive stale close was NOT blocked")
+        self.assertIn("re-run", why)
+        self.assertIn("--stale-panel-ok", why)
+        # grok#3: pin the message CONTENT — the risk class and BOTH fingerprints
+        # (worklist: "blocks the close with a message naming both fingerprints").
+        # A revert to the old hardcoded "risk is irreversible" or a dropped
+        # fingerprint must fail here, not stay green on the marker alone.
+        self.assertIn("assertive", why)
+        self.assertIn(self.KW["round_fp"], why)
+        self.assertIn(self.KW["now_fp"], why)
+
+    def test_assertive_override_without_reason_refused(self):
+        allowed, why = freshness_gate_decision(
+            **{**self.KW, "risk": "assertive", "stale_ok": True})
+        self.assertFalse(allowed)
+        self.assertIn("--reason", why)
+
+    def test_assertive_override_with_reason_allows(self):
+        # Narrow escape (same as irreversible): --stale-panel-ok --reason.
+        allowed, _ = freshness_gate_decision(
+            **{**self.KW, "risk": "assertive", "stale_ok": True,
+               "stale_reason": "docs-only delta, diff reviewed"})
+        self.assertTrue(allowed)
+
+    def test_assertive_force_allows(self):
+        # Blunt escape (same as irreversible): --force bypasses close policy.
+        allowed, _ = freshness_gate_decision(
+            **{**self.KW, "risk": "assertive", "force": True})
+        self.assertTrue(allowed)
+
+    def test_stale_unclassified_blocks(self):
+        # Panel finding O1: an unset `## Risk` is held to the high-consequence
+        # bar everywhere else (close_decision, panel_required "all"), so it must
+        # ALSO block on a stale carrying panel — otherwise blanking the field is
+        # strictly more lenient on freshness than honest classification, the
+        # 1.5.32 "cheapest path through the strictest gate" fail-open reopened.
+        allowed, why = freshness_gate_decision(
+            **{**self.KW, "risk": "unclassified"})
+        self.assertFalse(allowed, "unclassified stale close was NOT blocked")
+        self.assertIn("re-run", why)
 
 
 class ClosePathMatrix(unittest.TestCase):
@@ -213,12 +265,94 @@ class ClosePathMatrix(unittest.TestCase):
         self.assertIn("FRESH", self._receipt(td))
 
     def test_reversible_stale_closes_with_stale_clause(self):
-        # Advisory behavior unchanged below irreversible; the record is new.
+        # Advisory behavior unchanged below the gate; the record is new.
+        # (T1: reversible stays advisory — the negative control that the gate
+        # did not widen to every risk class.)
         d, td, env = self._setup(risk="reversible", panel_cfg="all")
         r = self._close(d, env)
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         self.assertIn("STALE", self._receipt(td))
         self.assertIn("tree-state mismatch", r.stdout)  # console note kept
+
+    def test_assertive_stale_blocks(self):
+        # T1: the real close path blocks an assertive stale close, same as
+        # irreversible. Red against pre-T1 code (assertive closed with a STALE
+        # receipt clause and no block).
+        d, td, env = self._setup(risk="assertive", panel_cfg="all")
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        self.assertIn(BLOCK_MARKER, r.stderr)
+        self.assertIn("risk is assertive", r.stderr)  # grok#3: names the class
+        self.assertIn("pending", self._receipt(td))
+
+    def test_assertive_fresh_closes_with_fresh_clause(self):
+        d, td, env = self._setup(risk="assertive", panel_cfg="all",
+                                 change_after=False)
+        r = self._close(d, env)
+        self.assertIn("Task 001 done.", r.stdout, r.stderr)
+        self.assertIn("FRESH", self._receipt(td))
+
+    def test_assertive_stale_panel_ok_closes_with_recorded_reason(self):
+        # T1: the narrow escape works for assertive too (user decision
+        # 2026-08-23 — same two escapes as irreversible).
+        d, td, env = self._setup(risk="assertive", panel_cfg="all")
+        r = self._close(d, env, "--stale-panel-ok")
+        self.assertNotIn("Task 001 done.", r.stdout)  # reason required
+        r = self._close(d, env, "--stale-panel-ok", "--reason",
+                        "docs-only delta, diff reviewed")
+        self.assertIn("Task 001 done.", r.stdout, r.stderr)
+        receipt = self._receipt(td)
+        self.assertIn(CLAUSE, receipt)
+        self.assertIn("STALE", receipt)
+        self.assertIn('accepted: "docs-only delta, diff reviewed"', receipt)
+
+    def test_assertive_force_bypasses_and_attributes_reason_to_force(self):
+        d, td, env = self._setup(risk="assertive", panel_cfg="all")
+        r = self._close(d, env, "--force", "--reason", "emergency close")
+        self.assertIn("Task 001 done.", r.stdout, r.stderr)
+        receipt = self._receipt(td)
+        self.assertIn("Forced close, reason:", receipt)
+        self.assertIn("emergency close", receipt)
+        self.assertIn("STALE", receipt)
+        self.assertNotIn('accepted: "emergency close"', receipt)
+
+    def test_unclassified_stale_blocks_under_all(self):
+        # Panel finding O1, end-to-end: under panel_required_for "all" an unset
+        # `## Risk` resting on a stale carrying panel must block, or blanking
+        # the field is a freshness bypass of the T1 guarantee. Red pre-O1
+        # (unclassified closed advisory-only).
+        d, td, env = self._setup(risk="unclassified", panel_cfg="all")
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        self.assertIn(BLOCK_MARKER, r.stderr)
+        self.assertIn("pending", self._receipt(td))
+
+    def test_reversible_stale_still_advisory_under_all(self):
+        # O1 negative control: the gate did NOT widen to reversible — a truly
+        # reversible task still closes with only the advisory STALE clause.
+        d, td, env = self._setup(risk="reversible", panel_cfg="all")
+        r = self._close(d, env)
+        self.assertIn("Task 001 done.", r.stdout, r.stderr)
+        self.assertIn("STALE", self._receipt(td))
+
+    def test_default_list_config_asymmetry_is_pinned(self):
+        # Panel finding O2: pin the SEEDED-default behavior, not just "all".
+        # Under panel_required_for=["assertive","irreversible"] the freshness
+        # gate fires for assertive (panel required) but is INERT for
+        # unclassified (panel NOT required → resolve_panel_required False), so
+        # `unclassified` does not hit the freshness BLOCK. This is the boundary
+        # a future edit to resolve_panel_required or the init seed could shift
+        # undetected — the documented scope limit of the O1 fix.
+        DEFAULT = ["assertive", "irreversible"]
+        # assertive → freshness block fires
+        d, td, env = self._setup(risk="assertive", panel_cfg=DEFAULT)
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        self.assertIn(BLOCK_MARKER, r.stderr)
+        # unclassified → gate inert (panel not required for it by default)
+        d2, td2, env2 = self._setup(risk="unclassified", panel_cfg=DEFAULT)
+        r2 = self._close(d2, env2)
+        self.assertNotIn(BLOCK_MARKER, r2.stderr)
 
     def test_irreversible_stale_without_policy_is_advisory(self):
         # Judge A4: a voluntary panel in a no-policy project must not block.
