@@ -2,6 +2,88 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.37] — 2026-08-23
+
+A stabilization batch (T1–T5) hardening the close contract, the judge tamper
+guard, and test hermeticity, plus a measured performance verdict. It adds no
+new top-level command and no provider-scope change from 1.5.36, though it does
+extend the close/audit contract (a new `verify_contract_ack` config key, the
+`verify-contract-change` audit sweep, and the `--stale-panel-ok` close flag).
+This release also runs the README audit that 1.5.36 deferred and re-baselines
+the audit stamp. The batch items below are sourced from the 1.5.37 batch range
+`76e0eaa..8aaf69b` and state only what that diff shows.
+
+### Added
+
+- **Verify-contract drift guard (T5).** Each close now records its declared
+  `verify` commands in the enforcement journal (a multi-line command is
+  newline-escaped to one line so it is not dropped at its first newline; the
+  joined field is byte-capped at pb_journal's 200-byte head, with the committed
+  receipt recording each command's first line (uncapped) as the authoritative
+  per-command list), and `tasks audit`
+  gains a risk-keyed `verify-contract-change` sweep that flags a `verify`
+  command recorded at a past close but no longer in the current contract **for
+  that risk**. An unacknowledged removal is an advisory finding; listing it in
+  the new `verify_contract_ack` config key degrades it to an informational line
+  but never fully silences it (the ack list is on the same gate-exempt config
+  path it guards — visibility, not prevention). Disclosed bounds: first-line
+  (cmd1) comparison, backticks in `verify` unsupported (use `$(...)`),
+  best-effort visibility rather than tamper-proof.
+- **Reproducible BASH_ENV DEBUG-trap benchmark (T4).**
+  `scripts/bench_bash_trap.py` measures the per-tool-call cost of the bundled
+  logger's DEBUG trap and prints median/p95 with a 15 ms verdict.
+
+### Changed
+
+- **Panel-freshness block extended to assertive and unclassified closes (T1).**
+  Where policy requires a panel (`panel_required_for`), a close held to the
+  high-consequence bar — `assertive`, `irreversible`, or an unset/unclassified
+  `## Risk` — now BLOCKS on stale panel evidence; a `reversible` close stays
+  advisory. Both escapes are recorded, never silent: `--force --reason` and the
+  narrower `--stale-panel-ok --reason` (which lands `STALE, accepted: "…"` in
+  the receipt's freshness clause).
+- **Judge tamper guard now hashes pre-existing dirty/untracked file content
+  (T3).** Review paths compare per-dirty-file content hashes (keyed off
+  `--porcelain -z` byte paths; symlinks by link text) in addition to Git
+  porcelain state, so a content-only edit to an already-dirty file, a
+  revert/delete, a same-content symlink retarget, and a git↔non-git transition
+  are caught. An oversize file records an honest bounded marker rather than a
+  silent skip — `unhashed:too-large:<size>` past the 5 MiB per-file cap,
+  `unhashed:budget-exceeded` past the 200 MiB per-snapshot cap.
+
+### Fixed
+
+- **Test hermeticity: enforcement-journal isolation (T2).** Journal-emitting
+  tests no longer leak records into the real workspace `.agent/journal/`, and
+  the `tasks init` `.gitignore` seed now includes `.agent/journal/` and
+  `.agent/*/journal/`.
+
+### Documentation
+
+- Ran the deferred README audit incrementally since the last audit baseline
+  (`797ce0e`). Refreshed
+  `docs/cli.md` (the `tasks work done` freshness/force flags and the
+  `verify-contract-change` audit sweep) and `docs/architecture.md` (a log-only
+  note on the enforcement journal), surfaced the T1 `--stale-panel-ok --reason`
+  flag in the shipped `tasks --help` usage and the init CLAUDE.md template
+  beside `--force`, and re-baselined `docs/readme-audit-baseline.json` at this
+  release.
+
+### Performance
+
+- **BASH_ENV DEBUG-trap cost — verdict NO-CHANGE (T4).** On the fused Bash-tool
+  hook path (Linux, py3.10), `BASH_ENV=bash-log.sh` adds a median ~6.8–7.5 ms
+  per tool call over two order-flipped N=150 runs (on a ~208 ms baseline) —
+  under the owner-ratified 15 ms threshold, so the DEBUG trap is left
+  unchanged. macOS/Windows numbers pending; the driver is a wall-clock tool,
+  not a CI-asserted budget, and absolute numbers are host-dependent.
+
+### Guarantee ledger
+
+- Four entries in `docs/guarantee-ledger.json` updated (statements + proofs);
+  none added or removed: `PB-CLOSE-VERIFY-CONTRACT`, `PB-PANEL-FRESHNESS`,
+  `PB-JUDGE-TAMPER`, `PB-PERFORMANCE-HOOKS`.
+
 ## [1.5.36] — 2026-08-22
 
 A provider-scope decision plus a batch of enforcement-parity and hermeticity

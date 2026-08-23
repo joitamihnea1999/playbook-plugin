@@ -82,7 +82,7 @@ The close is **earned, not asserted** — these are enforced by the CLI, not con
 
 ```bash
 .claude/bin/tasks work <number>              # activate task, hook starts tracking
-.claude/bin/tasks work done                  # verify + receipt + deactivate (--force needs --reason)
+.claude/bin/tasks work done                  # verify + receipt + deactivate (--force --reason overrides all; --stale-panel-ok --reason clears only a stale panel)
 .claude/bin/tasks new <type> <name>          # create task — does NOT activate
 .claude/bin/tasks list [--pending]           # task overview
 .claude/bin/tasks status                     # current gate position

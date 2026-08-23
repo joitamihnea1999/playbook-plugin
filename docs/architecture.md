@@ -28,6 +28,8 @@ Hooks enforce the structure at the OS level, because warnings don't stick — bl
 | `PostToolUse` | Echoes gate state after every tool call, keeping the current gate in the agent's face. |
 | `Stop` / `SessionEnd` | Finalize session state. SessionEnd removes the session directory only when the process is really exiting — `/clear` keeps it, because the same process continues and the active task has to survive it. |
 
+Each enforcement decision (task-gate allow/block, command-guard block, stop-hook unchecked-gates, close) is also appended best-effort as one JSON line to `.agent/<lane>/journal/enforcement.jsonl` — log-only, by tested construction it never alters or blocks a decision (guarantee `PB-ENFORCEMENT-JOURNAL`); no reader tooling ships yet.
+
 The task gate runs two guards before the no-active-task check, both on edits to the active task's own `task.md`:
 
 - **Guard 0 — manual-creation block.** A `Write` that would create a *new* `.agent/**/tasks/<N>-…/task.md` is blocked; only `tasks new` mints task files (it owns templates and numbering). Editing an existing task.md is fine.

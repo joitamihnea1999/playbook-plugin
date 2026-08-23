@@ -659,7 +659,7 @@ Then **ask the user** what they want to work on. Don't autonomously pick a task.
 
 ```bash
 .claude/bin/tasks work <number>              # activate task, hook starts tracking
-.claude/bin/tasks work done [--force]        # finish; bounces if gates still open (--force overrides)
+.claude/bin/tasks work done [--force]        # finish; bounces if gates open. --force overrides all; --stale-panel-ok --reason clears only a stale panel
 .claude/bin/tasks new <type> <name> [intent] # create task — intent fills ## Intent
 .claude/bin/tasks new --stub <type> <name> [intent] # stub — expands on tasks work
 .claude/bin/tasks plan-review <number>       # blind plan review by independent agent
@@ -880,7 +880,10 @@ Commands:
                       (/playbook:init seeds ["assertive","irreversible"] ⇒ only
                       those close-gate on a PASS panel, reversible work closes on
                       verify+single-judge; set "all" for a panel on every close).
-                      --force needs --reason.
+                      Stale panel evidence on a high-consequence close blocks;
+                      --stale-panel-ok --reason accepts only that, while --force
+                      --reason is the blunt whole-policy override. --force and
+                      --stale-panel-ok both need --reason.
   audit [<N>]         Run mechanical pre-panel sweeps (conflict markers, merge
                       artifacts, stale markers, + project sweeps); receipt to task.md
   parked [--all]      List open parked items across tasks (--all: incl. resolved)
