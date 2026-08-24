@@ -36,7 +36,10 @@ def _load_bench():
 
 def _stub_hook(dir_: Path, name: str, code: int) -> Path:
     p = dir_ / name
-    p.write_text(f"#!/usr/bin/env bash\nexit {code}\n", encoding="utf-8")
+    # newline="\n": on Windows the default text mode would translate \n -> \r\n,
+    # so git-bash would run `exit 0\r` — an invalid numeric argument that exits 1,
+    # not 0 (the exact failure this guards). Keep LF-only. No-op on POSIX.
+    p.write_text(f"#!/usr/bin/env bash\nexit {code}\n", encoding="utf-8", newline="\n")
     p.chmod(p.stat().st_mode | stat.S_IXUSR)
     return p
 
