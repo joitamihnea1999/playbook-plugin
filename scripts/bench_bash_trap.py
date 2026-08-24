@@ -68,16 +68,21 @@ def _make_project() -> tempfile.TemporaryDirectory:
     return td
 
 
-def _run_fused_once(cwd: str, env: dict, hooks=(TASK_GATE, CMD_GUARD)) -> "list[int]":
+def _run_fused_once(cwd: str, env: dict, hooks=(TASK_GATE, CMD_GUARD),
+                    bash: str = "bash") -> "list[int]":
     """One Bash-tool call's worth of PreToolUse hooks: task-gate + command-guard,
     each a fresh bash process reading the fixed payload on stdin. Returns each
     hook's exit code so the caller can tell a clean run from a broken one — the
     hooks ALLOW (exit 0) on the benign `echo benchmark` payload, so any non-zero
-    is a crash or an unexpected block, not a valid sample."""
+    is a crash or an unexpected block, not a valid sample.
+
+    `bash` defaults to bare `"bash"` (the dev machine's shell); callers on
+    Windows must pass a RESOLVED git-bash, because bare `bash` there is the
+    System32 WSL stub, which exits non-zero without running the script."""
     rcs: "list[int]" = []
     for hook in hooks:
         p = subprocess.run(
-            ["bash", str(hook)], input=PAYLOAD, cwd=cwd, env=env,
+            [bash, str(hook)], input=PAYLOAD, cwd=cwd, env=env,
             capture_output=True, text=True,
         )
         rcs.append(p.returncode)
@@ -91,9 +96,10 @@ def _run_ok(rcs: "list[int]") -> bool:
     return bool(rcs) and all(rc == 0 for rc in rcs)
 
 
-def _time_call(cwd: str, env: dict, hooks=(TASK_GATE, CMD_GUARD)) -> "tuple[float, list[int]]":
+def _time_call(cwd: str, env: dict, hooks=(TASK_GATE, CMD_GUARD),
+               bash: str = "bash") -> "tuple[float, list[int]]":
     t0 = time.perf_counter()
-    rcs = _run_fused_once(cwd, env, hooks)
+    rcs = _run_fused_once(cwd, env, hooks, bash)
     return (time.perf_counter() - t0) * 1000.0, rcs   # (ms, exit codes)
 
 
@@ -112,7 +118,8 @@ def _summary(samples: list[float]) -> dict:
     }
 
 
-def run_bench(runs: int, warmup: int, hooks=(TASK_GATE, CMD_GUARD)) -> dict:
+def run_bench(runs: int, warmup: int, hooks=(TASK_GATE, CMD_GUARD),
+              bash: str = "bash") -> dict:
     """Measure the three arms `runs` times each and return the result dict.
 
     Every run's hook exit codes are checked: a run where any hook exits non-zero
@@ -142,14 +149,14 @@ def run_bench(runs: int, warmup: int, hooks=(TASK_GATE, CMD_GUARD)) -> dict:
             cwd = str(Path(proj))
             for _ in range(max(0, warmup)):
                 for env in arms.values():
-                    _time_call(cwd, env, hooks)
+                    _time_call(cwd, env, hooks, bash)
             names = list(arms)
             for i in range(runs):
                 # Flip arm order on alternate iterations so no arm is
                 # systematically first/last (panel: fixed order can bias).
                 order = names if i % 2 == 0 else list(reversed(names))
                 for k in order:
-                    ms, rcs = _time_call(cwd, arms[k], hooks)
+                    ms, rcs = _time_call(cwd, arms[k], hooks, bash)
                     if _run_ok(rcs):
                         samples[k].append(ms)
                     else:

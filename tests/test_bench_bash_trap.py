@@ -22,6 +22,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests._bashcheck import bash_or_skip
+
 _HERE = Path(__file__).resolve().parent
 _BENCH = _HERE.parent / "scripts" / "bench_bash_trap.py"
 
@@ -46,12 +48,16 @@ def _stub_hook(dir_: Path, name: str, code: int) -> Path:
 
 class BenchExitStatus(unittest.TestCase):
     def test_run_fused_once_returns_exit_codes(self):
+        # Use the RESOLVED bash (skips if none usable): bare `bash` on Windows is
+        # the System32 WSL stub, which exits non-zero without running the script,
+        # so both hooks would read as 1 regardless of their real exit code.
+        bash = bash_or_skip()
         bench = _load_bench()
         with tempfile.TemporaryDirectory() as td:
             d = Path(td)
             good = _stub_hook(d, "ok-hook", 0)
             bad = _stub_hook(d, "bad-hook", 1)
-            rcs = bench._run_fused_once(td, dict(os.environ), hooks=(good, bad))
+            rcs = bench._run_fused_once(td, dict(os.environ), hooks=(good, bad), bash=bash)
         self.assertEqual([0, 1], list(rcs),
                          "_run_fused_once must surface each hook's exit code")
 
@@ -65,12 +71,13 @@ class BenchExitStatus(unittest.TestCase):
         # A full tiny bench run against a FAILING hook must record zero valid
         # timing samples for every arm and a positive failure count — never fold
         # the broken run into the median.
+        bash = bash_or_skip()
         bench = _load_bench()
         with tempfile.TemporaryDirectory() as td:
             d = Path(td)
             bad_a = _stub_hook(d, "bad-a", 1)
             bad_b = _stub_hook(d, "bad-b", 3)
-            result = bench.run_bench(runs=3, warmup=1, hooks=(bad_a, bad_b))
+            result = bench.run_bench(runs=3, warmup=1, hooks=(bad_a, bad_b), bash=bash)
         self.assertTrue(any(v > 0 for v in result["failures"].values()),
                         "failing hooks must be counted as failures")
         for arm, summ in result["arms"].items():
