@@ -889,6 +889,11 @@ Commands:
   parked [--all]      List open parked items across tasks (--all: incl. resolved)
   blocked "<reason>"  Pause the active task awaiting the owner's decision — an
                       honest state (not a faked checkbox); resume with work <N>
+  handoff             Hand off the active task to a fresh session: writes the
+                      mechanical state (repo + code_roots git state, gates, latest
+                      receipt) into a ## Handoff section for you to append your
+                      in-flight reasoning to, then blocks (reason: handoff).
+                      bootstrap surfaces it; work <N> resumes and consumes it.
   freehand            User-driven mode (no gate pressure)
   new <type> <name> [intent]   Create task (intent pre-fills ## Intent)
   new --stub <type> <name> [intent]   Create stub (expands on work)

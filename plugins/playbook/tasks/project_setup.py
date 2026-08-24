@@ -150,6 +150,22 @@ def cmd_bootstrap(cmd_args):
         print(mm_content.rstrip())
         print()
 
+    # Unconsumed session handoff (C1): the newest task blocked with reason
+    # "handoff". A fresh session must see it FIRST — resuming consumes it.
+    try:
+        from tasks.core import find_unconsumed_handoff
+        _ho = find_unconsumed_handoff(project_path)
+    except Exception:
+        _ho = None
+    if _ho:
+        _num, _slug, _ = _ho
+        print("=== HANDOFF WAITING ===")
+        print(f"Task {_num} ({_slug.replace('-', ' ')}) was handed off — its "
+              "`## Handoff` section holds the outgoing session's state + notes.")
+        print(f"Resume with tasks work {_num} (this consumes the handoff; the "
+              "section stays as history).")
+        print()
+
     # Pending tasks
     print("=== PENDING TASKS ===")
     list_tasks(project_path, pending_only=True)

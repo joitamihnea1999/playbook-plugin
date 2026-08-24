@@ -80,6 +80,7 @@ _BASELINE = {
     "status": (0, "No tasks found"),
     "audit": (0, "Running pre-panel audit..."),
     "blocked": (1, "a reason is required"),
+    "handoff": (1, "No active task to hand off"),
     "parked": (0, "No open parked items."),
     "freehand": (0, "creating freehand session"),
     # I5: doctor exits non-zero when a check FAILs. The bare scratch project has

@@ -2083,6 +2083,166 @@ def resume_blocked_task(task_file: Path) -> None:
         _atomic_write(task_file, "\n".join(out) + "\n")
 
 
+# ── Session handoff (C1) ─────────────────────────────────────────────────────
+# `tasks handoff` codifies the manual session-handoff pattern (proven 3x in this
+# project's own history): it writes the mechanical ~80% playbook already knows
+# into a `## Handoff` section, the agent appends the judgment ~20%, and the task
+# enters the honest blocked state (reason "handoff"). A fresh `tasks bootstrap`
+# surfaces the newest unconsumed handoff; resuming via `tasks work <N>` flips the
+# status back to in_progress (resume_blocked_task) — which is what consumes it.
+
+def _git_repo_summary(repo_path: Path) -> "tuple[str, str, int] | None":
+    """(branch, short-sha, dirty-file-count) for a git repo, or None when it is
+    not a git repo / git is unavailable / errors. Best-effort — a handoff must
+    still write on a repo with a detached HEAD or no git at all."""
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"],
+                              cwd=repo_path, capture_output=True, text=True)
+        if head.returncode != 0 or not head.stdout.strip():
+            return None
+        sha = head.stdout.strip()
+        br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            cwd=repo_path, capture_output=True, text=True).stdout.strip()
+        porc = subprocess.run(["git", "status", "--porcelain"], cwd=repo_path,
+                              capture_output=True, text=True)
+        dirty = len([ln for ln in porc.stdout.splitlines() if ln.strip()]) \
+            if porc.returncode == 0 else 0
+        return (br or "(detached)", sha, dirty)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _latest_receipt_line(task_file: Path) -> "str | None":
+    """The newest `### ...` entry heading under `## Verification Receipt`, or None
+    when the task has no receipts yet (a handoff still works without one)."""
+    try:
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    in_receipt = False
+    for ln in lines:
+        s = ln.strip()
+        if s == "## Verification Receipt":
+            in_receipt = True
+            continue
+        if in_receipt:
+            if s.startswith("## "):
+                break
+            if s.startswith("### "):
+                return s[4:].strip()
+    return None
+
+
+def _repo_state_bullet(label: str, summary: "tuple[str, str, int] | None") -> str:
+    if summary is None:
+        return f"- **{label}** — (not a git repo / git unavailable)"
+    br, sha, dirty = summary
+    state = f"{dirty} uncommitted file(s)" if dirty else "clean"
+    return f"- **{label}** — branch `{br}` @ `{sha}` ({state})"
+
+
+def build_handoff_section(project_path: Path, task_file: Path) -> str:
+    """The mechanical ~80% of a session handoff, as a `## Handoff` markdown block.
+    Best-effort throughout: git / receipts / code_roots absent → honest
+    placeholders, never a crash. The lone `### Agent notes` scaffold is where the
+    agent appends the judgment ~20% the tooling can't know."""
+    ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    name = Path(project_path).name
+    out = ["## Handoff",
+           f"> Generated {ts} — mechanical state below. APPEND your judgment "
+           'under "Agent notes" before you stop.', ""]
+    out.append(_repo_state_bullet(f"Project repo `{name}`",
+                                  _git_repo_summary(Path(project_path))))
+    try:
+        cfg = load_config(Path(project_path))
+    except Exception:
+        cfg = {}
+    for rel in _code_roots(cfg):
+        out.append(_repo_state_bullet(
+            f"Code root `{rel}`", _git_repo_summary(Path(project_path) / rel)))
+    try:
+        checked, total = _gate_counts(
+            task_file.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        checked, total = 0, 0
+    out.append(f"- **Gates:** {checked}/{total} checked — next unchecked: "
+               f"{_extract_head_position(task_file)}")
+    rc = _latest_receipt_line(task_file)
+    out.append("- **Latest verification:** " + (f"`{rc}`" if rc else "(none recorded)"))
+    out += ["",
+            "### Agent notes (the ~20% only you know — fill in before you stop)",
+            "- In-flight reasoning:",
+            "- Decisions not yet in the file:",
+            "- Dead ends ruled out:",
+            ""]
+    return "\n".join(out)
+
+
+def write_handoff(task_file: Path, section: str) -> None:
+    """Upsert the `## Handoff` section (idempotent replace, else append at end).
+    Touches no gate. The section's inner `### Agent notes` is a level-3 heading,
+    so the level-2 skip below replaces the whole prior block cleanly."""
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    out, skip = [], False
+    for line in lines:
+        if line.strip() == "## Handoff":
+            skip = True
+            continue
+        if skip:
+            if line.startswith("## ") and not line.startswith("### "):
+                skip = False
+                out.append(line)
+            continue
+        out.append(line)
+    while out and out[-1].strip() == "":
+        out.pop()
+    out += ["", section.rstrip(), ""]
+    _atomic_write(task_file, "\n".join(out) + "\n")
+
+
+def _extract_block_reason(task_file: Path) -> "str | None":
+    """The one-line reason from a task's `## Blocked` blockquote (the trailing
+    `(since …)` / `Resumed …` stamp stripped), or None when not blocked."""
+    try:
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    in_blocked = False
+    for ln in lines:
+        s = ln.strip()
+        if s == "## Blocked":
+            in_blocked = True
+            continue
+        if in_blocked:
+            if s.startswith("## "):
+                break
+            if s.startswith(">"):
+                body = s.lstrip(">").strip()
+                body = re.sub(r"\s*\((?:since|Resumed)[^)]*\)\s*$", "", body).strip()
+                if body:
+                    return body
+    return None
+
+
+def find_unconsumed_handoff(project_path: Path):
+    """The newest task that is BLOCKED with block-reason 'handoff' — an unconsumed
+    handoff. Resuming with `tasks work <N>` flips status to in_progress, which is
+    what consumes it (the `## Handoff` section stays as history). Returns
+    (number:int, slug:str, task_file:Path) or None."""
+    best = None
+    for num, slug, tf in _iter_task_dirs(project_path):
+        try:
+            if not _is_blocked(tf):
+                continue
+            reason = _extract_block_reason(tf)
+            if reason and reason.strip().lower() == "handoff":
+                if best is None or num > best[0]:
+                    best = (num, slug, tf)
+        except Exception:
+            continue
+    return best
+
+
 def _folder_matches_filter(folder_name: str, name_filter: str) -> bool:
     """Does a task folder name match the activation filter?
 
