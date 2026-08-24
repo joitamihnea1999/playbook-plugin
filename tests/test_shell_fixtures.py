@@ -49,7 +49,11 @@ def _clean_env() -> dict:
     # .agent/bash_history into scratch projects and breaks .agent-content asserts.
     env.pop("BASH_ENV", None)
     # Let each fixture own its session id / role rather than inheriting ours.
-    for k in ("PLAYBOOK_SESSION_ID", "PLAYBOOK_ROLE", "PLAYBOOK_EVAL_CONFIG"):
+    # PLAYBOOK_SANDBOXED too: a fixture that toggles it internally (e.g.
+    # gate-logging-failure-fixture, which sets it =1 for one scenario) is
+    # distorted if the parent env already has it set.
+    for k in ("PLAYBOOK_SESSION_ID", "PLAYBOOK_ROLE", "PLAYBOOK_EVAL_CONFIG",
+              "PLAYBOOK_SANDBOXED"):
         env.pop(k, None)
     return env
 
