@@ -177,6 +177,31 @@ class VerifyContractSweep(unittest.TestCase):
         self.assertTrue(run_audit(d)["passed"],   # info tier never fails audit
                         "an informational ack line must not fail the audit")
 
+    def test_multiline_verify_reported_as_unsupported_for_drift(self):
+        # B5: a MULTI-LINE verify command is compared only by its first line
+        # (cmd1) against the receipt (which also records only cmd1), so a
+        # weakening confined to lines 2+ is INVISIBLE. Here cmd1 ("make lint") is
+        # unchanged, so the old cmd1-only comparison returned None (silent
+        # false-clean). The sweep must instead surface the multi-line command
+        # loudly as unsupported-for-drift-detection — never silence.
+        d = self._project("make lint\nmake test")
+        self._add_receipt(d, "001", "2026-01-01T00:00:00+00:00", "reversible",
+                          ["make lint\nmake test"])
+        r = check_verify_contract_change(d)
+        self.assertIsNotNone(r, "a multi-line verify command was silently passed")
+        self.assertEqual(r["status"], "findings")
+        self.assertEqual(r["severity"], "advisory")     # visible, never a hard block
+        self.assertIn("multi-line", r["output"].lower())
+        self.assertIn("make lint", r["output"])          # names the command (cmd1)
+
+    def test_single_line_verify_has_no_multiline_advisory(self):
+        # Control: a single-line verify with a matching receipt stays fully clean
+        # — the multi-line advisory must NOT fire spuriously.
+        d = self._project("make test")
+        self._add_receipt(d, "001", "2026-01-01T00:00:00+00:00", "reversible",
+                          ["make test"])
+        self.assertIsNone(check_verify_contract_change(d))
+
     def test_unacknowledged_removal_still_fires_with_ack_present(self):
         # ack drops the named command to informational; a DIFFERENT unack'd drop
         # still fires at ADVISORY (finding) severity — the negative control.
