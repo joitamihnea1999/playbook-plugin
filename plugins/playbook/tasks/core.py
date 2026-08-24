@@ -998,12 +998,121 @@ def has_risk_section(task_file) -> bool:
     return bool(_risk_heading_lines(lines))
 
 
+def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
+                               strict: bool = False) -> "str | None":
+    """The fingerprint MATERIAL for a single git repo: HEAD + porcelain + working
+    diff + a digest of every untracked file's CONTENT. Returns None when
+    `repo_path` has no HEAD, isn't a git repo, or git errors — the caller decides
+    what that means. Shared by the outer tree and each nested `code_roots` repo so
+    both hash byte-identical semantics (owner constraint: no stronger hashing for
+    nested repos than the outer tree already does).
+
+    `strict=True` (nested `code_roots` roots — impl-panel findings F2/F4) adds two
+    guards that must NOT apply to the outer tree: (1) the path must be its OWN git
+    toplevel, so a plain subdirectory resolves to `<absent>` instead of silently
+    fingerprinting the ANCESTOR repo git would walk up to, and a symlinked root
+    that lands in a different repo is rejected; (2) a non-zero git status/diff
+    return code yields None (→ `<absent>`, the STALE-safe direction) instead of an
+    empty-output error reading as a CLEAN tree. `strict=False` reproduces the
+    outer tree's historical behavior byte-for-byte (the project may legitimately
+    live in a SUBDIRECTORY of a larger repo, where the toplevel check would wrongly
+    blank the fingerprint)."""
+    import hashlib
+    try:
+        head_r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_path,
+                                capture_output=True, text=True)
+        head = head_r.stdout.strip()
+        if not head:
+            return None
+        if strict:
+            if head_r.returncode != 0:
+                return None
+            top_r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                                   cwd=repo_path, capture_output=True, text=True)
+            try:
+                if (top_r.returncode != 0
+                        or Path(top_r.stdout.strip()).resolve()
+                        != Path(repo_path).resolve()):
+                    return None
+            except OSError:
+                return None
+        # -uall enumerates untracked files INDIVIDUALLY (a bare `?? dir/`
+        # hides everything inside the directory from the hash below).
+        porcelain_r = subprocess.run(
+            ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
+            cwd=repo_path, capture_output=True, text=True)
+        diff_r = subprocess.run(
+            ["git", "diff", "HEAD", "--", ".", *exclude],
+            cwd=repo_path, capture_output=True, text=True)
+        if strict and (porcelain_r.returncode != 0 or diff_r.returncode != 0):
+            return None                  # a failed status/diff is NOT a clean tree
+        porcelain = porcelain_r.stdout
+        diff = diff_r.stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # Untracked CONTENT is hashed explicitly (F18 judge C1, verified
+    # empirically): porcelain names an untracked file but never its bytes,
+    # and `diff HEAD` covers tracked paths only — so the pre-1.5.6
+    # fingerprint was blind to edits inside new files, which is exactly
+    # where post-panel fixes land (batches 4 and 5 both did).
+    untracked_digest = hashlib.sha256()
+    for line in sorted(porcelain.splitlines()):
+        if not line.startswith("?? "):
+            continue
+        rel = line[3:].strip().strip('"')
+        try:
+            content = (Path(repo_path) / rel).read_bytes()
+            fhash = hashlib.sha256(content).hexdigest()
+        except OSError:
+            fhash = "unreadable"
+        untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
+    return head + porcelain + diff + untracked_digest.hexdigest()
+
+
+def _code_roots(cfg: dict) -> "list[str]":
+    """Validated, sorted, de-duplicated list of project-relative nested-repo paths
+    from config.json `code_roots`. Empty when the key is absent (the default —
+    fingerprints are then byte-identical to before this feature existed) or when
+    every entry is invalid. Rejects, LOUDLY, anything that isn't a relative path
+    inside the project: non-lists, non-strings, empty/NUL-bearing strings,
+    absolute paths, and `..` traversal (the fingerprint must never be steered to
+    hash something outside the tree)."""
+    raw = cfg.get("code_roots")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        print("[playbook] code_roots: must be a list of project-relative paths "
+              "to nested git repos — ignored", file=sys.stderr)
+        return []
+    out: "set[str]" = set()
+    for i, p in enumerate(raw):
+        if not isinstance(p, str) or not p.strip() or "\x00" in p:
+            print(f"[playbook] code_roots[{i}]: needs a non-empty relative path "
+                  "string — skipped", file=sys.stderr)
+            continue
+        rel = p.strip()
+        parts = Path(rel).parts
+        if os.path.isabs(rel) or rel.startswith(("/", "\\")) or ".." in parts:
+            print(f"[playbook] code_roots[{i}]={rel!r}: must be a relative path "
+                  "inside the project (no absolute paths, no '..') — skipped",
+                  file=sys.stderr)
+            continue
+        out.add(rel)
+    return sorted(out)
+
+
 def tree_state_fingerprint(project_path: Path) -> str:
     """Content fingerprint of the CODE STATE: sha256 over HEAD + porcelain status
     + working diff, 12 hex chars. Names *what state* a panel reviewed or a close
     certified — deterministic, unlike mtimes, and sensitive to uncommitted work
     (which is the normal state at review time). Empty string when git is absent:
-    no fingerprint beats a fabricated one."""
+    no fingerprint beats a fabricated one.
+
+    When config.json `code_roots` names nested git repos (this workspace and
+    HowFar-v2 keep their real code in a gitignored nested checkout, invisible to
+    the outer `git status`), each root's material is folded in too, so a code-only
+    edit there moves the fingerprint. With `code_roots` unset the fingerprint is
+    byte-identical to before the key existed."""
     import hashlib
     # `.agent/` is EXCLUDED: triaging findings edits task.md between the panel
     # and the close by design — the fingerprint must answer "did the CODE
@@ -1030,42 +1139,42 @@ def tree_state_fingerprint(project_path: Path) -> str:
                 else:
                     print(f"[playbook] fingerprint_exclude[{_i}]: needs a "
                           "non-empty pathspec string — skipped", file=sys.stderr)
-    try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project_path,
-                              capture_output=True, text=True).stdout.strip()
-        if not head:
-            return ""
-        # -uall enumerates untracked files INDIVIDUALLY (a bare `?? dir/`
-        # hides everything inside the directory from the hash below).
-        porcelain = subprocess.run(
-            ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
-            cwd=project_path, capture_output=True, text=True).stdout
-        diff = subprocess.run(
-            ["git", "diff", "HEAD", "--", ".", *exclude],
-            cwd=project_path, capture_output=True, text=True).stdout
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    # Untracked CONTENT is hashed explicitly (F18 judge C1, verified
-    # empirically): porcelain names an untracked file but never its bytes,
-    # and `diff HEAD` covers tracked paths only — so the pre-1.5.6
-    # fingerprint was blind to edits inside new files, which is exactly
-    # where post-panel fixes land (batches 4 and 5 both did). NOTE: this
-    # changes fingerprint values across the 1.5.5→1.5.6 upgrade; a stamp
-    # from an older round reads STALE once and self-heals at the next panel.
-    untracked_digest = hashlib.sha256()
-    for line in sorted(porcelain.splitlines()):
-        if not line.startswith("?? "):
-            continue
-        rel = line[3:].strip().strip('"')
+    # Outer-tree material. NOTE: hashing untracked CONTENT changed fingerprint
+    # values across the 1.5.5→1.5.6 upgrade; a stamp from an older round reads
+    # STALE once and self-heals at the next panel.
+    base = _repo_fingerprint_material(Path(project_path), exclude)
+    if base is None:
+        return ""            # git absent — no fingerprint beats a fabricated one
+    material = base
+    # Nested code repos (config `code_roots`): a code-only edit inside a
+    # gitignored nested checkout is invisible to the outer `git status`, so the
+    # outer material above never moves for it. Fold each root's own material in.
+    # UNSET/empty → this loop runs zero times → `material` is byte-identical to
+    # before this feature. Sorted+deduped by _code_roots so order can't perturb
+    # the hash. Each root is hashed in `strict` mode (must be its OWN git repo
+    # toplevel, git failures → `<absent>`); a missing / non-repo / plain-subdir
+    # root contributes a stable "<absent>" marker rather than crashing (a
+    # configured root that isn't a repo yet is not a reason to abandon the whole
+    # fingerprint).
+    _proj_resolved = Path(project_path).resolve()
+    for _rel in _code_roots(_cfg):
+        _cand = Path(project_path) / _rel
+        # Resolve-containment (impl-panel F2): _code_roots already blocks `..`
+        # and absolute strings lexically, but a symlinked in-tree entry could
+        # still resolve OUTSIDE the project. Refuse to run git there.
         try:
-            content = (Path(project_path) / rel).read_bytes()
-            fhash = hashlib.sha256(content).hexdigest()
+            _cand_resolved = _cand.resolve()
+            _inside = (_cand_resolved == _proj_resolved
+                       or _proj_resolved in _cand_resolved.parents)
         except OSError:
-            fhash = "unreadable"
-        untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
-    return hashlib.sha256(
-        (head + porcelain + diff + untracked_digest.hexdigest())
-        .encode("utf-8", "replace")).hexdigest()[:12]
+            _inside = False
+        if not _inside:
+            print(f"[playbook] code_roots {_rel!r}: resolves outside the "
+                  "project — skipped", file=sys.stderr)
+            continue
+        _sub = _repo_fingerprint_material(_cand, exclude, strict=True)
+        material += f"\0code_root:{_rel}\0" + ("<absent>" if _sub is None else _sub)
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 # One round per `# Panel {Plan|Impl} Review` H1. judge.md stacks rounds NEWEST

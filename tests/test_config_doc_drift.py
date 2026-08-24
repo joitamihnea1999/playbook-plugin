@@ -40,6 +40,7 @@ _DOC = _HERE.parent / "docs" / "configuration.md"
 # both are enforced below. Cites are the read sites.
 HONORED_KEYS = frozenset({
     "audit",                      # audit.py:106  cfg.get("audit") (nested schema)
+    "code_roots",                 # core.py  _code_roots (nested-repo fingerprint)
     "command_guard",              # command_guard.py:248
     "dangerous_commands",         # command_guard.py:253
     "fingerprint_exclude",        # core.py (merge fingerprint)

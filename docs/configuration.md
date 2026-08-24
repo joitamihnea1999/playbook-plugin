@@ -127,6 +127,38 @@ excluded here can change after a panel without anyone being told, so a path
 that can carry claims or code does NOT belong in this list. Commit the file —
 stamp and close must agree across clones.
 
+## `.agent/config.json` — `code_roots` (project policy)
+
+The tree-state fingerprint is computed from the OUTER git repository. Some
+projects keep their real code in a **gitignored nested checkout** — this
+workspace's `playbook-plugin/`, HowFar-v2's app repo — invisible to the outer
+`git status`. A code-only edit inside such a nested repo therefore does not move
+the outer fingerprint at all, so a post-panel change there reads silently
+**FRESH** and the freshness gate never fires — the unsafe direction of the
+guarantee. `code_roots` closes that blind spot:
+
+```json
+{
+  "code_roots": ["playbook-plugin"]
+}
+```
+
+Each entry is a **project-relative path** to a nested git repository. When set,
+the fingerprint additionally folds in each root's `HEAD`, porcelain status, and
+working diff (including untracked-file content) — the exact same material the
+outer tree already hashes, no stronger and no weaker. A code-only edit inside a
+listed root now moves the fingerprint, so the freshness gate sees it.
+
+Rules, all loud: the key is **opt-in** — with `code_roots` absent (or `[]`) the
+fingerprint is **byte-identical** to before the key existed, so nothing changes
+for projects that don't use it. Entries are sorted and de-duplicated so config
+order can never perturb the hash. An entry that is not a string, is empty, is an
+absolute path, or contains `..` traversal is skipped with a printed warning
+(the fingerprint must never be steered to hash something outside the tree). A
+listed root that does not exist yet or is not a git repository contributes a
+stable marker rather than crashing the fingerprint. Commit the file — the panel
+stamp and the close comparison must agree across clones.
+
 ## `.agent/config.json` — `audit` (pre-panel sweeps)
 
 `tasks audit` runs mechanical sweeps before a review so judges spend tokens on hard problems, not greppable ones. The `audit` key tunes them:
@@ -226,6 +258,13 @@ and the panel-evidence requirement are untouched. `--force --reason` remains the
 blunt whole-policy hatch. A `reversible` risk always stays advisory (console
 note + receipt clause, no block), as does any close for which policy does not
 require a panel.
+
+The stamp compares a tree-state fingerprint of the **outer** git repository. If
+your project keeps code in a gitignored **nested checkout** (this workspace's
+`playbook-plugin/`), a code-only edit there is invisible to the outer fingerprint
+and would read silently FRESH — declare those repos in
+[`code_roots`](#agentconfigjson--code_roots-project-policy) so the freshness gate
+sees them.
 
 ### The verify-contract guard (a change to `verify` is made visible)
 
