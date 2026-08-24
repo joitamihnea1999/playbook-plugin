@@ -80,8 +80,16 @@ NUDGE_FILE="$AGENT_DIR/monitor/nudge.md"
 [ -f "$NUDGE_FILE" ] || exit 0
 [ -s "$NUDGE_FILE" ] || exit 0
 
-# Atomic claim: mv to .delivering so monitor can't overwrite mid-read
-DELIVERING="$NUDGE_FILE.delivering"
+# Atomic claim: rename the single nudge.md to a PER-INVOCATION UNIQUE path so
+# concurrent hook firings can't collide. With a fixed shared `.delivering` name,
+# a second firing's `mv` overwrote a first firing's in-flight claim (or both read
+# the same claimed file) — dropping or double-delivering a nudge. A unique
+# destination makes `mv` the mutual exclusion: exactly ONE concurrent firing can
+# rename the single nudge.md (rename is atomic on the source inode); the losers'
+# `mv` finds the source already gone and exits silently. `$$` (this hook
+# process's pid) + `$RANDOM` are bash builtins (bash 3.2 / macOS ok); together
+# they're unique across concurrent firings and robust to pid reuse.
+DELIVERING="$NUDGE_FILE.delivering.$$.$RANDOM"
 mv "$NUDGE_FILE" "$DELIVERING" 2>/dev/null || exit 0
 
 # Read content
@@ -112,7 +120,24 @@ print(json.dumps(out))
     printf '%s\n' "$NUDGE_JSON"
     rm -f "$DELIVERING"
 else
-    mv "$DELIVERING" "$NUDGE_FILE" 2>/dev/null || true
+    # Emit failed (e.g. python3 missing): preserve at-least-once — re-land our
+    # claim as nudge.md. But NEVER clobber a NEWER nudge the monitor may have
+    # written after our claim. A `[ -e ] then mv` check is NOT atomic — the
+    # monitor can write newer B between the test and the mv, and mv would
+    # overwrite+lose B. `ln` (hard link, no `-f`) is atomic no-replace: it FAILS
+    # (EEXIST) if nudge.md already exists, so our OLDER claim can never destroy
+    # the monitor's NEWER nudge. On success nudge.md is re-landed; either way the
+    # claim file is then dropped. `ln` unavailable/failing for another reason
+    # falls back to a best-effort non-atomic restore (this whole branch exists
+    # precisely because tools can be missing). All arms are `set -e`-safe.
+    if ln "$DELIVERING" "$NUDGE_FILE" 2>/dev/null; then
+        rm -f "$DELIVERING" 2>/dev/null || true          # linked → drop the extra name
+    elif [ -e "$NUDGE_FILE" ]; then
+        rm -f "$DELIVERING" 2>/dev/null || true          # ln EEXIST: a newer nudge won; drop stale claim
+    else
+        # ln unavailable and no nudge.md — non-atomic fallback, same as legacy.
+        mv "$DELIVERING" "$NUDGE_FILE" 2>/dev/null || rm -f "$DELIVERING" 2>/dev/null || true
+    fi
     exit 0
 fi
 
