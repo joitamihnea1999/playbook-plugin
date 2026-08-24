@@ -341,8 +341,26 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     # separate `-z` read failed, `dirty_hashes` is empty and the content-hash
     # compare would silently pass — so surface a degraded-guard warning instead
     # of a quiet miss (round-5 opus/grok).
+    # `is_git` (A2): a cheap `.git` probe that lets _detect_tamper distinguish
+    # "git repo whose readable `git status` FAILED" (fail CLOSED) from "genuinely
+    # not a git repo" (documented uncontained fallback), symmetric with the
+    # `z_read_ok` guard. It WALKS ANCESTORS the way git does — a Playbook root
+    # (located by `.agent/tasks/`) can sit nested inside a parent Git worktree
+    # whose `.git` is above `project_path` (panel round-1 codex:sol), and
+    # `git -C project_path status` reports on that ancestor repo. Matches a `.git`
+    # dir OR file (worktrees/submodules). Pure filesystem stats — never a
+    # subprocess that could itself hang.
+    def _in_git_repo(path: Path) -> bool:
+        p = path
+        while True:
+            if (p / ".git").exists():
+                return True
+            if p.parent == p:
+                return False
+            p = p.parent
     return {"porcelain": porcelain, "task_hash": task_hash,
-            "dirty_hashes": dirty_hashes, "z_read_ok": z_out is not None}
+            "dirty_hashes": dirty_hashes, "z_read_ok": z_out is not None,
+            "is_git": _in_git_repo(project_path)}
 
 
 # Each mode accepts BOTH placeholder generations: pre-1.5.2 templates say
@@ -509,6 +527,21 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     if b_porc is not None and not before.get("z_read_ok", False):
         changes.append("content-hash guard degraded: dirty files were not "
                        "enumerable at review start (`git status -z` failed)")
+    # A2: the READABLE `git status --porcelain` failing is asymmetric with the
+    # `-z` guard above — a git repo whose readable status returned None looks
+    # identical to a genuine non-git repo, so when BOTH snapshots are porcelain
+    # None the git↔non-git transition below does not fire and detection silently
+    # downgrades to task-hash-only. `is_git` (a `.git` probe) tells "git repo
+    # whose `git status` failed" (fail CLOSED) from "not a git repo at all"
+    # (documented uncontained fallback — stays silent, is_git False).
+    if a_porc is None and after.get("is_git"):
+        changes.append("content-hash guard degraded: `git status` did not run at "
+                       "close on a git repo (hostile/huge tree, corrupt index, or "
+                       "repo broken?)")
+    if b_porc is None and before.get("is_git"):
+        changes.append("content-hash guard degraded: `git status` did not run at "
+                       "review start on a git repo (hostile/huge tree, corrupt "
+                       "index, or repo broken?)")
     if (b_porc is None) != (a_porc is None):
         # git↔non-git transition WHILE a review runs: `git status` succeeded once
         # and failed the other time — the most likely cause is a rogue deleting

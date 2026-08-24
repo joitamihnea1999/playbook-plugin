@@ -432,6 +432,60 @@ class TamperGuardTest(unittest.TestCase):
                         "a failed -z enumeration must surface a degraded-guard "
                         "warning, not a silent pass")
 
+    def test_readable_gitstatus_failure_on_git_repo_is_flagged(self):
+        # A2: the READABLE `git status --porcelain` failing on a real git repo
+        # (hostile/huge tree, corrupt index, git broke) leaves `porcelain` None —
+        # indistinguishable from a non-git repo. When BOTH snapshots are None on a
+        # GIT repo the transition check misses it and detection silently downgrades
+        # to task-hash-only. It must instead fail CLOSED (degraded warning),
+        # symmetric with the `-z` z_read_ok path.
+        d = self._git_repo()
+        tf = d / "task.md"
+        tf.write_text("gate1\n")
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
+        # Force BOTH snapshots through the REAL `_snapshot_repo_state` with git
+        # status failing (rc=1), so this is end-to-end: production must recognize
+        # the real repo (is_git True) and _detect_tamper must fail closed on the
+        # symmetric both-None case (panel round-1 codex:sol — the earlier version
+        # injected is_git and did not exercise production).
+        import subprocess as _sp
+
+        def _fail_status(*a, **k):
+            return _sp.CompletedProcess(a[0] if a else [], returncode=1,
+                                        stdout="", stderr="fatal")
+        with mock.patch("subprocess.run", side_effect=_fail_status):
+            before = treview._snapshot_repo_state(d, tf)
+            self.assertIsNone(before["porcelain"])       # readable status failed
+            self.assertTrue(before["is_git"])            # production recognizes the real repo
+            changes = treview._detect_tamper(d, tf, before)   # after also fails → both None
+        self.assertTrue(any("degraded" in c for c in changes),
+                        "a readable git-status failure on a git repo must fail closed")
+
+    def test_is_git_probe_walks_ancestors(self):
+        # panel round-1 codex:sol: a Playbook root can be nested inside a parent
+        # Git worktree whose `.git` is ABOVE project_path; `git -C project_path
+        # status` reports on that ancestor repo, so is_git must walk ancestors.
+        d = self._git_repo()
+        nested = d / "sub" / "proj"
+        nested.mkdir(parents=True)
+        snap = treview._snapshot_repo_state(nested, nested / "task.md")
+        self.assertTrue(snap["is_git"],
+                        "is_git must recognize a dir nested inside a parent git worktree")
+
+    def test_non_git_porcelain_none_is_not_flagged(self):
+        # A2 negative control: a GENUINE non-git dir (porcelain None + is_git
+        # False) is the documented uncontained fallback — no degraded alarm, only
+        # the task-hash signal.
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text("a\n")
+        before = treview._snapshot_repo_state(d, tf)
+        self.assertFalse(before["is_git"])
+        self.assertEqual(treview._detect_tamper(d, tf, before), [],
+                         "a non-git repo must not raise a degraded alarm")
+
     def test_git_directory_deletion_is_caught(self):
         # T3 panel round 4 (sonnet, Critical): deleting .git makes `git status`
         # fail after but not before — a git↔non-git transition that must flag,
