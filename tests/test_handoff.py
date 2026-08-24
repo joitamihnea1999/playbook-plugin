@@ -183,5 +183,77 @@ class BootstrapSurfacing(_Base):
         self.assertNotIn("resume with tasks work", r2.stdout.lower())
 
 
+class FenceAndContainment(_Base):
+    """Impl-panel hardening: fence-aware section writer/readers + code_root
+    containment + git-failure not masked as clean."""
+
+    def _core(self):
+        sys.path.insert(0, str(PLUGIN))
+        import tasks.core as core
+        return core
+
+    def test_write_handoff_ignores_fenced_heading(self):
+        # Critical: a `## Handoff` quoted inside a fenced example must NOT be
+        # treated as the section — writing must not delete through to the next
+        # real H2 and corrupt the file.
+        core = self._core()
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text(
+            "# T\n\n## Notes\nExample of the section:\n```\n## Handoff\n"
+            "old fenced content\n```\n\n## Keepers\n- [ ] must survive\n",
+            encoding="utf-8")
+        core.write_handoff(tf, "## Handoff\n> fresh\n- **Gates:** 0/1\n")
+        text = tf.read_text(encoding="utf-8")
+        self.assertIn("## Keepers", text)              # real H2 preserved
+        self.assertIn("must survive", text)            # its content preserved
+        self.assertIn("```", text)                     # the fence preserved
+        self.assertIn("> fresh", text)                 # new section appended
+
+    def test_block_reason_ignores_fenced_decoy(self):
+        # A fenced `## Blocked` / `> handoff` example must not fake the reason;
+        # the REAL block reason wins.
+        core = self._core()
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text(
+            "# T\n\n## Status\nblocked\n\n## Docs\n```\n## Blocked\n"
+            "> handoff  (since x)\n```\n\n## Blocked\n> waiting on owner  (since y)\n",
+            encoding="utf-8")
+        self.assertEqual(core._extract_block_reason(tf), "waiting on owner")
+
+    def test_find_unconsumed_handoff_skips_fenced_decoy(self):
+        # A task blocked for a DIFFERENT reason, with a fenced handoff example,
+        # must not be surfaced as an unconsumed handoff.
+        core = self._core()
+        d, td = self._project()
+        (td / "task.md").write_text(
+            "# 001\n\n## Status\nblocked\n\n## Docs\n```\n## Blocked\n"
+            "> handoff\n```\n\n## Blocked\n> waiting  (since y)\n",
+            encoding="utf-8")
+        self.assertIsNone(core.find_unconsumed_handoff(d))
+
+    def test_git_status_failure_is_status_unknown_not_clean(self):
+        core = self._core()
+        # dirty=None (status failed) must render "status unknown", not "clean".
+        self.assertIn("status unknown",
+                      core._repo_state_bullet("R", ("main", "abc1234", None)))
+        self.assertIn("clean",
+                      core._repo_state_bullet("R", ("main", "abc1234", 0)))
+
+    def test_code_root_plain_subdir_is_not_ancestor_repo(self):
+        # A code_root that is a plain subdir of the outer repo must report
+        # "(not a git repo…)", not the ancestor repo's branch — require_own_toplevel.
+        core = self._core()
+        d, td = self._project()
+        (d / "plaindir").mkdir()
+        self.assertIsNone(
+            core._git_repo_summary(d / "plaindir", require_own_toplevel=True))
+        # the real nested repo IS its own toplevel
+        d2, _ = self._project(code_root=True)
+        self.assertIsNotNone(
+            core._git_repo_summary(d2 / "sub", require_own_toplevel=True))
+
+
 if __name__ == "__main__":
     unittest.main()

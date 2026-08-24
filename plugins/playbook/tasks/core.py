@@ -944,6 +944,31 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     return found
 
 
+def _iter_nonfenced(lines: "list[str]"):
+    """Yield ``(index, stripped_line)`` for every line OUTSIDE a Markdown code
+    fence. Shared fence-tracking (same rules as `_risk_heading_lines`) so section
+    writers/readers never treat a heading quoted inside a fenced example as a live
+    section — the #09 hazard, re-raised for the handoff writer/readers by the C1
+    impl panel (a fenced `## Handoff`/`## Blocked`/`## Verification Receipt` must
+    not corrupt the file or fake bootstrap/handoff state)."""
+    fence_char = ""
+    fence_len = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip().lstrip("﻿")
+        fm = re.match(r"^(`{3,}|~{3,})", stripped)
+        if fence_char:
+            if (fm and fm.group(1)[0] == fence_char
+                    and len(fm.group(1)) >= fence_len):
+                fence_char = ""
+                fence_len = 0
+            continue
+        if fm:
+            fence_char = fm.group(1)[0]
+            fence_len = len(fm.group(1))
+            continue
+        yield i, stripped
+
+
 def extract_risk(task_file) -> str:
     """Read the `## Risk` classification from a task.md — the token on the line
     after the heading. Returns one of RISK_CLASSES, or 'unclassified' if the
@@ -2091,22 +2116,38 @@ def resume_blocked_task(task_file: Path) -> None:
 # surfaces the newest unconsumed handoff; resuming via `tasks work <N>` flips the
 # status back to in_progress (resume_blocked_task) — which is what consumes it.
 
-def _git_repo_summary(repo_path: Path) -> "tuple[str, str, int] | None":
-    """(branch, short-sha, dirty-file-count) for a git repo, or None when it is
-    not a git repo / git is unavailable / errors. Best-effort — a handoff must
-    still write on a repo with a detached HEAD or no git at all."""
+def _git_repo_summary(repo_path: Path, *,
+                      require_own_toplevel: bool = False
+                      ) -> "tuple[str, str, int | None] | None":
+    """(branch, short-sha, dirty-count) for a git repo, or None when it is not a
+    git repo / git is unavailable / errors. `dirty` is None when HEAD read but
+    `git status` FAILED — the handoff renders that as "status unknown", never a
+    false "clean" (impl-panel C1). `require_own_toplevel=True` (nested code_roots)
+    demands the path be its OWN git toplevel so a plain subdirectory reports
+    `<absent>` (None) rather than the ANCESTOR repo, matching C2's strict
+    fingerprint. Best-effort — a handoff must still write on a detached HEAD."""
     try:
         head = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"],
                               cwd=repo_path, capture_output=True, text=True)
         if head.returncode != 0 or not head.stdout.strip():
             return None
         sha = head.stdout.strip()
+        if require_own_toplevel:
+            top = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                                 cwd=repo_path, capture_output=True, text=True)
+            try:
+                if (top.returncode != 0
+                        or Path(top.stdout.strip()).resolve()
+                        != Path(repo_path).resolve()):
+                    return None
+            except (OSError, RuntimeError, ValueError):
+                return None
         br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                             cwd=repo_path, capture_output=True, text=True).stdout.strip()
         porc = subprocess.run(["git", "status", "--porcelain"], cwd=repo_path,
                               capture_output=True, text=True)
-        dirty = len([ln for ln in porc.stdout.splitlines() if ln.strip()]) \
-            if porc.returncode == 0 else 0
+        dirty = (len([ln for ln in porc.stdout.splitlines() if ln.strip()])
+                 if porc.returncode == 0 else None)
         return (br or "(detached)", sha, dirty)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -2120,24 +2161,29 @@ def _latest_receipt_line(task_file: Path) -> "str | None":
     except OSError:
         return None
     in_receipt = False
-    for ln in lines:
-        s = ln.strip()
+    for _i, s in _iter_nonfenced(lines):   # fence-aware (impl-panel C1)
         if s == "## Verification Receipt":
             in_receipt = True
             continue
         if in_receipt:
-            if s.startswith("## "):
+            if s.startswith("## ") and not s.startswith("### "):
                 break
             if s.startswith("### "):
                 return s[4:].strip()
     return None
 
 
-def _repo_state_bullet(label: str, summary: "tuple[str, str, int] | None") -> str:
+def _repo_state_bullet(label: str,
+                       summary: "tuple[str, str, int | None] | None") -> str:
     if summary is None:
         return f"- **{label}** — (not a git repo / git unavailable)"
     br, sha, dirty = summary
-    state = f"{dirty} uncommitted file(s)" if dirty else "clean"
+    if dirty is None:
+        state = "status unknown"          # git status failed — not "clean" (C1)
+    elif dirty:
+        state = f"{dirty} uncommitted file(s)"
+    else:
+        state = "clean"
     return f"- **{label}** — branch `{br}` @ `{sha}` ({state})"
 
 
@@ -2157,9 +2203,20 @@ def build_handoff_section(project_path: Path, task_file: Path) -> str:
         cfg = load_config(Path(project_path))
     except Exception:
         cfg = {}
+    _proj_resolved = Path(project_path).resolve()
     for rel in _code_roots(cfg):
-        out.append(_repo_state_bullet(
-            f"Code root `{rel}`", _git_repo_summary(Path(project_path) / rel)))
+        # Same containment as C2's fingerprint: skip a symlinked root that
+        # resolves outside the project, and require the root to be its OWN git
+        # toplevel (a plain subdir must not report the ancestor repo).
+        cand = Path(project_path) / rel
+        try:
+            cand_r = cand.resolve()
+            inside = (cand_r == _proj_resolved or _proj_resolved in cand_r.parents)
+        except (OSError, RuntimeError, ValueError):
+            inside = False
+        summary = (_git_repo_summary(cand, require_own_toplevel=True)
+                   if inside else None)
+        out.append(_repo_state_bullet(f"Code root `{rel}`", summary))
     try:
         checked, total = _gate_counts(
             task_file.read_text(encoding="utf-8", errors="replace"))
@@ -2180,20 +2237,22 @@ def build_handoff_section(project_path: Path, task_file: Path) -> str:
 
 def write_handoff(task_file: Path, section: str) -> None:
     """Upsert the `## Handoff` section (idempotent replace, else append at end).
-    Touches no gate. The section's inner `### Agent notes` is a level-3 heading,
-    so the level-2 skip below replaces the whole prior block cleanly."""
+    Touches no gate. Fence-aware (impl-panel C1 Critical): a `## Handoff` quoted
+    inside a fenced example is NOT the section, so it can never make this delete
+    through to the next real H2 and corrupt the file. The section's own inner
+    `### Agent notes` is level-3, so it never ends the replaced block."""
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    out, skip = [], False
-    for line in lines:
-        if line.strip() == "## Handoff":
-            skip = True
-            continue
-        if skip:
-            if line.startswith("## ") and not line.startswith("### "):
-                skip = False
-                out.append(line)
-            continue
-        out.append(line)
+    nonfenced = list(_iter_nonfenced(lines))
+    start = next((i for i, s in nonfenced if s == "## Handoff"), None)
+    if start is None:
+        out = list(lines)                                   # append fresh
+    else:
+        # End at the first non-fenced level-2 heading strictly after start
+        # (a fenced heading inside the old block does not end it).
+        end = next((i for i, s in nonfenced
+                    if i > start and s.startswith("## ") and not s.startswith("### ")),
+                   len(lines))
+        out = list(lines[:start]) + list(lines[end:])
     while out and out[-1].strip() == "":
         out.pop()
     out += ["", section.rstrip(), ""]
@@ -2202,19 +2261,19 @@ def write_handoff(task_file: Path, section: str) -> None:
 
 def _extract_block_reason(task_file: Path) -> "str | None":
     """The one-line reason from a task's `## Blocked` blockquote (the trailing
-    `(since …)` / `Resumed …` stamp stripped), or None when not blocked."""
+    `(since …)` / `Resumed …` stamp stripped), or None when not blocked.
+    Fence-aware (impl-panel C1): a fenced `## Blocked` example is not live."""
     try:
         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
     in_blocked = False
-    for ln in lines:
-        s = ln.strip()
+    for _i, s in _iter_nonfenced(lines):
         if s == "## Blocked":
             in_blocked = True
             continue
         if in_blocked:
-            if s.startswith("## "):
+            if s.startswith("## ") and not s.startswith("### "):
                 break
             if s.startswith(">"):
                 body = s.lstrip(">").strip()
