@@ -29,6 +29,25 @@ Two numbers rather than one because they answer different questions: soft is *wh
 
 **One exception — `review_timeout_secs` in `config.json` is a floor, not just a tier.** When the file sets it, the CLI and env tiers may only *raise* the hard timeout, never lower it; a lower value is clamped up and a warning is printed. When the file sets it to unlimited, a finite `--timeout` is ignored outright. The reason is that `--timeout` is often passed by an agent, and an install that deliberately removed its kill window should not have one reintroduced by a subprocess argument. Nothing is floored when the file does not set the key — then ordinary precedence applies and `--timeout 60` means 60. The soft deadline is never floored; that is what `--soft-timeout` is for.
 
+## `.agent/config.json` — judge & close knobs
+
+Three more `.agent/config.json` keys tune the judge panel and the close-time verify run:
+
+```json
+{
+  "panel_quorum": "majority",
+  "judge_verify": ["python3 -m pytest -q"],
+  "verify_timeout_secs": 1200,
+  "review_context_chars": 100000,
+  "review_context_chars_stdin": 200000
+}
+```
+
+- `panel_quorum` — the minimum number of succeeding judges for a `panel-review` to **PASS**. Accepted values: `"majority"` (the default — `launched // 2 + 1`, a strict majority of the judges that actually *launched*, so a degraded panel with seats missing still needs a real majority rather than quietly lowering the bar), `"all"` (every launched judge must pass), a positive integer (an absolute count), or a float in `(0, 1]` (that fraction of the launched judges, rounded up). A bool, a value `≤ 0`, or an out-of-range fraction is **invalid**; an invalid value at any tier warns once and **falls through to the next tier** — env → config → the built-in `"majority"` — so a bad env var does not mask a valid `config.json` value, and `"majority"` applies only when no tier is valid. **Precedence, highest first:** `PLAYBOOK_PANEL_QUORUM` env → `.agent/config.json` `panel_quorum` → the built-in `"majority"`.
+- `judge_verify` — a list of shell command strings the project declares safe for a judge to run inside its **read-only sandbox** while checking a specific suspicion. **This is prompt guidance, not an enforced execution engine, and whether a judge can actually run the commands depends on its seat's tools:** Claude judge seats are invoked with `--tools Read,Glob,Grep` (plus `WebSearch`) and **cannot execute shell commands at all** — for them the clause is advisory context; codex/grok seats decide for themselves. Only the **first six** declared commands are surfaced to the judge prompt (declare the ones that matter first). Declare only commands that never write inside the repo — redirect caches elsewhere, use a unique temp dir, keep them parallel-safe — because judges run concurrently under the sandbox. Absent or empty (the default) means no execution clause is added at all. A non-list value, or non-string / blank entries, are ignored.
+- `verify_timeout_secs` — the **hard** wall-clock ceiling, in seconds, for **one** declared `verify` command at close (`tasks work done`): on expiry that command is killed and the close is blocked. Default 1200. Set it to `0` or `"unlimited"` (also the JSON strings `"none"` / `"null"` / `"inf"` / `"infinite"`) for **no ceiling** — this knob exists because a verify command with no ceiling can hang `tasks work done` forever, which in headless use is a silent deadlock. **Precedence, highest first:** `PLAYBOOK_VERIFY_TIMEOUT_SECS` env → `.agent/config.json` `verify_timeout_secs` → the 1200 default. This is distinct from `review_timeout_secs`, which bounds the *judge* subprocess, not the verify command.
+- `review_context_chars` / `review_context_chars_stdin` — the per-transport character budget for the task context handed to a review judge. Two keys because the two transports differ: `review_context_chars_stdin` (default **200000**) applies to stdin-fed seats (claude, codex), which have no OS argv limit so their ceiling is model attention; `review_context_chars` (default **100000**) applies to argv-fed seats (grok and the experimental agy/pi), which stay under the byte-guarded argv bound. Raising a budget past what the transport can carry is reported in the review receipts. **Precedence, highest first, per key:** `PLAYBOOK_REVIEW_CONTEXT_CHARS` / `PLAYBOOK_REVIEW_CONTEXT_CHARS_STDIN` env → `.agent/config.json` → the default.
+
 ## `.agent/config.json` — `merge_verify` (project policy)
 
 The `/playbook:merge` skill always verifies *the merge itself*: mind-map integrity, per-user contamination, and that the merge introduced no code of its own. Whether your *branches* are healthy is a different question, and only your project knows what answering it looks like — so you declare the command:
@@ -107,6 +126,33 @@ printed warning, never silently. Exclude only true bookkeeping: anything
 excluded here can change after a panel without anyone being told, so a path
 that can carry claims or code does NOT belong in this list. Commit the file —
 stamp and close must agree across clones.
+
+## `.agent/config.json` — `audit` (pre-panel sweeps)
+
+`tasks audit` runs mechanical sweeps before a review so judges spend tokens on hard problems, not greppable ones. The `audit` key tunes them:
+
+```json
+{
+  "audit": {
+    "sweeps": [
+      {"name": "no-print", "command": "! grep -rn 'console.log' src", "why": "stray debug logs", "severity": "advisory"}
+    ],
+    "disable_defaults": false,
+    "mindmap_severity": "advisory",
+    "node_freshness": true,
+    "node_freshness_severity": "advisory",
+    "dangling_links_severity": "advisory",
+    "wellformed_severity": "advisory",
+    "task_bloat_chars": 24000
+  }
+}
+```
+
+- `sweeps` — project-specific sweeps appended to the built-in safety set. Each is `{name, command, why, severity}`; a sweep's shell `command` exits 0 = findings, 1 = clean, ≥2 = error/did-not-run (never a pass). Malformed entries (missing `name`/`command`) are skipped rather than crashing the audit. `severity` is one of `error` / `advisory` / `info` (default `advisory`); only `error` findings fail the audit.
+- `disable_defaults` — set `true` to drop the built-in default sweeps (conflict-markers, merge-artifacts, stale-markers) and run only your declared `sweeps`. Default `false`.
+- `node_freshness` — set `false` to turn off the mind-map node-freshness sweep (which flags a node whose cited code changed after the node). Default on.
+- `mindmap_severity`, `node_freshness_severity`, `dangling_links_severity`, `wellformed_severity` — per-sweep severity overrides for the advisory mind-map checks; each takes `error` / `advisory` / `info`. Raise one to `error` to make that drift fail the audit instead of merely reporting.
+- `task_bloat_chars` — the byte threshold above which an open `task.md` is flagged as too large to review through one window (the sweep nudges the sanctioned `tasks compact`). Unset or `≤ 0` defaults to **half the argv `review_context_chars` budget** (≈50000 at the default), so it tracks your context budget automatically.
 
 ## `.agent/config.json` — `command_guard` (destructive-command interlock)
 
@@ -301,6 +347,10 @@ Pinned model ids rot as providers ship and retire models, so the pins have a mai
 | `PLAYBOOK_JUDGE_BUDGET_USD` | Overrides `judge_budget_usd` (below CLI flags). |
 | `PLAYBOOK_REVIEW_TIMEOUT_SECS` | Overrides `review_timeout_secs` (below CLI flags). May only raise a hard timeout that `config.json` has set — see the floor rule above. |
 | `PLAYBOOK_REVIEW_SOFT_TIMEOUT_SECS` | Overrides `review_soft_timeout_secs` (below CLI flags). Not floored. |
+| `PLAYBOOK_PANEL_QUORUM` | Overrides `panel_quorum` — same value grammar (`majority` / `all` / integer / fraction). |
+| `PLAYBOOK_VERIFY_TIMEOUT_SECS` | Overrides `verify_timeout_secs` — the close-time verify ceiling (`0`/`unlimited` disables). |
+| `PLAYBOOK_REVIEW_CONTEXT_CHARS` | Overrides `review_context_chars` — the argv-transport judge context budget. |
+| `PLAYBOOK_REVIEW_CONTEXT_CHARS_STDIN` | Overrides `review_context_chars_stdin` — the stdin-transport judge context budget. |
 | `PLAYBOOK_ALLOW_DANGEROUS` | Set truthy to acknowledge one destructive command past the `command_guard` interlock (a human-confirmed one-off). |
 | `PLAYBOOK_BASH` | Absolute path to the `bash` the shell-dependent surfaces (audit sweeps, `merge-verify`, `scripts/verify`) should use. Needed only where a bare `bash` on `PATH` is not the right one — most often on Windows, where `bash.exe` in System32 is the WSL launcher rather than Git Bash. The chosen bash is probed with a sentinel; an unusable one fails closed. `$PLAYBOOK_VERIFY_BASH` (named for the dev verifier, exported by CI) is honoured as a fallback when `PLAYBOOK_BASH` is unset. |
 | `PLAYBOOK_PROJECT_ROOT`, `PLAYBOOK_SESSION_ID`, `PLAYBOOK_SANDBOXED`, `PLAYBOOK_MINDMAP_MAX`, `PLAYBOOK_EVAL_CONFIG` | Internal — set by the wrappers, hooks, and sandbox; not meant to be set by hand. |
