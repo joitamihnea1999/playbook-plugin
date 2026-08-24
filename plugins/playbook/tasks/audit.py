@@ -47,7 +47,17 @@ from tasks.core import load_config
 
 # --exclude-dir keeps the sweeps off build output and the workspace's own state,
 # so a `- [ ]` in a task.md or a marker in node_modules is never a finding.
-_EXCLUDES = "--exclude-dir=.git --exclude-dir=.agent --exclude-dir=node_modules --exclude-dir=.venv"
+# `__pycache__` is excluded because a compiled `.pyc` can carry a conflict/marker
+# byte-run (compiled string constants, marshal data) that grep would report as a
+# binary match — false-failing the error-severity conflict sweep and forcing a
+# manual cache clear before every audit.
+_EXCLUDES = ("--exclude-dir=.git --exclude-dir=.agent --exclude-dir=node_modules "
+             "--exclude-dir=.venv --exclude-dir=__pycache__")
+# `-I` treats a binary file (one containing NUL) as a non-match, so a marker byte
+# baked into ANY binary — a stray `.pyc`, a compiled artifact outside __pycache__,
+# an image — can never surface as a finding. Belt-and-suspenders with the
+# __pycache__ exclude above; the exclude also spares grep the descent+scan work.
+_GREP = f"grep -rIEn {_EXCLUDES}"
 
 DEFAULT_SWEEPS = [
     {
@@ -56,7 +66,7 @@ DEFAULT_SWEEPS = [
         "why": "unresolved git conflict markers are half-merged, broken code",
         # `<<<<<<<` / `>>>>>>>` at line start are unambiguous — no legitimate use.
         # `=======` alone is skipped: a 7-char markdown underline collides with it.
-        "command": rf"grep -rEn {_EXCLUDES} '^(<<<<<<<|>>>>>>>)' .",
+        "command": rf"{_GREP} '^(<<<<<<<|>>>>>>>)' .",
     },
     {
         "name": "merge-artifacts",
@@ -80,7 +90,7 @@ DEFAULT_SWEEPS = [
         "name": "stale-markers",
         "severity": "advisory",
         "why": "TODO/FIXME/XXX/HACK — candidates a review should not have to find",
-        "command": rf"grep -rEn {_EXCLUDES} '(TODO|FIXME|XXX|HACK)' .",
+        "command": rf"{_GREP} '(TODO|FIXME|XXX|HACK)' .",
     },
 ]
 
