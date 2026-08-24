@@ -71,6 +71,42 @@ class NewTemplatePlaceholderAnchor(unittest.TestCase):
         self.assertIn("finding", tf.read_text())
 
 
+class FixTemplateAcceptsImplWriteback(unittest.TestCase):
+    """B6: the Fix playbook pattern (bugfix/cleanup) rendered a task.md with NO
+    '## Implementation Review' section, so a single-judge impl review had no
+    write-back anchor and silently refused — found live in task 010 (the judge
+    wrote to judge-codex.log but could not deliver into task.md). Adding the
+    section to the Fix pattern must make write-back succeed, while the Build
+    pattern (the negative control) stays exactly as it was."""
+
+    def _render(self, task_type):
+        tf = Path(tempfile.mkdtemp()) / "task.md"
+        tf.write_text(template.render_template(1, "t", task_type), encoding="utf-8")
+        return tf
+
+    def test_bugfix_template_accepts_impl_writeback(self):
+        tf = self._render("bugfix")
+        self.assertIn("## Implementation Review", tf.read_text(),
+                      "bugfix template must carry the write-back anchor section")
+        self.assertIsNone(_write_review_findings(tf, "impl", "B6-finding"),
+                          "bugfix template must accept single-judge impl write-back")
+        self.assertIn("B6-finding", tf.read_text())
+
+    def test_cleanup_template_accepts_impl_writeback(self):
+        # cleanup shares the Fix pattern, so it gains the anchor by the same fix.
+        tf = self._render("cleanup")
+        self.assertIsNone(_write_review_findings(tf, "impl", "B6-finding"))
+        self.assertIn("B6-finding", tf.read_text())
+
+    def test_build_template_writeback_unchanged(self):
+        # Negative control: the Build pattern already had the section; write-back
+        # must still succeed exactly as before the fix.
+        tf = self._render("feature")
+        self.assertIn("## Implementation Review", tf.read_text())
+        self.assertIsNone(_write_review_findings(tf, "impl", "ctrl-finding"))
+        self.assertIn("ctrl-finding", tf.read_text())
+
+
 class PanelTriageFrameLimits(unittest.TestCase):
     """P11: the panel's own judge.md must name what a panel structurally cannot
     catch, so a clean panel is never read as 'all clear' on these classes."""
