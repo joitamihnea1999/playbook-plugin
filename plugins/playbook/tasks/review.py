@@ -94,6 +94,96 @@ _TAMPER_HASH_CAP = 5 * 1024 * 1024  # 5 MiB per file
 _TAMPER_TOTAL_BUDGET = 200 * 1024 * 1024  # 200 MiB
 
 
+def _safe_hash_regular(path: "Path", cap: int) -> "tuple[str, object, int]":
+    """Hash a path AS A REGULAR FILE without any operation a hostile swap could
+    turn into a hang, an unbounded allocation, or an uncaught crash (panel rounds
+    2-6, codex×2 + sonnet). The single safe-read primitive used by BOTH the
+    task.md fingerprint and the dirty-file content-hash loop.
+
+    Opens ONE `O_NONBLOCK|O_NOFOLLOW` descriptor and re-validates it with `fstat`
+    AFTER the open, so a TOCTOU swap to a FIFO between an earlier stat and this
+    read cannot block, and a symlink swapped in cannot be followed. Reads at most
+    `cap` bytes, so a file grown to gigabytes cannot exhaust memory. O_NONBLOCK /
+    O_NOFOLLOW are absent on native Windows (getattr → 0): there it degrades to a
+    plain size-bounded read (a documented limitation — Windows is the uncontained
+    fallback where the OS sandbox is anyway unavailable). Returns:
+      ("hash", hexdigest, nbytes)  — a regular file within the cap
+      ("toolarge", size, 0)        — a regular file larger than the cap
+      ("error", None, 0)           — not a plain regular file now (symlink/FIFO/
+                                     device/deleted), a perms strip, or a read error
+    """
+    import hashlib
+    import stat as _stat
+    # O_BINARY (Windows) keeps the read RAW: without it Windows text-mode
+    # translates CRLF→LF, so a rogue that only rewrites line endings of a
+    # gitignored task.md would hash identically and slip the guard (panel round-8
+    # codex:sol). No-op (0) on POSIX.
+    flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return ("error", None, 0)               # ELOOP / ENXIO / perms / gone
+    try:
+        st = os.fstat(fd)                        # re-validate the OPENED object
+        if not _stat.S_ISREG(st.st_mode):
+            return ("error", None, 0)            # TOCTOU: became a FIFO/dir/device
+        if st.st_size > cap:
+            return ("toolarge", st.st_size, 0)
+        # Read up to cap+1 bytes: a file that GROWS past the cap DURING the read
+        # (a rogue appending after the fstat) would otherwise be silently
+        # truncated-and-hashed, so a rewrite of its bytes beyond `cap` hashes
+        # identically both times. Reading one extra byte lets us bucket a
+        # boundary grower as `toolarge` instead (panel round-7 opus).
+        h = hashlib.sha256()
+        remaining, nbytes = cap + 1, 0
+        while remaining > 0:
+            try:
+                chunk = os.read(fd, min(65536, remaining))
+            except (BlockingIOError, OSError):
+                return ("error", None, 0)        # O_NONBLOCK pipe / read error
+            if not chunk:
+                break
+            h.update(chunk)
+            remaining -= len(chunk)
+            nbytes += len(chunk)
+        if nbytes > cap:
+            return ("toolarge", nbytes, 0)       # grew past the cap mid-read
+        return ("hash", h.hexdigest(), nbytes)
+    finally:
+        os.close(fd)
+
+
+def _safe_task_fingerprint(task_file: "Path") -> "str | None":
+    """Fingerprint task.md for the tamper guard via the safe-read primitive
+    (`_safe_hash_regular`). Returns None only when task.md is ABSENT (the
+    deleted-task signal); a symlink is fingerprinted by LINK TEXT (never
+    dereferenced); an oversize file returns a SIZE-BEARING `too-large:<size>`
+    marker (so a size change is caught by the before/after compare while a
+    legitimately-oversize-but-unchanged task.md does NOT false-positive — panel
+    round-6 opus/codex:sol); a directory/FIFO/device or read error returns the
+    `unreadable` sentinel, which a readable→unreadable transition flags as tamper.
+    """
+    import hashlib
+    import stat as _stat
+    try:
+        st = os.lstat(task_file)
+    except OSError:
+        return None                              # absent → deleted-task signal
+    if _stat.S_ISLNK(st.st_mode):
+        try:
+            return "symlink:" + hashlib.sha256(
+                os.fsencode(os.readlink(task_file))).hexdigest()
+        except OSError:
+            return "unreadable"
+    kind, detail, _ = _safe_hash_regular(task_file, _TAMPER_HASH_CAP)
+    if kind == "hash":
+        return detail                            # type: ignore[return-value]
+    if kind == "toolarge":
+        return f"too-large:{detail}"             # size-bearing: unchanged → no flag
+    return "unreadable"                          # dir / FIFO / device / error
+
+
 def _porcelain_z_paths(z: bytes) -> "list[str]":
     """Working-tree paths from `git status --porcelain -z -uall` output (BYTES).
 
@@ -204,25 +294,48 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
                     dirty_hashes[rel] = "symlink:" + hashlib.sha256(
                         os.fsencode(os.readlink(fp))).hexdigest()
                     continue
-                if not fp.is_file():           # deleted/dir/gitlink → covered elsewhere
+                import stat as _stat_mod
+                try:
+                    _lst = os.lstat(fp)
+                except OSError:
+                    continue                     # gone → the porcelain diff covers it
+                if not _stat_mod.S_ISREG(_lst.st_mode):
+                    # NOT a regular file (dir / gitlink / FIFO / device). Record a
+                    # stable type marker instead of skipping, so a tracked file
+                    # already listed as dirty (` M victim`) that a rogue swaps to a
+                    # FIFO — whose porcelain line can stay unchanged on some git
+                    # versions — compares regular-hash → `nonregular:<type>` and is
+                    # flagged (panel round-8 codex:terra). A path that is
+                    # non-regular in BOTH snapshots (a real submodule) keeps the
+                    # same marker → no false flag.
+                    dirty_hashes[rel] = f"nonregular:{_stat_mod.S_IFMT(_lst.st_mode)}"
                     continue
-                sz = fp.stat().st_size
-                if sz > _TAMPER_HASH_CAP:
-                    dirty_hashes[rel] = f"unhashed:too-large:{sz}"
-                elif budget <= 0:
+                if budget <= 0:
                     # Total-bytes budget exhausted: a huge dirty/untracked tree
                     # (e.g. a fresh repo with no .gitignore for node_modules)
                     # must not make every review hash gigabytes twice. Honest
                     # marker, never a silent skip (round-4 opus).
                     dirty_hashes[rel] = "unhashed:budget-exceeded"
-                else:
-                    dirty_hashes[rel] = hashlib.sha256(fp.read_bytes()).hexdigest()
-                    budget -= sz
+                    continue
+                # Route the read through the SAME safe primitive as task.md: a
+                # detached writer swapping a dirty file to a FIFO between the
+                # lstat above and this read would otherwise block `read_bytes`
+                # FOREVER, hanging _detect_tamper (and every exit that depends on
+                # it) — a DoS worse than a missed banner (panel round-6, sonnet
+                # Critical / opus). The primitive re-validates with fstat.
+                kind, detail, nbytes = _safe_hash_regular(fp, _TAMPER_HASH_CAP)
+                if kind == "hash":
+                    dirty_hashes[rel] = detail   # type: ignore[assignment]
+                    budget -= nbytes
+                elif kind == "toolarge":
+                    dirty_hashes[rel] = f"unhashed:too-large:{detail}"
+                else:  # a TOCTOU swap after the lstat, or a read failure
+                    dirty_hashes[rel] = "unhashed:error"
             except OSError:
                 dirty_hashes[rel] = "unhashed:error"
-    task_hash = None
-    if task_file and task_file.exists():
-        task_hash = hashlib.sha256(task_file.read_bytes()).hexdigest()
+    # task.md fingerprint — a hostile swap must not crash OR HANG the guard
+    # before the exit banner (panel rounds 2-4, codex×2). See _safe_task_fingerprint.
+    task_hash = _safe_task_fingerprint(task_file) if task_file else None
     # `z_read_ok` lets _detect_tamper fail CLOSED when the content-hash guard
     # could not run: if the readable `git status` succeeded (a git repo) but the
     # separate `-z` read failed, `dirty_hashes` is empty and the content-hash
@@ -453,9 +566,34 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
             # `b_hash and a_hash` compare would short-circuit on the deletion
             # (round-3 sonnet, Critical).
             changes.append(f"task.md deleted ({rel})")
+        elif a_hash == "unreadable" and b_hash != "unreadable":
+            # A readable regular file BECAME non-regular mid-review (dir / FIFO /
+            # device, or perms stripped) — a tamper. Both-unreadable is a stable
+            # non-regular task.md, not a mid-review change, so it is NOT flagged
+            # here (that false-positived a legitimately-oversize task.md in the
+            # round-5 fail-closed form — panel round-6 opus/codex:sol). Oversize
+            # is caught instead by the size-bearing `too-large:<size>` marker
+            # flowing through the change compare below.
+            changes.append(f"task.md is no longer a readable regular file — "
+                           f"swapped for a directory/FIFO/device or perms stripped ({rel})")
         elif b_hash != a_hash:
+            # Content changed, OR the size-bearing oversize marker changed (a
+            # grow/shrink across or within the cap), OR a readable↔oversize flip.
             changes.append(f"task.md content changed ({rel})")
     return changes
+
+
+def _detect_tamper_safe(project_path: Path, task_file: Path | None, before: dict) -> list[str]:
+    """`_detect_tamper` wrapped so an unexpected raise NEVER skips a guaranteed
+    tamper banner/exit. Every I/O inside `_detect_tamper`/`_snapshot_repo_state`
+    is already guarded, but this last-resort guard means a post-snapshot exit —
+    on EITHER the panel or single-judge path — can always reach its `sys.exit`.
+    On any error it surfaces a loud UNVERIFIED note (which itself trips the
+    banner), the safe direction for a best-effort guard (panel rounds 5, 7)."""
+    try:
+        return _detect_tamper(project_path, task_file, before)
+    except Exception as _e:   # noqa: BLE001 — last-resort guard, must not raise
+        return [f"tamper check itself errored ({_e}) — review UNVERIFIED"]
 
 
 def _tamper_banner(changes: list[str]) -> str:
@@ -815,7 +953,16 @@ def cmd_panel_review(cmd_args):
             results[label] = output
             print(f"  [{label}] done", flush=True)
 
-    _tamper_changes = _detect_tamper(project_path, task_file, _tamper_before)
+    _tamper_changes = _detect_tamper_safe(project_path, task_file, _tamper_before)
+    # On tamper the panel, like the single-judge path, does NOTHING but emit the
+    # banner and exit — before the tree fingerprint and judge.md assembly/write
+    # below, any of which could hang (an unbounded/FIFO read) or write through an
+    # attacker-redirected task dir on a hostile tree (panel rounds 9-10 codex:sol).
+    # The panel verdicts are untrustworthy on a mutated tree, so not persisting
+    # them costs nothing; the operator inspects per the banner.
+    if _tamper_changes:
+        print("\n" + _tamper_banner(_tamper_changes), file=sys.stderr, flush=True)
+        sys.exit(1)
 
     # Classify each judge as succeeded vs failed — a failed judge must NOT
     # read as a clean empty review (T139) or a successful one. Shared
@@ -843,16 +990,11 @@ def cmd_panel_review(cmd_args):
         f"**PANEL VERDICT: {'PASS' if panel_passed else 'FAIL'}** — {verdict_reason}\n"
     )
 
-    # Write judge.md (path already set above based on task_file presence)
+    # Write judge.md (path already set above based on task_file presence).
+    # (No tamper branch here: a mutated tree already exited above with the banner,
+    # so this assembly/write is only reached on a clean tree.)
     display_label = task_path or extra_prompt[:60]
     lines = [f"# Panel {review_label.title()} — {display_label}\n", verdict_banner]
-    # Tamper banner rides directly under the round heading (#1) — the reading
-    # agent must meet it before any finding, and the heading must stay FIRST
-    # because judge.md stacks rounds by `# Panel …` headings (1.5.3). The
-    # file is still written (paid verdicts are never discarded), but the run
-    # exits non-zero below.
-    if _tamper_changes:
-        lines.insert(1, _tamper_banner(_tamper_changes) + "\n")
     lines.append(f"**Judges:** {succeeded}/{len(results)} succeeded | **Quorum:** {panel_quorum} | **Web search:** {'yes' if web_search else 'no'} | **Timeout:** {timeout_label}\n")
     # Context receipt (C3/P3), per transport (1.5.3): each seat saw what its
     # line says it saw — nothing was dropped without being named.
@@ -906,11 +1048,18 @@ def cmd_panel_review(cmd_args):
         lines.append("\n\n")
     # Stack, never clobber (1.5.3): a re-run panel must not destroy the
     # previous round's verdicts. Newest round first; the close gate reads
-    # only the newest round's mode+verdict.
+    # only the newest round's mode+verdict. Best-effort so a hostile tree can't
+    # crash the run before the exit code.
     from tasks.core import stack_judge_round
-    stack_judge_round(judge_md, "\n".join(lines))
+    _panel_save_failed = False
+    try:
+        stack_judge_round(judge_md, "\n".join(lines))
+        _saved_note = f"\nSaved: {judge_md.relative_to(project_path)}"
+    except OSError as _e:
+        _panel_save_failed = True
+        _saved_note = f"\n(could not write {judge_md.name}: {_e})"
     summary = (f"\nPANEL {'PASS' if panel_passed else 'FAIL'}: {verdict_reason}"
-               f"\nSaved: {judge_md.relative_to(project_path)}")
+               + _saved_note)
     if failed:
         summary += f"; FAILED: {', '.join(sorted(failed))}"
     if over_budget:
@@ -919,11 +1068,14 @@ def cmd_panel_review(cmd_args):
                     f".agent/config.json or pass --budget to re-run them.")
     print(summary, flush=True)
 
-    # Tamper hard-stop (#1): a judge mutated the working tree. judge.md is
-    # already written (with the banner on top) so verdicts aren't lost, but
-    # the run exits non-zero and the operator must NOT ingest it into task.md.
-    if _tamper_changes:
-        print("\n" + _tamper_banner(_tamper_changes), file=sys.stderr, flush=True)
+    # (Tamper already exited above with the banner, before this assembly/write.)
+    # Chain of custody (codex:sol round-9, panel twin of the single-judge rule):
+    # a clean panel whose verdicts could NOT be persisted must not report success
+    # — the reading agent would ingest a PASS that left no judge.md to read.
+    if _panel_save_failed:
+        print(f"\nPanel verdicts could not be written to {judge_md.name}; "
+              f"exiting nonzero so the run is not mistaken for a delivered review.",
+              file=sys.stderr, flush=True)
         sys.exit(1)
 
     # Hard stop on probe-confirmed dead pins (task 012). Pattern
@@ -1138,8 +1290,33 @@ def cmd_single_review(cmd, cmd_args):
 
     review_label = "plan review" if review_mode == "plan" else "impl review"
 
+    def _emit_tamper(changes):
+        # A1: the loud tamper banner, shared by every post-snapshot single-judge
+        # exit (timeout / budget / dead-pin / the normal hard-stop). Print-only:
+        # each call site owns its own exit code, so this never exits itself.
+        if changes:
+            print("\n" + _tamper_banner(changes), file=sys.stderr, flush=True)
+
+    def _safe_detect():
+        # The single-judge alias for the module-level `_detect_tamper_safe`
+        # (which the panel path also uses — parity, opus round-7).
+        return _detect_tamper_safe(project_path, task_file, _tamper_before)
+
     def _bail_review_timeout(expired=None):
         # Only reachable when a finite HARD timeout is in force.
+        #
+        # A1 tamper guard (#1): a judge killed at the hard timeout can have
+        # mutated the working tree BEFORE the kill — the panel path stops on
+        # tamper and so must this exit. Detect and EMIT the banner FIRST, before
+        # the partial-log write below, for two reasons: (a) that log lands under
+        # the task dir and would self-flag if the snapshot ran after it; and
+        # (b) a tampering judge is exactly the one that may have deleted or made
+        # the task dir unwritable, so the fragile write must not be able to
+        # swallow the banner by raising first (codex:sol Critical). `_tamper_before`
+        # was taken before the judge spawned; the closure resolves it at call time
+        # (every call site is after its assignment below).
+        _to_changes = _safe_detect()
+        _emit_tamper(_to_changes)
         #
         # Whatever the judge had already written is salvaged to a SEPARATE
         # `*.partial.log` rather than being dropped or overwriting the main
@@ -1148,6 +1325,9 @@ def cmd_single_review(cmd, cmd_args):
         # to be handed nothing is the worst outcome; but a partial review must
         # never be mistaken for a complete one, nor replace a previous good
         # review. So: new file, explicit banner, still exit nonzero.
+        # Persistence is BEST-EFFORT: a rogue that removed or locked the task
+        # dir must not turn this bail into an uncaught crash — the banner is
+        # already out, and the exit code must still be reached.
         partial = ""
         if expired is not None:
             raw = getattr(expired, "stdout", None) or getattr(expired, "output", None) or ""
@@ -1158,17 +1338,21 @@ def cmd_single_review(cmd, cmd_args):
         if partial:
             partial_log = task_file.parent / (
                 _judge_log_name(backend).removesuffix(".log") + ".partial.log")
-            atomic_write(
-                partial_log,
-                f"# INCOMPLETE {review_label} — the judge was killed at the hard "
-                f"timeout ({review_timeout_label}) mid-response.\n"
-                f"# This is what it had written by then. It is NOT a finished "
-                f"review: findings may be cut off and it reached no conclusion.\n"
-                f"# The previous complete review, if any, is untouched in "
-                f"{_judge_log_name(backend)}.\n\n{partial}\n",
-            )
-            saved_note = (f" Partial output ({len(partial)} chars) saved to "
-                          f"{partial_log.relative_to(project_path)}.")
+            try:
+                atomic_write(
+                    partial_log,
+                    f"# INCOMPLETE {review_label} — the judge was killed at the hard "
+                    f"timeout ({review_timeout_label}) mid-response.\n"
+                    f"# This is what it had written by then. It is NOT a finished "
+                    f"review: findings may be cut off and it reached no conclusion.\n"
+                    f"# The previous complete review, if any, is untouched in "
+                    f"{_judge_log_name(backend)}.\n\n{partial}\n",
+                )
+                saved_note = (f" Partial output ({len(partial)} chars) saved to "
+                              f"{partial_log.relative_to(project_path)}.")
+            except OSError as _save_err:
+                saved_note = (f" Partial output ({len(partial)} chars) could NOT be "
+                              f"saved ({_save_err}).")
         else:
             saved_note = " The judge produced no output before the kill."
         print(
@@ -1488,18 +1672,34 @@ def cmd_single_review(cmd, cmd_args):
                   file=sys.stderr)
             sys.exit(1)
 
-    if result.stdout:
-        print(result.stdout, end="", flush=True)
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr, flush=True)
-
-    # Tamper check (#1): did the judge mutate the working tree? Computed here;
-    # the log is still saved below (paid work preserved) but the run hard-stops
-    # non-zero at the end so the operator won't ingest a tampered review.
-    _tamper_changes = _detect_tamper(project_path, task_file, _tamper_before)
-
-    # Save output — backend-specific log files
+    # Tamper hard-stop (#1) is the VERY FIRST thing after the judge returns, and
+    # on tamper it does NOTHING but emit the banner and exit — no output stream,
+    # no log save, no budget message, no dead-pin probe/report/write-back. Two
+    # reasons this is the whole hard-stop: (a) nothing precedes the banner that
+    # can raise/hang and suppress it (panels found that "operation-before-banner"
+    # class one site at a time, rounds 1,5,7,8,9); and (b) nothing FOLLOWS it
+    # either, so a rogue that redirected the task dir to a symlink or grew a file
+    # cannot make a post-banner write escape the repo or a post-banner read hang
+    # (round-10 codex:sol). The tampered review is untrustworthy, so losing its
+    # log costs nothing; the operator inspects with `git status && git diff` per
+    # the banner. `_safe_detect` itself never raises (last-resort guarded).
+    _tamper_changes = _safe_detect()
     judge_log = task_file.parent / _judge_log_name(backend)
+    if _tamper_changes:
+        _emit_tamper(_tamper_changes)
+        sys.exit(1)
+
+    # Clean tree: stream the judge's output for the operator (best-effort — a
+    # closed sink must not crash a completed review).
+    try:
+        if result.stdout:
+            print(result.stdout, end="", flush=True)
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+    # Save output — backend-specific log files (tamper already exited above)
     output = (result.stdout or "").strip()
     # Budget exhaustion arrives as exit-0 stdout (task 012 L3): detect it
     # BEFORE saving so it never overwrites a prior good review, tell the
@@ -1512,6 +1712,8 @@ def cmd_single_review(cmd, cmd_args):
         print(f"\nJudge hit the ${review_budget} budget cap and produced no "
               f"review{kept}. Raise judge_budget_usd in .agent/config.json "
               f"or pass --budget.", flush=True)
+        # (No tamper emit here: the early hard-stop above already exited on any
+        # tamper, so this budget path is only reached with a clean tree.)
         sys.exit(1)
     # Failure-marked output (e.g. claude's bad-model message: stdout WITH
     # exit 1) is not a review either — never let it overwrite a prior good
@@ -1521,6 +1723,7 @@ def cmd_single_review(cmd, cmd_args):
     # Set only on the success path below; stays None when the review failed,
     # so the write-back at the end cannot ingest a rejected run's output.
     saved_review_text = None
+    _log_save_failed = False
     if result.returncode != 0 and (not output or _judge_failed_str(_formatted_result)):
         if judge_log.exists():
             print(f"\nReview failed (exit {result.returncode}); kept previous {judge_log.relative_to(project_path)}", flush=True)
@@ -1558,8 +1761,22 @@ def cmd_single_review(cmd, cmd_args):
                        + (" | ".join(context_receipts) if context_receipts
                           else "full task.md + mind map delivered (no truncation)")
                        + "\n\n")
-        atomic_write(judge_log, _ctx_header + saved_review_text)
-        print(f"\nSaved: {judge_log.relative_to(project_path)}", flush=True)
+        # Best-effort: a rogue that returns 0 but deleted/locked the task dir
+        # must not crash this write BEFORE the tamper hard-stop below (codex:terra
+        # round-5 Critical) — the judge output was already streamed to stdout, so
+        # losing the log file is acceptable; losing the banner is not. But a
+        # failed save is recorded: on a CLEAN review (no tamper) the findings
+        # write-back below is REFUSED when the durable log could not be written,
+        # so findings are never ingested with no chain of custody (codex:sol
+        # round-6). When there IS tamper, the run exits nonzero at the banner
+        # regardless, so the flag only gates the clean path.
+        try:
+            atomic_write(judge_log, _ctx_header + saved_review_text)
+            print(f"\nSaved: {judge_log.relative_to(project_path)}", flush=True)
+        except OSError as _save_err:
+            _log_save_failed = True
+            print(f"\nCould not save {judge_log.name} ({_save_err}); the judge "
+                  f"output was printed above.", file=sys.stderr, flush=True)
 
     # Model-unavailable hard stop (task 012), same contract as the panel:
     # classify the FORMATTED result (both streams survive on nonzero exit
@@ -1582,17 +1799,17 @@ def cmd_single_review(cmd, cmd_args):
         print(f"\nHARD STOP: judge pin unavailable (probe-confirmed):\n"
               f"  {_sj_spec}: {pv} — {detail} → {fix}\n\nCurrent availability:",
               file=sys.stderr)
-        report = apply_confirmed(
-            check_pins(project_path, probe=False, extra_specs=[_sj_spec]),
-            confirmed)
-        print(render_report(report), file=sys.stderr)
-        sys.exit(1)
-
-    # Tamper hard-stop (#1): the single judge mutated the working tree. Log
-    # is already saved above; exit non-zero with the loud banner so the
-    # operator inspects/restores instead of trusting the review.
-    if _tamper_changes:
-        print("\n" + _tamper_banner(_tamper_changes), file=sys.stderr, flush=True)
+        # No tamper concern here: the early hard-stop above already exited on any
+        # tamper, so this dead-pin path is only reached with a clean tree. The
+        # availability report is still best-effort (a raising probe/cache should
+        # not turn a dead-pin report into a traceback).
+        try:
+            report = apply_confirmed(
+                check_pins(project_path, probe=False, extra_specs=[_sj_spec]),
+                confirmed)
+            print(render_report(report), file=sys.stderr)
+        except Exception as _diag_err:   # noqa: BLE001 — diagnostics are advisory
+            print(f"(availability report unavailable: {_diag_err})", file=sys.stderr)
         sys.exit(1)
 
     # Write the findings into task.md — LAST, deliberately. The judge is
@@ -1603,6 +1820,17 @@ def cmd_single_review(cmd, cmd_args):
     # review: writing any earlier would ingest findings the very next lines
     # declare untrustworthy. `saved_review_text` is the same content written
     # to the backend log, not raw stdout, so log and task.md never diverge.
+    if _log_save_failed and result.returncode == 0 and saved_review_text and saved_review_text.strip():
+        # The durable judge log could not be written (task dir deleted/locked,
+        # or judge.log pre-existing as a directory). Do NOT ingest findings with
+        # no chain of custody on an otherwise-clean review (codex:sol round-6) —
+        # refuse and exit nonzero so a status-only caller can't mistake this for
+        # a delivered review.
+        print(f"\nReview succeeded but its durable log could not be saved "
+              f"({judge_log.name}); refusing to write findings into "
+              f"{task_file.relative_to(project_path)} without a chain of custody. "
+              f"Judge output was printed above.", file=sys.stderr, flush=True)
+        sys.exit(1)
     if result.returncode == 0 and saved_review_text and saved_review_text.strip():
         refusal = _write_review_findings(task_file, review_mode, saved_review_text)
         if refusal is None:
