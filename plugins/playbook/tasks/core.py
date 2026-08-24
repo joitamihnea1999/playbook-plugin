@@ -1034,7 +1034,8 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
                         or Path(top_r.stdout.strip()).resolve()
                         != Path(repo_path).resolve()):
                     return None
-            except OSError:
+            except (OSError, RuntimeError, ValueError):
+                # RuntimeError: a symlink loop under .resolve() (impl-panel N5).
                 return None
         # -uall enumerates untracked files INDIVIDUALLY (a bare `?? dir/`
         # hides everything inside the directory from the hash below).
@@ -1166,7 +1167,9 @@ def tree_state_fingerprint(project_path: Path) -> str:
             _cand_resolved = _cand.resolve()
             _inside = (_cand_resolved == _proj_resolved
                        or _proj_resolved in _cand_resolved.parents)
-        except OSError:
+        except (OSError, RuntimeError, ValueError):
+            # RuntimeError: a symlink loop under .resolve() (impl-panel N5) must
+            # skip the root loudly, not traceback the whole fingerprint.
             _inside = False
         if not _inside:
             print(f"[playbook] code_roots {_rel!r}: resolves outside the "

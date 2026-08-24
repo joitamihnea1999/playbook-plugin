@@ -275,6 +275,40 @@ class NestedCodeRoots(unittest.TestCase):
         self.assertTrue(tree_state_fingerprint(d))
         self.assertEqual(tree_state_fingerprint(d), tree_state_fingerprint(d))
 
+    def test_fingerprint_exclude_applies_inside_nested_roots(self):
+        # Impl-panel N1: the outer exclusion set (`.agent` + fingerprint_exclude)
+        # is honored inside each nested root too — documented behavior, pinned so
+        # it can't silently change. A `journal/` exclude blinds journal/ in the
+        # nested repo, while a real code edit there still moves the fingerprint.
+        d, sub = self._outer_with_nested()
+        self._cfg(d, {"code_roots": ["sub"], "fingerprint_exclude": ["journal/"]})
+        (sub / "journal").mkdir()
+        fp1 = tree_state_fingerprint(d)
+        (sub / "journal" / "1.md").write_text("shipped\n", encoding="utf-8")
+        self.assertEqual(fp1, tree_state_fingerprint(d),
+                         "fingerprint_exclude did not propagate into the nested root")
+        # exclusion is narrow — a real nested code edit still moves it
+        (sub / "app.py").write_text("y = 3\n", encoding="utf-8")
+        self.assertNotEqual(fp1, tree_state_fingerprint(d))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires os.symlink")
+    def test_symlink_loop_root_does_not_crash(self):
+        # Impl-panel N5: a code_roots entry that is a symlink LOOP makes
+        # Path.resolve() raise RuntimeError on some platforms; the fingerprint
+        # must skip it deterministically, never traceback.
+        d, sub = self._outer_with_nested()
+        try:
+            os.symlink(d / "loop", d / "loop")   # self-referential loop
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink not permitted here")
+        self._cfg(d, {"code_roots": ["loop", "sub"]})
+        fp = tree_state_fingerprint(d)            # must not raise
+        self.assertTrue(fp)
+        self.assertEqual(fp, tree_state_fingerprint(d))
+        # the valid sibling `sub` still took effect
+        (sub / "app.py").write_text("y = 9\n", encoding="utf-8")
+        self.assertNotEqual(fp, tree_state_fingerprint(d))
+
     @unittest.skipUnless(hasattr(os, "symlink"), "requires os.symlink")
     def test_symlink_root_escaping_the_tree_is_skipped(self):
         # Impl-panel F2: a code_roots entry that is lexically clean ("link", no

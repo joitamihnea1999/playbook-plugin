@@ -153,11 +153,23 @@ Rules, all loud: the key is **opt-in** — with `code_roots` absent (or `[]`) th
 fingerprint is **byte-identical** to before the key existed, so nothing changes
 for projects that don't use it. Entries are sorted and de-duplicated so config
 order can never perturb the hash. An entry that is not a string, is empty, is an
-absolute path, or contains `..` traversal is skipped with a printed warning
-(the fingerprint must never be steered to hash something outside the tree). A
-listed root that does not exist yet or is not a git repository contributes a
-stable marker rather than crashing the fingerprint. Commit the file — the panel
-stamp and the close comparison must agree across clones.
+absolute path, or contains `..` traversal is skipped with a printed warning; a
+symlinked entry that *resolves* outside the project is likewise skipped loudly
+(the fingerprint is never steered to hash something outside the tree). Each root
+must be its **own** git repository — a plain subdirectory of the outer repo, a
+path that does not exist yet, or a repo git cannot read contributes a stable
+`<absent>` marker rather than adopting the ancestor repo's identity or crashing
+the fingerprint. Commit the file — the panel stamp and the close comparison must
+agree across clones.
+
+The same exclusion set applies inside every nested root as in the outer tree:
+`.agent/` is always excluded (workflow bookkeeping is not code), and any
+[`fingerprint_exclude`](#agentconfigjson--fingerprint_exclude-project-policy)
+pathspecs you declare are honored in each nested root too. So a
+`fingerprint_exclude: ["journal/"]` blinds a `journal/` directory inside a
+`code_roots` repo as well as in the outer one — deliberate (the exclusion is a
+project-wide bookkeeping declaration), but worth knowing before you exclude a
+path that also exists under a nested root.
 
 ## `.agent/config.json` — `audit` (pre-panel sweeps)
 
