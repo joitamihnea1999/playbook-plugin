@@ -2,6 +2,101 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.38] — 2026-08-25
+
+An eleven-item hardening batch on top of 1.5.37 (plus a Windows/Git-Bash CI
+portability fix): the judge tamper guard now signals on every exit and fails
+closed, the monitor-nudge delivery race is fixed, the audit and verify
+contracts are made more honest about binaries and multi-line commands, the
+config surface gets an authoritative documented registry with a drift guard,
+and two owner-ratified feature-freeze exceptions land — `code_roots`
+nested-repo freshness coverage and the new `tasks handoff` command. The items
+below are sourced from the range `5fe8bf9..5c8bbf8` and state only what that
+diff shows.
+
+### Added
+
+- **`tasks handoff` — session handoff, codified (C1).** A new top-level command
+  hands the active task to a fresh session: it writes a `## Handoff` section
+  carrying the mechanical facts (the project repo and each configured
+  `code_roots` nested repo's branch/HEAD/dirty-count, the task's
+  checked/unchecked gate counts and next unchecked gate, the latest
+  verification-receipt line, and a timestamp), then blocks the task in the
+  honest `blocked` state with reason `handoff` (reusing `tasks blocked`, not a
+  faked checkbox) and prints a `### Agent notes` scaffold for the judgment the
+  tooling can't capture. `tasks bootstrap` surfaces the newest unconsumed
+  handoff and names the resume command; `tasks work <N>` consumes it (flipping
+  status back to `in_progress`), leaving the section behind as history.
+  Stdlib-only, no daemon, no network; degrades gracefully when git or the
+  receipts are absent.
+- **`code_roots` — nested-repo tree-state fingerprint (C2).** A new opt-in
+  `.agent/config.json` key that folds each named nested repo's
+  HEAD+porcelain+diff+untracked into the panel-freshness fingerprint, closing
+  the blind spot where a code-only edit inside a gitignored nested checkout was
+  invisible to the freshness gate. Opt-in: with `code_roots` unset the
+  fingerprint is byte-identical to before. A nested root that can't be
+  fingerprinted (missing, a plain subdirectory, an unborn or unreadable repo, a
+  symlink escaping the tree) collapses to a stable `<absent>` marker rather than
+  fingerprinting an ancestor.
+- **Documented config-key surface + drift guard (B3).** `docs/configuration.md`
+  now documents every `.agent/config.json` key the code honors, backed by a
+  hand-maintained authoritative `HONORED_KEYS` registry and a drift-guard test:
+  it catches a newly-added literal `load_config(...).get("key")` that isn't in
+  the registry, and requires each honored key to appear as a structured token
+  (a `"key"` inside a ```json fence or a `` `key` `` bullet) in the docs — two
+  keys read via a dynamic key that no literal scan can see are held by the
+  registry.
+
+### Changed
+
+- **Judge tamper banner on every post-snapshot exit (A1).** The tamper guard is
+  wrapped so an unexpected raise can never skip the guaranteed tamper
+  banner/exit on either the panel or single-judge path; the task.md fingerprint
+  and dirty-file content hashing route through a safe-read primitive whose I/O
+  can't crash — or hang — the guard before its `sys.exit`. A readable→unreadable
+  transition is itself flagged as tamper; symlinks are fingerprinted by link
+  text.
+- **Judge review fails closed on a git repo whose `git status` fails (A2).** A
+  cheap ancestor-walking `.git` probe lets the guard distinguish "git repo whose
+  readable `git status` failed" (fail CLOSED) from "genuinely not a git repo"
+  (the documented uncontained fallback), correct for a Playbook root nested
+  inside a parent worktree whose `.git` sits above the project path.
+- **Audit grep sweeps skip binary and `__pycache__` content (B1).** The
+  conflict/marker sweeps pass `-I` (a NUL-containing file is a non-match) and
+  exclude `__pycache__`, so a marker byte baked into a compiled `.pyc` or other
+  binary can no longer false-fail the error-severity conflict sweep.
+- **`scripts/verify` scrubs inherited sandbox/session env off the child (B2).**
+  `verify` unsets `PLAYBOOK_SANDBOXED` (the sole signal `is_sandboxed()` reads),
+  along with `BASH_ENV`, `PLAYBOOK_SESSION_ID`, `PLAYBOOK_ROLE`, and
+  `PLAYBOOK_EVAL_CONFIG`, before running the suite, so an inherited environment
+  can't skew the run.
+- **Benchmark asserts hook exit status and excludes broken runs (B4).**
+  `scripts/bench_bash_trap.py` now checks every hook invocation's exit code: a
+  run where any hook exits non-zero is counted as a failure and excluded from
+  that arm's timing sample; an arm with no valid samples reports its delta as
+  None and its verdict as `INVALID` rather than timing a crash.
+- **Verify-drift sweep surfaces multi-line commands loudly (B5).** The
+  `verify-contract-change` sweep compares per-command first lines (cmd1, what
+  the receipt records) and now emits any multi-line current `verify` command as
+  an explicit advisory — a clean sweep means "no first-line command was dropped
+  and no multi-line command is present", making the cmd1-only bound visible
+  rather than silent. Full multi-line drift support remains deferred.
+
+### Fixed
+
+- **Fix-pattern tasks stranding impl-review findings (B6).** The bugfix/cleanup
+  ("Fix") task template now carries the `## Implementation Review` anchor that
+  the single-judge write-back needs; without it those findings were silently
+  left in `judge-*.log` instead of landing in task.md.
+- **Monitor-nudge delivery race (A3).** `monitor-nudge.sh` claims the single
+  `nudge.md` by renaming it to a per-invocation unique path, making `mv` the
+  mutual exclusion so exactly one concurrent firing wins and the losers exit
+  silently; a newer nudge written after the claim is protected by an atomic
+  no-replace `ln`, so an older claim can't clobber it.
+- **Windows/Git-Bash CI portability.** The bench hook stub is written with
+  LF-only newlines and the benchmark invokes the resolved bash rather than a
+  bare `bash`, fixing the Windows CI lane.
+
 ## [1.5.37] — 2026-08-23
 
 A stabilization batch (T1–T5) hardening the close contract, the judge tamper
