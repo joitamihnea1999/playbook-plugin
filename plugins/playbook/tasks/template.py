@@ -889,6 +889,11 @@ Commands:
   parked [--all]      List open parked items across tasks (--all: incl. resolved)
   blocked "<reason>"  Pause the active task awaiting the owner's decision — an
                       honest state (not a faked checkbox); resume with work <N>
+  handoff             Hand off the active task to a fresh session: writes the
+                      mechanical state (repo + code_roots git state, gates, latest
+                      receipt) into a ## Handoff section for you to append your
+                      in-flight reasoning to, then blocks (reason: handoff).
+                      bootstrap surfaces it; work <N> resumes and consumes it.
   freehand            User-driven mode (no gate pressure)
   new <type> <name> [intent]   Create task (intent pre-fills ## Intent)
   new --stub <type> <name> [intent]   Create stub (expands on work)
@@ -1080,9 +1085,15 @@ def render_template(num: int, title: str, task_type: str | None = None) -> str:
     ]
 
     if pattern_name == "Fix":
+        # judge_impl_section() carries the '## Implementation Review' anchor that
+        # _write_review_findings needs to deliver a single-judge impl review into
+        # task.md. Without it a Fix-pattern task (bugfix/cleanup) silently
+        # stranded findings in judge-*.log (found live in task 010). Build already
+        # appends it; Investigate/Evaluate deliberately do not (report-shaped).
         middle = [
             design_phase_light(),
             work_plan_fix(),
+            judge_impl_section(),
         ]
     elif pattern_name == "Investigate":
         middle = [

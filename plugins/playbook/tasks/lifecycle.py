@@ -899,6 +899,48 @@ def cmd_blocked(cmd_args):
           f"Resume with: tasks work {active}")
 
 
+def cmd_handoff(cmd_args):
+    """The `tasks handoff` arm (C1): codify the proven manual session-handoff.
+
+    Writes the mechanical ~80% (project + nested-code-root git state, gate
+    progress, latest verification receipt, a timestamp) into the ACTIVE task's
+    `## Handoff` section, prints instructions for the agent to append the
+    judgment ~20%, then blocks the task with reason "handoff" (reusing the
+    honest blocked state — never a faked checkbox). `tasks bootstrap` surfaces
+    the newest unconsumed handoff; `tasks work <N>` consumes it."""
+    project_path = find_project_root()
+    agent_dir = resolve_agent_dir(project_path)
+    session_id = resolve_session_id()
+    state_file = agent_dir / "sessions" / session_id / "current_state"
+    active = state_file.read_text(encoding="utf-8", errors="replace").strip() \
+        if state_file.exists() else None
+    if not active:
+        print("No active task to hand off. Activate one first: tasks work <N>",
+              file=sys.stderr)
+        sys.exit(1)
+    matches = list((agent_dir / "tasks").glob(f"{active}-*/task.md"))
+    if not matches:
+        print(f"Task {active} not found", file=sys.stderr)
+        sys.exit(1)
+    task_file = matches[0]
+    from tasks.core import (build_handoff_section, set_task_blocked,
+                            write_handoff)
+    section = build_handoff_section(project_path, task_file)
+    write_handoff(task_file, section)
+    # Honest blocked state (reason "handoff") — bootstrap keys on this to surface
+    # the handoff, resume_blocked_task (via `tasks work`) clears it → consumed.
+    set_task_blocked(task_file, "handoff")
+    print(f"Handoff written to task {active} — mechanical state captured in the "
+          "## Handoff section, task marked BLOCKED (reason: handoff).")
+    print("")
+    print("NOW, before you stop: append the judgment ~20% the tooling can't know "
+          "under the '### Agent notes' scaffold in that section —")
+    print("  - your in-flight reasoning, decisions not yet written in the file, "
+          "dead ends already ruled out.")
+    print(f"A fresh session's `tasks bootstrap` will surface this handoff; "
+          f"resume (and consume) it with: tasks work {active}")
+
+
 def cmd_parked(cmd_args):
     """The `tasks parked` arm — body moved verbatim from cli.py (1.5.9 split)."""
     # P9: the standing query that makes parked items un-swallowable. Lists

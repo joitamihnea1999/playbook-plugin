@@ -29,7 +29,7 @@ COMMANDS = (
     "work", "new", "init", "bootstrap", "list", "ls", "panel-review",
     "models", "plan-review", "impl-review", "judge", "context", "intent",
     "timeline", "tagger", "tag", "retro", "status", "audit", "blocked",
-    "parked", "freehand", "doctor", "environment", "detect-verify", "merge-doctor",
+    "handoff", "parked", "freehand", "doctor", "environment", "detect-verify", "merge-doctor",
     "mindmap-sync", "log", "prepare-merge", "compact", "recall",
 )
 
@@ -142,6 +142,12 @@ def main():
     elif cmd == "blocked":
         from tasks.lifecycle import cmd_blocked
         cmd_blocked(cmd_args)
+
+    elif cmd == "handoff":
+        # Session handoff (C1): write the mechanical ~80% into the active task's
+        # ## Handoff section, block with reason "handoff"; bootstrap surfaces it.
+        from tasks.lifecycle import cmd_handoff
+        cmd_handoff(cmd_args)
 
     elif cmd == "parked":
         from tasks.lifecycle import cmd_parked

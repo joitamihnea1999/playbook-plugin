@@ -57,7 +57,11 @@ CHECKS: list[tuple] = []
 def env() -> dict:
     """Child env with dogfooding state stripped (see tests/test_shell_fixtures.py)."""
     e = dict(os.environ)
-    for k in ("BASH_ENV", "PLAYBOOK_SESSION_ID", "PLAYBOOK_ROLE", "PLAYBOOK_EVAL_CONFIG"):
+    # PLAYBOOK_SANDBOXED is the sole signal provider/sandbox.is_sandboxed() reads;
+    # a dogfooding host that runs verify from inside a sandboxed session exports
+    # it, which would make the whole child suite behave as if already sandboxed.
+    for k in ("BASH_ENV", "PLAYBOOK_SESSION_ID", "PLAYBOOK_ROLE",
+              "PLAYBOOK_EVAL_CONFIG", "PLAYBOOK_SANDBOXED"):
         e.pop(k, None)
     return e
 

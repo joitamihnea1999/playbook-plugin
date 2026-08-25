@@ -247,6 +247,73 @@ class MonitorNudgePreserved(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Delivery race (external panel 2026-08-24) — monitor-nudge.sh claimed the nudge
+# to a FIXED shared `.delivering` path, so concurrent hook firings collided on it
+# and could drop or double-deliver. A per-invocation unique claim fixes it.
+# --------------------------------------------------------------------------- #
+class MonitorNudgeDeliveryRace(unittest.TestCase):
+    def setUp(self):
+        self.p = _Project()
+        self.addCleanup(self.p.cleanup)
+        self.nudge = self.p.proj / ".agent" / "monitor" / "nudge.md"
+        self.nudge.parent.mkdir(parents=True, exist_ok=True)
+
+    def _run(self):
+        env = dict(os.environ, PLAYBOOK_SESSION_ID=SESSION)
+        env.pop("PLAYBOOK_ROLE", None)
+        return subprocess.run([bash_or_skip(), str(MONITOR_NUDGE)],
+                              input=json.dumps({"hook_event_name": "PostToolUse"}).encode(),
+                              cwd=str(self.p.proj), env=env, capture_output=True, timeout=60)
+
+    def test_concurrent_inflight_claim_not_clobbered(self):
+        # A concurrent firing (H1) has already claimed a nudge — its in-flight
+        # `.delivering` file exists. A new firing (H2) arriving with a fresh nudge
+        # must NOT destroy H1's claim. The fixed SHARED `.delivering` name let
+        # H2's `mv nudge.md .delivering` overwrite H1's claim, dropping (or
+        # double-delivering) a nudge. Deterministic: H1's claim is materialized,
+        # then one real H2 fires against it.
+        inflight = Path(str(self.nudge) + ".delivering")
+        inflight.write_text("INFLIGHT NUDGE (H1 mid-delivery)\n", encoding="utf-8")
+        self.nudge.write_text("FRESH NUDGE for H2\n", encoding="utf-8")
+        self._run()   # H2
+        self.assertTrue(inflight.is_file(),
+                        "a concurrent firing's in-flight nudge claim was clobbered")
+        self.assertIn("INFLIGHT", inflight.read_text(encoding="utf-8"))
+
+    def test_emit_failure_restore_survives_with_no_orphan_claim(self):
+        # Judge (A3 impl review): the emit-failure restore was made atomic
+        # (`ln` no-clobber, so an OLDER claim can never overwrite a NEWER nudge B
+        # the monitor wrote after the claim — the no-clobber property is by
+        # construction). This regression-guards the interaction that broke it: the
+        # unique claim name + `ln` under `set -e` must still (a) deliver
+        # at-least-once and (b) leave NO orphan `nudge.md.delivering*` claim — the
+        # exact failure when `ln` aborted before cleanup.
+        from tests._nopython import make_nopython_path
+        self.nudge.write_text("re-read the intent\n", encoding="utf-8")
+        path = make_nopython_path(self.p.tmp / "nopybin_restore")
+        env = dict(os.environ, PLAYBOOK_SESSION_ID=SESSION, PATH=path)
+        env.pop("PLAYBOOK_ROLE", None)
+        subprocess.run([bash_or_skip(), str(MONITOR_NUDGE)],
+                       input=json.dumps({"hook_event_name": "PostToolUse"}).encode(),
+                       cwd=str(self.p.proj), env=env, capture_output=True, timeout=60)
+        self.assertTrue(self.nudge.is_file(), "nudge lost on emit-failure restore")
+        self.assertIn("re-read the intent", self.nudge.read_text(encoding="utf-8"))
+        leftovers = sorted(p.name for p in self.nudge.parent.glob("nudge.md.delivering*"))
+        self.assertEqual(leftovers, [], f"orphan claim left after restore: {leftovers}")
+
+    def test_single_nudge_delivered_and_cleared(self):
+        # Control: a lone nudge delivers ([MONITOR] in stdout) and fully clears —
+        # no nudge.md and no leftover `.delivering*` claim of any name.
+        self.nudge.write_text("re-read the intent\n", encoding="utf-8")
+        r = self._run()
+        self.assertIn("[MONITOR]", r.stdout.decode("utf-8", "replace"),
+                      "a lone nudge was not delivered")
+        self.assertFalse(self.nudge.exists(), "delivered nudge.md was not cleared")
+        leftovers = sorted(str(p.name) for p in self.nudge.parent.glob("nudge.md.delivering*"))
+        self.assertEqual(leftovers, [], f"leftover claim file(s): {leftovers}")
+
+
+# --------------------------------------------------------------------------- #
 # Ledger evidence — PB-COMMAND-FAILURE-POLICY: a malformed PROJECT
 # dangerous_commands regex is skipped (except re.error) and does NOT disable the
 # built-in patterns. The audit measured this; bind it as executable evidence.

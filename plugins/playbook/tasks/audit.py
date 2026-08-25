@@ -47,7 +47,17 @@ from tasks.core import load_config
 
 # --exclude-dir keeps the sweeps off build output and the workspace's own state,
 # so a `- [ ]` in a task.md or a marker in node_modules is never a finding.
-_EXCLUDES = "--exclude-dir=.git --exclude-dir=.agent --exclude-dir=node_modules --exclude-dir=.venv"
+# `__pycache__` is excluded because a compiled `.pyc` can carry a conflict/marker
+# byte-run (compiled string constants, marshal data) that grep would report as a
+# binary match — false-failing the error-severity conflict sweep and forcing a
+# manual cache clear before every audit.
+_EXCLUDES = ("--exclude-dir=.git --exclude-dir=.agent --exclude-dir=node_modules "
+             "--exclude-dir=.venv --exclude-dir=__pycache__")
+# `-I` treats a binary file (one containing NUL) as a non-match, so a marker byte
+# baked into ANY binary — a stray `.pyc`, a compiled artifact outside __pycache__,
+# an image — can never surface as a finding. Belt-and-suspenders with the
+# __pycache__ exclude above; the exclude also spares grep the descent+scan work.
+_GREP = f"grep -rIEn {_EXCLUDES}"
 
 DEFAULT_SWEEPS = [
     {
@@ -56,7 +66,7 @@ DEFAULT_SWEEPS = [
         "why": "unresolved git conflict markers are half-merged, broken code",
         # `<<<<<<<` / `>>>>>>>` at line start are unambiguous — no legitimate use.
         # `=======` alone is skipped: a 7-char markdown underline collides with it.
-        "command": rf"grep -rEn {_EXCLUDES} '^(<<<<<<<|>>>>>>>)' .",
+        "command": rf"{_GREP} '^(<<<<<<<|>>>>>>>)' .",
     },
     {
         "name": "merge-artifacts",
@@ -80,7 +90,7 @@ DEFAULT_SWEEPS = [
         "name": "stale-markers",
         "severity": "advisory",
         "why": "TODO/FIXME/XXX/HACK — candidates a review should not have to find",
-        "command": rf"grep -rEn {_EXCLUDES} '(TODO|FIXME|XXX|HACK)' .",
+        "command": rf"{_GREP} '(TODO|FIXME|XXX|HACK)' .",
     },
 ]
 
@@ -748,11 +758,15 @@ def check_verify_contract_change(project_path) -> "dict | None":
     close has no baseline, exempt by design) or no command was dropped — matching
     the other built-in checks that stay silent unless they have a finding.
 
-    Bound (accepted): comparison is per-command cmd1 (first line), because that
-    is what the receipt records; a change confined to lines 2+ of a multi-line
-    command is not distinguished. A clean sweep means 'no first-line command was
-    dropped', not 'verify was never touched' — the enforcement journal retains
-    the full per-close trail."""
+    Bound: comparison is per-command cmd1 (first line), because that is what the
+    receipt records; a change confined to lines 2+ of a MULTI-LINE command is not
+    distinguished. Rather than silently certify such a command clean, the sweep
+    surfaces any multi-line current verify command as an ADVISORY
+    (unsupported-for-drift-detection) — visibility, never silence (owner decision,
+    B5). Full multi-line drift support is deferred. A clean sweep therefore means
+    'no first-line command was dropped and no multi-line command is present', not
+    'verify was never touched' — the enforcement journal retains the full
+    per-close trail."""
     from tasks.core import load_config, resolve_verify_commands
     recorded, latest_ts = _recorded_verify_commands(project_path)
     if not recorded:
@@ -776,10 +790,20 @@ def check_verify_contract_change(project_path) -> "dict | None":
     removed_by_risk: "dict[str, list]" = {}      # risk -> sorted UNacknowledged drops
     acked_by_risk: "dict[str, list]" = {}        # risk -> sorted acknowledged drops
     current_by_risk: "dict[str, list]" = {}      # risk -> sorted current bar
+    multiline_cmds: "set[str]" = set()           # cmd1 of any MULTI-LINE current command
     for risk, cmds in sorted(recorded.items()):
-        current_r = {c.strip().splitlines()[0]
-                     for _lbl, c in resolve_verify_commands(project_path, risk, cfg=cfg)
-                     if c.strip()}
+        current_r: "set[str]" = set()
+        for _lbl, c in resolve_verify_commands(project_path, risk, cfg=cfg):
+            cs = c.strip()
+            if not cs:
+                continue
+            lines = cs.splitlines()
+            current_r.add(lines[0])
+            if len(lines) > 1:
+                # cmd1 IS what the receipt records and what this sweep compares,
+                # so a weakening confined to lines 2+ of a multi-line command is
+                # invisible to drift detection. Surface it rather than pass silent.
+                multiline_cmds.add(lines[0])
         current_by_risk[risk] = sorted(current_r)
         dropped = cmds - current_r
         if not dropped:
@@ -790,8 +814,19 @@ def check_verify_contract_change(project_path) -> "dict | None":
             removed_by_risk[risk] = un
         if ac:
             acked_by_risk[risk] = ac
-    if not removed_by_risk and not acked_by_risk:
-        return None                              # nothing dropped — clean
+    if not removed_by_risk and not acked_by_risk and not multiline_cmds:
+        return None                              # nothing dropped, nothing opaque — clean
+
+    # Fail-loud, never silence (owner decision, B5): a multi-line current verify
+    # command cannot be drift-checked past its first line, so it is reported as an
+    # advisory even when the cmd1 comparison found no drop. Full multi-line drift
+    # support is deferred — this only makes the LIMITATION visible.
+    def _multiline_lines():
+        return ["verify command(s) are MULTI-LINE and unsupported for drift "
+                "detection — only the first line (cmd1) is compared, so a change "
+                "on any later line is NOT detected by this sweep (check the full "
+                "command / enforcement journal by hand):"] + \
+               [f"  [multi-line] {c1} …" for c1 in sorted(multiline_cmds)]
 
     def _lines(mapping):
         return [f"  [{r}] dropped: {mapping[r]}; {r} now runs: "
@@ -806,6 +841,8 @@ def check_verify_contract_change(project_path) -> "dict | None":
         if acked_by_risk:
             out += ["  acknowledged (informational, still recorded):"]
             out += _lines(acked_by_risk)
+        if multiline_cmds:
+            out += _multiline_lines()
         out.append(
             "  If a removal is intentional, add the command to "
             "`verify_contract_ack` in .agent/config.json to downgrade it to an "
@@ -817,6 +854,27 @@ def check_verify_contract_change(project_path) -> "dict | None":
             "why": ("a verify command run at a past close is gone from the "
                     "gate-exempt .agent/config.json — a silently weakened verify "
                     "closes tasks against a hollow bar; acknowledge if intentional"),
+            "status": "findings",
+            "output": "\n".join(out),
+        }
+    if multiline_cmds:
+        # No cmd1 drop, but a multi-line current command means the sweep cannot
+        # certify the LATER lines unchanged — an ADVISORY (above the ack-info
+        # tier), never a silent pass. Any acknowledged cmd1 drop is folded in.
+        out = _multiline_lines()
+        if acked_by_risk:
+            out += ["  acknowledged cmd1 removals (informational, still recorded):"]
+            out += _lines(acked_by_risk)
+        out.append(
+            "  Full multi-line drift detection is deferred; until then, review a "
+            "multi-line verify command's later lines by hand (the enforcement "
+            "journal retains the full per-close command trail).")
+        return {
+            "name": "verify-contract-change",
+            "severity": "advisory",
+            "why": ("a multi-line verify command is only drift-checked on its "
+                    "first line — a weakening on a later line would not be "
+                    "detected; surfaced so it is never silently certified clean"),
             "status": "findings",
             "output": "\n".join(out),
         }

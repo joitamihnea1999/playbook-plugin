@@ -66,6 +66,32 @@ class NegativeControls(unittest.TestCase):
         (p / "README.md").write_text("Title\n=======\n\nbody\n", encoding="utf-8")
         self.assertEqual(self._run("conflict-markers", p), "clean")
 
+    def test_conflict_markers_skips_binary_pyc(self):
+        # A compiled .pyc under __pycache__ can contain the literal bytes
+        # `<<<<<<<` at a line start (compiled string constants, marshal data).
+        # grep -r would report it as a binary match and the error-severity
+        # sweep would false-FAIL the audit — forcing a manual cache clear before
+        # every run. The sweep must skip binary/pycache content: NUL bytes make
+        # this a binary file, and it lives under __pycache__.
+        p = self._proj()
+        cache = p / "src" / "__pycache__"
+        cache.mkdir()
+        # A real-ish .pyc: NUL bytes (binary marker for grep -I) + the conflict
+        # byte-pattern at a line start.
+        (cache / "ok.cpython-310.pyc").write_bytes(
+            b"\x00\x00\x00\x00\n<<<<<<< embedded\n\x00\xff\x00\n")
+        self.assertEqual(self._run("conflict-markers", p), "clean")
+
+    def test_stale_markers_skips_binary_pyc(self):
+        # Same binary-skip guarantee for the other grep sweep: a TODO byte-run
+        # baked into a .pyc must not surface as an (advisory) finding.
+        p = self._proj()
+        cache = p / "src" / "__pycache__"
+        cache.mkdir()
+        (cache / "ok.cpython-310.pyc").write_bytes(
+            b"\x00\x00\x00TODO fix later\x00\xff\x00\n")
+        self.assertEqual(self._run("stale-markers", p), "clean")
+
     def test_merge_artifacts(self):
         p = self._proj()
         self.assertEqual(self._run("merge-artifacts", p), "clean")

@@ -25,7 +25,7 @@ _NEEDED = [
     "bash", "sh", "cat", "grep", "sed", "head", "tail", "find", "dirname",
     "basename", "printf", "echo", "uname", "tr", "awk", "mkdir", "rm", "mv",
     "cp", "ls", "env", "date", "wc", "cut", "sort", "ps", "chmod", "expr",
-    "flock", "cygpath",
+    "ln", "flock", "cygpath",
 ]
 
 

@@ -944,6 +944,31 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     return found
 
 
+def _iter_nonfenced(lines: "list[str]"):
+    """Yield ``(index, stripped_line)`` for every line OUTSIDE a Markdown code
+    fence. Shared fence-tracking (same rules as `_risk_heading_lines`) so section
+    writers/readers never treat a heading quoted inside a fenced example as a live
+    section — the #09 hazard, re-raised for the handoff writer/readers by the C1
+    impl panel (a fenced `## Handoff`/`## Blocked`/`## Verification Receipt` must
+    not corrupt the file or fake bootstrap/handoff state)."""
+    fence_char = ""
+    fence_len = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip().lstrip("﻿")
+        fm = re.match(r"^(`{3,}|~{3,})", stripped)
+        if fence_char:
+            if (fm and fm.group(1)[0] == fence_char
+                    and len(fm.group(1)) >= fence_len):
+                fence_char = ""
+                fence_len = 0
+            continue
+        if fm:
+            fence_char = fm.group(1)[0]
+            fence_len = len(fm.group(1))
+            continue
+        yield i, stripped
+
+
 def extract_risk(task_file) -> str:
     """Read the `## Risk` classification from a task.md — the token on the line
     after the heading. Returns one of RISK_CLASSES, or 'unclassified' if the
@@ -998,12 +1023,122 @@ def has_risk_section(task_file) -> bool:
     return bool(_risk_heading_lines(lines))
 
 
+def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
+                               strict: bool = False) -> "str | None":
+    """The fingerprint MATERIAL for a single git repo: HEAD + porcelain + working
+    diff + a digest of every untracked file's CONTENT. Returns None when
+    `repo_path` has no HEAD, isn't a git repo, or git errors — the caller decides
+    what that means. Shared by the outer tree and each nested `code_roots` repo so
+    both hash byte-identical semantics (owner constraint: no stronger hashing for
+    nested repos than the outer tree already does).
+
+    `strict=True` (nested `code_roots` roots — impl-panel findings F2/F4) adds two
+    guards that must NOT apply to the outer tree: (1) the path must be its OWN git
+    toplevel, so a plain subdirectory resolves to `<absent>` instead of silently
+    fingerprinting the ANCESTOR repo git would walk up to, and a symlinked root
+    that lands in a different repo is rejected; (2) a non-zero git status/diff
+    return code yields None (→ `<absent>`, the STALE-safe direction) instead of an
+    empty-output error reading as a CLEAN tree. `strict=False` reproduces the
+    outer tree's historical behavior byte-for-byte (the project may legitimately
+    live in a SUBDIRECTORY of a larger repo, where the toplevel check would wrongly
+    blank the fingerprint)."""
+    import hashlib
+    try:
+        head_r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_path,
+                                capture_output=True, text=True)
+        head = head_r.stdout.strip()
+        if not head:
+            return None
+        if strict:
+            if head_r.returncode != 0:
+                return None
+            top_r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                                   cwd=repo_path, capture_output=True, text=True)
+            try:
+                if (top_r.returncode != 0
+                        or Path(top_r.stdout.strip()).resolve()
+                        != Path(repo_path).resolve()):
+                    return None
+            except (OSError, RuntimeError, ValueError):
+                # RuntimeError: a symlink loop under .resolve() (impl-panel N5).
+                return None
+        # -uall enumerates untracked files INDIVIDUALLY (a bare `?? dir/`
+        # hides everything inside the directory from the hash below).
+        porcelain_r = subprocess.run(
+            ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
+            cwd=repo_path, capture_output=True, text=True)
+        diff_r = subprocess.run(
+            ["git", "diff", "HEAD", "--", ".", *exclude],
+            cwd=repo_path, capture_output=True, text=True)
+        if strict and (porcelain_r.returncode != 0 or diff_r.returncode != 0):
+            return None                  # a failed status/diff is NOT a clean tree
+        porcelain = porcelain_r.stdout
+        diff = diff_r.stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # Untracked CONTENT is hashed explicitly (F18 judge C1, verified
+    # empirically): porcelain names an untracked file but never its bytes,
+    # and `diff HEAD` covers tracked paths only — so the pre-1.5.6
+    # fingerprint was blind to edits inside new files, which is exactly
+    # where post-panel fixes land (batches 4 and 5 both did).
+    untracked_digest = hashlib.sha256()
+    for line in sorted(porcelain.splitlines()):
+        if not line.startswith("?? "):
+            continue
+        rel = line[3:].strip().strip('"')
+        try:
+            content = (Path(repo_path) / rel).read_bytes()
+            fhash = hashlib.sha256(content).hexdigest()
+        except OSError:
+            fhash = "unreadable"
+        untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
+    return head + porcelain + diff + untracked_digest.hexdigest()
+
+
+def _code_roots(cfg: dict) -> "list[str]":
+    """Validated, sorted, de-duplicated list of project-relative nested-repo paths
+    from config.json `code_roots`. Empty when the key is absent (the default —
+    fingerprints are then byte-identical to before this feature existed) or when
+    every entry is invalid. Rejects, LOUDLY, anything that isn't a relative path
+    inside the project: non-lists, non-strings, empty/NUL-bearing strings,
+    absolute paths, and `..` traversal (the fingerprint must never be steered to
+    hash something outside the tree)."""
+    raw = cfg.get("code_roots")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        print("[playbook] code_roots: must be a list of project-relative paths "
+              "to nested git repos — ignored", file=sys.stderr)
+        return []
+    out: "set[str]" = set()
+    for i, p in enumerate(raw):
+        if not isinstance(p, str) or not p.strip() or "\x00" in p:
+            print(f"[playbook] code_roots[{i}]: needs a non-empty relative path "
+                  "string — skipped", file=sys.stderr)
+            continue
+        rel = p.strip()
+        parts = Path(rel).parts
+        if os.path.isabs(rel) or rel.startswith(("/", "\\")) or ".." in parts:
+            print(f"[playbook] code_roots[{i}]={rel!r}: must be a relative path "
+                  "inside the project (no absolute paths, no '..') — skipped",
+                  file=sys.stderr)
+            continue
+        out.add(rel)
+    return sorted(out)
+
+
 def tree_state_fingerprint(project_path: Path) -> str:
     """Content fingerprint of the CODE STATE: sha256 over HEAD + porcelain status
     + working diff, 12 hex chars. Names *what state* a panel reviewed or a close
     certified — deterministic, unlike mtimes, and sensitive to uncommitted work
     (which is the normal state at review time). Empty string when git is absent:
-    no fingerprint beats a fabricated one."""
+    no fingerprint beats a fabricated one.
+
+    When config.json `code_roots` names nested git repos (this workspace and
+    HowFar-v2 keep their real code in a gitignored nested checkout, invisible to
+    the outer `git status`), each root's material is folded in too, so a code-only
+    edit there moves the fingerprint. With `code_roots` unset the fingerprint is
+    byte-identical to before the key existed."""
     import hashlib
     # `.agent/` is EXCLUDED: triaging findings edits task.md between the panel
     # and the close by design — the fingerprint must answer "did the CODE
@@ -1030,42 +1165,44 @@ def tree_state_fingerprint(project_path: Path) -> str:
                 else:
                     print(f"[playbook] fingerprint_exclude[{_i}]: needs a "
                           "non-empty pathspec string — skipped", file=sys.stderr)
-    try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project_path,
-                              capture_output=True, text=True).stdout.strip()
-        if not head:
-            return ""
-        # -uall enumerates untracked files INDIVIDUALLY (a bare `?? dir/`
-        # hides everything inside the directory from the hash below).
-        porcelain = subprocess.run(
-            ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
-            cwd=project_path, capture_output=True, text=True).stdout
-        diff = subprocess.run(
-            ["git", "diff", "HEAD", "--", ".", *exclude],
-            cwd=project_path, capture_output=True, text=True).stdout
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    # Untracked CONTENT is hashed explicitly (F18 judge C1, verified
-    # empirically): porcelain names an untracked file but never its bytes,
-    # and `diff HEAD` covers tracked paths only — so the pre-1.5.6
-    # fingerprint was blind to edits inside new files, which is exactly
-    # where post-panel fixes land (batches 4 and 5 both did). NOTE: this
-    # changes fingerprint values across the 1.5.5→1.5.6 upgrade; a stamp
-    # from an older round reads STALE once and self-heals at the next panel.
-    untracked_digest = hashlib.sha256()
-    for line in sorted(porcelain.splitlines()):
-        if not line.startswith("?? "):
-            continue
-        rel = line[3:].strip().strip('"')
+    # Outer-tree material. NOTE: hashing untracked CONTENT changed fingerprint
+    # values across the 1.5.5→1.5.6 upgrade; a stamp from an older round reads
+    # STALE once and self-heals at the next panel.
+    base = _repo_fingerprint_material(Path(project_path), exclude)
+    if base is None:
+        return ""            # git absent — no fingerprint beats a fabricated one
+    material = base
+    # Nested code repos (config `code_roots`): a code-only edit inside a
+    # gitignored nested checkout is invisible to the outer `git status`, so the
+    # outer material above never moves for it. Fold each root's own material in.
+    # UNSET/empty → this loop runs zero times → `material` is byte-identical to
+    # before this feature. Sorted+deduped by _code_roots so order can't perturb
+    # the hash. Each root is hashed in `strict` mode (must be its OWN git repo
+    # toplevel, git failures → `<absent>`); a missing / non-repo / plain-subdir
+    # root contributes a stable "<absent>" marker rather than crashing (a
+    # configured root that isn't a repo yet is not a reason to abandon the whole
+    # fingerprint).
+    _proj_resolved = Path(project_path).resolve()
+    for _rel in _code_roots(_cfg):
+        _cand = Path(project_path) / _rel
+        # Resolve-containment (impl-panel F2): _code_roots already blocks `..`
+        # and absolute strings lexically, but a symlinked in-tree entry could
+        # still resolve OUTSIDE the project. Refuse to run git there.
         try:
-            content = (Path(project_path) / rel).read_bytes()
-            fhash = hashlib.sha256(content).hexdigest()
-        except OSError:
-            fhash = "unreadable"
-        untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
-    return hashlib.sha256(
-        (head + porcelain + diff + untracked_digest.hexdigest())
-        .encode("utf-8", "replace")).hexdigest()[:12]
+            _cand_resolved = _cand.resolve()
+            _inside = (_cand_resolved == _proj_resolved
+                       or _proj_resolved in _cand_resolved.parents)
+        except (OSError, RuntimeError, ValueError):
+            # RuntimeError: a symlink loop under .resolve() (impl-panel N5) must
+            # skip the root loudly, not traceback the whole fingerprint.
+            _inside = False
+        if not _inside:
+            print(f"[playbook] code_roots {_rel!r}: resolves outside the "
+                  "project — skipped", file=sys.stderr)
+            continue
+        _sub = _repo_fingerprint_material(_cand, exclude, strict=True)
+        material += f"\0code_root:{_rel}\0" + ("<absent>" if _sub is None else _sub)
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 # One round per `# Panel {Plan|Impl} Review` H1. judge.md stacks rounds NEWEST
@@ -1969,6 +2106,200 @@ def resume_blocked_task(task_file: Path) -> None:
         i += 1
     if stamped:
         _atomic_write(task_file, "\n".join(out) + "\n")
+
+
+# ── Session handoff (C1) ─────────────────────────────────────────────────────
+# `tasks handoff` codifies the manual session-handoff pattern (proven 3x in this
+# project's own history): it writes the mechanical ~80% playbook already knows
+# into a `## Handoff` section, the agent appends the judgment ~20%, and the task
+# enters the honest blocked state (reason "handoff"). A fresh `tasks bootstrap`
+# surfaces the newest unconsumed handoff; resuming via `tasks work <N>` flips the
+# status back to in_progress (resume_blocked_task) — which is what consumes it.
+
+def _git_repo_summary(repo_path: Path, *,
+                      require_own_toplevel: bool = False
+                      ) -> "tuple[str, str, int | None] | None":
+    """(branch, short-sha, dirty-count) for a git repo, or None when it is not a
+    git repo / git is unavailable / errors. `dirty` is None when HEAD read but
+    `git status` FAILED — the handoff renders that as "status unknown", never a
+    false "clean" (impl-panel C1). `require_own_toplevel=True` (nested code_roots)
+    demands the path be its OWN git toplevel so a plain subdirectory reports
+    `<absent>` (None) rather than the ANCESTOR repo, matching C2's strict
+    fingerprint. Best-effort — a handoff must still write on a detached HEAD."""
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"],
+                              cwd=repo_path, capture_output=True, text=True)
+        if head.returncode != 0 or not head.stdout.strip():
+            return None
+        sha = head.stdout.strip()
+        if require_own_toplevel:
+            top = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                                 cwd=repo_path, capture_output=True, text=True)
+            try:
+                if (top.returncode != 0
+                        or Path(top.stdout.strip()).resolve()
+                        != Path(repo_path).resolve()):
+                    return None
+            except (OSError, RuntimeError, ValueError):
+                return None
+        br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            cwd=repo_path, capture_output=True, text=True).stdout.strip()
+        porc = subprocess.run(["git", "status", "--porcelain"], cwd=repo_path,
+                              capture_output=True, text=True)
+        dirty = (len([ln for ln in porc.stdout.splitlines() if ln.strip()])
+                 if porc.returncode == 0 else None)
+        return (br or "(detached)", sha, dirty)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _latest_receipt_line(task_file: Path) -> "str | None":
+    """The newest `### ...` entry heading under `## Verification Receipt`, or None
+    when the task has no receipts yet (a handoff still works without one)."""
+    try:
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    in_receipt = False
+    for _i, s in _iter_nonfenced(lines):   # fence-aware (impl-panel C1)
+        if s == "## Verification Receipt":
+            in_receipt = True
+            continue
+        if in_receipt:
+            if s.startswith("## ") and not s.startswith("### "):
+                break
+            if s.startswith("### "):
+                return s[4:].strip()
+    return None
+
+
+def _repo_state_bullet(label: str,
+                       summary: "tuple[str, str, int | None] | None") -> str:
+    if summary is None:
+        return f"- **{label}** — (not a git repo / git unavailable)"
+    br, sha, dirty = summary
+    if dirty is None:
+        state = "status unknown"          # git status failed — not "clean" (C1)
+    elif dirty:
+        state = f"{dirty} uncommitted file(s)"
+    else:
+        state = "clean"
+    return f"- **{label}** — branch `{br}` @ `{sha}` ({state})"
+
+
+def build_handoff_section(project_path: Path, task_file: Path) -> str:
+    """The mechanical ~80% of a session handoff, as a `## Handoff` markdown block.
+    Best-effort throughout: git / receipts / code_roots absent → honest
+    placeholders, never a crash. The lone `### Agent notes` scaffold is where the
+    agent appends the judgment ~20% the tooling can't know."""
+    ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    name = Path(project_path).name
+    out = ["## Handoff",
+           f"> Generated {ts} — mechanical state below. APPEND your judgment "
+           'under "Agent notes" before you stop.', ""]
+    out.append(_repo_state_bullet(f"Project repo `{name}`",
+                                  _git_repo_summary(Path(project_path))))
+    try:
+        cfg = load_config(Path(project_path))
+    except Exception:
+        cfg = {}
+    _proj_resolved = Path(project_path).resolve()
+    for rel in _code_roots(cfg):
+        # Same containment as C2's fingerprint: skip a symlinked root that
+        # resolves outside the project, and require the root to be its OWN git
+        # toplevel (a plain subdir must not report the ancestor repo).
+        cand = Path(project_path) / rel
+        try:
+            cand_r = cand.resolve()
+            inside = (cand_r == _proj_resolved or _proj_resolved in cand_r.parents)
+        except (OSError, RuntimeError, ValueError):
+            inside = False
+        summary = (_git_repo_summary(cand, require_own_toplevel=True)
+                   if inside else None)
+        out.append(_repo_state_bullet(f"Code root `{rel}`", summary))
+    try:
+        checked, total = _gate_counts(
+            task_file.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        checked, total = 0, 0
+    out.append(f"- **Gates:** {checked}/{total} checked — next unchecked: "
+               f"{_extract_head_position(task_file)}")
+    rc = _latest_receipt_line(task_file)
+    out.append("- **Latest verification:** " + (f"`{rc}`" if rc else "(none recorded)"))
+    out += ["",
+            "### Agent notes (the ~20% only you know — fill in before you stop)",
+            "- In-flight reasoning:",
+            "- Decisions not yet in the file:",
+            "- Dead ends ruled out:",
+            ""]
+    return "\n".join(out)
+
+
+def write_handoff(task_file: Path, section: str) -> None:
+    """Upsert the `## Handoff` section (idempotent replace, else append at end).
+    Touches no gate. Fence-aware (impl-panel C1 Critical): a `## Handoff` quoted
+    inside a fenced example is NOT the section, so it can never make this delete
+    through to the next real H2 and corrupt the file. The section's own inner
+    `### Agent notes` is level-3, so it never ends the replaced block."""
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    nonfenced = list(_iter_nonfenced(lines))
+    start = next((i for i, s in nonfenced if s == "## Handoff"), None)
+    if start is None:
+        out = list(lines)                                   # append fresh
+    else:
+        # End at the first non-fenced level-2 heading strictly after start
+        # (a fenced heading inside the old block does not end it).
+        end = next((i for i, s in nonfenced
+                    if i > start and s.startswith("## ") and not s.startswith("### ")),
+                   len(lines))
+        out = list(lines[:start]) + list(lines[end:])
+    while out and out[-1].strip() == "":
+        out.pop()
+    out += ["", section.rstrip(), ""]
+    _atomic_write(task_file, "\n".join(out) + "\n")
+
+
+def _extract_block_reason(task_file: Path) -> "str | None":
+    """The one-line reason from a task's `## Blocked` blockquote (the trailing
+    `(since …)` / `Resumed …` stamp stripped), or None when not blocked.
+    Fence-aware (impl-panel C1): a fenced `## Blocked` example is not live."""
+    try:
+        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    in_blocked = False
+    for _i, s in _iter_nonfenced(lines):
+        if s == "## Blocked":
+            in_blocked = True
+            continue
+        if in_blocked:
+            if s.startswith("## ") and not s.startswith("### "):
+                break
+            if s.startswith(">"):
+                body = s.lstrip(">").strip()
+                body = re.sub(r"\s*\((?:since|Resumed)[^)]*\)\s*$", "", body).strip()
+                if body:
+                    return body
+    return None
+
+
+def find_unconsumed_handoff(project_path: Path):
+    """The newest task that is BLOCKED with block-reason 'handoff' — an unconsumed
+    handoff. Resuming with `tasks work <N>` flips status to in_progress, which is
+    what consumes it (the `## Handoff` section stays as history). Returns
+    (number:int, slug:str, task_file:Path) or None."""
+    best = None
+    for num, slug, tf in _iter_task_dirs(project_path):
+        try:
+            if not _is_blocked(tf):
+                continue
+            reason = _extract_block_reason(tf)
+            if reason and reason.strip().lower() == "handoff":
+                if best is None or num > best[0]:
+                    best = (num, slug, tf)
+        except Exception:
+            continue
+    return best
 
 
 def _folder_matches_filter(folder_name: str, name_filter: str) -> bool:
