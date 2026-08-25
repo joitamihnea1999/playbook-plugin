@@ -119,6 +119,72 @@ class FingerprintCoverage(unittest.TestCase):
         self.assertIn("fingerprint_exclude", buf.getvalue(),
                       "malformed entries must be skipped LOUDLY")
 
+    @unittest.skipIf(os.name == "nt", "mkfifo / symlink-follow are POSIX-only")
+    def test_untracked_symlink_to_fifo_does_not_hang_fingerprint(self):
+        # R1/P1 (1.5.39): the untracked-content hash used a bare read_bytes(),
+        # which FOLLOWS an untracked symlink into a FIFO and blocks forever (git
+        # lists the symlink `?? link`; a bare FIFO it skips, so the symlink is
+        # the live vector). The freshness fingerprint runs on every panel and
+        # every high-consequence close, so this is a PERMANENT denial of the
+        # close path. _safe_hash_regular's O_NOFOLLOW must reject the symlink →
+        # a deterministic "unreadable" leaf, never a hang.
+        import threading
+        d = _repo()
+        fifo = d / "real.pipe"
+        os.mkfifo(fifo)
+        os.symlink(fifo, d / "linktofifo")     # untracked symlink → FIFO
+        result: dict = {}
+
+        def run():
+            result["fp"] = tree_state_fingerprint(d)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(timeout=15)
+        self.assertFalse(t.is_alive(),
+                         "fingerprint hung following an untracked symlink into a "
+                         "FIFO — the untracked hash must not follow into a pipe")
+        self.assertTrue(result.get("fp"),
+                        "fingerprint returned empty after the symlink-to-FIFO")
+        # deterministic: a second computation agrees (no time/randomness leak)
+        self.assertEqual(result["fp"], tree_state_fingerprint(d))
+
+    def test_oversize_untracked_content_is_cap_bounded(self):
+        # R1/P1: a huge untracked file must not be read whole (OOM). With a tiny
+        # cap, two same-size untracked files that share size but differ in
+        # content past the cap must fingerprint IDENTICALLY (a size-bearing
+        # `toolarge:<size>` marker) — proving the read never touches the bytes.
+        # RED on the old full-read code, which sees the differing content.
+        import tasks.core as core
+        d = _repo()
+        cap = 16
+        sentinel = object()
+        orig = getattr(core, "_FINGERPRINT_HASH_CAP", sentinel)
+        core._FINGERPRINT_HASH_CAP = cap
+
+        def restore():
+            if orig is sentinel:
+                if hasattr(core, "_FINGERPRINT_HASH_CAP"):
+                    del core._FINGERPRINT_HASH_CAP
+            else:
+                core._FINGERPRINT_HASH_CAP = orig
+        self.addCleanup(restore)
+
+        head = b"A" * cap
+        (d / "big.bin").write_bytes(head + b"11111111")     # oversize, size cap+8
+        fp1 = tree_state_fingerprint(d)
+        (d / "big.bin").write_bytes(head + b"22222222")     # same size, content differs
+        fp2 = tree_state_fingerprint(d)
+        self.assertEqual(fp1, fp2,
+                         "fingerprint read past the cap — a huge untracked file "
+                         "would be read whole (OOM risk)")
+        # boundary control: a file AT/under the cap is content-hashed again, so
+        # dropping to cap bytes moves the fingerprint (the cap is a ceiling, not
+        # a blindfold for normal files).
+        (d / "big.bin").write_bytes(head)                   # exactly cap bytes → hashed
+        self.assertNotEqual(fp2, tree_state_fingerprint(d),
+                            "a file at/under the cap must be content-hashed")
+
 
 class NestedCodeRoots(unittest.TestCase):
     """C2: the outer fingerprint is blind to a code-only edit inside a nested

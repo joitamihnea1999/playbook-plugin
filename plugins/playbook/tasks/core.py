@@ -1023,6 +1023,77 @@ def has_risk_section(task_file) -> bool:
     return bool(_risk_heading_lines(lines))
 
 
+# Per-file ceiling for hashing UNTRACKED content in the freshness fingerprint
+# (R1/1.5.39). A file larger than this records a size-bearing `toolarge:<size>`
+# marker instead of being read whole, so a multi-GB untracked artifact cannot
+# exhaust memory during a panel/close. 5 MiB mirrors the tamper path's per-file
+# cap (review.py `_TAMPER_HASH_CAP`); the two are independent policy knobs.
+_FINGERPRINT_HASH_CAP = 5 * 1024 * 1024  # 5 MiB per untracked file
+
+
+def _safe_hash_regular(path: "Path", cap: int) -> "tuple[str, object, int]":
+    """Hash a path AS A REGULAR FILE without any operation a hostile swap could
+    turn into a hang, an unbounded allocation, or an uncaught crash (panel rounds
+    2-6, codex×2 + sonnet). The single safe-read primitive used by the task.md
+    fingerprint, the dirty-file content-hash loop (review.py [3]) AND the
+    untracked-content digest in `_repo_fingerprint_material` below (R1/1.5.39).
+
+    Opens ONE `O_NONBLOCK|O_NOFOLLOW` descriptor and re-validates it with `fstat`
+    AFTER the open, so a TOCTOU swap to a FIFO between an earlier stat and this
+    read cannot block, and a symlink swapped in (or, for the untracked-content
+    caller, an untracked symlink pointing INTO a FIFO/device/huge file) cannot be
+    followed. Reads at most `cap` bytes, so a file grown to gigabytes cannot
+    exhaust memory. O_NONBLOCK / O_NOFOLLOW are absent on native Windows
+    (getattr → 0): there it degrades to a plain size-bounded read (a documented
+    limitation — Windows is the uncontained fallback where the OS sandbox is
+    anyway unavailable). Returns:
+      ("hash", hexdigest, nbytes)  — a regular file within the cap
+      ("toolarge", size, 0)        — a regular file larger than the cap
+      ("error", None, 0)           — not a plain regular file now (symlink/FIFO/
+                                     device/deleted), a perms strip, or a read error
+    """
+    import hashlib
+    import stat as _stat
+    # O_BINARY (Windows) keeps the read RAW: without it Windows text-mode
+    # translates CRLF→LF, so a rogue that only rewrites line endings of a
+    # gitignored task.md would hash identically and slip the guard (panel round-8
+    # codex:sol). No-op (0) on POSIX.
+    flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return ("error", None, 0)               # ELOOP / ENXIO / perms / gone
+    try:
+        st = os.fstat(fd)                        # re-validate the OPENED object
+        if not _stat.S_ISREG(st.st_mode):
+            return ("error", None, 0)            # TOCTOU: became a FIFO/dir/device
+        if st.st_size > cap:
+            return ("toolarge", st.st_size, 0)
+        # Read up to cap+1 bytes: a file that GROWS past the cap DURING the read
+        # (a rogue appending after the fstat) would otherwise be silently
+        # truncated-and-hashed, so a rewrite of its bytes beyond `cap` hashes
+        # identically both times. Reading one extra byte lets us bucket a
+        # boundary grower as `toolarge` instead (panel round-7 opus).
+        h = hashlib.sha256()
+        remaining, nbytes = cap + 1, 0
+        while remaining > 0:
+            try:
+                chunk = os.read(fd, min(65536, remaining))
+            except (BlockingIOError, OSError):
+                return ("error", None, 0)        # O_NONBLOCK pipe / read error
+            if not chunk:
+                break
+            h.update(chunk)
+            remaining -= len(chunk)
+            nbytes += len(chunk)
+        if nbytes > cap:
+            return ("toolarge", nbytes, 0)       # grew past the cap mid-read
+        return ("hash", h.hexdigest(), nbytes)
+    finally:
+        os.close(fd)
+
+
 def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
                                strict: bool = False) -> "str | None":
     """The fingerprint MATERIAL for a single git repo: HEAD + porcelain + working
@@ -1086,10 +1157,22 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
         if not line.startswith("?? "):
             continue
         rel = line[3:].strip().strip('"')
-        try:
-            content = (Path(repo_path) / rel).read_bytes()
-            fhash = hashlib.sha256(content).hexdigest()
-        except OSError:
+        # R1/1.5.39: hash via the safe primitive, never a bare read_bytes().
+        # O_NOFOLLOW stops an untracked SYMLINK from being followed into a FIFO
+        # (which git lists as `?? link` and read_bytes would block on forever)
+        # or a device/huge file; the cap bounds the read so a multi-GB untracked
+        # artifact can't exhaust memory. A regular file within the cap yields the
+        # IDENTICAL sha256 digest as before, so the byte-identical fingerprint
+        # guarantee holds (test_unset_matches_legacy_oracle). Degraded leaves are
+        # DETERMINISTIC: a size-bearing `toolarge:<size>` (a growth still moves
+        # the fingerprint) or `unreadable` (FIFO/symlink/device/deleted/perms).
+        kind, detail, _n = _safe_hash_regular(Path(repo_path) / rel,
+                                              _FINGERPRINT_HASH_CAP)
+        if kind == "hash":
+            fhash = detail
+        elif kind == "toolarge":
+            fhash = f"toolarge:{detail}"
+        else:
             fhash = "unreadable"
         untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
     return head + porcelain + diff + untracked_digest.hexdigest()
