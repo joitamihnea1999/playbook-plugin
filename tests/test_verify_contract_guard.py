@@ -498,7 +498,12 @@ class VerifyContractSweep(unittest.TestCase):
 
 class VerifyContractJournalAtClose(unittest.TestCase):
     """The close path records the resolved verify command(s) in the enforcement
-    journal, so a forensic reader can see what bar each close actually ran."""
+    journal, so a forensic reader can see what bar each close actually ran.
+
+    R5 (owner-ratified, M173): the journal `decision` contract is
+    {allow, block, record}; this close entry is `hook="close",
+    decision="record"` (a log-only forensic record, not a gate allow/block),
+    replacing the earlier out-of-contract `decision="verify-contract"`."""
 
     def _repo(self, verify="echo VC_MARKER_9f") -> Path:
         d = Path(tempfile.mkdtemp(prefix="pb-vcj-"))
@@ -532,12 +537,26 @@ class VerifyContractJournalAtClose(unittest.TestCase):
         r = subprocess.run([sys.executable, "-m", "tasks.cli", "work", "done"],
                            cwd=d, env=env, capture_output=True, text=True, timeout=60)
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
-        recs = [x for x in self._journal(d) if x.get("hook") == "close"
-                and x.get("decision") == "verify-contract"]
-        self.assertTrue(recs, "close did not journal a verify-contract record")
+        journal = self._journal(d)
+        recs = [x for x in journal if x.get("hook") == "close"
+                and x.get("decision") == "record"]
+        self.assertTrue(recs, "close did not journal a record entry")
+        # Pin the EXACT close tuple (panel R5 codex:sol): hook/decision/reason
+        # must all match the ratified contract, so a change to any one of them
+        # (or a stray legacy entry) is caught, not just "a record exists".
+        rec = recs[-1]
+        self.assertEqual(rec.get("hook"), "close")
+        self.assertEqual(rec.get("decision"), "record")
+        self.assertEqual(rec.get("reason"), "verify contract")
         # the verify command is captured specifically in the `command` field —
         # a distinctive marker, so it can't be a coincidental JSON literal.
-        self.assertIn("VC_MARKER_9f", recs[-1].get("command", ""))
+        self.assertIn("VC_MARKER_9f", rec.get("command", ""))
+        # Enum closure: EVERY decision emitted to the journal in this run must
+        # belong to the ratified {allow, block, record} contract — so the close
+        # cannot smuggle back an out-of-contract value like "verify-contract".
+        decisions = {x.get("decision") for x in journal}
+        self.assertTrue(decisions <= {"allow", "block", "record"},
+                        f"journal emitted an out-of-contract decision: {decisions}")
 
     def test_close_journals_full_multiline_verify_command(self):
         # round-3 panel (sonnet): a MULTI-LINE verify command was joined with
@@ -554,8 +573,8 @@ class VerifyContractJournalAtClose(unittest.TestCase):
                            cwd=d, env=env, capture_output=True, text=True, timeout=60)
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         recs = [x for x in self._journal(d) if x.get("hook") == "close"
-                and x.get("decision") == "verify-contract"]
-        self.assertTrue(recs, "close did not journal a verify-contract record")
+                and x.get("decision") == "record"]
+        self.assertTrue(recs, "close did not journal a record entry")
         cmd = recs[-1].get("command", "")
         self.assertNotIn("\n", cmd, "the journal record must stay single-line")
         self.assertIn("VC_LINE1_7a", cmd)
@@ -578,8 +597,8 @@ class VerifyContractJournalAtClose(unittest.TestCase):
                            cwd=d, env=env, capture_output=True, text=True, timeout=60)
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         recs = [x for x in self._journal(d) if x.get("hook") == "close"
-                and x.get("decision") == "verify-contract"]
-        self.assertTrue(recs, "close did not journal a verify-contract record")
+                and x.get("decision") == "record"]
+        self.assertTrue(recs, "close did not journal a record entry")
         self.assertLessEqual(len(recs[-1].get("command", "").encode("utf-8")), 200,
                              "command field must stay within pb_journal's head cap")
 
@@ -598,8 +617,8 @@ class VerifyContractJournalAtClose(unittest.TestCase):
                            cwd=d, env=env, capture_output=True, text=True, timeout=60)
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         recs = [x for x in self._journal(d) if x.get("hook") == "close"
-                and x.get("decision") == "verify-contract"]
-        self.assertTrue(recs, "close did not journal a verify-contract record")
+                and x.get("decision") == "record"]
+        self.assertTrue(recs, "close did not journal a record entry")
         self.assertLessEqual(len(recs[-1].get("command", "").encode("utf-8")), 200,
                              "multi-byte command field exceeded the byte cap")
 

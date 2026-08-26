@@ -289,7 +289,9 @@ hard-blocking a legitimate improvement:
 
 - **Journalled at close.** Every close records the verify commands it ran in the
   enforcement journal (`.agent/**/journal/enforcement.jsonl`, `hook: "close"`,
-  `decision: "verify-contract"`) in addition to naming them in the task's
+  `decision: "record"` — the journal `decision` contract is `{allow, block,
+  record}`, and a close is a log-only `record`, not a gate allow/block) in
+  addition to naming them in the task's
   `## Verification Receipt`. The commands are newline-escaped onto a single line,
   so a multi-line verify command is kept intact (not chopped at its first
   newline, which would silently drop every command after it). The `command`
