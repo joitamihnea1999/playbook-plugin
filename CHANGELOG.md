@@ -2,6 +2,98 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.39] — 2026-08-26
+
+A five-item hardening batch on top of 1.5.38, plus two CI test-portability
+fixes. The freshness fingerprint that guards every panel and high-consequence
+close is hardened against a planted-untracked-file denial of the close path and
+against a special-character-filename blind spot; `tasks handoff` stops losing
+prior handoffs' agent notes; the monitor-nudge at-least-once contract recovers
+claims stranded by a dead owner; and the enforcement journal's close-time entry
+is brought inside a `{allow, block, record}` decision contract. The items below
+are sourced from the range `32597c1..HEAD` and state only what that diff shows.
+
+### Fixed
+
+- **Freshness fingerprint no longer hangs or OOMs on a planted untracked file
+  (R1).** `_repo_fingerprint_material` hashed every untracked file with a bare
+  `read_bytes()`; git lists an untracked symlink as `?? link` and `read_bytes()`
+  follows it — into a FIFO it blocked forever, into `/dev/zero` or a multi-GB
+  file it exhausted memory, so a single planted untracked symlink was a permanent
+  denial of the close path (the freshness fingerprint runs on every panel and
+  every high-consequence close). The untracked-content hash now routes through
+  the `_safe_hash_regular` primitive (`O_NONBLOCK|O_NOFOLLOW` open + `fstat`
+  re-validation + size cap), moved from `review.py` to `core.py` so the tamper
+  path and the fingerprint share one primitive. Degraded leaves are
+  deterministic — `toolarge:<size>` (a growth still moves the fingerprint) or
+  `unreadable` (FIFO/symlink/device/deleted); a regular file within the cap
+  yields the identical sha256, so the byte-identical-fingerprint guarantee holds.
+- **Special-character untracked filenames are no longer invisible to the
+  freshness gate (R2).** The untracked-content digest enumerated files by parsing
+  the default `git status --porcelain` with `.strip('"')`, which does not
+  un-escape git's C-quoting: a filename like `a"b.py` (`?? "a\"b.py"`) parsed to a
+  wrong path, was recorded `unreadable`, and its content edits were invisible to
+  the fingerprint — a stale panel could read FRESH on such a repo. Untracked
+  paths are now enumerated from a separate `git status --porcelain -uall -z`,
+  captured as bytes and `os.fsdecode`'d (the main non-`-z` porcelain string
+  folded into the fingerprint is unchanged). The fingerprint is byte-identical
+  for every repo without a git-special-char untracked filename; only such a repo
+  — previously mis-recorded `unreadable` — sees its digest move to the correct
+  value. A `-z` failure falls back to the exact legacy parse.
+- **`tasks handoff` preserves prior handoffs instead of deleting them (R3).**
+  `write_handoff` replaced the whole `## Handoff` block on the next handoff, so a
+  handoff→resume→handoff sequence deleted the prior handoff's manually-filled
+  `### Agent notes` — contradicting the "the `## Handoff` section stays behind as
+  history" claim for the multi-handoff case. A pre-existing `## Handoff` block is
+  now archived (heading demoted to `### Archived handoff`, content kept verbatim)
+  into a dedicated `## Handoff history` H2 (newest-first); the fresh `## Handoff`
+  is appended last so its future replace boundary never reaches the history. Both
+  H2 lookups stay fence-aware.
+- **Monitor-nudge recovers claims stranded by a dead owner (R4).** A crash
+  between the per-invocation rename-claim (`nudge.md` →
+  `nudge.md.delivering.<pid>.<rand>`) and its success-`rm`/failure-restore
+  stranded the `.delivering.*` file; later invocations only looked at `nudge.md`,
+  so the claimed nudge was silently lost, breaking the at-least-once contract the
+  unique-claim design establishes. Each invocation now runs orphan recovery
+  first: it scans `nudge.md.delivering.*`, parses the owner pid, and re-lands any
+  claim whose owner is dead (`kill -0` fails) via the same atomic no-clobber `ln`
+  as the failure path. A live-owner claim (concurrent in-flight delivery) is left
+  untouched; empty/unparseable pids are handled defensively. All arms are
+  `set -e`-safe and use only bash 3.2 builtins.
+- **CI: non-UTF-8 untracked-filename test skips where the filesystem rejects the
+  byte.** `test_non_utf8_untracked_filename_content_is_tracked` created a file
+  named with a raw `\xff` byte; macOS (APFS/HFS+) enforces valid UTF-8 filenames
+  and raised `OSError [Errno 92] Illegal byte sequence`, reddening the macOS lane.
+  File creation is now guarded with `try/except OSError → skipTest` (matching the
+  FIFO/symlink Windows-skip pattern); Linux still exercises the surrogateescape
+  path.
+- **CI: live-owner nudge test uses a real bash child's `$$`.** The live-owner
+  orphan-recovery test named its claim with `os.getpid()` (a native Windows PID);
+  the hook's `kill -0` liveness check runs in MSYS Git-Bash, which only knows MSYS
+  PIDs, so a native Windows PID read as dead and the claim was (correctly)
+  recovered — failing the assertion on the Windows lane only. Production always
+  names claims with the hook's own bash `$$` (an MSYS pid), so the feature is
+  correct on Windows; only the test used an unrealistic pid. It now spawns a real
+  `bash` child and uses its `$$`.
+
+### Changed
+
+- **Enforcement-journal close entry now records `decision: "record"` inside a
+  `{allow, block, record}` contract (R5).** The close-time verify-contract
+  journal entry wrote `decision="verify-contract"`, outside the documented
+  `allow`/`block` contract, so external consumers flagged it as an unexpected
+  decision. Owner-ratified (M173): the journal decision contract is
+  `{allow, block, record}`, and a close is a log-only `record` of the verify bar
+  it ran (not a gate allow/block). `lifecycle.py`'s close emitter now writes
+  `record`; `docs/architecture.md` and `docs/configuration.md` make the decision
+  enum explicit; and `guarantee-ledger.json` (`PB-ENFORCEMENT-JOURNAL`) names the
+  enum, adds `lifecycle.py`'s `cmd_work` as an owner, and adds a proof for the
+  close record (negative control = a wedged journal that still never blocks the
+  close). **External-consumer skew (disclosed):** a downstream reader of this
+  journal (e.g. playbook-lens) that does not yet know `record` will flag it as an
+  unexpected decision until it adds the value — a one-time, expected skew that is
+  the consumer's to absorb; this repo's format is the source of truth.
+
 ## [1.5.38] — 2026-08-25
 
 An eleven-item hardening batch on top of 1.5.37 (plus a Windows/Git-Bash CI
