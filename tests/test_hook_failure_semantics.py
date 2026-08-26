@@ -358,11 +358,29 @@ class MonitorNudgeOrphanRecovery(unittest.TestCase):
 
     def test_live_owner_claim_is_not_stolen(self):
         # A claim whose owner process is STILL ALIVE is a concurrent in-flight
-        # delivery, not an orphan. Recovery must leave it untouched. Use the
-        # test process's own pid — guaranteed alive for the duration.
-        live = self.mon / f"nudge.md.delivering.{os.getpid()}.xyz"
-        live.write_text("IN-FLIGHT (live owner)\n", encoding="utf-8")
-        self._run()
+        # delivery, not an orphan. Recovery must leave it untouched. The owner
+        # pid must be one the hook's `kill -0 "$opid"` can actually see: the
+        # hook runs in (MSYS) bash, so use a REAL live bash child's `$$`, not
+        # this Python process's os.getpid() — on Git-Bash a native Windows PID
+        # is unknown to MSYS `kill`, which would read the owner as dead and
+        # (correctly, per contract) recover the claim, failing this test.
+        # Production always names claims with the hook's own bash `$$`, so this
+        # mirrors the real liveness the feature checks.
+        sh = bash_or_skip()
+        owner = subprocess.Popen(
+            [sh, "-c", "echo $$; exec sleep 30"], stdout=subprocess.PIPE)
+        assert owner.stdout is not None  # PIPE is set, but keep the type checker happy
+        try:
+            live_pid = owner.stdout.readline().decode("utf-8", "replace").strip()
+            self.assertTrue(live_pid.isdigit(), f"could not read live child pid: {live_pid!r}")
+            live = self.mon / f"nudge.md.delivering.{live_pid}.xyz"
+            live.write_text("IN-FLIGHT (live owner)\n", encoding="utf-8")
+            self._run()
+        finally:
+            owner.kill()
+            owner.wait(timeout=10)
+            if owner.stdout:
+                owner.stdout.close()
         self.assertTrue(live.is_file(),
                         "a live owner's in-flight claim was stolen by orphan recovery")
         self.assertIn("IN-FLIGHT", live.read_text(encoding="utf-8"))
