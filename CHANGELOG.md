@@ -2,6 +2,70 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.40] — 2026-08-26
+
+Two correctness fixes to task.md fence parsing, closing a gate-bypass vector and
+a record-corruption vector that a fenced heading *example* inside a task file
+could trigger. The headline: the `## Risk` classifier now shares the strict fence
+scanner, closing the vector where a fenced `## Risk` example was mis-parsed as
+live metadata (via a nested/info-string fence or a ≥4-space fence *marker*) and
+shadowed the real `assertive` classification — which had let an assertive task
+close on the reversible bar without a panel. (Residual shadowing via a bare
+indented code block, a non-ASCII-whitespace fence closer, or an unclosed fence
+remains a disclosed best-effort bound — see the first item.) Alongside it, the
+`## Blocked` / `## Handoff` section writers became fence-aware, so a fenced
+`## Blocked` / `## Handoff` example can no longer be mistaken for the live section
+and delete or mis-splice the real record. The risk classifier and the
+blocked/handoff writers now share one strict fence scanner. The items below are
+sourced from the range `d552031..HEAD` and state only what that diff shows.
+
+### Fixed
+
+- **A fenced `## Risk` example mis-parsed through a fence boundary no longer
+  shadows the real classification (headline).** `_risk_heading_lines` (feeding
+  `extract_risk`) had a hand-rolled fence loop that treated a ```lang line — and a
+  ≥4-space-indented ``` marker — as a fence closer. A task.md quoting a fenced
+  `## Risk` / `reversible` example therefore "closed" the fence early, the example
+  heading read as live metadata and shadowed the real `assertive` heading
+  (swallowed by the reopened fence), and `extract_risk` returned `reversible` — so
+  an assertive task would close on the reversible bar with no panel (a verified
+  `PB-RISK-CLASSIFY` bypass). `_risk_heading_lines` now delegates to
+  `_iter_nonfenced`, the shared strict fence scanner: ≤3-space opener,
+  whitespace-only closer, a backtick info-string is not a fence, and an unclosed
+  fence fails CLOSED (fenced through EOF, so a `## Risk` decoy after an unclosed
+  opener returns `unclassified` rather than becoming the class). This closes the
+  mis-parsed-boundary vector; residual shadowing remains a disclosed best-effort
+  bound — a `## Risk` inside a bare ≥4-space *indented code block* still reads as
+  live; a fence closer followed by non-ASCII whitespace (e.g. NBSP) still closes;
+  an unclosed fence hiding the real field makes the task read as a legacy no-Risk
+  task — each needs an adversarially-crafted committed task.md, is contained by
+  diff review + the OS sandbox, and is parked for a follow-up. `guarantee-ledger.json`
+  adds `_risk_heading_lines` as an owner of `PB-RISK-CLASSIFY` and binds the two
+  new proofs (fenced-decoy-cannot-shadow; unclosed-fence-fails-closed).
+- **Fence-aware `## Blocked` / `## Handoff` section writers — a fenced heading
+  example can no longer corrupt the task record.** `set_task_blocked` and
+  `resume_blocked_task` located the `## Blocked` heading fence-blind, so a task.md
+  quoting a fenced `## Blocked` / `## Handoff` example could have the real record
+  deleted or mis-spliced (a stranded, unclosed fence; swallowed sections);
+  `tasks handoff` inherited this through `set_task_blocked`. Both writers now route
+  through a new module-level `_live_section_span` built on the shared scanner:
+  `set_task_blocked` drops every LIVE `## Blocked` span (idempotent re-block) and
+  `resume_blocked_task` stamps only the live section, with normal no-fence
+  block/resume/handoff output byte-identical to before. The shared `_iter_nonfenced`
+  was hardened to the same CommonMark opener/closer rules as the receipt writer's
+  separate `_closed_fence_line_indices` (a ```lang line or a ≥4-space marker is
+  content, not a boundary) and made to fail CLOSED on an unclosed opener — the safe
+  direction for consumers that DELETE, so a decoy after an unclosed fence is never
+  deleted (the opposite of the receipt writer's insert-only fail-open). The
+  blocked/handoff section writers and the risk classifier now share this one
+  fail-closed scanner; non-corrupting readers such as `extract_parked_items` remain
+  fence-blind (disclosed in the ledger). `guarantee-ledger.json`
+  extends `PB-TASK-BLOCKED` with the fence-aware clause, adds `_live_section_span`
+  as an owner, binds the new section-writer proofs, and discloses the remaining
+  best-effort bounds (tab-after-hash ATX boundary, indented code blocks, and — on
+  a genuinely unclosed fence — a record that is written but lands unreadable to
+  the fence-aware reader).
+
 ## [1.5.39] — 2026-08-26
 
 A five-item hardening batch on top of 1.5.38, plus two CI test-portability
