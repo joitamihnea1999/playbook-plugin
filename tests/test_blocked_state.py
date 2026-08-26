@@ -109,6 +109,92 @@ class SetBlockedPure(unittest.TestCase):
         self.assertIsNone(_find_active_task(proj), "a blocked task must not be active")
 
 
+class SetBlockedFenceAware(unittest.TestCase):
+    """P1 (parked by the 1.5.39 panel): the block-state WRITERS must locate the
+    `## Blocked` section fence-aware, exactly as the handoff writer/readers already
+    do (core._iter_nonfenced). A task.md that quotes a fenced `## Blocked` example
+    (documentation of the ritual) must not have that example — or the real record —
+    deleted or mis-spliced. write_handoff was made fence-safe in Session C; this
+    covers the writers it CALLS (set_task_blocked / resume_blocked_task)."""
+
+    def _core(self):
+        import tasks.core as core
+        return core
+
+    def _task(self, body):
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text(body, encoding="utf-8")
+        return tf
+
+    # A fenced `## Blocked` example sits BEFORE the real content it must not eat.
+    DECOY = (
+        "# T\n\n## Status\npending\n\n"
+        "## Docs\nFor reference, the blocked format looks like:\n"
+        "```\n## Blocked\n> example reason  (since 2000-01-01T00:00)\n```\n\n"
+        "## Work Plan\n- [x] G1: done\n- [ ] G2: real gate\n"
+    )
+
+    def test_set_blocked_ignores_fenced_decoy(self):
+        core = self._core()
+        tf = self._task(self.DECOY)
+        core.set_task_blocked(tf, "REALPAUSE waiting on owner")
+        text = tf.read_text(encoding="utf-8")
+        # The fenced example is untouched: both fences survive (balanced), and its
+        # body is byte-intact — the writer never reached into the fence.
+        self.assertEqual(text.count("```"), 2,
+                         "fence-blind delete stranded an unclosed fence")
+        self.assertIn("> example reason  (since 2000-01-01T00:00)", text,
+                      "the fenced example body was deleted")
+        # The real block reason is live and readable by the fence-aware reader —
+        # on the buggy writer the fresh section lands inside the broken fence and
+        # the reader (correctly) sees nothing live.
+        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE waiting on owner")
+        # The real Work Plan H2 and its gate survive.
+        self.assertIn("## Work Plan", text)
+        self.assertIn("- [ ] G2: real gate", text)
+
+    def test_resume_ignores_fenced_decoy(self):
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\nblocked\n\n"
+            "## Docs\n```\n## Blocked\n> example\n```\n\n"
+            "## Blocked\n> real reason  (since 2000-01-01T00:00)\n")
+        core.resume_blocked_task(tf)
+        text = tf.read_text(encoding="utf-8")
+        # Exactly ONE resume stamp — on the LIVE blocked section, never the fenced
+        # example (the fence-blind writer stamps both).
+        self.assertEqual(text.count("> Resumed"), 1,
+                         "resume stamped the fenced example too")
+        self.assertEqual(core._extract_status(tf), "in_progress")
+        # The fenced example is byte-intact.
+        self.assertIn("```\n## Blocked\n> example\n```", text)
+
+    def test_normal_block_and_resume_byte_identical(self):
+        # Negative control: with NO fenced heading, output must be byte-identical
+        # to the pre-fix shape (captured from current behavior; only the ISO
+        # timestamps vary). This is what proves the fence-aware rewrite did not
+        # perturb the ordinary block/resume path.
+        import re
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\npending\n\n## Work Plan\n- [ ] G1\n")
+
+        def norm(s):
+            return re.sub(r"20\d\d-\d\d-\d\dT[0-9:+\-]+", "TS", s)
+
+        core.set_task_blocked(tf, "pause here")
+        self.assertEqual(
+            norm(tf.read_text(encoding="utf-8")),
+            "# T\n\n## Status\nblocked\n\n## Work Plan\n- [ ] G1\n\n"
+            "## Blocked\n> pause here  (since TS)\n\n")
+        core.resume_blocked_task(tf)
+        self.assertEqual(
+            norm(tf.read_text(encoding="utf-8")),
+            "# T\n\n## Status\nin_progress\n\n## Work Plan\n- [ ] G1\n\n"
+            "## Blocked\n> pause here  (since TS)\n\n> Resumed TS\n")
+
+
 class BlockedEndToEnd(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

@@ -969,6 +969,27 @@ def _iter_nonfenced(lines: "list[str]"):
         yield i, stripped
 
 
+def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
+    """[start, end) of the first NON-FENCED level-2 `## {title}` section, or None.
+    `title` includes the `## ` prefix. `end` is the first non-fenced H2 strictly
+    after start (a fenced heading, or the section's own H3s, never end it).
+
+    Shared by the block-state writers (set_task_blocked / resume_blocked_task) and
+    mirrors the local `_section_span` inside write_handoff — every section-locating
+    WRITER on the task.md path must be fence-aware so a fenced `## Blocked` /
+    `## Handoff` example (documentation of the ritual) can never be treated as the
+    live section and delete or mis-splice the real record (the #09 hazard; P1
+    parked by the 1.5.39 panel)."""
+    nf = list(_iter_nonfenced(lines))
+    start = next((i for i, s in nf if s == title), None)
+    if start is None:
+        return None
+    end = next((i for i, s in nf
+                if i > start and s.startswith("## ") and not s.startswith("### ")),
+               len(lines))
+    return (start, end)
+
+
 def extract_risk(task_file) -> str:
     """Read the `## Risk` classification from a task.md — the token on the line
     after the heading. Returns one of RISK_CLASSES, or 'unclassified' if the
@@ -2199,19 +2220,16 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     clean = " ".join(reason.split()) or "(no reason given)"
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
     _set_status(task_file, "blocked")
-    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    # Drop any prior ## Blocked section (idempotent re-block), then append fresh.
-    out, skip = [], False
-    for line in lines:
-        if line.strip() == "## Blocked":
-            skip = True
-            continue
-        if skip:
-            if line.startswith("## "):
-                skip = False
-                out.append(line)
-            continue
-        out.append(line)
+    out = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
+    # fresh. Fence-aware (P1): a `## Blocked` quoted inside a fenced example is not
+    # the section, so the delete can never strand an unclosed fence or swallow the
+    # real record. Loop because a re-block may find more than one live section.
+    while True:
+        span = _live_section_span(out, "## Blocked")
+        if span is None:
+            break
+        out = out[:span[0]] + out[span[1]:]
     while out and out[-1].strip() == "":
         out.pop()
     out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
@@ -2224,20 +2242,14 @@ def resume_blocked_task(task_file: Path) -> None:
     _set_status(task_file, "in_progress")
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    out, i, n, stamped = [], 0, len(lines), False
-    while i < n:
-        out.append(lines[i])
-        if lines[i].strip() == "## Blocked":
-            i += 1
-            while i < n and not lines[i].startswith("## "):
-                out.append(lines[i])
-                i += 1
-            out.append(f"> Resumed {ts}")
-            stamped = True
-            continue
-        i += 1
-    if stamped:
-        _atomic_write(task_file, "\n".join(out) + "\n")
+    # Fence-aware (P1): stamp only the LIVE ## Blocked section, never a fenced
+    # `## Blocked` example. The stamp lands at the end of the section's body (right
+    # before the next live H2 / EOF), byte-identical to the pre-fix placement.
+    span = _live_section_span(lines, "## Blocked")
+    if span is None:
+        return
+    out = lines[:span[1]] + [f"> Resumed {ts}"] + lines[span[1]:]
+    _atomic_write(task_file, "\n".join(out) + "\n")
 
 
 # ── Session handoff (C1) ─────────────────────────────────────────────────────
