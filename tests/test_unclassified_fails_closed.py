@@ -182,6 +182,22 @@ class RiskSectionDetection(unittest.TestCase):
                 self.assertTrue(has_risk_section(p))
                 self.assertEqual(extract_risk(p), "unclassified")
 
+    def test_fenced_risk_decoy_cannot_shadow_the_real_classification(self):
+        # Critical (panel codex-sol): a fenced `## Risk` example whose fence is
+        # "closed" by a ```lang line (or a >=4-space-indented marker) must not be
+        # read as live metadata. Otherwise the fenced `reversible` decoy shadows
+        # the real `assertive`, and an assertive task closes on the lighter bar.
+        # `_risk_heading_lines` must use the strict CommonMark fence rules.
+        for interior in ("```yaml", "    ```"):
+            with self.subTest(interior=interior):
+                body = ("# T\n\n## Status\npending\n\n"
+                        "## Docs\n```\nexample\n" + interior + "\n"
+                        "## Risk\nreversible\n```\n\n"
+                        "## Risk\nassertive\n\n## Work Plan\n- [ ] g\n")
+                p = self._md(body)
+                self.assertEqual(extract_risk(p), "assertive",
+                                 "a fenced Risk decoy must not shadow the real class")
+
     def test_unreadable_file_is_treated_as_legacy(self):
         """Fail toward the documented old behavior, never toward inventing a
         block from an I/O error."""

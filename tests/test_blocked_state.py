@@ -189,6 +189,43 @@ class SetBlockedFenceAware(unittest.TestCase):
         self.assertIn("- [ ] G1: real gate", text)
         self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
 
+    def test_set_blocked_ignores_indented_fence_markers(self):
+        # Panel (opus/sonnet/codex, converging): a >=4-space-indented ``` is an
+        # indented code block, not a fence closer (CommonMark ^ {0,3}). A real
+        # fence must not be "closed" by an indented marker, exposing an interior
+        # `## Blocked` as live — `_iter_nonfenced` must share the ≤3-space rule
+        # with `_closed_fence_line_indices`.
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\npending\n\n"
+            "## Docs\n```\nexample\n    ```\n## Blocked\n> decoy\n```\n\n"
+            "## Work Plan\n- [ ] G1: real gate\n")
+        core.set_task_blocked(tf, "REALPAUSE")
+        text = tf.read_text(encoding="utf-8")
+        self.assertIn("- [ ] G1: real gate", text)
+        self.assertIn("> decoy", text)
+        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
+
+    def test_resume_stamp_byte_identical_mid_file(self):
+        # Panel (opus finding 2): the resume stamp must land byte-identically to
+        # the pre-fix code when `## Blocked` is NOT the last section (the changed
+        # `lines[:span[1]]` insertion path). Old behavior inserted the stamp right
+        # before the next live H2, after the body incl. its trailing blank line.
+        import re
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\nblocked\n\n"
+            "## Blocked\n> reason  (since 2000-01-01T00:00)\n\n"
+            "## Notes\n- keep me\n")
+        core.resume_blocked_task(tf)
+        norm = re.sub(r"20\d\d-\d\d-\d\dT[0-9:+\-]+", "TS",
+                      tf.read_text(encoding="utf-8"))
+        self.assertEqual(
+            norm,
+            "# T\n\n## Status\nin_progress\n\n"
+            "## Blocked\n> reason  (since TS)\n\n> Resumed TS\n"
+            "## Notes\n- keep me\n")
+
     def test_normal_block_and_resume_byte_identical(self):
         # Negative control: with NO fenced heading, output must be byte-identical
         # to the pre-fix shape (captured from current behavior; only the ISO

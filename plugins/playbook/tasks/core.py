@@ -923,22 +923,18 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     returned deliberately: callers treat more than one field as malformed
     rather than letting an attacker choose which duplicate wins.
     """
+    # Fence detection delegates to `_closed_fence_line_indices` \u2014 the ONE task.md
+    # fence scanner. The prior hand-rolled loop treated a ```lang line (and a
+    # >=4-space-indented marker) as a closer, so a fenced `## Risk` example could
+    # "close" early and be read as live metadata \u2014 shadowing the real class and
+    # letting an assertive task close on the reversible bar (panel: codex-sol
+    # Critical, task 032). Sharing the scanner closes that gate bypass.
     found: "list[tuple[int, str]]" = []
-    fence_char = ""
-    fence_len = 0
+    fenced = _closed_fence_line_indices(lines)
     for i, line in enumerate(lines):
+        if i in fenced:
+            continue
         stripped = line.strip().lstrip("\ufeff")
-        fm = re.match(r"^(`{3,}|~{3,})", stripped)
-        if fence_char:
-            if (fm and fm.group(1)[0] == fence_char
-                    and len(fm.group(1)) >= fence_len):
-                fence_char = ""
-                fence_len = 0
-            continue
-        if fm:
-            fence_char = fm.group(1)[0]
-            fence_len = len(fm.group(1))
-            continue
         if _RISK_HEADING_RE.match(stripped):
             found.append((i, stripped))
     return found
@@ -946,37 +942,24 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
 
 def _iter_nonfenced(lines: "list[str]"):
     """Yield ``(index, stripped_line)`` for every line OUTSIDE a Markdown code
-    fence. Shared fence-tracking (same rules as `_risk_heading_lines`) so section
-    writers/readers never treat a heading quoted inside a fenced example as a live
-    section — the #09 hazard, re-raised for the handoff writer/readers by the C1
-    impl panel (a fenced `## Handoff`/`## Blocked`/`## Verification Receipt` must
-    not corrupt the file or fake bootstrap/handoff state)."""
-    fence_char = ""
-    fence_len = 0
+    fence, so section writers/readers never treat a heading quoted inside a fenced
+    example as a live section — the #09 hazard, re-raised for the handoff/blocked
+    writers by the C1/P1 impl panels (a fenced `## Handoff`/`## Blocked`/`##
+    Verification Receipt` must not corrupt the file or fake bootstrap/handoff
+    state).
+
+    Fence detection delegates to `_closed_fence_line_indices` — the ONE task.md
+    fence scanner — so every section locator (blocked/handoff writers, the risk
+    classifier, the receipt writer, the audit reader) agrees byte-for-byte on the
+    CommonMark rules (<=3-space opener/closer, whitespace-only closer, backtick
+    info-string, unclosed-fence handling). A second hand-rolled scanner drifted on
+    indentation and closer-content and reopened the #09 corruption through those
+    gaps (panel: opus/sonnet/codex, task 032)."""
+    fenced = _closed_fence_line_indices(lines)
     for i, line in enumerate(lines):
-        stripped = line.strip().lstrip("﻿")
-        fm = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
-        if fence_char:
-            # Closer (CommonMark): same char, length >= opener, and NOTHING but
-            # whitespace after the run — a ```lang line inside a fence is content,
-            # not a closer. Matches `_closed_fence_line_indices` so the two
-            # task.md fence scanners agree on where a fence ends (panel: codex).
-            if (fm and fm.group(1)[0] == fence_char
-                    and len(fm.group(1)) >= fence_len
-                    and fm.group(2).strip() == ""):
-                fence_char = ""
-                fence_len = 0
+        if i in fenced:
             continue
-        if fm:
-            # Opener (CommonMark): a BACKTICK fence whose info string contains a
-            # backtick is not a fence — same rule as `_closed_fence_line_indices`.
-            if fm.group(1)[0] == "`" and "`" in fm.group(2):
-                yield i, stripped
-                continue
-            fence_char = fm.group(1)[0]
-            fence_len = len(fm.group(1))
-            continue
-        yield i, stripped
+        yield i, line.strip().lstrip("﻿")
 
 
 def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
