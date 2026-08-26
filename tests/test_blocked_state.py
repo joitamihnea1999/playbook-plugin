@@ -109,6 +109,167 @@ class SetBlockedPure(unittest.TestCase):
         self.assertIsNone(_find_active_task(proj), "a blocked task must not be active")
 
 
+class SetBlockedFenceAware(unittest.TestCase):
+    """P1 (parked by the 1.5.39 panel): the block-state WRITERS must locate the
+    `## Blocked` section fence-aware, exactly as the handoff writer/readers already
+    do (core._iter_nonfenced). A task.md that quotes a fenced `## Blocked` example
+    (documentation of the ritual) must not have that example — or the real record —
+    deleted or mis-spliced. write_handoff was made fence-safe in Session C; this
+    covers the writers it CALLS (set_task_blocked / resume_blocked_task)."""
+
+    def _core(self):
+        import tasks.core as core
+        return core
+
+    def _task(self, body):
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text(body, encoding="utf-8")
+        return tf
+
+    # A fenced `## Blocked` example sits BEFORE the real content it must not eat.
+    DECOY = (
+        "# T\n\n## Status\npending\n\n"
+        "## Docs\nFor reference, the blocked format looks like:\n"
+        "```\n## Blocked\n> example reason  (since 2000-01-01T00:00)\n```\n\n"
+        "## Work Plan\n- [x] G1: done\n- [ ] G2: real gate\n"
+    )
+
+    def test_set_blocked_ignores_fenced_decoy(self):
+        core = self._core()
+        tf = self._task(self.DECOY)
+        core.set_task_blocked(tf, "REALPAUSE waiting on owner")
+        text = tf.read_text(encoding="utf-8")
+        # The fenced example is untouched: both fences survive (balanced), and its
+        # body is byte-intact — the writer never reached into the fence.
+        self.assertEqual(text.count("```"), 2,
+                         "fence-blind delete stranded an unclosed fence")
+        self.assertIn("> example reason  (since 2000-01-01T00:00)", text,
+                      "the fenced example body was deleted")
+        # The real block reason is live and readable by the fence-aware reader —
+        # on the buggy writer the fresh section lands inside the broken fence and
+        # the reader (correctly) sees nothing live.
+        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE waiting on owner")
+        # The real Work Plan H2 and its gate survive.
+        self.assertIn("## Work Plan", text)
+        self.assertIn("- [ ] G2: real gate", text)
+
+    def test_resume_ignores_fenced_decoy(self):
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\nblocked\n\n"
+            "## Docs\n```\n## Blocked\n> example\n```\n\n"
+            "## Blocked\n> real reason  (since 2000-01-01T00:00)\n")
+        core.resume_blocked_task(tf)
+        text = tf.read_text(encoding="utf-8")
+        # Exactly ONE resume stamp — on the LIVE blocked section, never the fenced
+        # example (the fence-blind writer stamps both).
+        self.assertEqual(text.count("> Resumed"), 1,
+                         "resume stamped the fenced example too")
+        self.assertEqual(core._extract_status(tf), "in_progress")
+        # The fenced example is byte-intact.
+        self.assertIn("```\n## Blocked\n> example\n```", text)
+
+    def test_set_blocked_ignores_trailing_content_fence_closer(self):
+        # Panel (codex-sol/#1, codex-terra/#1): `_iter_nonfenced` must apply the
+        # CommonMark closer rule — a ```lang line inside a fence is CONTENT, not a
+        # closer (only a whitespace-only run closes). Otherwise the fence "closes"
+        # early and the `## Blocked` after it reads as live → mis-splice. This
+        # aligns the block path with the stricter `_closed_fence_line_indices`.
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\npending\n\n"
+            "## Docs\n```\nexample code\n```text\n## Blocked\n> decoy reason\n```\n\n"
+            "## Work Plan\n- [ ] G1: real gate\n")
+        core.set_task_blocked(tf, "REALPAUSE")
+        text = tf.read_text(encoding="utf-8")
+        # The whole fenced example is preserved and balanced (2 opener/closer runs).
+        self.assertEqual(text.count("```"), 3)
+        self.assertIn("> decoy reason", text)
+        self.assertIn("- [ ] G1: real gate", text)
+        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
+
+    def test_set_blocked_ignores_indented_fence_markers(self):
+        # Panel (opus/sonnet/codex, converging): a >=4-space-indented ``` is an
+        # indented code block, not a fence closer (CommonMark ^ {0,3}). A real
+        # fence must not be "closed" by an indented marker, exposing an interior
+        # `## Blocked` as live — `_iter_nonfenced` must share the ≤3-space rule
+        # with `_closed_fence_line_indices`.
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\npending\n\n"
+            "## Docs\n```\nexample\n    ```\n## Blocked\n> decoy\n```\n\n"
+            "## Work Plan\n- [ ] G1: real gate\n")
+        core.set_task_blocked(tf, "REALPAUSE")
+        text = tf.read_text(encoding="utf-8")
+        self.assertIn("- [ ] G1: real gate", text)
+        self.assertIn("> decoy", text)
+        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
+
+    def test_set_blocked_fails_closed_on_unclosed_fence(self):
+        # Panel round-3 (codex-sol/codex-terra): a destructive section writer must
+        # fail CLOSED on an UNCLOSED fence — treat the remainder as fenced and
+        # never DELETE a `## Blocked` decoy after an unclosed opener. (A fail-open
+        # scanner deletes it — the regression this guards against.) On this
+        # malformed input the fresh block appended at EOF lands inside the trailing
+        # unclosed fence, so the safety property is non-deletion (+ the reason is
+        # still written), not readability — a documented malformed-input corner.
+        core = self._core()
+        before = self._task(
+            "# T\n\n## Status\npending\n\n"
+            "## Docs\n```\n## Blocked\n> decoy\n> keep this quoted line\n")
+        core.set_task_blocked(before, "REALPAUSE")
+        text = before.read_text(encoding="utf-8")
+        self.assertIn("> decoy", text, "unclosed-fence decoy must not be deleted")
+        self.assertIn("> keep this quoted line", text)
+        self.assertIn("REALPAUSE", text, "the block reason is still recorded")
+        self.assertEqual(core._extract_status(before), "blocked")
+
+    def test_resume_stamp_byte_identical_mid_file(self):
+        # Panel (opus finding 2): the resume stamp must land byte-identically to
+        # the pre-fix code when `## Blocked` is NOT the last section (the changed
+        # `lines[:span[1]]` insertion path). Old behavior inserted the stamp right
+        # before the next live H2, after the body incl. its trailing blank line.
+        import re
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\nblocked\n\n"
+            "## Blocked\n> reason  (since 2000-01-01T00:00)\n\n"
+            "## Notes\n- keep me\n")
+        core.resume_blocked_task(tf)
+        norm = re.sub(r"20\d\d-\d\d-\d\dT[0-9:+\-]+", "TS",
+                      tf.read_text(encoding="utf-8"))
+        self.assertEqual(
+            norm,
+            "# T\n\n## Status\nin_progress\n\n"
+            "## Blocked\n> reason  (since TS)\n\n> Resumed TS\n"
+            "## Notes\n- keep me\n")
+
+    def test_normal_block_and_resume_byte_identical(self):
+        # Negative control: with NO fenced heading, output must be byte-identical
+        # to the pre-fix shape (captured from current behavior; only the ISO
+        # timestamps vary). This is what proves the fence-aware rewrite did not
+        # perturb the ordinary block/resume path.
+        import re
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\npending\n\n## Work Plan\n- [ ] G1\n")
+
+        def norm(s):
+            return re.sub(r"20\d\d-\d\d-\d\dT[0-9:+\-]+", "TS", s)
+
+        core.set_task_blocked(tf, "pause here")
+        self.assertEqual(
+            norm(tf.read_text(encoding="utf-8")),
+            "# T\n\n## Status\nblocked\n\n## Work Plan\n- [ ] G1\n\n"
+            "## Blocked\n> pause here  (since TS)\n\n")
+        core.resume_blocked_task(tf)
+        self.assertEqual(
+            norm(tf.read_text(encoding="utf-8")),
+            "# T\n\n## Status\nin_progress\n\n## Work Plan\n- [ ] G1\n\n"
+            "## Blocked\n> pause here  (since TS)\n\n> Resumed TS\n")
+
+
 class BlockedEndToEnd(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

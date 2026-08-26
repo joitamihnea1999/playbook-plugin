@@ -923,50 +923,79 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     returned deliberately: callers treat more than one field as malformed
     rather than letting an attacker choose which duplicate wins.
     """
-    found: "list[tuple[int, str]]" = []
-    fence_char = ""
-    fence_len = 0
-    for i, line in enumerate(lines):
-        stripped = line.strip().lstrip("\ufeff")
-        fm = re.match(r"^(`{3,}|~{3,})", stripped)
-        if fence_char:
-            if (fm and fm.group(1)[0] == fence_char
-                    and len(fm.group(1)) >= fence_len):
-                fence_char = ""
-                fence_len = 0
-            continue
-        if fm:
-            fence_char = fm.group(1)[0]
-            fence_len = len(fm.group(1))
-            continue
-        if _RISK_HEADING_RE.match(stripped):
-            found.append((i, stripped))
-    return found
+    # Fence detection reuses `_iter_nonfenced` \u2014 the shared strict CommonMark
+    # scanner. The prior hand-rolled loop treated a ```lang line (and a >=4-space
+    # marker) as a closer, so a fenced `## Risk` example could "close" early and be
+    # read as live metadata \u2014 shadowing the real class and letting an assertive
+    # task close on the reversible bar (panel: codex-sol Critical, task 032).
+    # Sharing the scanner closes that gate bypass and inherits its fail-closed
+    # handling of an unclosed fence.
+    return [(i, s) for i, s in _iter_nonfenced(lines) if _RISK_HEADING_RE.match(s)]
 
 
 def _iter_nonfenced(lines: "list[str]"):
     """Yield ``(index, stripped_line)`` for every line OUTSIDE a Markdown code
-    fence. Shared fence-tracking (same rules as `_risk_heading_lines`) so section
-    writers/readers never treat a heading quoted inside a fenced example as a live
-    section — the #09 hazard, re-raised for the handoff writer/readers by the C1
-    impl panel (a fenced `## Handoff`/`## Blocked`/`## Verification Receipt` must
-    not corrupt the file or fake bootstrap/handoff state)."""
+    fence, so section writers/readers never treat a heading quoted inside a fenced
+    example as a live section — the #09 hazard, re-raised for the handoff/blocked
+    writers by the C1/P1 impl panels (a fenced `## Handoff`/`## Blocked`/`##
+    Verification Receipt` must not corrupt the file or fake bootstrap/handoff
+    state).
+
+    Applies the SAME CommonMark opener/closer rules as `_closed_fence_line_indices`
+    (<=3-space indent — `_FENCE_OPEN_RE`; a backtick opener whose info string holds
+    a backtick is not a fence; a closer is the same char, >= the opener's length,
+    and whitespace-only after the run), so a ```lang line or a >=4-space marker
+    inside a fence is content, not a boundary. This is the shared source for the
+    blocked/handoff writers AND `_risk_heading_lines`.
+
+    It differs from `_closed_fence_line_indices` in ONE deliberate direction: an
+    UNCLOSED opener fences everything through EOF (fail CLOSED). These consumers
+    DELETE/replace sections, so on a malformed unclosed fence the safe choice is to
+    treat the remainder as fenced and never delete it — the opposite of the receipt
+    writer's fail-open, which only ever INSERTS (panel round-3: codex found the
+    fail-open delegation let set_task_blocked delete a decoy after an unclosed
+    fence). The stricter of the two on every axis; never the more destructive."""
     fence_char = ""
     fence_len = 0
     for i, line in enumerate(lines):
-        stripped = line.strip().lstrip("﻿")
-        fm = re.match(r"^(`{3,}|~{3,})", stripped)
+        raw = line.lstrip("﻿")                 # keep indentation, drop BOM
+        fm = _FENCE_OPEN_RE.match(raw)
         if fence_char:
             if (fm and fm.group(1)[0] == fence_char
-                    and len(fm.group(1)) >= fence_len):
+                    and len(fm.group(1)) >= fence_len
+                    and fm.group(2).strip() == ""):
                 fence_char = ""
                 fence_len = 0
-            continue
+            continue                            # inside fence (incl. unclosed→EOF)
         if fm:
+            if fm.group(1)[0] == "`" and "`" in fm.group(2):
+                yield i, raw.strip()
+                continue
             fence_char = fm.group(1)[0]
             fence_len = len(fm.group(1))
             continue
-        yield i, stripped
+        yield i, raw.strip()
+
+
+def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
+    """[start, end) of the first NON-FENCED level-2 `## {title}` section, or None.
+    `title` includes the `## ` prefix. `end` is the first non-fenced H2 strictly
+    after start (a fenced heading, or the section's own H3s, never end it).
+
+    Shared by the block-state writers (set_task_blocked / resume_blocked_task) and
+    mirrors the local `_section_span` inside write_handoff — every section-locating
+    WRITER on the task.md path must be fence-aware so a fenced `## Blocked` /
+    `## Handoff` example (documentation of the ritual) can never be treated as the
+    live section and delete or mis-splice the real record (the #09 hazard; P1
+    parked by the 1.5.39 panel)."""
+    nf = list(_iter_nonfenced(lines))
+    start = next((i for i, s in nf if s == title), None)
+    if start is None:
+        return None
+    end = next((i for i, s in nf
+                if i > start and s.startswith("## ") and not s.startswith("### ")),
+               len(lines))
+    return (start, end)
 
 
 def extract_risk(task_file) -> str:
@@ -2199,19 +2228,16 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     clean = " ".join(reason.split()) or "(no reason given)"
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
     _set_status(task_file, "blocked")
-    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    # Drop any prior ## Blocked section (idempotent re-block), then append fresh.
-    out, skip = [], False
-    for line in lines:
-        if line.strip() == "## Blocked":
-            skip = True
-            continue
-        if skip:
-            if line.startswith("## "):
-                skip = False
-                out.append(line)
-            continue
-        out.append(line)
+    out = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
+    # fresh. Fence-aware (P1): a `## Blocked` quoted inside a fenced example is not
+    # the section, so the delete can never strand an unclosed fence or swallow the
+    # real record. Loop because a re-block may find more than one live section.
+    while True:
+        span = _live_section_span(out, "## Blocked")
+        if span is None:
+            break
+        out = out[:span[0]] + out[span[1]:]
     while out and out[-1].strip() == "":
         out.pop()
     out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
@@ -2224,20 +2250,14 @@ def resume_blocked_task(task_file: Path) -> None:
     _set_status(task_file, "in_progress")
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    out, i, n, stamped = [], 0, len(lines), False
-    while i < n:
-        out.append(lines[i])
-        if lines[i].strip() == "## Blocked":
-            i += 1
-            while i < n and not lines[i].startswith("## "):
-                out.append(lines[i])
-                i += 1
-            out.append(f"> Resumed {ts}")
-            stamped = True
-            continue
-        i += 1
-    if stamped:
-        _atomic_write(task_file, "\n".join(out) + "\n")
+    # Fence-aware (P1): stamp only the LIVE ## Blocked section, never a fenced
+    # `## Blocked` example. The stamp lands at the end of the section's body (right
+    # before the next live H2 / EOF), byte-identical to the pre-fix placement.
+    span = _live_section_span(lines, "## Blocked")
+    if span is None:
+        return
+    out = lines[:span[1]] + [f"> Resumed {ts}"] + lines[span[1]:]
+    _atomic_write(task_file, "\n".join(out) + "\n")
 
 
 # ── Session handoff (C1) ─────────────────────────────────────────────────────

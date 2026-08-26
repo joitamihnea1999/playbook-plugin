@@ -255,6 +255,37 @@ class FenceAndContainment(_Base):
         self.assertEqual(out3.count("### Archived handoff"), 2,
                          "both prior handoffs must be archived")
 
+    def test_handoff_e2e_ignores_fenced_blocked_decoy(self):
+        # P1 (parked by the 1.5.39 panel): `tasks handoff` → set_task_blocked must
+        # NOT corrupt a task.md that quotes a fenced `## Blocked` example. This is
+        # the end-to-end proof: write_handoff was already fence-safe, but the
+        # blocked-state writer it calls was not, so the whole command inherited the
+        # corruption. Run the real subprocess CLI.
+        core = self._core()
+        d, td = self._project()
+        (td / "task.md").write_text(
+            "# 001 - Demo\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n"
+            "## Work Plan\n- [x] G1\n- [ ] G2\n\n"
+            "## Docs\nFor reference, the blocked format:\n"
+            "```\n## Blocked\n> example  (since 2000-01-01T00:00)\n```\n\n"
+            "## Keepers\n- [ ] must survive\n",
+            encoding="utf-8")
+        r = _cli(d, "handoff")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = (td / "task.md").read_text(encoding="utf-8")
+        # Fences stay balanced — no stranded, unclosed fence.
+        self.assertEqual(text.count("```"), 2,
+                         "handoff's blocked-writer stranded an unclosed fence")
+        # The fenced example body survives byte-intact.
+        self.assertIn("> example  (since 2000-01-01T00:00)", text)
+        # The real later section survives.
+        self.assertIn("## Keepers", text)
+        self.assertIn("must survive", text)
+        # The live block reason is the handoff (fence-aware reader finds it); the
+        # handoff section is present.
+        self.assertEqual(core._extract_block_reason(td / "task.md"), "handoff")
+        self.assertIn("## Handoff", text)
+
     def test_block_reason_ignores_fenced_decoy(self):
         # A fenced `## Blocked` / `> handoff` example must not fake the reason;
         # the REAL block reason wins.
