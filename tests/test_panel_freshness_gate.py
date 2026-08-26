@@ -227,8 +227,14 @@ class FingerprintCoverage(unittest.TestCase):
         # must round-trip so its content is hashed, not `unreadable`.
         d = _repo()
         raw = os.path.join(os.fsencode(str(d)), b"a\xffb.py")
-        with open(raw, "wb") as f:
-            f.write(b"V = 1\n")
+        try:
+            with open(raw, "wb") as f:
+                f.write(b"V = 1\n")
+        except OSError:
+            # macOS (APFS/HFS+) enforces valid UTF-8 filenames and rejects a
+            # raw \xff byte (Errno 92, Illegal byte sequence); the surrogateescape
+            # round-trip is only exercisable where the FS accepts such a name.
+            self.skipTest("filesystem rejects non-UTF-8 filenames")
         fp1 = tree_state_fingerprint(d)
         with open(raw, "wb") as f:
             f.write(b"V = 2\n")
