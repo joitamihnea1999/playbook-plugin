@@ -185,6 +185,147 @@ class FingerprintCoverage(unittest.TestCase):
         self.assertNotEqual(fp2, tree_state_fingerprint(d),
                             "a file at/under the cap must be content-hashed")
 
+    @unittest.skipIf(os.name == "nt", "'\"' is illegal in Windows filenames")
+    def test_special_char_untracked_filename_content_is_tracked(self):
+        # R2/P2 (1.5.39): git C-quotes a special-char untracked filename in the
+        # default porcelain (a"b.py → `?? "a\"b.py"`); the old `.strip('"')`
+        # parse left the internal escape intact → a wrong path → `unreadable`,
+        # so content edits to such a file were INVISIBLE to the fingerprint (a
+        # stale panel could read FRESH). The `-z` enumeration resolves the real
+        # path, so its content is now hashed and edits move the fp.
+        d = _repo()
+        weird = d / 'a"b.py'
+        weird.write_text("VERSION = 1\n", encoding="utf-8")
+        fp1 = tree_state_fingerprint(d)
+        weird.write_text("VERSION = 2\n", encoding="utf-8")
+        fp2 = tree_state_fingerprint(d)
+        self.assertNotEqual(fp1, fp2,
+                            "content edit to a C-quoted untracked filename is "
+                            "invisible to the fingerprint (porcelain mis-parse)")
+
+    @unittest.skipIf(os.name == "nt", "CR is illegal in Windows filenames")
+    def test_carriage_return_untracked_filename_content_is_tracked(self):
+        # R2 impl-panel (codex:sol Important): a raw CR byte in a `-z` path is
+        # mangled to LF by `text=True` universal-newline translation → wrong
+        # path → `unreadable` → edits invisible. The `-z` output MUST be read as
+        # bytes and os.fsdecode'd. (git default-quotes the CR as `\r`, but `-z`
+        # emits the raw byte — this is exactly the text-mode trap.)
+        d = _repo()
+        weird = d / "a\rb.py"
+        weird.write_text("V = 1\n", encoding="utf-8")
+        fp1 = tree_state_fingerprint(d)
+        weird.write_text("V = 2\n", encoding="utf-8")
+        fp2 = tree_state_fingerprint(d)
+        self.assertNotEqual(fp1, fp2,
+                            "content edit to a CR-in-name untracked file is "
+                            "invisible (text-mode newline translation)")
+
+    @unittest.skipIf(os.name == "nt", "non-UTF-8 bytes are illegal in Windows filenames")
+    def test_non_utf8_untracked_filename_content_is_tracked(self):
+        # R2 impl-panel (sonnet #2): a POSIX filename may carry arbitrary
+        # non-UTF-8 bytes; the `-z` bytes → os.fsdecode(surrogateescape) path
+        # must round-trip so its content is hashed, not `unreadable`.
+        d = _repo()
+        raw = os.path.join(os.fsencode(str(d)), b"a\xffb.py")
+        with open(raw, "wb") as f:
+            f.write(b"V = 1\n")
+        fp1 = tree_state_fingerprint(d)
+        with open(raw, "wb") as f:
+            f.write(b"V = 2\n")
+        fp2 = tree_state_fingerprint(d)
+        self.assertNotEqual(fp1, fp2,
+                            "content edit to a non-UTF-8-named untracked file is "
+                            "invisible (surrogateescape round-trip broken)")
+
+    def test_unicode_untracked_filename_content_is_tracked(self):
+        # R2 impl-panel (codex:sol #2): a Unicode filename is octal-escaped by
+        # git's default porcelain on ALL platforms (café.py → `"caf\303\251.py"`)
+        # and is a LEGAL filename on Windows too — so this case exercises the
+        # un-quoting path cross-platform (unlike the CR/`"`/non-UTF-8 cases that
+        # can only exist on POSIX).
+        d = _repo()
+        weird = d / "café.py"
+        weird.write_text("V = 1\n", encoding="utf-8")
+        fp1 = tree_state_fingerprint(d)
+        weird.write_text("V = 2\n", encoding="utf-8")
+        fp2 = tree_state_fingerprint(d)
+        self.assertNotEqual(fp1, fp2,
+                            "content edit to a Unicode-named untracked file is "
+                            "invisible (octal-escape un-quoting broken)")
+
+    @unittest.skipIf(os.name == "nt", "leading/trailing spaces are trimmed by Windows")
+    def test_whitespace_untracked_filename_content_is_tracked(self):
+        # R2 impl-panel round-6 (codex:sol, empirically confirmed): git QUOTES a
+        # leading/trailing-whitespace filename (`?? " lead.py"`) WITHOUT escapes,
+        # so the legacy `.strip().strip('"')` recovers it intact — such a name is
+        # byte-identical (NOT an exception). This pins that it is content-tracked.
+        d = _repo()
+        weird = d / " lead.py"
+        weird.write_text("V = 1\n", encoding="utf-8")
+        fp1 = tree_state_fingerprint(d)
+        weird.write_text("V = 2\n", encoding="utf-8")
+        fp2 = tree_state_fingerprint(d)
+        self.assertNotEqual(fp1, fp2,
+                            "content edit to a leading-whitespace untracked file "
+                            "is invisible to the fingerprint")
+
+    def test_z_failure_falls_back_to_legacy_parse(self):
+        # R2 impl-panel round-2 (sonnet #1): the "-z unavailable" branch is the
+        # safety net behind the "never a silent empty digest" claim. Force the
+        # `-z` status to fail and assert the legacy per-file digest still runs
+        # (a content edit to a normal untracked file still moves the fp).
+        import tasks.core as core
+        from unittest import mock
+        d = _repo()
+        (d / "new.py").write_text("V = 1\n", encoding="utf-8")
+        real_run = subprocess.run
+        seen = {"z": False}
+
+        def fake_run(cmd, *a, **k):
+            if isinstance(cmd, (list, tuple)) and "-z" in cmd:
+                seen["z"] = True
+                return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"")
+            return real_run(cmd, *a, **k)
+
+        with mock.patch.object(core.subprocess, "run", side_effect=fake_run):
+            fp1 = tree_state_fingerprint(d)
+            (d / "new.py").write_text("V = 2\n", encoding="utf-8")
+            fp2 = tree_state_fingerprint(d)
+        self.assertTrue(seen["z"], "the -z status was never attempted")
+        self.assertNotEqual(fp1, fp2,
+                            "-z-failure fallback did not content-hash untracked "
+                            "files (silent empty digest)")
+
+    def test_z_exception_falls_back_to_legacy_parse(self):
+        # R2 impl-panel round-4 (codex:sol + codex:terra, unanimous): a -z
+        # subprocess EXCEPTION (OSError), not just a nonzero return code, must
+        # fall back to the legacy parse — NOT be caught by the outer try and
+        # blank the whole fingerprint (an empty fp makes the freshness gate
+        # permit a high-consequence close).
+        import tasks.core as core
+        from unittest import mock
+        d = _repo()
+        (d / "new.py").write_text("V = 1\n", encoding="utf-8")
+        real_run = subprocess.run
+        seen = {"z": False}
+
+        def fake_run(cmd, *a, **k):
+            if isinstance(cmd, (list, tuple)) and "-z" in cmd:
+                seen["z"] = True
+                raise OSError("boom: -z launch failed")
+            return real_run(cmd, *a, **k)
+
+        with mock.patch.object(core.subprocess, "run", side_effect=fake_run):
+            fp1 = tree_state_fingerprint(d)
+            (d / "new.py").write_text("V = 2\n", encoding="utf-8")
+            fp2 = tree_state_fingerprint(d)
+        self.assertTrue(seen["z"], "the -z status was never attempted")
+        self.assertTrue(fp1, "a -z exception blanked the fingerprint (empty fp "
+                             "→ freshness gate permits the close)")
+        self.assertNotEqual(fp1, fp2,
+                            "-z-exception fallback did not content-hash untracked "
+                            "files")
+
 
 class NestedCodeRoots(unittest.TestCase):
     """C2: the outer fingerprint is blind to a code-only edit inside a nested
@@ -234,6 +375,23 @@ class NestedCodeRoots(unittest.TestCase):
         (sub / "extra.py").write_text("Z = 2\n", encoding="utf-8")
         self.assertNotEqual(fp_unt1, tree_state_fingerprint(d),
                             "untracked nested content is not hashed")
+
+    @unittest.skipIf(os.name == "nt", "'\"' is illegal in Windows filenames")
+    def test_nested_special_char_untracked_content_is_tracked(self):
+        # R2 impl-panel round-2 (sonnet #2): the C-quote fix lives in the shared
+        # `_repo_fingerprint_material` called with strict=True for code_roots, so
+        # a special-char untracked file INSIDE a nested repo must also be content-
+        # tracked (the ledger's "applies equally to outer and nested" claim).
+        d, sub = self._outer_with_nested()
+        self._cfg(d, {"code_roots": ["sub"]})
+        weird = sub / 'a"b.py'
+        weird.write_text("V = 1\n", encoding="utf-8")
+        fp1 = tree_state_fingerprint(d)
+        weird.write_text("V = 2\n", encoding="utf-8")
+        fp2 = tree_state_fingerprint(d)
+        self.assertNotEqual(fp1, fp2,
+                            "special-char untracked content inside a nested "
+                            "code_roots repo is invisible to the fingerprint")
 
     def test_unset_code_roots_is_byte_identical(self):
         # Unset (and empty-list) must be EXACTLY today's behavior: a nested edit

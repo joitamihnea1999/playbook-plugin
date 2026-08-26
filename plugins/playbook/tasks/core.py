@@ -1138,6 +1138,24 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
         porcelain_r = subprocess.run(
             ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
             cwd=repo_path, capture_output=True, text=True)
+        # R2/1.5.39: a SECOND, NUL-delimited status supplies the raw (un-quoted)
+        # untracked paths for the content digest below — kept ADJACENT to the
+        # first porcelain call (before `diff`) to MINIMIZE the window between the
+        # two snapshots (impl-panel sonnet #1). Captured as BYTES (NO text=True):
+        # `-z` emits raw path bytes, and universal-newline translation would
+        # mangle a CR byte in a filename to LF (impl-panel codex:sol #1).
+        # Isolated so a `-z` FAILURE — a nonzero return code OR an exception
+        # (impl-panel r4 codex:sol/terra) — degrades to the legacy parse below
+        # (z_out=None) rather than being caught by the outer handler and blanking
+        # the WHOLE fingerprint: an empty fp reads as "git absent" and the
+        # freshness gate would then permit a high-consequence close.
+        try:
+            z_r = subprocess.run(
+                ["git", "status", "--porcelain", "-uall", "-z", "--", ".", *exclude],
+                cwd=repo_path, capture_output=True)
+            z_out = z_r.stdout if z_r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            z_out = None
         diff_r = subprocess.run(
             ["git", "diff", "HEAD", "--", ".", *exclude],
             cwd=repo_path, capture_output=True, text=True)
@@ -1153,10 +1171,35 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
     # fingerprint was blind to edits inside new files, which is exactly
     # where post-panel fixes land (batches 4 and 5 both did).
     untracked_digest = hashlib.sha256()
-    for line in sorted(porcelain.splitlines()):
-        if not line.startswith("?? "):
-            continue
-        rel = line[3:].strip().strip('"')
+    # R2/1.5.39 (owner-ratified 2026-08-26): enumerate untracked paths from the
+    # NUL-delimited `z_out` fetched above, so git's C-quoting of special-char
+    # filenames (a"b.py → `?? "a\"b.py"` in the DEFAULT output) is never
+    # mis-parsed. The old `.strip('"')` parse left the internal `\"` escape
+    # intact → a wrong path → `unreadable`, hiding content edits to such a file.
+    # The MAIN `porcelain` string folded into the fingerprint above stays the
+    # non-`-z` form, so the fingerprint VALUE is byte-identical for every repo
+    # whose untracked filenames need no quoting (the oracle-test case); only a
+    # repo that ACTUALLY contains a special-char untracked file — previously
+    # mis-recorded `unreadable` — sees its digest change, to the correct value.
+    # `os.fsdecode` round-trips raw path bytes (incl. non-UTF-8) losslessly. A
+    # `-z` failure falls back to the exact legacy parse (never a silent empty
+    # digest). NOTE (impl-panel sonnet #1): the `-z` snapshot is separate from
+    # the folded `porcelain` above, so a file created/removed in the tiny window
+    # between them could make the two disagree — practically always in the
+    # STALE-safe direction (a spurious re-panel); the lone false-FRESH is the
+    # astronomically-contrived same-window deletion at BOTH stamp and close (see
+    # PB-PANEL-FRESHNESS ledger). The calls are adjacent to keep the window
+    # minimal — the same order of non-atomicity the porcelain/diff/per-file reads
+    # already carry.
+    untracked_rels: "list[str] | None" = None
+    if z_out is not None:
+        untracked_rels = [os.fsdecode(e[3:]) for e in z_out.split(b"\0")
+                          if e.startswith(b"?? ")]
+    if untracked_rels is None:                         # -z unavailable → legacy
+        untracked_rels = [ln[3:].strip().strip('"')
+                          for ln in porcelain.splitlines()
+                          if ln.startswith("?? ")]
+    for rel in sorted(untracked_rels):
         # R1/1.5.39: hash via the safe primitive, never a bare read_bytes().
         # O_NOFOLLOW stops an untracked SYMLINK from being followed into a FIFO
         # (which git lists as `?? link` and read_bytes would block on forever)
@@ -1174,7 +1217,13 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
             fhash = f"toolarge:{detail}"
         else:
             fhash = "unreadable"
-        untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
+        # `surrogateescape` (the inverse of the `os.fsdecode` above) round-trips
+        # a non-UTF-8 filename's raw bytes, so two DISTINCT non-UTF-8 names never
+        # collapse to the same digest term the way `errors="replace"` would (both
+        # → `?`) — impl-panel r5 codex:sol. Byte-identical to the old `replace`
+        # for every ASCII/valid-UTF-8 name (no surrogates present).
+        untracked_digest.update(
+            f"{rel}\0{fhash}\n".encode("utf-8", "surrogateescape"))
     return head + porcelain + diff + untracked_digest.hexdigest()
 
 
