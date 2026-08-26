@@ -314,6 +314,63 @@ class MonitorNudgeDeliveryRace(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Orphan recovery (R4) — a crash between the per-invocation rename-claim and
+# either the success `rm` or the failure `ln`-restore strands a
+# `nudge.md.delivering.<pid>.<rand>` file. Later invocations only look at
+# nudge.md, so that claimed nudge is silently lost (breaks at-least-once). A
+# later invocation must re-land a stranded claim whose OWNER PROCESS IS DEAD,
+# and must NOT steal one whose owner is still alive (a concurrent in-flight
+# delivery).
+# --------------------------------------------------------------------------- #
+class MonitorNudgeOrphanRecovery(unittest.TestCase):
+    # A pid that can never be live: above pid_max on both Linux (default
+    # 2**22) and macOS (default 99999), so `kill -0` is a deterministic ESRCH.
+    DEAD_PID = "2147483647"
+
+    def setUp(self):
+        self.p = _Project()
+        self.addCleanup(self.p.cleanup)
+        self.mon = self.p.proj / ".agent" / "monitor"
+        self.mon.mkdir(parents=True, exist_ok=True)
+        self.nudge = self.mon / "nudge.md"
+
+    def _run(self):
+        env = dict(os.environ, PLAYBOOK_SESSION_ID=SESSION)
+        env.pop("PLAYBOOK_ROLE", None)
+        return subprocess.run([bash_or_skip(), str(MONITOR_NUDGE)],
+                              input=json.dumps({"hook_event_name": "PostToolUse"}).encode(),
+                              cwd=str(self.p.proj), env=env, capture_output=True, timeout=60)
+
+    def test_dead_owner_orphan_is_recovered_and_delivered(self):
+        # RED before the fix: no nudge.md exists, only a stranded claim whose
+        # owner pid is dead. Current code ignores `.delivering.*` and exits at
+        # the `[ -f nudge.md ]` check, so the nudge is lost. After the fix the
+        # invocation re-lands the orphan and delivers it.
+        orphan = self.mon / f"nudge.md.delivering.{self.DEAD_PID}.abc"
+        orphan.write_text("STRANDED NUDGE (dead owner)\n", encoding="utf-8")
+        r = self._run()
+        self.assertIn("[MONITOR]", r.stdout.decode("utf-8", "replace"),
+                      "a stranded orphan of a DEAD owner was not recovered/delivered")
+        self.assertIn("STRANDED NUDGE", r.stdout.decode("utf-8", "replace"))
+        leftovers = sorted(x.name for x in self.mon.glob("nudge.md.delivering*"))
+        self.assertEqual(leftovers, [], f"orphan claim not cleared after recovery: {leftovers}")
+        self.assertFalse(self.nudge.exists(), "recovered nudge.md was not cleared after delivery")
+
+    def test_live_owner_claim_is_not_stolen(self):
+        # A claim whose owner process is STILL ALIVE is a concurrent in-flight
+        # delivery, not an orphan. Recovery must leave it untouched. Use the
+        # test process's own pid — guaranteed alive for the duration.
+        live = self.mon / f"nudge.md.delivering.{os.getpid()}.xyz"
+        live.write_text("IN-FLIGHT (live owner)\n", encoding="utf-8")
+        self._run()
+        self.assertTrue(live.is_file(),
+                        "a live owner's in-flight claim was stolen by orphan recovery")
+        self.assertIn("IN-FLIGHT", live.read_text(encoding="utf-8"))
+        self.assertFalse(self.nudge.exists(),
+                         "a live claim was re-landed as nudge.md (should be left in place)")
+
+
+# --------------------------------------------------------------------------- #
 # Ledger evidence — PB-COMMAND-FAILURE-POLICY: a malformed PROJECT
 # dangerous_commands regex is skipped (except re.error) and does NOT disable the
 # built-in patterns. The audit measured this; bind it as executable evidence.
