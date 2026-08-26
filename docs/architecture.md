@@ -28,7 +28,7 @@ Hooks enforce the structure at the OS level, because warnings don't stick — bl
 | `PostToolUse` | Echoes gate state after every tool call, keeping the current gate in the agent's face. |
 | `Stop` / `SessionEnd` | Finalize session state. SessionEnd removes the session directory only when the process is really exiting — `/clear` keeps it, because the same process continues and the active task has to survive it. |
 
-Each enforcement decision (task-gate allow/block, command-guard block, stop-hook unchecked-gates, close) is also appended best-effort as one JSON line to `.agent/<lane>/journal/enforcement.jsonl` — log-only, by tested construction it never alters or blocks a decision (guarantee `PB-ENFORCEMENT-JOURNAL`); no reader tooling ships yet.
+Each enforcement decision is also appended best-effort as one JSON line to `.agent/<lane>/journal/enforcement.jsonl` — its `decision` field is one of `{allow, block, record}`: task-gate writes `allow`/`block`, command-guard/stop-hook/batch-close write `block`, and a close writes a `record` logging the verify bar it ran (a forensic record, not a gate allow/block). Log-only, by tested construction it never alters or blocks a decision (guarantee `PB-ENFORCEMENT-JOURNAL`); no reader tooling ships yet.
 
 The task gate runs two guards before the no-active-task check, both on edits to the active task's own `task.md`:
 

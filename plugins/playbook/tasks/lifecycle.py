@@ -458,7 +458,13 @@ def cmd_work(cmd_args):
                         # caps — a verbatim reason would be uncapped and could
                         # push the record past PIPE_BUF, breaking its atomic
                         # single-write contract under concurrent closes (panel).
-                        _pbj.append(agent_dir, "close", "verify-contract",
+                        # decision="record": the journal contract is
+                        # {allow, block, record} (owner-ratified, M173/R5); a
+                        # close is a log-only forensic RECORD of the verify bar,
+                        # not a gate allow/block. The earlier "verify-contract"
+                        # value was outside the contract and tripped consumers'
+                        # unexpected-decision checks.
+                        _pbj.append(agent_dir, "close", "record",
                                     "verify contract",
                                     session_id=session_id, command=_vcmds)
                 except Exception:

@@ -76,6 +76,41 @@ export EVENT_NAME=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load
 SESSION_ID="${PLAYBOOK_SESSION_ID:-pid-$PPID}"
 NUDGE_FILE="$AGENT_DIR/monitor/nudge.md"
 
+# Orphan recovery: a crash between this hook's rename-claim (below) and either
+# its success `rm` or its failure `ln`-restore STRANDS a
+# `nudge.md.delivering.<pid>.<rand>` file. Later invocations only look at
+# nudge.md, so that already-claimed nudge is silently lost — breaking the
+# at-least-once contract the unique-claim design establishes. Before making this
+# invocation's own claim, re-land any stranded claim whose OWNER PROCESS IS DEAD.
+# A claim whose pid is still alive is a concurrent in-flight delivery: leave it.
+# All arms are `set -e`-safe (guards / `|| true` / `if`), and $$/$RANDOM/kill are
+# bash 3.2 builtins (macOS ok). Re-landing uses the SAME atomic `ln` no-clobber
+# as the failure path so a stale orphan can never destroy a newer live nudge.
+for orphan in "$AGENT_DIR"/monitor/nudge.md.delivering.*; do
+    [ -e "$orphan" ] || continue                    # glob had no match
+    if [ ! -s "$orphan" ]; then                     # empty stray claim — just drop it
+        rm -f "$orphan" 2>/dev/null || true
+        continue
+    fi
+    obase=${orphan##*/nudge.md.delivering.}         # <pid>.<rand>
+    opid=${obase%%.*}                               # <pid>
+    case "$opid" in
+        ''|*[!0-9]*) continue ;;                    # unparseable pid — don't guess, leave it
+    esac
+    if kill -0 "$opid" 2>/dev/null; then
+        continue                                    # owner alive → in-flight, not orphaned
+    fi
+    # Owner dead → re-land the orphan as nudge.md, atomically and no-clobber.
+    if ln "$orphan" "$NUDGE_FILE" 2>/dev/null; then
+        rm -f "$orphan" 2>/dev/null || true         # linked → drop the extra name
+    elif [ -e "$NUDGE_FILE" ]; then
+        rm -f "$orphan" 2>/dev/null || true         # a newer nudge won; drop stale orphan
+    else
+        # ln unavailable/failing and no nudge.md — non-atomic fallback (as legacy).
+        mv "$orphan" "$NUDGE_FILE" 2>/dev/null || rm -f "$orphan" 2>/dev/null || true
+    fi
+done
+
 # No nudge file or empty — silent exit
 [ -f "$NUDGE_FILE" ] || exit 0
 [ -s "$NUDGE_FILE" ] || exit 0

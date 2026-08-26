@@ -23,7 +23,7 @@ import shutil
 import sys
 from pathlib import Path
 from tasks.atomic import atomic_write
-from tasks.core import resolve_agent_dir
+from tasks.core import _safe_hash_regular, resolve_agent_dir
 from tasks.mindmap import _load_mind_map
 from tasks.shared import find_project_root
 
@@ -94,64 +94,10 @@ _TAMPER_HASH_CAP = 5 * 1024 * 1024  # 5 MiB per file
 _TAMPER_TOTAL_BUDGET = 200 * 1024 * 1024  # 200 MiB
 
 
-def _safe_hash_regular(path: "Path", cap: int) -> "tuple[str, object, int]":
-    """Hash a path AS A REGULAR FILE without any operation a hostile swap could
-    turn into a hang, an unbounded allocation, or an uncaught crash (panel rounds
-    2-6, codex×2 + sonnet). The single safe-read primitive used by BOTH the
-    task.md fingerprint and the dirty-file content-hash loop.
-
-    Opens ONE `O_NONBLOCK|O_NOFOLLOW` descriptor and re-validates it with `fstat`
-    AFTER the open, so a TOCTOU swap to a FIFO between an earlier stat and this
-    read cannot block, and a symlink swapped in cannot be followed. Reads at most
-    `cap` bytes, so a file grown to gigabytes cannot exhaust memory. O_NONBLOCK /
-    O_NOFOLLOW are absent on native Windows (getattr → 0): there it degrades to a
-    plain size-bounded read (a documented limitation — Windows is the uncontained
-    fallback where the OS sandbox is anyway unavailable). Returns:
-      ("hash", hexdigest, nbytes)  — a regular file within the cap
-      ("toolarge", size, 0)        — a regular file larger than the cap
-      ("error", None, 0)           — not a plain regular file now (symlink/FIFO/
-                                     device/deleted), a perms strip, or a read error
-    """
-    import hashlib
-    import stat as _stat
-    # O_BINARY (Windows) keeps the read RAW: without it Windows text-mode
-    # translates CRLF→LF, so a rogue that only rewrites line endings of a
-    # gitignored task.md would hash identically and slip the guard (panel round-8
-    # codex:sol). No-op (0) on POSIX.
-    flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return ("error", None, 0)               # ELOOP / ENXIO / perms / gone
-    try:
-        st = os.fstat(fd)                        # re-validate the OPENED object
-        if not _stat.S_ISREG(st.st_mode):
-            return ("error", None, 0)            # TOCTOU: became a FIFO/dir/device
-        if st.st_size > cap:
-            return ("toolarge", st.st_size, 0)
-        # Read up to cap+1 bytes: a file that GROWS past the cap DURING the read
-        # (a rogue appending after the fstat) would otherwise be silently
-        # truncated-and-hashed, so a rewrite of its bytes beyond `cap` hashes
-        # identically both times. Reading one extra byte lets us bucket a
-        # boundary grower as `toolarge` instead (panel round-7 opus).
-        h = hashlib.sha256()
-        remaining, nbytes = cap + 1, 0
-        while remaining > 0:
-            try:
-                chunk = os.read(fd, min(65536, remaining))
-            except (BlockingIOError, OSError):
-                return ("error", None, 0)        # O_NONBLOCK pipe / read error
-            if not chunk:
-                break
-            h.update(chunk)
-            remaining -= len(chunk)
-            nbytes += len(chunk)
-        if nbytes > cap:
-            return ("toolarge", nbytes, 0)       # grew past the cap mid-read
-        return ("hash", h.hexdigest(), nbytes)
-    finally:
-        os.close(fd)
+# `_safe_hash_regular` — the single safe-read primitive — was moved to
+# `tasks.core` (R1/1.5.39) so the untracked-content digest in
+# `_repo_fingerprint_material` can share it without a core→review import cycle.
+# Re-exported at the top of this module; the tamper trio below is unchanged.
 
 
 def _safe_task_fingerprint(task_file: "Path") -> "str | None":

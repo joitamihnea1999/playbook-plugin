@@ -210,6 +210,51 @@ class FenceAndContainment(_Base):
         self.assertIn("```", text)                     # the fence preserved
         self.assertIn("> fresh", text)                 # new section appended
 
+    def test_repeated_handoff_preserves_prior_agent_notes(self):
+        # R3/P3 (1.5.39): a handoff→resume→handoff sequence must NOT lose the
+        # prior handoff's manually-appended Agent notes. The old block is
+        # archived under `## Handoff history`, satisfying the docs' "stays behind
+        # as history" claim for the multi-handoff case.
+        import re
+        core = self._core()
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text("# T\n\n## Work Plan\n- [ ] g\n", encoding="utf-8")
+        core.write_handoff(tf, "## Handoff\n> Generated H1\n- **Gates:** 1/3\n\n"
+                               "### Agent notes\n- In-flight reasoning:\n")
+        # the agent fills a judgment note under Agent notes before stopping
+        tf.write_text(
+            tf.read_text(encoding="utf-8").replace(
+                "- In-flight reasoning:",
+                "- In-flight reasoning: FIRST-JUDGMENT-NOTE"),
+            encoding="utf-8")
+        # a fresh session resumes and later hands off again
+        core.write_handoff(tf, "## Handoff\n> Generated H2\n- **Gates:** 2/3\n\n"
+                               "### Agent notes\n- In-flight reasoning:\n")
+        out = tf.read_text(encoding="utf-8")
+        self.assertIn("FIRST-JUDGMENT-NOTE", out,
+                      "repeated handoff deleted the prior handoff's Agent notes")
+        self.assertIn("## Handoff history", out, "no history section created")
+        self.assertIn("> Generated H2", out, "fresh handoff not written")
+        # exactly ONE live `## Handoff` (the fresh one); the old is demoted to H3
+        self.assertEqual(len(re.findall(r"(?m)^## Handoff$", out)), 1,
+                         "there must be exactly one live ## Handoff section")
+        # a THIRD handoff keeps BOTH prior handoffs' notes (history accumulates)
+        tf.write_text(
+            tf.read_text(encoding="utf-8").replace(
+                "- In-flight reasoning:",
+                "- In-flight reasoning: SECOND-JUDGMENT-NOTE"),
+            encoding="utf-8")
+        core.write_handoff(tf, "## Handoff\n> Generated H3\n- **Gates:** 3/3\n\n"
+                               "### Agent notes\n- In-flight reasoning:\n")
+        out3 = tf.read_text(encoding="utf-8")
+        self.assertIn("FIRST-JUDGMENT-NOTE", out3)
+        self.assertIn("SECOND-JUDGMENT-NOTE", out3)
+        self.assertIn("> Generated H3", out3)
+        self.assertEqual(len(re.findall(r"(?m)^## Handoff$", out3)), 1)
+        self.assertEqual(out3.count("### Archived handoff"), 2,
+                         "both prior handoffs must be archived")
+
     def test_block_reason_ignores_fenced_decoy(self):
         # A fenced `## Blocked` / `> handoff` example must not fake the reason;
         # the REAL block reason wins.

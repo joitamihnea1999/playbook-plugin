@@ -1023,6 +1023,77 @@ def has_risk_section(task_file) -> bool:
     return bool(_risk_heading_lines(lines))
 
 
+# Per-file ceiling for hashing UNTRACKED content in the freshness fingerprint
+# (R1/1.5.39). A file larger than this records a size-bearing `toolarge:<size>`
+# marker instead of being read whole, so a multi-GB untracked artifact cannot
+# exhaust memory during a panel/close. 5 MiB mirrors the tamper path's per-file
+# cap (review.py `_TAMPER_HASH_CAP`); the two are independent policy knobs.
+_FINGERPRINT_HASH_CAP = 5 * 1024 * 1024  # 5 MiB per untracked file
+
+
+def _safe_hash_regular(path: "Path", cap: int) -> "tuple[str, object, int]":
+    """Hash a path AS A REGULAR FILE without any operation a hostile swap could
+    turn into a hang, an unbounded allocation, or an uncaught crash (panel rounds
+    2-6, codex×2 + sonnet). The single safe-read primitive used by the task.md
+    fingerprint, the dirty-file content-hash loop (review.py [3]) AND the
+    untracked-content digest in `_repo_fingerprint_material` below (R1/1.5.39).
+
+    Opens ONE `O_NONBLOCK|O_NOFOLLOW` descriptor and re-validates it with `fstat`
+    AFTER the open, so a TOCTOU swap to a FIFO between an earlier stat and this
+    read cannot block, and a symlink swapped in (or, for the untracked-content
+    caller, an untracked symlink pointing INTO a FIFO/device/huge file) cannot be
+    followed. Reads at most `cap` bytes, so a file grown to gigabytes cannot
+    exhaust memory. O_NONBLOCK / O_NOFOLLOW are absent on native Windows
+    (getattr → 0): there it degrades to a plain size-bounded read (a documented
+    limitation — Windows is the uncontained fallback where the OS sandbox is
+    anyway unavailable). Returns:
+      ("hash", hexdigest, nbytes)  — a regular file within the cap
+      ("toolarge", size, 0)        — a regular file larger than the cap
+      ("error", None, 0)           — not a plain regular file now (symlink/FIFO/
+                                     device/deleted), a perms strip, or a read error
+    """
+    import hashlib
+    import stat as _stat
+    # O_BINARY (Windows) keeps the read RAW: without it Windows text-mode
+    # translates CRLF→LF, so a rogue that only rewrites line endings of a
+    # gitignored task.md would hash identically and slip the guard (panel round-8
+    # codex:sol). No-op (0) on POSIX.
+    flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return ("error", None, 0)               # ELOOP / ENXIO / perms / gone
+    try:
+        st = os.fstat(fd)                        # re-validate the OPENED object
+        if not _stat.S_ISREG(st.st_mode):
+            return ("error", None, 0)            # TOCTOU: became a FIFO/dir/device
+        if st.st_size > cap:
+            return ("toolarge", st.st_size, 0)
+        # Read up to cap+1 bytes: a file that GROWS past the cap DURING the read
+        # (a rogue appending after the fstat) would otherwise be silently
+        # truncated-and-hashed, so a rewrite of its bytes beyond `cap` hashes
+        # identically both times. Reading one extra byte lets us bucket a
+        # boundary grower as `toolarge` instead (panel round-7 opus).
+        h = hashlib.sha256()
+        remaining, nbytes = cap + 1, 0
+        while remaining > 0:
+            try:
+                chunk = os.read(fd, min(65536, remaining))
+            except (BlockingIOError, OSError):
+                return ("error", None, 0)        # O_NONBLOCK pipe / read error
+            if not chunk:
+                break
+            h.update(chunk)
+            remaining -= len(chunk)
+            nbytes += len(chunk)
+        if nbytes > cap:
+            return ("toolarge", nbytes, 0)       # grew past the cap mid-read
+        return ("hash", h.hexdigest(), nbytes)
+    finally:
+        os.close(fd)
+
+
 def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
                                strict: bool = False) -> "str | None":
     """The fingerprint MATERIAL for a single git repo: HEAD + porcelain + working
@@ -1067,6 +1138,24 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
         porcelain_r = subprocess.run(
             ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
             cwd=repo_path, capture_output=True, text=True)
+        # R2/1.5.39: a SECOND, NUL-delimited status supplies the raw (un-quoted)
+        # untracked paths for the content digest below — kept ADJACENT to the
+        # first porcelain call (before `diff`) to MINIMIZE the window between the
+        # two snapshots (impl-panel sonnet #1). Captured as BYTES (NO text=True):
+        # `-z` emits raw path bytes, and universal-newline translation would
+        # mangle a CR byte in a filename to LF (impl-panel codex:sol #1).
+        # Isolated so a `-z` FAILURE — a nonzero return code OR an exception
+        # (impl-panel r4 codex:sol/terra) — degrades to the legacy parse below
+        # (z_out=None) rather than being caught by the outer handler and blanking
+        # the WHOLE fingerprint: an empty fp reads as "git absent" and the
+        # freshness gate would then permit a high-consequence close.
+        try:
+            z_r = subprocess.run(
+                ["git", "status", "--porcelain", "-uall", "-z", "--", ".", *exclude],
+                cwd=repo_path, capture_output=True)
+            z_out = z_r.stdout if z_r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            z_out = None
         diff_r = subprocess.run(
             ["git", "diff", "HEAD", "--", ".", *exclude],
             cwd=repo_path, capture_output=True, text=True)
@@ -1082,16 +1171,59 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
     # fingerprint was blind to edits inside new files, which is exactly
     # where post-panel fixes land (batches 4 and 5 both did).
     untracked_digest = hashlib.sha256()
-    for line in sorted(porcelain.splitlines()):
-        if not line.startswith("?? "):
-            continue
-        rel = line[3:].strip().strip('"')
-        try:
-            content = (Path(repo_path) / rel).read_bytes()
-            fhash = hashlib.sha256(content).hexdigest()
-        except OSError:
+    # R2/1.5.39 (owner-ratified 2026-08-26): enumerate untracked paths from the
+    # NUL-delimited `z_out` fetched above, so git's C-quoting of special-char
+    # filenames (a"b.py → `?? "a\"b.py"` in the DEFAULT output) is never
+    # mis-parsed. The old `.strip('"')` parse left the internal `\"` escape
+    # intact → a wrong path → `unreadable`, hiding content edits to such a file.
+    # The MAIN `porcelain` string folded into the fingerprint above stays the
+    # non-`-z` form, so the fingerprint VALUE is byte-identical for every repo
+    # whose untracked filenames need no quoting (the oracle-test case); only a
+    # repo that ACTUALLY contains a special-char untracked file — previously
+    # mis-recorded `unreadable` — sees its digest change, to the correct value.
+    # `os.fsdecode` round-trips raw path bytes (incl. non-UTF-8) losslessly. A
+    # `-z` failure falls back to the exact legacy parse (never a silent empty
+    # digest). NOTE (impl-panel sonnet #1): the `-z` snapshot is separate from
+    # the folded `porcelain` above, so a file created/removed in the tiny window
+    # between them could make the two disagree — practically always in the
+    # STALE-safe direction (a spurious re-panel); the lone false-FRESH is the
+    # astronomically-contrived same-window deletion at BOTH stamp and close (see
+    # PB-PANEL-FRESHNESS ledger). The calls are adjacent to keep the window
+    # minimal — the same order of non-atomicity the porcelain/diff/per-file reads
+    # already carry.
+    untracked_rels: "list[str] | None" = None
+    if z_out is not None:
+        untracked_rels = [os.fsdecode(e[3:]) for e in z_out.split(b"\0")
+                          if e.startswith(b"?? ")]
+    if untracked_rels is None:                         # -z unavailable → legacy
+        untracked_rels = [ln[3:].strip().strip('"')
+                          for ln in porcelain.splitlines()
+                          if ln.startswith("?? ")]
+    for rel in sorted(untracked_rels):
+        # R1/1.5.39: hash via the safe primitive, never a bare read_bytes().
+        # O_NOFOLLOW stops an untracked SYMLINK from being followed into a FIFO
+        # (which git lists as `?? link` and read_bytes would block on forever)
+        # or a device/huge file; the cap bounds the read so a multi-GB untracked
+        # artifact can't exhaust memory. A regular file within the cap yields the
+        # IDENTICAL sha256 digest as before, so the byte-identical fingerprint
+        # guarantee holds (test_unset_matches_legacy_oracle). Degraded leaves are
+        # DETERMINISTIC: a size-bearing `toolarge:<size>` (a growth still moves
+        # the fingerprint) or `unreadable` (FIFO/symlink/device/deleted/perms).
+        kind, detail, _n = _safe_hash_regular(Path(repo_path) / rel,
+                                              _FINGERPRINT_HASH_CAP)
+        if kind == "hash":
+            fhash = detail
+        elif kind == "toolarge":
+            fhash = f"toolarge:{detail}"
+        else:
             fhash = "unreadable"
-        untracked_digest.update(f"{rel}\0{fhash}\n".encode("utf-8", "replace"))
+        # `surrogateescape` (the inverse of the `os.fsdecode` above) round-trips
+        # a non-UTF-8 filename's raw bytes, so two DISTINCT non-UTF-8 names never
+        # collapse to the same digest term the way `errors="replace"` would (both
+        # → `?`) — impl-panel r5 codex:sol. Byte-identical to the old `replace`
+        # for every ASCII/valid-UTF-8 name (no surrogates present).
+        untracked_digest.update(
+            f"{rel}\0{fhash}\n".encode("utf-8", "surrogateescape"))
     return head + porcelain + diff + untracked_digest.hexdigest()
 
 
@@ -2236,27 +2368,65 @@ def build_handoff_section(project_path: Path, task_file: Path) -> str:
 
 
 def write_handoff(task_file: Path, section: str) -> None:
-    """Upsert the `## Handoff` section (idempotent replace, else append at end).
-    Touches no gate. Fence-aware (impl-panel C1 Critical): a `## Handoff` quoted
-    inside a fenced example is NOT the section, so it can never make this delete
-    through to the next real H2 and corrupt the file. The section's own inner
-    `### Agent notes` is level-3, so it never ends the replaced block."""
+    """Upsert the `## Handoff` section (fresh section appended at end). Touches no
+    gate. Fence-aware (impl-panel C1 Critical): a `## Handoff` quoted inside a
+    fenced example is NOT the section, so it can never make this delete through to
+    the next real H2 and corrupt the file. The section's own inner `### Agent
+    notes` is level-3, so it never ends the replaced block.
+
+    R3/1.5.39: a handoff→resume→handoff sequence must not LOSE the prior
+    handoff's manually-appended `### Agent notes`. So a pre-existing `## Handoff`
+    block is not deleted — it is ARCHIVED verbatim (its heading demoted to `###
+    Archived handoff`) under a dedicated `## Handoff history` H2, newest-first.
+    That H2 is a distinct top-level section, so the next append's boundary never
+    reaches into it — every handoff's judgment "stays behind as history" (the
+    docs/CHANGELOG claim), not just the newest."""
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    nonfenced = list(_iter_nonfenced(lines))
-    start = next((i for i, s in nonfenced if s == "## Handoff"), None)
-    if start is None:
-        out = list(lines)                                   # append fresh
-    else:
-        # End at the first non-fenced level-2 heading strictly after start
-        # (a fenced heading inside the old block does not end it).
-        end = next((i for i, s in nonfenced
+
+    def _section_span(title: str) -> "tuple[int, int] | None":
+        # [start, end) of a non-fenced level-2 section, or None. `end` is the
+        # first non-fenced H2 strictly after start (a fenced heading, or the
+        # section's own H3s, never end it).
+        nf = list(_iter_nonfenced(lines))
+        start = next((i for i, s in nf if s == title), None)
+        if start is None:
+            return None
+        end = next((i for i, s in nf
                     if i > start and s.startswith("## ") and not s.startswith("### ")),
                    len(lines))
-        out = list(lines[:start]) + list(lines[end:])
-    while out and out[-1].strip() == "":
-        out.pop()
-    out += ["", section.rstrip(), ""]
-    _atomic_write(task_file, "\n".join(out) + "\n")
+        return (start, end)
+
+    # 1. Archive any existing `## Handoff` block (verbatim, heading demoted).
+    archived: "list[str] | None" = None
+    ho = _section_span("## Handoff")
+    if ho:
+        old = list(lines[ho[0]:ho[1]])
+        while old and old[-1].strip() == "":
+            old.pop()
+        # old[0] is the `## Handoff` heading; demote it, keep the rest verbatim
+        # (the `> Generated <ts>` line preserves WHEN, the filled `### Agent
+        # notes` preserve the judgment).
+        archived = ["### Archived handoff", *old[1:]]
+        lines = list(lines[:ho[0]]) + list(lines[ho[1]:])
+
+    # 2. Prepend the archived block into `## Handoff history` (create if absent).
+    if archived is not None:
+        hh = _section_span("## Handoff history")
+        if hh:
+            insert_at = hh[0] + 1                          # right after the H2 line
+            lines = (list(lines[:insert_at]) + ["", *archived, ""]
+                     + list(lines[insert_at:]))
+        else:
+            while lines and lines[-1].strip() == "":
+                lines.pop()
+            lines += ["", "## Handoff history", "", *archived]
+
+    # 3. Append the fresh `## Handoff` at the very end (kept LAST so its future
+    #    replace boundary never reaches the history section above it).
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    lines += ["", section.rstrip(), ""]
+    _atomic_write(task_file, "\n".join(lines) + "\n")
 
 
 def _extract_block_reason(task_file: Path) -> "str | None":
