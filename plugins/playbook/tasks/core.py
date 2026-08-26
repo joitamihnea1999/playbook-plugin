@@ -2368,27 +2368,65 @@ def build_handoff_section(project_path: Path, task_file: Path) -> str:
 
 
 def write_handoff(task_file: Path, section: str) -> None:
-    """Upsert the `## Handoff` section (idempotent replace, else append at end).
-    Touches no gate. Fence-aware (impl-panel C1 Critical): a `## Handoff` quoted
-    inside a fenced example is NOT the section, so it can never make this delete
-    through to the next real H2 and corrupt the file. The section's own inner
-    `### Agent notes` is level-3, so it never ends the replaced block."""
+    """Upsert the `## Handoff` section (fresh section appended at end). Touches no
+    gate. Fence-aware (impl-panel C1 Critical): a `## Handoff` quoted inside a
+    fenced example is NOT the section, so it can never make this delete through to
+    the next real H2 and corrupt the file. The section's own inner `### Agent
+    notes` is level-3, so it never ends the replaced block.
+
+    R3/1.5.39: a handoff→resume→handoff sequence must not LOSE the prior
+    handoff's manually-appended `### Agent notes`. So a pre-existing `## Handoff`
+    block is not deleted — it is ARCHIVED verbatim (its heading demoted to `###
+    Archived handoff`) under a dedicated `## Handoff history` H2, newest-first.
+    That H2 is a distinct top-level section, so the next append's boundary never
+    reaches into it — every handoff's judgment "stays behind as history" (the
+    docs/CHANGELOG claim), not just the newest."""
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    nonfenced = list(_iter_nonfenced(lines))
-    start = next((i for i, s in nonfenced if s == "## Handoff"), None)
-    if start is None:
-        out = list(lines)                                   # append fresh
-    else:
-        # End at the first non-fenced level-2 heading strictly after start
-        # (a fenced heading inside the old block does not end it).
-        end = next((i for i, s in nonfenced
+
+    def _section_span(title: str) -> "tuple[int, int] | None":
+        # [start, end) of a non-fenced level-2 section, or None. `end` is the
+        # first non-fenced H2 strictly after start (a fenced heading, or the
+        # section's own H3s, never end it).
+        nf = list(_iter_nonfenced(lines))
+        start = next((i for i, s in nf if s == title), None)
+        if start is None:
+            return None
+        end = next((i for i, s in nf
                     if i > start and s.startswith("## ") and not s.startswith("### ")),
                    len(lines))
-        out = list(lines[:start]) + list(lines[end:])
-    while out and out[-1].strip() == "":
-        out.pop()
-    out += ["", section.rstrip(), ""]
-    _atomic_write(task_file, "\n".join(out) + "\n")
+        return (start, end)
+
+    # 1. Archive any existing `## Handoff` block (verbatim, heading demoted).
+    archived: "list[str] | None" = None
+    ho = _section_span("## Handoff")
+    if ho:
+        old = list(lines[ho[0]:ho[1]])
+        while old and old[-1].strip() == "":
+            old.pop()
+        # old[0] is the `## Handoff` heading; demote it, keep the rest verbatim
+        # (the `> Generated <ts>` line preserves WHEN, the filled `### Agent
+        # notes` preserve the judgment).
+        archived = ["### Archived handoff", *old[1:]]
+        lines = list(lines[:ho[0]]) + list(lines[ho[1]:])
+
+    # 2. Prepend the archived block into `## Handoff history` (create if absent).
+    if archived is not None:
+        hh = _section_span("## Handoff history")
+        if hh:
+            insert_at = hh[0] + 1                          # right after the H2 line
+            lines = (list(lines[:insert_at]) + ["", *archived, ""]
+                     + list(lines[insert_at:]))
+        else:
+            while lines and lines[-1].strip() == "":
+                lines.pop()
+            lines += ["", "## Handoff history", "", *archived]
+
+    # 3. Append the fresh `## Handoff` at the very end (kept LAST so its future
+    #    replace boundary never reaches the history section above it).
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    lines += ["", section.rstrip(), ""]
+    _atomic_write(task_file, "\n".join(lines) + "\n")
 
 
 def _extract_block_reason(task_file: Path) -> "str | None":
