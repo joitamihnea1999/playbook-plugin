@@ -955,14 +955,24 @@ def _iter_nonfenced(lines: "list[str]"):
     fence_len = 0
     for i, line in enumerate(lines):
         stripped = line.strip().lstrip("﻿")
-        fm = re.match(r"^(`{3,}|~{3,})", stripped)
+        fm = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
         if fence_char:
+            # Closer (CommonMark): same char, length >= opener, and NOTHING but
+            # whitespace after the run — a ```lang line inside a fence is content,
+            # not a closer. Matches `_closed_fence_line_indices` so the two
+            # task.md fence scanners agree on where a fence ends (panel: codex).
             if (fm and fm.group(1)[0] == fence_char
-                    and len(fm.group(1)) >= fence_len):
+                    and len(fm.group(1)) >= fence_len
+                    and fm.group(2).strip() == ""):
                 fence_char = ""
                 fence_len = 0
             continue
         if fm:
+            # Opener (CommonMark): a BACKTICK fence whose info string contains a
+            # backtick is not a fence — same rule as `_closed_fence_line_indices`.
+            if fm.group(1)[0] == "`" and "`" in fm.group(2):
+                yield i, stripped
+                continue
             fence_char = fm.group(1)[0]
             fence_len = len(fm.group(1))
             continue

@@ -170,6 +170,25 @@ class SetBlockedFenceAware(unittest.TestCase):
         # The fenced example is byte-intact.
         self.assertIn("```\n## Blocked\n> example\n```", text)
 
+    def test_set_blocked_ignores_trailing_content_fence_closer(self):
+        # Panel (codex-sol/#1, codex-terra/#1): `_iter_nonfenced` must apply the
+        # CommonMark closer rule — a ```lang line inside a fence is CONTENT, not a
+        # closer (only a whitespace-only run closes). Otherwise the fence "closes"
+        # early and the `## Blocked` after it reads as live → mis-splice. This
+        # aligns the block path with the stricter `_closed_fence_line_indices`.
+        core = self._core()
+        tf = self._task(
+            "# T\n\n## Status\npending\n\n"
+            "## Docs\n```\nexample code\n```text\n## Blocked\n> decoy reason\n```\n\n"
+            "## Work Plan\n- [ ] G1: real gate\n")
+        core.set_task_blocked(tf, "REALPAUSE")
+        text = tf.read_text(encoding="utf-8")
+        # The whole fenced example is preserved and balanced (2 opener/closer runs).
+        self.assertEqual(text.count("```"), 3)
+        self.assertIn("> decoy reason", text)
+        self.assertIn("- [ ] G1: real gate", text)
+        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
+
     def test_normal_block_and_resume_byte_identical(self):
         # Negative control: with NO fenced heading, output must be byte-identical
         # to the pre-fix shape (captured from current behavior; only the ISO
