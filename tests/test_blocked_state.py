@@ -206,6 +206,25 @@ class SetBlockedFenceAware(unittest.TestCase):
         self.assertIn("> decoy", text)
         self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
 
+    def test_set_blocked_fails_closed_on_unclosed_fence(self):
+        # Panel round-3 (codex-sol/codex-terra): a destructive section writer must
+        # fail CLOSED on an UNCLOSED fence — treat the remainder as fenced and
+        # never DELETE a `## Blocked` decoy after an unclosed opener. (A fail-open
+        # scanner deletes it — the regression this guards against.) On this
+        # malformed input the fresh block appended at EOF lands inside the trailing
+        # unclosed fence, so the safety property is non-deletion (+ the reason is
+        # still written), not readability — a documented malformed-input corner.
+        core = self._core()
+        before = self._task(
+            "# T\n\n## Status\npending\n\n"
+            "## Docs\n```\n## Blocked\n> decoy\n> keep this quoted line\n")
+        core.set_task_blocked(before, "REALPAUSE")
+        text = before.read_text(encoding="utf-8")
+        self.assertIn("> decoy", text, "unclosed-fence decoy must not be deleted")
+        self.assertIn("> keep this quoted line", text)
+        self.assertIn("REALPAUSE", text, "the block reason is still recorded")
+        self.assertEqual(core._extract_status(before), "blocked")
+
     def test_resume_stamp_byte_identical_mid_file(self):
         # Panel (opus finding 2): the resume stamp must land byte-identically to
         # the pre-fix code when `## Blocked` is NOT the last section (the changed

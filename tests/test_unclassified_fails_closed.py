@@ -198,6 +198,15 @@ class RiskSectionDetection(unittest.TestCase):
                 self.assertEqual(extract_risk(p), "assertive",
                                  "a fenced Risk decoy must not shadow the real class")
 
+    def test_unclosed_fence_hides_a_risk_decoy_fail_closed(self):
+        # Panel round-3: the risk classifier must fail CLOSED on an unclosed fence
+        # — a `## Risk` quoted after an unclosed opener is fenced-through-EOF, not
+        # live metadata, so it cannot become the classification. (Fail-open reads
+        # the decoy and returns `reversible`.)
+        p = self._md("# T\n\n## Docs\n```\n## Risk\nreversible\n> still quoted\n")
+        self.assertFalse(has_risk_section(p))
+        self.assertEqual(extract_risk(p), "unclassified")
+
     def test_unreadable_file_is_treated_as_legacy(self):
         """Fail toward the documented old behavior, never toward inventing a
         block from an I/O error."""

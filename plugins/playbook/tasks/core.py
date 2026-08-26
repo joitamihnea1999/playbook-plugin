@@ -923,21 +923,14 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     returned deliberately: callers treat more than one field as malformed
     rather than letting an attacker choose which duplicate wins.
     """
-    # Fence detection delegates to `_closed_fence_line_indices` \u2014 the ONE task.md
-    # fence scanner. The prior hand-rolled loop treated a ```lang line (and a
-    # >=4-space-indented marker) as a closer, so a fenced `## Risk` example could
-    # "close" early and be read as live metadata \u2014 shadowing the real class and
-    # letting an assertive task close on the reversible bar (panel: codex-sol
-    # Critical, task 032). Sharing the scanner closes that gate bypass.
-    found: "list[tuple[int, str]]" = []
-    fenced = _closed_fence_line_indices(lines)
-    for i, line in enumerate(lines):
-        if i in fenced:
-            continue
-        stripped = line.strip().lstrip("\ufeff")
-        if _RISK_HEADING_RE.match(stripped):
-            found.append((i, stripped))
-    return found
+    # Fence detection reuses `_iter_nonfenced` \u2014 the shared strict CommonMark
+    # scanner. The prior hand-rolled loop treated a ```lang line (and a >=4-space
+    # marker) as a closer, so a fenced `## Risk` example could "close" early and be
+    # read as live metadata \u2014 shadowing the real class and letting an assertive
+    # task close on the reversible bar (panel: codex-sol Critical, task 032).
+    # Sharing the scanner closes that gate bypass and inherits its fail-closed
+    # handling of an unclosed fence.
+    return [(i, s) for i, s in _iter_nonfenced(lines) if _RISK_HEADING_RE.match(s)]
 
 
 def _iter_nonfenced(lines: "list[str]"):
@@ -948,18 +941,40 @@ def _iter_nonfenced(lines: "list[str]"):
     Verification Receipt` must not corrupt the file or fake bootstrap/handoff
     state).
 
-    Fence detection delegates to `_closed_fence_line_indices` — the ONE task.md
-    fence scanner — so every section locator (blocked/handoff writers, the risk
-    classifier, the receipt writer, the audit reader) agrees byte-for-byte on the
-    CommonMark rules (<=3-space opener/closer, whitespace-only closer, backtick
-    info-string, unclosed-fence handling). A second hand-rolled scanner drifted on
-    indentation and closer-content and reopened the #09 corruption through those
-    gaps (panel: opus/sonnet/codex, task 032)."""
-    fenced = _closed_fence_line_indices(lines)
+    Applies the SAME CommonMark opener/closer rules as `_closed_fence_line_indices`
+    (<=3-space indent — `_FENCE_OPEN_RE`; a backtick opener whose info string holds
+    a backtick is not a fence; a closer is the same char, >= the opener's length,
+    and whitespace-only after the run), so a ```lang line or a >=4-space marker
+    inside a fence is content, not a boundary. This is the shared source for the
+    blocked/handoff writers AND `_risk_heading_lines`.
+
+    It differs from `_closed_fence_line_indices` in ONE deliberate direction: an
+    UNCLOSED opener fences everything through EOF (fail CLOSED). These consumers
+    DELETE/replace sections, so on a malformed unclosed fence the safe choice is to
+    treat the remainder as fenced and never delete it — the opposite of the receipt
+    writer's fail-open, which only ever INSERTS (panel round-3: codex found the
+    fail-open delegation let set_task_blocked delete a decoy after an unclosed
+    fence). The stricter of the two on every axis; never the more destructive."""
+    fence_char = ""
+    fence_len = 0
     for i, line in enumerate(lines):
-        if i in fenced:
+        raw = line.lstrip("﻿")                 # keep indentation, drop BOM
+        fm = _FENCE_OPEN_RE.match(raw)
+        if fence_char:
+            if (fm and fm.group(1)[0] == fence_char
+                    and len(fm.group(1)) >= fence_len
+                    and fm.group(2).strip() == ""):
+                fence_char = ""
+                fence_len = 0
+            continue                            # inside fence (incl. unclosed→EOF)
+        if fm:
+            if fm.group(1)[0] == "`" and "`" in fm.group(2):
+                yield i, raw.strip()
+                continue
+            fence_char = fm.group(1)[0]
+            fence_len = len(fm.group(1))
             continue
-        yield i, line.strip().lstrip("﻿")
+        yield i, raw.strip()
 
 
 def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
