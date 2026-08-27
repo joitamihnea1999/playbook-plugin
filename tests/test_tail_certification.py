@@ -887,6 +887,41 @@ class Round4Coverage(unittest.TestCase):
         self.assertNotIn("Task 001 done.", out.getvalue())
         self.assertIn("changed during certification", err.getvalue())
 
+    # sonnet#1 (r7) — the post-PASS CAS re-runs the WHOLE tail_cert_delta, so a
+    # code_roots mutation during cert (invisible to the `.agent`-excluded
+    # fingerprint) is caught by the scope-set re-check, not the fp re-hash.
+    def test_cas_blocks_config_mutation_invisible_to_fingerprint(self):
+        d, td, env = ClosePathTailCert("test_docs_only_delta_certifies")._setup()
+        (d / "docs" / "guide.md").write_text("# doc\n", encoding="utf-8")
+
+        def _mutating_judge(*a, **k):
+            (d / ".agent" / "config.json").write_text(
+                json.dumps({"panel_required_for": "all",
+                            "code_roots": ["nonexistent"]}), encoding="utf-8")
+            return "PASS"
+        import contextlib
+        import io
+        from unittest import mock
+        from tasks.lifecycle import cmd_work
+        out, err = io.StringIO(), io.StringIO()
+        old_cwd, old_env = os.getcwd(), dict(os.environ)
+        os.chdir(d)
+        os.environ["PLAYBOOK_SESSION_ID"] = "pid-036"
+        os.environ["PYTHONPATH"] = PLUGIN_STR
+        try:
+            with mock.patch("tasks.review.run_tail_cert_judge",
+                            side_effect=_mutating_judge), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    cmd_work(["done"])
+                except SystemExit:
+                    pass
+        finally:
+            os.chdir(old_cwd)
+            os.environ.clear()
+            os.environ.update(old_env)
+        self.assertNotIn("Task 001 done.", out.getvalue())
+
 
 class RunTailCertJudgeGuards(unittest.TestCase):
     """opus#2 — run_tail_cert_judge's own fail-closed guards (unmocked)."""
@@ -921,6 +956,47 @@ class RunTailCertJudgeGuards(unittest.TestCase):
                                return_value="(error: judge not found)"):
             self.assertIsNone(
                 R.run_tail_cert_judge(d, snap, ["docs/g.md"], "PANEL PASS"))
+
+    # r7 opus#2/grok#1 + codex:sol#5 — a REALISTIC multi-line judge response ending
+    # in the nonced token drives a real PASS through prompt-build + parse (the only
+    # test that exercises run_tail_cert_judge end-to-end but the live transport).
+    def test_realistic_multiline_response_certifies(self):
+        from unittest import mock
+
+        import tasks.review as R
+        d = _repo()
+        (d / "docs").mkdir()
+        snap = build_panel_snapshot(d, tree_state_fingerprint(d))
+        (d / "docs" / "g.md").write_text("# a benign doc\n", encoding="utf-8")
+
+        def _raw(project_path, prompt, timeout_secs):
+            import re
+            n = re.search(r"TAIL-CERT ([0-9a-f]+):", prompt).group(1)
+            return ("The delta only adds a benign doc line.\n"
+                    "It does not contradict the panel's verdict.\n"
+                    f"TAIL-CERT {n}: PASS\n")
+        with mock.patch.object(R, "_run_tail_cert_judge_raw", side_effect=_raw):
+            self.assertEqual(
+                R.run_tail_cert_judge(d, snap, ["docs/g.md"], "PANEL PASS"), "PASS")
+
+    # r7 opus#1 — the tamper backstop fires when the judge mutates the repo mid-cert
+    def test_tamper_during_cert_blocks(self):
+        from unittest import mock
+
+        import tasks.review as R
+        d = _repo()
+        (d / "docs").mkdir()
+        snap = build_panel_snapshot(d, tree_state_fingerprint(d))
+        (d / "docs" / "g.md").write_text("# d\n", encoding="utf-8")
+
+        def _raw(project_path, prompt, timeout_secs):
+            import re
+            (Path(project_path) / "code.py").write_text("evil = 1\n", "utf-8")  # mutate
+            n = re.search(r"TAIL-CERT ([0-9a-f]+):", prompt).group(1)
+            return f"TAIL-CERT {n}: PASS\n"
+        with mock.patch.object(R, "_run_tail_cert_judge_raw", side_effect=_raw):
+            v = R.run_tail_cert_judge(d, snap, ["docs/g.md"], "PANEL PASS")
+        self.assertIsNone(v)                    # tree mutated during cert → block
 
 
 if __name__ == "__main__":

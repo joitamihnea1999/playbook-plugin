@@ -402,7 +402,8 @@ def cmd_work(cmd_args):
                         from tasks.core import resolve_review_timeout
                         _tc_verdict = run_tail_cert_judge(
                             project_path, _snap, _tc_non, _panel_summary,
-                            timeout_secs=resolve_review_timeout(project_path))
+                            timeout_secs=resolve_review_timeout(project_path),
+                            task_file=task_file)
                         if _tc_verdict == "PASS":
                             # Finding D (TOCTOU): the judge call is long; recompute
                             # the fingerprint and require it to equal the one the

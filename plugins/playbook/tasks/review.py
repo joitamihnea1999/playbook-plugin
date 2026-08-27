@@ -1342,12 +1342,17 @@ def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
 
 
 def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
-                        *, timeout_secs=None) -> "str | None":
+                        *, timeout_secs=None, task_file=None) -> "str | None":
     """Dedicated tail-cert judge (finding E): materialize the certifiable delta,
     build the tail-cert prompt, spawn the default single judge READ-ONLY under the
     same tamper backstop the other judge paths use, and parse its NONCED
     `TAIL-CERT <nonce>: PASS|FAIL` verdict FAIL-CLOSED. Returns "PASS"/"FAIL"/None
-    (None = block). NEVER stacks judge.md and NEVER calls cmd_single_review."""
+    (None = block). NEVER stacks judge.md and NEVER calls cmd_single_review.
+
+    `task_file` is passed to the tamper guard so it fingerprints `task.md`
+    specifically (impl-panel r7 opus#2/grok#1: `.agent/` is gitignored, so without
+    naming the task file the guard's porcelain/dirty-hash sweep never covers the
+    task record a rogue judge could rewrite during certification)."""
     import secrets
     from tasks.core import parse_tail_cert_verdict
     diff_text = _tail_cert_review_diff(project_path, snapshot)
@@ -1372,15 +1377,16 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
     # so without this a rogue write to task.md/judge.md during certification is
     # invisible. Best-effort snapshot: if it can't be taken we still run, matching
     # the other paths' posture on uncontained platforms.
+    _tf = Path(task_file) if task_file else None
     _tb = None
     try:
-        _tb = _snapshot_repo_state(project_path, None)
+        _tb = _snapshot_repo_state(project_path, _tf)
     except Exception:
         _tb = None
     raw = _run_tail_cert_judge_raw(project_path, prompt, timeout_secs)
     if _tb is not None:
         try:
-            if _detect_tamper_safe(project_path, None, _tb):
+            if _detect_tamper_safe(project_path, _tf, _tb):
                 return None            # repo mutated during cert → no verdict
         except Exception:
             return None                # tamper check itself failed → fail closed

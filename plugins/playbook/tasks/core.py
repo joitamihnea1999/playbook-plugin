@@ -1133,6 +1133,14 @@ def _safe_read_regular(path: "Path", cap: int) -> "bytes | None":
     codex:sol#1) or blocking on a FIFO (r2 grok#1). None → the caller fails
     closed."""
     import stat as _stat
+    # An explicit lstat/is_symlink refusal BEFORE os.open (impl-panel r7 grok#2):
+    # O_NOFOLLOW degrades to 0 on native Windows, so the fstat-regular check below
+    # is not enough there to stop following a symlink into an external secret.
+    try:
+        if _stat.S_ISLNK(os.lstat(path).st_mode):
+            return None
+    except OSError:
+        return None
     flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
              | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
     try:
