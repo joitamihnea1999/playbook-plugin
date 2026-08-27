@@ -1603,7 +1603,13 @@ def _dirty_path_content_map(repo_path: Path,
         elif kind == "toolarge":
             out[rel] = f"toolarge:{detail}:m{_mode}"
         else:
-            out[rel] = "absent"
+            # `_safe_hash_regular` returned "error": the path is either GONE
+            # (deleted → a definite state, token "absent") or EXISTS-but-cannot-be-
+            # read (perms / non-regular → NO content signal, token "unreadable" so
+            # `_untrusted` ALWAYS surfaces it — impl-panel r11 codex:sol#1: a dirty
+            # code path unreadable at BOTH F0 and close must never certify by
+            # collapsing to a constant "absent").
+            out[rel] = "absent" if not os.path.lexists(p) else "unreadable"
     return out
 
 

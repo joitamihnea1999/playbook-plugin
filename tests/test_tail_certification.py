@@ -788,6 +788,29 @@ class Round2Fixes(unittest.TestCase):
         can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
         self.assertIn("code.py", beh)               # oversized dirty always surfaces
 
+    # r11 codex:sol#1 — a dirty code path UNREADABLE (perms) at F0 and close has no
+    # content signal; it must token as "unreadable" (untrusted) and ALWAYS surface,
+    # never collapse to a constant "absent" that hides a content change.
+    @unittest.skipUnless(os.name == "posix" and os.getuid() != 0,
+                         "perms test is POSIX non-root only")
+    def test_unreadable_dirty_code_surfaces(self):
+        import stat as _stat
+        d = _repo()
+        (d / "docs").mkdir()
+        cp = d / "code.py"
+        cp.write_text("x = 2\n", encoding="utf-8")   # dirty
+        os.chmod(cp, 0)                                # unreadable at F0
+        try:
+            fp = tree_state_fingerprint(d)
+            snap = build_panel_snapshot(d, fp)
+            # token must be "unreadable", not "absent"
+            self.assertEqual(snap["scopes"][""]["dirty"].get("code.py"), "unreadable")
+            (d / "docs" / "note.md").write_text("doc\n", encoding="utf-8")
+            can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
+            self.assertIn("code.py", beh)             # untrusted → always surfaces
+        finally:
+            os.chmod(cp, _stat.S_IRUSR | _stat.S_IWUSR)   # restore so cleanup works
+
     # I3 — a git-error dirty map yields NO descriptor (not a clean {})
     def test_build_snapshot_none_on_no_head(self):
         # a fresh repo with no commits (unborn HEAD) → None, never a false-clean

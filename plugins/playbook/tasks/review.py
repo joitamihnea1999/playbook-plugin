@@ -1186,7 +1186,10 @@ def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
 
     def _emit(text):
         nonlocal total
-        total += len(text)
+        # Count BYTES, not characters (impl-panel r11 opus F1): the transport
+        # limit this protects (an argv judge's ~30 KiB cap) is bytes, so a
+        # multi-byte-UTF-8 doc could otherwise exceed it while `total` stayed under.
+        total += len(text.encode("utf-8", "replace"))
         if total > _TAIL_CERT_TOTAL_CAP:
             return False                   # payload too large for the transport
         parts.append(text)
