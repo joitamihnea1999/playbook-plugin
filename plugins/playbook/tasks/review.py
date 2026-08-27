@@ -1128,25 +1128,38 @@ def cmd_panel_review(cmd_args):
         sys.exit(1)
 
 
-_TAIL_CERT_DIFF_CAP = 512 * 1024   # per untracked file shown to the judge
+_TAIL_CERT_DIFF_CAP = 512 * 1024   # per certifiable file shown to the judge
 
 
-def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
-    """The F0→final delta the certifying judge is asked to review, per scope,
-    EXCLUDING `.agent` + fingerprint_exclude (owner decision A: task records are
-    not part of the review set). Returns None (→ the caller fails CLOSED) if a
-    certifiable path's content cannot be captured — a judge must never certify a
-    delta it was shown nothing for (impl-panel opus#1/codex:sol#5/codex:terra#2/
-    grok#1: the flagship case is a NEW untracked `docs/*.md`, which `git diff HEAD`
-    omits, so the judge used to be handed an empty diff and rubber-stamped it).
+def _split_scope_prefix(prefixed, scope_names):
+    """Map a scope-PREFIXED delta path back to (scope_name, scope_relative_path).
+    Longest non-empty scope prefix wins; the outer scope ("") is the fallback."""
+    best = ""
+    for name in scope_names:
+        if name and (prefixed == name or prefixed.startswith(name + "/")):
+            if len(name) > len(best):
+                best = name
+    rel = prefixed[len(best) + 1:] if best else prefixed
+    return best, rel
 
-    Three sources per scope: (1) committed-since-F0 + tracked-working diffs; (2)
-    UNTRACKED certifiable files' current bytes, materialized as an explicit block
-    (this is the close-then-commit docs tail); (3) F0-dirty paths now absent
-    (reverted/deleted) named explicitly so the judge knows a claim was removed."""
+
+def _tail_cert_review_diff(project_path, snapshot, non_behavioral) -> "str | None":
+    """The F0→final delta the certifying judge is asked to review. The SAFETY
+    guarantee (impl-panel r2 opus#1/codex:sol#3/grok#3): the CURRENT bytes of
+    EVERY certifiable (`non_behavioral`) path are shown — so no path is ever
+    certified with an empty diff, including a tracked doc reverted to HEAD (exists,
+    no hunk) and a new untracked doc. Content is read with the no-follow, bounded
+    `_safe_read_regular` (r2 codex:sol#1/grok#1: never follow an untracked symlink
+    into `/tmp/secret`, never block on a FIFO). Returns None → the caller fails
+    CLOSED — for any certifiable path whose regular-file bytes cannot be captured.
+
+    A best-effort unified diff (encoding-safe, rc-checked — r2 grok#5/codex:sol#5)
+    is appended as CHANGE CONTEXT only; a diff failure is non-fatal because the
+    per-path content above is the real safety artifact."""
     import subprocess
     from tasks.core import (
-        _fingerprint_exclude_pathspecs, _tail_cert_scopes, load_config,
+        _fingerprint_exclude_pathspecs, _safe_read_regular, _tail_cert_scopes,
+        load_config,
     )
     try:
         cfg = load_config(Path(project_path))
@@ -1154,72 +1167,54 @@ def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
         cfg = {}
     exclude = _fingerprint_exclude_pathspecs(cfg)
     scopes = _tail_cert_scopes(Path(project_path), cfg)
-    snap_scopes = (snapshot or {}).get("scopes", {}) if isinstance(snapshot, dict) else {}
-    chunks = []
+    scope_names = list(scopes.keys())
+    parts = []
+    # (1) SAFETY: the current content of every certifiable path (or a block).
+    for prefixed in sorted(non_behavioral or []):
+        name, rel = _split_scope_prefix(prefixed, scope_names)
+        repo = scopes.get(name)
+        if repo is None:
+            return None                    # a path in a scope we don't know → block
+        fpath = Path(repo) / rel
+        if not fpath.exists() and not fpath.is_symlink():
+            parts.append(f"--- {prefixed}: REMOVED/REVERTED since F0 (a claim may "
+                         f"have been withdrawn) ---")
+            continue
+        data = _safe_read_regular(fpath, _TAIL_CERT_DIFF_CAP)
+        if data is None:
+            return None                    # non-regular / oversize / unreadable
+        parts.append(f"--- current content of {prefixed} ---\n"
+                     + data.decode("utf-8", "replace"))
+    # (2) CONTEXT: a best-effort unified diff per scope (never fatal).
     for name, repo in scopes.items():
-        rec = snap_scopes.get(name) or {}
+        rec = (snapshot or {}).get("scopes", {}).get(name) or {} \
+            if isinstance(snapshot, dict) else {}
         f0 = rec.get("commit") or ""
-        f0_dirty = rec.get("dirty") if isinstance(rec.get("dirty"), dict) else {}
-        label = name or "(outer tree)"
-        parts = []
-        try:
-            if f0:
+        blobs = []
+        for extra in ([f"{f0}..HEAD"] if f0 else [], []):
+            try:
                 r = subprocess.run(
-                    ["git", "diff", f"{f0}..HEAD", "--", ".", *exclude],
-                    cwd=repo, capture_output=True, text=True)
-                if r.stdout.strip():
-                    parts.append(r.stdout)
-            r2 = subprocess.run(
-                ["git", "diff", "HEAD", "--", ".", *exclude],
-                cwd=repo, capture_output=True, text=True)
-            if r2.stdout.strip():
-                parts.append(r2.stdout)
-            # (2) untracked certifiable files — their bytes, not just their names.
-            u = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard", "-z",
-                 "--", ".", *exclude],
-                cwd=repo, capture_output=True)
-            if u.returncode != 0:
-                return None
-            for raw in u.stdout.split(b"\0"):
-                if not raw:
-                    continue
-                rel = os.fsdecode(raw)
-                fpath = Path(repo) / rel
-                try:
-                    data = fpath.read_bytes()
-                except OSError:
-                    return None            # a listed path we cannot capture → block
-                if len(data) > _TAIL_CERT_DIFF_CAP:
-                    text = (f"(untracked file {rel}: {len(data)} bytes — "
-                            f"exceeds {_TAIL_CERT_DIFF_CAP}-byte display cap; "
-                            f"first bytes below)\n"
-                            + data[:_TAIL_CERT_DIFF_CAP].decode("utf-8", "replace"))
-                else:
-                    text = data.decode("utf-8", "replace")
-                parts.append(f"--- NEW (untracked) file: {rel} ---\n{text}")
-        except (OSError, subprocess.SubprocessError):
-            return None                    # git error → fail closed, never blind
-        # (3) F0-dirty paths now absent (reverted-to-HEAD or deleted).
-        reverted = []
-        for p in sorted(f0_dirty):
-            if not (Path(repo) / p).exists():
-                reverted.append(p)
-        if reverted:
-            parts.append("(paths dirty at panel-time F0 that are now reverted or "
-                         "deleted — a claim may have been removed): "
-                         + ", ".join(reverted))
-        if parts:
-            chunks.append(f"===== scope: {label} =====\n" + "\n".join(parts))
-    return "\n\n".join(chunks) if chunks else "(no textual delta captured)"
+                    ["git", "diff", *extra, "--", ".", *exclude],
+                    cwd=repo, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace")
+                if r.returncode == 0 and r.stdout.strip():
+                    blobs.append(r.stdout)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass                       # context only — never blocks
+        if blobs:
+            parts.append(f"===== change context: scope {name or '(outer tree)'} "
+                         f"=====\n" + "\n".join(blobs))
+    return "\n\n".join(parts) if parts else "(no certifiable delta content)"
 
 
-def _tail_cert_prompt(non_behavioral, panel_summary, diff_text) -> str:
+def _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce) -> str:
     """The dedicated tail-cert judge prompt (finding E — never cmd_single_review's
     plan/impl prompt). Frames the exact contract: a full panel ALREADY PASSED the
     code at tree F0; the only changes since are these NON-behavioral (docs/tests/
     claim) files; confirm the delta does not invalidate that verdict or introduce
-    a false claim, and emit a single structured verdict line."""
+    a false claim, and emit a single structured verdict line. The verdict token
+    carries a per-invocation `nonce` so nothing in the reviewed CONTENT can forge
+    it (impl-panel r2 grok#2)."""
     files = "\n".join(f"  - {p}" for p in non_behavioral) or "  (none listed)"
     return (
         "You are a TAIL-CERTIFICATION judge. A full multi-model panel already "
@@ -1240,9 +1235,9 @@ def _tail_cert_prompt(non_behavioral, panel_summary, diff_text) -> str:
         "as needed. You are NOT re-reviewing the code the panel already passed — "
         "only whether this delta invalidates that verdict.\n\n"
         "Answer with your reasoning, then emit EXACTLY ONE final line, on its own, "
-        "verbatim:\n"
-        "  TAIL-CERT: PASS   (the delta is consistent — the panel verdict stands)\n"
-        "  TAIL-CERT: FAIL   (the delta needs a fresh full panel)\n"
+        "verbatim (the token below carries a one-time id — copy it exactly):\n"
+        f"  TAIL-CERT {nonce}: PASS   (the delta is consistent — panel verdict stands)\n"
+        f"  TAIL-CERT {nonce}: FAIL   (the delta needs a fresh full panel)\n"
         "Emit the token exactly once. Any other output for that line blocks the "
         "close (fail-closed)."
     )
@@ -1290,11 +1285,13 @@ def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
         backend, variant = dj, None
     try:
         from provider.subagent import _adapter_class
+        from tasks.core import resolve_judge_budget
         adapter = _adapter_class(backend)(session_id="tail-cert",
                                           project_root=Path(project_path))
         return adapter.run_headless_judge(
             prompt=prompt, model=variant, system_context="",
-            web_search=False, timeout_secs=timeout_secs, budget_usd="10")
+            web_search=False, timeout_secs=timeout_secs,
+            budget_usd=resolve_judge_budget(project_path))
     except subprocess.TimeoutExpired:
         return "(error: tail-cert judge timed out)"
     except Exception as e:
@@ -1303,24 +1300,43 @@ def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
 
 def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
                         *, timeout_secs=None) -> "str | None":
-    """Dedicated tail-cert judge (finding E): build the delta diff + the tail-cert
-    prompt, spawn the default single judge read-only, and parse its structured
-    `TAIL-CERT: PASS|FAIL` verdict FAIL-CLOSED. Returns "PASS"/"FAIL"/None (None =
-    block). NEVER stacks judge.md and NEVER calls cmd_single_review, so it cannot
-    forge a panel-impl stamp the freshness gate would key off."""
+    """Dedicated tail-cert judge (finding E): materialize the certifiable delta,
+    build the tail-cert prompt, spawn the default single judge READ-ONLY under the
+    same tamper backstop the other judge paths use, and parse its NONCED
+    `TAIL-CERT <nonce>: PASS|FAIL` verdict FAIL-CLOSED. Returns "PASS"/"FAIL"/None
+    (None = block). NEVER stacks judge.md and NEVER calls cmd_single_review."""
+    import secrets
     from tasks.core import parse_tail_cert_verdict
-    diff_text = _tail_cert_review_diff(project_path, snapshot)
+    diff_text = _tail_cert_review_diff(project_path, snapshot, non_behavioral)
     if diff_text is None:
         return None                    # could not capture the delta → fail closed
-    prompt = _tail_cert_prompt(non_behavioral, panel_summary, diff_text)
+    nonce = secrets.token_hex(8)
+    prompt = _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce)
+    # Tamper backstop (impl-panel r2 opus#2): the panel + single-judge paths
+    # snapshot the repo before spawning and refuse the verdict if the read-only
+    # judge mutated the tree. The close-time fingerprint CAS excludes `.agent/`,
+    # so without this a rogue write to task.md/judge.md during certification is
+    # invisible. Best-effort snapshot: if it can't be taken we still run, matching
+    # the other paths' posture on uncontained platforms.
+    _tb = None
+    try:
+        _tb = _snapshot_repo_state(project_path, None)
+    except Exception:
+        _tb = None
     raw = _run_tail_cert_judge_raw(project_path, prompt, timeout_secs)
+    if _tb is not None:
+        try:
+            if _detect_tamper_safe(project_path, None, _tb):
+                return None            # repo mutated during cert → no verdict
+        except Exception:
+            pass
     # A FAILED/crashed/errored judge must NEVER certify (impl-panel grok#5):
     # format_judge_output prefixes a nonzero exit with "(FAILED", and a spawn/
-    # resolution error is "(error:" — a stray PASS token in that tail would
-    # otherwise parse to a certification. Reject before parsing.
+    # resolution error is "(error:" — a stray token in that tail would otherwise
+    # parse to a certification. Reject before parsing.
     if not raw or raw.lstrip().startswith("(error:") or "(FAILED" in raw:
         return None
-    return parse_tail_cert_verdict(raw)
+    return parse_tail_cert_verdict(raw, nonce)
 
 
 def cmd_single_review(cmd, cmd_args):

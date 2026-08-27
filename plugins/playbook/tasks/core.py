@@ -1123,6 +1123,44 @@ def _safe_hash_regular(path: "Path", cap: int) -> "tuple[str, object, int]":
         os.close(fd)
 
 
+def _safe_read_regular(path: "Path", cap: int) -> "bytes | None":
+    """Read up to `cap` bytes of a path AS A REGULAR FILE, or None if it is not a
+    plain regular file now (symlink/FIFO/device/dir/deleted), is larger than the
+    cap, or errors — the same O_NONBLOCK|O_NOFOLLOW + fstat-regular primitive as
+    `_safe_hash_regular`, but returning the bytes. Used to materialize a
+    certifiable doc's CONTENT for the tail-cert judge WITHOUT following a symlink
+    (an untracked `docs/leak.md → /tmp/secret` must never be read — impl-panel r2
+    codex:sol#1) or blocking on a FIFO (r2 grok#1). None → the caller fails
+    closed."""
+    import stat as _stat
+    flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode) or st.st_size > cap:
+            return None
+        buf = bytearray()
+        remaining = cap + 1
+        while remaining > 0:
+            try:
+                chunk = os.read(fd, min(65536, remaining))
+            except (BlockingIOError, OSError):
+                return None
+            if not chunk:
+                break
+            buf += chunk
+            remaining -= len(chunk)
+        if len(buf) > cap:
+            return None                 # grew past the cap mid-read
+        return bytes(buf)
+    finally:
+        os.close(fd)
+
+
 def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
                                strict: bool = False) -> "str | None":
     """The fingerprint MATERIAL for a single git repo: HEAD + porcelain + working
@@ -1721,21 +1759,26 @@ def tail_cert_gate_decision(*, can_certify: bool, behavioral_nonempty: bool,
     return (False, "tail certification did not return PASS — fresh panel required")
 
 
-# The dedicated tail-cert judge emits EXACTLY this on its own line (finding E: a
-# structured terminal token, never a prose grep). `\b` after the verdict so a
-# trailing period is tolerated but `PASSPORT` is not.
-_TAIL_CERT_VERDICT_RE = re.compile(r"(?m)^[ \t]*TAIL-CERT:[ \t]*(PASS|FAIL)\b[ \t]*$")
+def _tail_cert_verdict_re(nonce: "str | None") -> "re.Pattern":
+    """The verdict-line matcher. With a NONCE (production — impl-panel r2 grok#2)
+    the token is `TAIL-CERT <nonce>: PASS|FAIL`, so unpredictable doc CONTENT can
+    never forge it and an instruction-echo can't either. `\\r?$` tolerates CRLF
+    from a Windows judge (r2 grok#4). `\\b` after the verdict allows a trailing
+    period but not `PASSPORT`."""
+    tok = "TAIL-CERT" + ((" " + re.escape(nonce)) if nonce else "")
+    return re.compile(rf"(?m)^[ \t]*{tok}:[ \t]*(PASS|FAIL)\b[ \t]*\r?$")
 
 
-def parse_tail_cert_verdict(raw: "str | None") -> "str | None":
+def parse_tail_cert_verdict(raw: "str | None",
+                            nonce: "str | None" = None) -> "str | None":
     """Parse the dedicated tail-cert judge's structured verdict, FAIL-CLOSED
-    (finding E). Returns "PASS"/"FAIL" ONLY for a single unambiguous
-    `TAIL-CERT: PASS|FAIL` line; None for everything else — missing, malformed, a
-    spawn-error string, or MORE than one token (a duplicate or contradictory
-    verdict, or the judge echoing the instruction). None always blocks."""
+    (finding E). Returns "PASS"/"FAIL" ONLY for a single unambiguous verdict line
+    carrying the expected `nonce`; None for everything else — missing, malformed,
+    a spawn-error string, wrong/absent nonce, or MORE than one token (a duplicate,
+    a contradiction, or the judge echoing the instruction). None always blocks."""
     if not raw:
         return None
-    matches = _TAIL_CERT_VERDICT_RE.findall(raw)
+    matches = _tail_cert_verdict_re(nonce).findall(raw)
     if len(matches) != 1:            # zero / duplicate / contradictory → block
         return None
     return matches[0]

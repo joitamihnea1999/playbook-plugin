@@ -455,15 +455,35 @@ class TailCertVerdictParse(unittest.TestCase):
         # A spawn error ("(error: claude not found on PATH)") → None → block.
         self.assertIsNone(parse_tail_cert_verdict("(error: claude not found)"))
 
+    def test_crlf_line_matches(self):
+        # r2 grok#4: a Windows judge emitting CRLF must still certify.
+        self.assertEqual(
+            parse_tail_cert_verdict("ok\r\nTAIL-CERT: PASS\r\n"), "PASS")
+
+    def test_nonce_required_when_given(self):
+        # r2 grok#2: with a nonce, only the nonced token counts — unpredictable
+        # doc content (a bare `TAIL-CERT: PASS`) can never forge a certification.
+        n = "deadbeefcafe0001"
+        self.assertEqual(
+            parse_tail_cert_verdict(f"TAIL-CERT {n}: PASS\n", n), "PASS")
+        self.assertIsNone(parse_tail_cert_verdict("TAIL-CERT: PASS\n", n))
+        self.assertIsNone(parse_tail_cert_verdict("TAIL-CERT wrongnonce: PASS\n", n))
+
 
 PLUGIN_STR = str(PLUGIN)
 
-# A deterministic stub "judge": prints whatever STUB_TAIL_VERDICT holds. Proves
-# the seam SUBSTITUTES the judge program but cannot force a PASS — its output
-# still flows through the fail-closed parser (a garbage value → None → block).
+# A deterministic stub "judge": reads the prompt, extracts the one-time nonce, and
+# emits the nonced verdict token for STUB_TAIL_VERDICT ('PASS'/'FAIL'); any other
+# value is emitted raw (→ no nonce match → None → block). Proves the seam
+# SUBSTITUTES the judge program but cannot force a PASS — output still flows
+# through the fail-closed, nonce-checked parser.
 _STUB_JUDGE = (
-    "import os,sys;"
-    "sys.stdout.write(os.environ.get('STUB_TAIL_VERDICT',''))"
+    "import os,re,sys;"
+    "p=sys.stdin.read();"
+    "m=re.search(r'TAIL-CERT ([0-9a-f]+):',p);"
+    "v=os.environ.get('STUB_TAIL_VERDICT','');"
+    "sys.stdout.write(('TAIL-CERT %s: %s\\n'%(m.group(1),v)) "
+    "if (m and v in ('PASS','FAIL')) else v)"
 )
 
 
@@ -525,7 +545,7 @@ class ClosePathTailCert(unittest.TestCase):
     def test_docs_only_delta_certifies(self):
         d, td, env = self._setup()
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env, verdict="TAIL-CERT: PASS\n")
+        r = self._close(d, env, verdict="PASS")
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         self.assertIn("tail-certified", r.stderr)
         self.assertIn("TAIL-CERTIFIED", self._receipt(td))
@@ -534,7 +554,7 @@ class ClosePathTailCert(unittest.TestCase):
     def test_code_delta_blocks_even_with_pass_stub(self):
         d, td, env = self._setup()
         (d / "code.py").write_text("x = 1  # comment\n", encoding="utf-8")
-        r = self._close(d, env, verdict="TAIL-CERT: PASS\n")   # stub says PASS…
+        r = self._close(d, env, verdict="PASS")   # stub says PASS…
         self.assertNotIn("Task 001 done.", r.stdout)           # …but code blocks
         self.assertIn("pending", self._receipt(td))
 
@@ -542,7 +562,7 @@ class ClosePathTailCert(unittest.TestCase):
     def test_fail_certification_blocks(self):
         d, td, env = self._setup()
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env, verdict="TAIL-CERT: FAIL\n")
+        r = self._close(d, env, verdict="FAIL")
         self.assertNotIn("Task 001 done.", r.stdout)
         self.assertIn("pending", self._receipt(td))
 
@@ -550,14 +570,14 @@ class ClosePathTailCert(unittest.TestCase):
     def test_garbage_verdict_blocks(self):
         d, td, env = self._setup()
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env, verdict="looks fine to me\n")
+        r = self._close(d, env, verdict="looks fine to me")
         self.assertNotIn("Task 001 done.", r.stdout)
 
     # (d) missing descriptor → falls back to the stale block
     def test_missing_snapshot_falls_back_to_block(self):
         d, td, env = self._setup(snapshot=False)
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env, verdict="TAIL-CERT: PASS\n")
+        r = self._close(d, env, verdict="PASS")
         self.assertNotIn("Task 001 done.", r.stdout)
         self.assertIn("code state changed after the newest impl panel", r.stderr)
 
@@ -585,7 +605,7 @@ class ClosePathTailCert(unittest.TestCase):
                             "mv", "code.py", "docs/moved.md"], cwd=d,
                            capture_output=True)
         assert r.returncode == 0
-        rr = self._close(d, env, verdict="TAIL-CERT: PASS\n")
+        rr = self._close(d, env, verdict="PASS")
         self.assertNotIn("Task 001 done.", rr.stdout)   # deleted .py is behavioral
 
 
@@ -644,10 +664,27 @@ class Round2Fixes(unittest.TestCase):
         fp = tree_state_fingerprint(d)
         snap = build_panel_snapshot(d, fp)
         (d / "docs" / "guide.md").write_text("CLAIM: 99% faster\n", encoding="utf-8")
-        text = _tail_cert_review_diff(d, snap)
+        text = _tail_cert_review_diff(d, snap, ["docs/guide.md"])
         self.assertIsNotNone(text)
         self.assertIn("CLAIM: 99% faster", text)   # the judge SEES the new claim
         self.assertIn("guide.md", text)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_review_diff_refuses_to_follow_symlink(self):
+        # r2 codex:sol#1/grok#1: an untracked docs symlink must NOT be followed
+        # (no exfiltration), and a non-regular certifiable path fails closed.
+        from tasks.review import _tail_cert_review_diff
+        d = _repo()
+        (d / "docs").mkdir()
+        secret = Path(tempfile.mkdtemp()) / "secret"
+        secret.write_text("TOP SECRET\n", encoding="utf-8")
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        os.symlink(secret, d / "docs" / "leak.md")
+        text = _tail_cert_review_diff(d, snap, ["docs/leak.md"])
+        self.assertIsNone(text)                    # non-regular → fail closed
+        if text:
+            self.assertNotIn("TOP SECRET", text)
 
 
 class Round2Backdoor(unittest.TestCase):
@@ -665,7 +702,7 @@ class Round2Backdoor(unittest.TestCase):
         (d / "docs" / "guide.md").write_text("# doc\n", encoding="utf-8")
         e = dict(env,
                  PLAYBOOK_TAIL_CERT_JUDGE_CMD=f'"{sys.executable}" -c "{_STUB_JUDGE}"',
-                 STUB_TAIL_VERDICT="TAIL-CERT: PASS\n")
+                 STUB_TAIL_VERDICT="PASS")
         r = subprocess.run(
             [sys.executable, "-m", "tasks.cli", "work", "done"],
             cwd=d, env=e, capture_output=True, text=True, timeout=90)
