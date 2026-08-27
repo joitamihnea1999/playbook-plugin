@@ -1372,6 +1372,12 @@ _ROUND_HEAD_RE = re.compile(r"^# Panel (Plan|Impl) Review\b", re.MULTILINE)
 _ROUND_VERDICT_RE = re.compile(r"\*\*PANEL VERDICT: (PASS|FAIL)\*\*")
 _ROUND_TREE_RE = re.compile(r"\*\*Tree-state:\*\* ([0-9a-f]{6,64})")
 JUDGE_MD_MAX_ROUNDS = 5
+JUDGE_ARCHIVE_NAME = "judge-archive.md"
+# The one-line pointer stacking leaves at the end of judge.md when rounds
+# overflow. Matched at end-of-file so a re-stack can strip the PREVIOUS pointer
+# (any wording — the pre-1.5.41 "trimmed — full history is in git" form too)
+# out of the round body it rides on, keeping the archive a clean round sequence.
+_TRIM_POINTER_RE = re.compile(r"\n*\[\.\.\. \d+ older round\(s\)[^\]]*\]\s*\Z")
 
 
 def parse_judge_rounds(text: str) -> "list[dict]":
@@ -1396,19 +1402,99 @@ def parse_judge_rounds(text: str) -> "list[dict]":
     return rounds
 
 
+def _archive_judge_overflow(archive_path: Path,
+                            overflow_bodies: "list[str]") -> int:
+    """Preserve rounds trimmed from judge.md's retention window by appending them
+    VERBATIM to a sibling `judge-archive.md`, newest-first — the same
+    "moving history is not deleting it" contract as `tasks compact` /
+    `task-archive.md`. Panel rounds are paid work and ARE the review record;
+    dropping them (the pre-1.5.41 "…full history is in git" claim was unreliable
+    — judge.md is rewritten in place and committed at most once at task end, so
+    intra-session trimmed rounds were simply lost) breaks the earned-close
+    contract. Returns the total round count now in the archive.
+
+    `overflow_bodies` are newest-first among themselves and are all NEWER than
+    anything already archived, so they are prepended to keep the archive
+    globally newest-first.
+
+    Fails CLOSED on an existing archive it cannot READ (an IO error propagates
+    as OSError) rather than treating it as empty and overwriting it — silently
+    replacing an unreadable archive would destroy already-preserved rounds
+    (round-2 panel F2). Content it can read but not structure (legacy/opaque) is
+    preserved as one verbatim block, the same rule `stack_judge_round` applies to
+    judge.md itself. Returns the total round-or-block count now in the archive."""
+    prior: "list[str]" = []
+    if archive_path.exists():
+        # Let an IO error propagate: the caller keeps the overflow in judge.md
+        # instead, so nothing is lost. errors="replace" tolerates bad bytes
+        # (an encoding glitch must not be fatal), but an unreadable file raises.
+        raw = archive_path.read_text(encoding="utf-8", errors="replace")
+        prior_rounds = parse_judge_rounds(raw)
+        if prior_rounds:
+            prior = [_TRIM_POINTER_RE.sub("", r["body"]).rstrip()
+                     for r in prior_rounds]
+        elif raw.strip():
+            # Non-empty but unparseable: never destroy a record we can't parse.
+            prior = [raw.strip()]
+    # Idempotent: if a crash landed BETWEEN the archive write and the judge.md
+    # write (or a rollback failed), a retry recomputes the SAME overflow and
+    # would archive it a second time, inflating the documented round count.
+    # Skip any overflow body byte-identical to one already archived (round-2
+    # panel F1). Distinct rounds never collide — each body carries its own
+    # commit/tree-state.
+    prior_set = set(prior)
+    fresh = [b.rstrip() for b in overflow_bodies if b.rstrip() not in prior_set]
+    if not fresh:
+        # Every overflow body is already archived (a crash-retry re-presenting
+        # the same rounds). Nothing to add → a TRUE no-op: skip the rewrite
+        # entirely so a needless write can't fail and push the caller onto the
+        # keep-in-both-files path, inflating the documented count (round-4 panel,
+        # grok G2).
+        return len(prior)
+    kept = fresh + prior
+    header = ("<!-- Judge round archive. Rounds trimmed from judge.md's "
+              "retention window, kept VERBATIM, newest first. The TRUE panel "
+              "round count for this task = round headings here + round headings "
+              "in judge.md. Never edit or delete by hand. -->\n\n")
+    _atomic_write(archive_path, header + "\n\n".join(kept) + "\n")
+    return len(kept)
+
+
 def stack_judge_round(judge_md: Path, round_text: str,
                       max_rounds: int = JUDGE_MD_MAX_ROUNDS) -> None:
     """Prepend a panel round to judge.md, newest first — a re-run must never
     clobber the previous round's verdicts (they are paid work and the record).
-    Retention keeps the newest `max_rounds`; older rounds live on in git history,
-    and the trim is announced in the file rather than silent."""
+    Retention keeps the newest `max_rounds` in judge.md (the review-read budget);
+    any older round that overflows is ARCHIVED VERBATIM to a sibling
+    `judge-archive.md` (never destroyed), and judge.md carries a one-line pointer
+    to it.
+
+    Two failure paths preserve the never-lose-a-paid-round contract:
+    - if the archive write FAILS, the overflow is NOT trimmed — judge.md keeps
+      every round untrimmed (the budget grows on that rare path, but no paid
+      round is dropped), rather than deleting it and pointing at git (round-2
+      panel F1);
+    - the archive is written BEFORE judge.md, so if the judge.md write then
+      fails the archive is rolled back to its prior state — a retry cannot
+      double-archive the same overflow and inflate the documented count (F3;
+      mirrors `compact.py`'s archive-then-rollback).
+
+    NOTE: like the pre-existing judge.md / receipt writers, this is a plain
+    read-modify-write with no cross-process lock, so two panels stacking the
+    SAME task concurrently can still last-writer-win a round — best-effort under
+    concurrency, tracked as a follow-up that should serialize all of core.py's
+    stackers at once (round-2 panel F4)."""
     old_bodies: "list[str]" = []
     if judge_md.exists():
         try:
             old_text = judge_md.read_text(encoding="utf-8", errors="replace")
             old_rounds = parse_judge_rounds(old_text)
             if old_rounds:
-                old_bodies = [r["body"].rstrip() for r in old_rounds]
+                # Strip the previous end-of-file overflow pointer off whichever
+                # round body it rode on (it is metadata, not review content), so
+                # the archive stays a clean sequence of rounds.
+                old_bodies = [_TRIM_POINTER_RE.sub("", r["body"]).rstrip()
+                              for r in old_rounds]
             elif old_text.strip():
                 # Legacy / taskless content that predates round headings: keep it
                 # as one opaque block — stacking must never silently destroy a
@@ -1416,14 +1502,56 @@ def stack_judge_round(judge_md: Path, round_text: str,
                 old_bodies = [old_text.strip()]
         except OSError:
             old_bodies = []
-    kept = [round_text.rstrip()] + old_bodies
-    trimmed = len(kept) - max_rounds
-    kept = kept[:max_rounds]
-    out = "\n\n".join(kept) + "\n"
-    if trimmed > 0:
-        out += (f"\n[... {trimmed} older round(s) trimmed — the full history is "
-                "in git ...]\n")
-    _atomic_write(judge_md, out)
+    kept_all = [round_text.rstrip()] + old_bodies
+    overflow = kept_all[max_rounds:]        # oldest rounds pushed out THIS call
+    kept = kept_all[:max_rounds]
+    archive_path = judge_md.parent / JUDGE_ARCHIVE_NAME
+    archived_total = 0
+    archived_ok = False
+    archive_existed = False
+    archive_backup: "bytes | None" = None
+    if overflow:
+        archive_existed = archive_path.exists()
+        try:
+            if archive_existed:
+                # Snapshot for rollback BEFORE we touch it (also fails closed on
+                # an unreadable existing archive → we keep rounds in judge.md).
+                archive_backup = archive_path.read_bytes()
+            archived_total = _archive_judge_overflow(archive_path, overflow)
+            archived_ok = True
+        except OSError:
+            archived_ok = False
+    if overflow and not archived_ok:
+        # F1: archiving failed — DO NOT drop the paid round. Keep everything in
+        # judge.md untrimmed and say so honestly (no false git-recovery claim).
+        out = "\n\n".join(kept_all) + "\n"
+        out += (f"\n[... {len(overflow)} older round(s) could NOT be archived to "
+                f"{JUDGE_ARCHIVE_NAME}; retained here in judge.md so nothing is "
+                "lost — fix the archive path ...]\n")
+    else:
+        out = "\n\n".join(kept) + "\n"
+        if overflow:
+            out += (f"\n[... {len(overflow)} older round(s) archived to "
+                    f"{JUDGE_ARCHIVE_NAME} — kept verbatim, {archived_total} "
+                    "round(s) preserved there in total ...]\n")
+    try:
+        _atomic_write(judge_md, out)
+    except OSError:
+        # F3: the primary write failed after the archive was already committed —
+        # roll the archive back so a retry does not stack the same overflow twice.
+        if archived_ok:
+            try:
+                if archive_existed and archive_backup is not None:
+                    # Restore the prior bytes through the atomic (temp+rename+
+                    # fsync) primitive, NOT a raw truncating write_bytes: a crash
+                    # mid-restore must not leave a truncated archive that loses a
+                    # paid round (round-3 panel, sonnet+grok).
+                    atomic_write(archive_path, archive_backup)
+                elif not archive_existed:
+                    archive_path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def resolve_panel_required(project_path: Path, risk: str) -> bool:

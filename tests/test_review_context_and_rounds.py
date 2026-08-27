@@ -76,13 +76,244 @@ class StackRounds(unittest.TestCase):
         self.assertIn("old free-form verdicts", text,
                       "stacking must never destroy a record it cannot parse")
 
-    def test_retention_trims_oldest_and_says_so(self):
+    def test_retention_caps_judgemd_and_points_to_archive(self):
+        # S2 (1.5.41): judge.md still holds only the newest max_rounds (review
+        # budget), but the overflow is ARCHIVED, not destroyed — and the in-file
+        # pointer names the archive so a reader knows where the rest went.
         jm = self._jm()
         for i in range(7):
             stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
         text = jm.read_text(encoding="utf-8")
         self.assertEqual(len(parse_judge_rounds(text)), 5)
-        self.assertIn("older round(s) trimmed", text)
+        self.assertIn("judge-archive.md", text,
+                      "the pointer must name the archive, not claim git")
+        self.assertNotIn("full history is in git", text,
+                         "the unreliable git-history claim must be gone")
+
+    def test_overflow_round_archived_verbatim_not_destroyed(self):
+        # The core defect: the 6th stack used to DROP the oldest round with only
+        # a count. Now the oldest round's body must survive verbatim in the
+        # sibling archive.
+        jm = self._jm()
+        for i in range(6):  # rounds 0..5 → judge.md keeps 5..1, round 0 overflows
+            stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
+        jm_text = jm.read_text(encoding="utf-8")
+        self.assertNotIn("findings body 0", jm_text,
+                         "oldest round should be out of judge.md's window")
+        archive = jm.parent / "judge-archive.md"
+        self.assertTrue(archive.exists(), "overflow round was not archived")
+        arc_text = archive.read_text(encoding="utf-8")
+        self.assertIn("findings body 0", arc_text,
+                      "the trimmed round must be preserved verbatim in the archive")
+        # And it must be a real, parseable round (not just loose text).
+        self.assertEqual(len(parse_judge_rounds(arc_text)), 1)
+        # Round-4 panel G3: prove "verbatim" for real — the archived body must
+        # equal the original round, and no trim-pointer may leak into it.
+        self.assertEqual(parse_judge_rounds(arc_text)[0]["body"].rstrip(),
+                         round_text("impl", "PASS", n=0).rstrip(),
+                         "archived round body must be byte-identical to the original")
+        self.assertNotIn("older round(s)", arc_text,
+                         "no trim-pointer text may leak into the archive")
+
+    def test_rearchiving_only_present_rounds_is_a_true_noop(self):
+        # Round-4 panel G3/grok: when every overflow body is already archived
+        # (a crash-retry re-presenting the same bodies), the helper must not
+        # rewrite the archive at all — a needless rewrite could fail and push
+        # the caller onto the keep-in-both-files path, inflating the count.
+        import tasks.core as core
+        jm = self._jm()
+        archive = jm.parent / "judge-archive.md"
+        body = round_text("impl", "PASS", n=0).rstrip()
+        core._archive_judge_overflow(archive, [body])  # archive now holds round 0
+        calls = []
+        real_aw = core._atomic_write
+
+        def spy_aw(path, text):
+            calls.append(Path(path).name)
+            return real_aw(path, text)
+
+        core._atomic_write = spy_aw
+        try:
+            n = core._archive_judge_overflow(archive, [body])  # all already present
+        finally:
+            core._atomic_write = real_aw
+        self.assertEqual(n, 1, "count must still reflect the one archived round")
+        self.assertEqual(calls, [],
+                         "a no-op re-archive must not rewrite judge-archive.md")
+
+    def test_archived_bodies_are_pointer_free_and_verbatim_past_first_overflow(self):
+        # Round-5 panel G2 (grok): the 6-stack verbatim test only archives round 0,
+        # which never carried a trim-pointer. From the 2nd overflow on, the
+        # oldest kept body in judge.md carries the end-of-file pointer, so
+        # `_TRIM_POINTER_RE` MUST strip it before archiving. Drive 8 stacks and
+        # assert every archived body is byte-identical to its original round and
+        # that no pointer text leaked into the archive.
+        jm = self._jm()
+        for i in range(8):  # rounds 0..7 → 2,1,0 overflow into the archive
+            stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
+        arc_text = (jm.parent / "judge-archive.md").read_text(encoding="utf-8")
+        self.assertNotIn("older round(s)", arc_text,
+                         "a trim-pointer leaked into the archive (strip failed)")
+        archived = parse_judge_rounds(arc_text)
+        self.assertEqual(len(archived), 3)
+        got = {r["body"].rstrip() for r in archived}
+        want = {round_text("impl", "PASS", n=n).rstrip() for n in (0, 1, 2)}
+        self.assertEqual(got, want,
+                         "archived bodies must equal their originals verbatim, "
+                         "with the trim-pointer stripped")
+
+    def test_archive_accumulates_newest_first_judgemd_stays_capped(self):
+        jm = self._jm()
+        for i in range(10):  # rounds 0..9
+            stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
+        jm_text = jm.read_text(encoding="utf-8")
+        self.assertEqual(len(parse_judge_rounds(jm_text)), 5)
+        arc_text = (jm.parent / "judge-archive.md").read_text(encoding="utf-8")
+        # rounds 0..4 overflowed (5 total), kept newest-first in the archive.
+        self.assertEqual(len(parse_judge_rounds(arc_text)), 5)
+        self.assertLess(arc_text.index("findings body 4"),
+                        arc_text.index("findings body 0"),
+                        "archive must be newest-first (round 4 before round 0)")
+
+    def test_archive_is_idempotent_on_duplicate_overflow(self):
+        # Round-2 panel F1 (opus): a crash between the archive write and the
+        # judge.md write, followed by a retry, recomputes the same overflow and
+        # re-archives it — which would double-count and inflate the documented
+        # "true round count". Archiving the same round body twice must be a
+        # no-op the second time.
+        from tasks.core import _archive_judge_overflow
+        jm = self._jm()
+        archive = jm.parent / "judge-archive.md"
+        body = round_text("impl", "PASS", n=0).rstrip()
+        _archive_judge_overflow(archive, [body])
+        _archive_judge_overflow(archive, [body])  # retry after a crash
+        self.assertEqual(
+            len(parse_judge_rounds(archive.read_text(encoding="utf-8"))), 1,
+            "re-archiving the identical round must not duplicate it")
+
+    def test_no_archive_created_within_cap(self):
+        jm = self._jm()
+        for i in range(5):  # exactly at the cap → nothing overflows
+            stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
+        self.assertEqual(len(parse_judge_rounds(jm.read_text(encoding="utf-8"))), 5)
+        self.assertFalse((jm.parent / "judge-archive.md").exists(),
+                         "no archive should exist when nothing was trimmed")
+
+    def test_archive_failure_retains_overflow_in_judgemd_never_loses_it(self):
+        # F1 (round-2 panel): if the archive cannot be written (here: a DIRECTORY
+        # sits at its path, so it is unreadable/unwritable), the overflow round
+        # must NOT be deleted — the whole point of this task is that a paid round
+        # is never lost. judge.md keeps ALL rounds untrimmed and says why.
+        jm = self._jm()
+        (jm.parent / "judge-archive.md").mkdir()  # sabotage the archive path
+        for i in range(6):
+            stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
+        text = jm.read_text(encoding="utf-8")
+        self.assertIn("findings body 0", text,
+                      "overflow round must be retained in judge.md when archiving fails")
+        self.assertEqual(len(parse_judge_rounds(text)), 6,
+                         "no paid round may be dropped on the archive-failure path")
+        self.assertNotIn("recover from git history", text,
+                         "must not claim git recovery while retaining in-file")
+
+    def test_unparseable_existing_archive_is_preserved_not_overwritten(self):
+        # F2: an archive that already holds content parse_judge_rounds can't
+        # structure (legacy/opaque) must survive the next overflow, not be
+        # clobbered — same 'never destroy a record you can't parse' rule as
+        # judge.md's own stacker.
+        jm = self._jm()
+        archive = jm.parent / "judge-archive.md"
+        archive.write_text("LEGACY OPAQUE ARCHIVE CONTENT\n", encoding="utf-8")
+        for i in range(6):  # forces one overflow into the archive
+            stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
+        arc_text = archive.read_text(encoding="utf-8")
+        self.assertIn("LEGACY OPAQUE ARCHIVE CONTENT", arc_text,
+                      "opaque prior archive content must be preserved verbatim")
+        self.assertIn("findings body 0", arc_text,
+                      "the new overflow round must be archived alongside it")
+
+    def test_judgemd_write_failure_rolls_back_archive(self):
+        # F3: archive is written before judge.md; if the judge.md write then
+        # fails, the archive must be rolled back so a retry cannot double-archive
+        # the same overflow (which would inflate the documented count). Fail ONLY
+        # the judge.md write (a directory-at-path would also break the read and
+        # produce no overflow, so patch the writer instead).
+        import tasks.core as core
+        jm = self._jm()
+        for i in range(5):  # 5 rounds, at cap, no archive yet
+            stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
+        archive = jm.parent / "judge-archive.md"
+        self.assertFalse(archive.exists())
+        real_aw = core._atomic_write
+
+        def failing_aw(path, text):
+            if Path(path).name == "judge.md":
+                raise OSError("simulated judge.md write failure")
+            return real_aw(path, text)
+
+        core._atomic_write = failing_aw
+        try:
+            with self.assertRaises(OSError):
+                stack_judge_round(jm, round_text("impl", "PASS", n=5), max_rounds=5)
+        finally:
+            core._atomic_write = real_aw
+        self.assertFalse(archive.exists(),
+                         "archive must be rolled back when the judge.md write fails")
+        # the pre-existing judge.md record is untouched (still its 5 rounds).
+        self.assertEqual(len(parse_judge_rounds(jm.read_text(encoding="utf-8"))), 5)
+
+    def test_judgemd_write_failure_restores_existing_archive_byte_exact(self):
+        # Round-3 panel (sonnet + grok, convergent): the F3 rollback's
+        # archive_existed=True branch (restore prior BYTES) was untested and used
+        # a non-atomic truncate-then-write. Seed an already-populated archive,
+        # fail only the judge.md write on a later overflow, and assert the
+        # archive is restored to its EXACT prior bytes (not truncated/lost).
+        import tasks.core as core
+        jm = self._jm()
+        for i in range(6):  # 6 stacks → one overflow already sits in the archive
+            stack_judge_round(jm, round_text("impl", "PASS", n=i), max_rounds=5)
+        archive = jm.parent / "judge-archive.md"
+        self.assertTrue(archive.exists())
+        prior_bytes = archive.read_bytes()
+        real_aw = core._atomic_write
+
+        def failing_aw(path, text):
+            if Path(path).name == "judge.md":
+                raise OSError("simulated judge.md write failure")
+            return real_aw(path, text)
+
+        core._atomic_write = failing_aw
+        try:
+            with self.assertRaises(OSError):
+                stack_judge_round(jm, round_text("impl", "PASS", n=99), max_rounds=5)
+        finally:
+            core._atomic_write = real_aw
+        self.assertEqual(archive.read_bytes(), prior_bytes,
+                         "existing archive must be restored byte-for-byte on rollback")
+
+
+class ArchiveDocFormat(unittest.TestCase):
+    """S2 (1.5.41): the true round format must be documented so lens v0.2 can
+    count judge.md + judge-archive.md instead of undercounting at 5."""
+
+    def test_architecture_doc_states_format_and_archive(self):
+        doc = (_HERE.parent / "docs" / "architecture.md").read_text(
+            encoding="utf-8")
+        self.assertIn("judge-archive.md", doc)
+        self.assertIn("# Panel Impl Review", doc,
+                      "the round-heading format must be documented for counters")
+        self.assertIn("true panel-round count", doc.lower())
+        # Round-5 panel G3 (grok): pin the ADDITIVE rule, not just the phrase —
+        # a doc that still said "count judge.md alone" would pass the substring
+        # checks above but re-introduce the original undercount.
+        low = doc.lower()
+        self.assertIn("judge-archive.md", low)
+        self.assertTrue(
+            ("plus those in `judge-archive.md`" in doc)
+            or ("headings in **both**" in doc)
+            or ("headings in both" in low),
+            "the doc must state the count is judge.md headings PLUS "
+            "judge-archive.md headings, not judge.md alone")
 
 
 class StructuralEvidence(unittest.TestCase):
