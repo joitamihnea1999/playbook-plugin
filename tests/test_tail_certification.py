@@ -436,18 +436,20 @@ class TailCertVerdictParse(unittest.TestCase):
         self.assertIsNone(parse_tail_cert_verdict(""))
         self.assertIsNone(parse_tail_cert_verdict(None))
 
-    def test_duplicate_tokens_is_none(self):
-        # Two tokens (even identical) → ambiguous → fail closed.
+    def test_non_terminal_pass_then_prose_is_none(self):
+        # r5 grok#1/codex:sol#2: only the LAST non-empty line is the verdict, so a
+        # PASS line buried in reasoning followed by prose does NOT certify.
         self.assertIsNone(
-            parse_tail_cert_verdict("TAIL-CERT: PASS\nTAIL-CERT: PASS\n"))
+            parse_tail_cert_verdict("TAIL-CERT: PASS\nActually, on reflection...\n"))
 
-    def test_contradictory_tokens_is_none(self):
-        self.assertIsNone(
-            parse_tail_cert_verdict("TAIL-CERT: PASS\nTAIL-CERT: FAIL\n"))
+    def test_non_terminal_pass_then_fail_last_line_is_fail(self):
+        # A PASS earlier + a FAIL as the FINAL line = the judge's final word: FAIL.
+        self.assertEqual(
+            parse_tail_cert_verdict("TAIL-CERT: PASS\nTAIL-CERT: FAIL\n"), "FAIL")
 
     def test_prose_echo_of_instruction_is_none(self):
-        # The judge echoing the instruction ("emit TAIL-CERT: PASS or FAIL")
-        # produces two verdict tokens → None, never a spurious PASS.
+        # The judge echoing the instruction inline (not as the final line) → None,
+        # never a spurious PASS.
         raw = "I was told to emit TAIL-CERT: PASS or TAIL-CERT: FAIL. Verdict:\n"
         self.assertIsNone(parse_tail_cert_verdict(raw))
 
@@ -672,7 +674,7 @@ class Round2Fixes(unittest.TestCase):
         fp = tree_state_fingerprint(d)
         snap = build_panel_snapshot(d, fp)
         (d / "docs" / "guide.md").write_text("CLAIM: 99% faster\n", encoding="utf-8")
-        text = _tail_cert_review_diff(d, snap, ["docs/guide.md"])
+        text = _tail_cert_review_diff(d, snap)
         self.assertIsNotNone(text)
         self.assertIn("CLAIM: 99% faster", text)   # the judge SEES the new claim
         self.assertIn("guide.md", text)
@@ -699,7 +701,7 @@ class Round2Fixes(unittest.TestCase):
         (d / "docs" / "g.md").write_text("FALSE CLAIM staged\n", encoding="utf-8")
         _git(d, "add", "docs/g.md")
         (d / "docs" / "g.md").write_text("benign\n", encoding="utf-8")
-        text = _tail_cert_review_diff(d, snap, ["docs/g.md"])
+        text = _tail_cert_review_diff(d, snap)
         self.assertIsNotNone(text)
         self.assertIn("FALSE CLAIM staged", text)   # the shipping index is shown
 
@@ -715,10 +717,32 @@ class Round2Fixes(unittest.TestCase):
         fp = tree_state_fingerprint(d)
         snap = build_panel_snapshot(d, fp)
         os.symlink(secret, d / "docs" / "leak.md")
-        text = _tail_cert_review_diff(d, snap, ["docs/leak.md"])
+        text = _tail_cert_review_diff(d, snap)
         self.assertIsNone(text)                    # non-regular → fail closed
         if text:
             self.assertNotIn("TOP SECRET", text)
+
+    # R5-2/grok#2/opus F2 — a large TRACKED doc edited by a little is shown as a
+    # small DIFF, not its full content, so it stays under the transport limit.
+    def test_large_tracked_doc_shown_as_small_diff(self):
+        from tasks.review import _TAIL_CERT_TOTAL_CAP, _tail_cert_review_diff
+        d = _repo()
+        (d / "docs").mkdir()
+        # a realistic large ledger: many lines (~300 KB), like docs/guarantee-ledger
+        big = "".join(f'  {{"entry": {i}, "pad": "xxxxxxxxxxxxxxxx"}},\n'
+                      for i in range(8000))
+        (d / "docs" / "big.json").write_text('[\n' + big + ']\n', encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "big doc")
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        # a SMALL edit (append one line) to the large tracked file
+        with open(d / "docs" / "big.json", "a", encoding="utf-8") as fh:
+            fh.write('{"new":"claim"}\n')
+        text = _tail_cert_review_diff(d, snap)
+        self.assertIsNotNone(text)                  # certifiable, not fail-closed
+        self.assertLess(len(text), _TAIL_CERT_TOTAL_CAP)   # small diff, not 300 KB
+        self.assertIn("claim", text)                # the added claim is visible
 
 
 class NoProductionSeam(unittest.TestCase):
@@ -778,7 +802,7 @@ class Round4Fixes(unittest.TestCase):
         (d / "docs" / "evil.md").write_text("FALSE staged claim\n", encoding="utf-8")
         _git(d, "add", "docs/evil.md")
         (d / "docs" / "evil.md").unlink()
-        text = _tail_cert_review_diff(d, snap, ["docs/evil.md"])
+        text = _tail_cert_review_diff(d, snap)
         self.assertIsNotNone(text)
         self.assertIn("FALSE staged claim", text)         # the shipping blob is shown
         self.assertNotIn("REMOVED/DELETED", text)         # NOT mislabeled withdrawn
@@ -818,7 +842,7 @@ class Round4Coverage(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old_env)
         self.assertNotIn("Task 001 done.", out.getvalue())
-        self.assertIn("tree changed during certification", err.getvalue())
+        self.assertIn("changed during certification", err.getvalue())
 
 
 class RunTailCertJudgeGuards(unittest.TestCase):

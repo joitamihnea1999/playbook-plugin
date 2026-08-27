@@ -290,19 +290,27 @@ outer tree and every `code_roots` scope. If **every** changed path is in a
 **non-behavioral file class** — `*.md` under `docs/` or named
 `README*`/`CHANGELOG*`/`MIND_MAP*`, `*.json` under `docs/` (the guarantee
 ledger), the repo-root `CLAUDE.md`, anything under `tests/`, and task records
-under `.agent/` — the **default single judge** re-reviews just that delta against
-the panel's verdict and returns a structured `TAIL-CERT: PASS`/`FAIL`. A PASS
-satisfies freshness and the close is recorded as `STALE, but TAIL-CERTIFIED`.
+under `.agent/` (a `.py` under a `tests/` segment counts, by decision A — the
+test tree is non-behavioral; production source never does) — the **default
+single judge** re-reviews just that delta against the panel's verdict and
+returns a structured verdict token carrying a per-invocation id, read from the
+final line only (so reviewed content cannot forge it). A PASS satisfies freshness
+and the close is recorded as `STALE, but TAIL-CERTIFIED`.
 
 The safety property is that **any behavioral (code) delta still forces a fresh
 full panel** — a single changed line in a `.py` (even a comment), a `config.json`
 edit, a top-level doc that isn't a recognized doc name, or a rename that moves
 code into `docs/` (both endpoints are classified, so the deleted source is seen).
 The mechanism fails closed on every ambiguity: a missing/mismatched panel
-descriptor, a `code_roots` set that changed since the panel, a git error, a
-stale tree with no attributable delta, a non-PASS verdict, or a tree that mutates
-during the judge call. `--stale-panel-ok --reason` and `--force --reason` remain
-the manual exits; tail certification is the automatic one for the docs/test tail.
+descriptor, a `code_roots` or `fingerprint_exclude` set that changed since the
+panel, a git error, a stale tree with no attributable delta, a non-PASS verdict,
+or a tree/scope that mutates during the judge call (re-validated by a compare-
+and-swap). Tail certification narrows an assertive freshness check from a
+multi-model quorum panel to a **single** judge for the docs/test tail — an
+owner-accepted tradeoff (decision A); a very large docs/ledger tail that would
+exceed the judge's transport limit falls back to a full panel. `--stale-panel-ok
+--reason` and `--force --reason` remain the manual exits; tail certification is
+the automatic one for the docs/test tail.
 
 ### The verify-contract guard (a change to `verify` is made visible)
 

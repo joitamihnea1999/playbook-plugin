@@ -1347,23 +1347,15 @@ def tree_state_fingerprint(project_path: Path) -> str:
     # .agent/config.json, git pathspec strings — e.g. "journal/"): a standing
     # journal gate writes project-side files after the last panel by
     # construction, and F18's irreversible gate must not tax that.
-    exclude = [":(exclude).agent"]
     try:
         _cfg = load_config(Path(project_path))
     except Exception:
         _cfg = {}
-    _raw_ex = _cfg.get("fingerprint_exclude")
-    if _raw_ex is not None:
-        if not isinstance(_raw_ex, list):
-            print("[playbook] fingerprint_exclude: must be a list of git "
-                  "pathspec strings — ignored", file=sys.stderr)
-        else:
-            for _i, _p in enumerate(_raw_ex):
-                if isinstance(_p, str) and _p.strip() and "\x00" not in _p:
-                    exclude.append(f":(exclude){_p.strip()}")
-                else:
-                    print(f"[playbook] fingerprint_exclude[{_i}]: needs a "
-                          "non-empty pathspec string — skipped", file=sys.stderr)
+    # Single source of truth for the exclusion pathspecs (impl-panel r5 sonnet#1):
+    # the fingerprint and the tail-cert delta enumeration MUST use the identical
+    # list, so they share this helper rather than hand-rebuilding it (the R4-3
+    # exclude-set binding depends on that equivalence).
+    exclude = _fingerprint_exclude_pathspecs(_cfg)
     # Outer-tree material. NOTE: hashing untracked CONTENT changed fingerprint
     # values across the 1.5.5→1.5.6 upgrade; a stamp from an older round reads
     # STALE once and self-heals at the next panel.
@@ -1438,9 +1430,15 @@ def classify_delta_paths(paths: "list[str]", *,
         behavioral (owner H pinned only the project-root CLAUDE.md — impl-panel
         grok#2), as does any `foo/CLAUDE.md`.
     Everything else is BEHAVIORAL: `*.py`, `scripts/*`, a top-level `*.md` that
-    is not a doc name, `config.json`/lockfiles, unknown extensions. The doc rules
-    are `.md`/`.json`-only by construction, so no rule can ever route a code file
-    into non_behavioral — the property the safety-critical negative controls pin.
+    is not a doc name, `config.json`/lockfiles, unknown extensions. The DOC rules
+    (docs `.md`/`.json`, README/CHANGELOG/MIND_MAP, root CLAUDE.md) are
+    `.md`/`.json`-only by construction, so no DOC rule ever routes a code file into
+    non_behavioral. The ONLY code that classifies non-behavioral is a `.py` under a
+    `tests/` segment (owner decision A: the test tree is non-behavioral — a judge
+    still reviews it) or a root `.agent/` record — NOT production source. That
+    tests-widen-to-`.py` is deliberate and pinned by test_tests_tree_is_nonbehavioral
+    (impl-panel r5 opus F1: the earlier "a .py NEVER lands in non_behavioral" claim
+    was imprecise — a test .py does, by design).
 
     Paths are git-style (`/`-separated) — git emits `/` on every platform, so a
     literal backslash is a REAL character IN A FILENAME (legal on POSIX), never a
@@ -1492,10 +1490,17 @@ def _fingerprint_exclude_pathspecs(cfg: dict) -> "list[str]":
     records are excluded from what the certification judge reviews)."""
     specs = [":(exclude).agent"]
     raw = cfg.get("fingerprint_exclude")
-    if isinstance(raw, list):
-        for p in raw:
-            if isinstance(p, str) and p.strip() and "\x00" not in p:
-                specs.append(f":(exclude){p.strip()}")
+    if raw is not None:
+        if not isinstance(raw, list):
+            print("[playbook] fingerprint_exclude: must be a list of git "
+                  "pathspec strings — ignored", file=sys.stderr)
+        else:
+            for _i, p in enumerate(raw):
+                if isinstance(p, str) and p.strip() and "\x00" not in p:
+                    specs.append(f":(exclude){p.strip()}")
+                else:
+                    print(f"[playbook] fingerprint_exclude[{_i}]: needs a "
+                          "non-empty pathspec string — skipped", file=sys.stderr)
     return specs
 
 
@@ -1778,28 +1783,31 @@ def tail_cert_gate_decision(*, can_certify: bool, behavioral_nonempty: bool,
 
 
 def _tail_cert_verdict_re(nonce: "str | None") -> "re.Pattern":
-    """The verdict-line matcher. With a NONCE (production — impl-panel r2 grok#2)
-    the token is `TAIL-CERT <nonce>: PASS|FAIL`, so unpredictable doc CONTENT can
-    never forge it and an instruction-echo can't either. `\\r?$` tolerates CRLF
-    from a Windows judge (r2 grok#4). `\\b` after the verdict allows a trailing
-    period but not `PASSPORT`."""
+    """The verdict-line matcher, anchored to a WHOLE line. With a NONCE
+    (production — impl-panel r2 grok#2) the token is `TAIL-CERT <nonce>: PASS|FAIL`,
+    so unpredictable doc CONTENT can never forge it. `\\r?` tolerates CRLF (r2
+    grok#4). `\\b` after the verdict allows a trailing period but not `PASSPORT`."""
     tok = "TAIL-CERT" + ((" " + re.escape(nonce)) if nonce else "")
-    return re.compile(rf"(?m)^[ \t]*{tok}:[ \t]*(PASS|FAIL)\b[ \t]*\r?$")
+    return re.compile(rf"^[ \t]*{tok}:[ \t]*(PASS|FAIL)\b[ \t]*\r?$")
 
 
 def parse_tail_cert_verdict(raw: "str | None",
                             nonce: "str | None" = None) -> "str | None":
-    """Parse the dedicated tail-cert judge's structured verdict, FAIL-CLOSED
-    (finding E). Returns "PASS"/"FAIL" ONLY for a single unambiguous verdict line
-    carrying the expected `nonce`; None for everything else — missing, malformed,
-    a spawn-error string, wrong/absent nonce, or MORE than one token (a duplicate,
-    a contradiction, or the judge echoing the instruction). None always blocks."""
+    """Parse the dedicated tail-cert judge's structured verdict from the LAST
+    non-empty line only, FAIL-CLOSED (finding E; impl-panel r5 grok#1/codex:sol#2:
+    scanning the whole response let a judge whose prose concludes FAIL still
+    certify by having emitted a PASS line earlier, and the prompt's own example
+    lines were parser-valid). Returns "PASS"/"FAIL" ONLY when the FINAL non-empty
+    line IS exactly the verdict token carrying the expected `nonce`; None for
+    everything else — missing, malformed, a spawn-error string, wrong/absent
+    nonce, or a non-terminal verdict. None always blocks."""
     if not raw:
         return None
-    matches = _tail_cert_verdict_re(nonce).findall(raw)
-    if len(matches) != 1:            # zero / duplicate / contradictory → block
+    lines = [ln for ln in raw.replace("\r\n", "\n").split("\n") if ln.strip()]
+    if not lines:
         return None
-    return matches[0]
+    m = _tail_cert_verdict_re(nonce).match(lines[-1])   # LAST non-empty line only
+    return m.group(1) if m else None
 
 
 # One round per `# Panel {Plan|Impl} Review` H1. judge.md stacks rounds NEWEST

@@ -399,12 +399,21 @@ def cmd_work(cmd_args):
                             # the fingerprint and require it to equal the one the
                             # certification was computed against — a compare-and-
                             # swap that closes the mutate-during-cert window
-                            # without a lock.
+                            # without a lock. impl-panel r5 codex:terra#1/sol#1: the
+                            # scope-set + exclude-set + delta checks live INSIDE
+                            # tail_cert_delta and ran BEFORE the judge, so re-run
+                            # the WHOLE thing here and require the identical
+                            # non-behavioral-only result (a fingerprint match alone
+                            # doesn't re-validate a code_root removal or an exclude
+                            # change made during the judge call).
                             _recheck_fp = tree_state_fingerprint(project_path)
-                            if _recheck_fp != _now_fp:
+                            _r_can, _r_beh, _r_non = tail_cert_delta(
+                                project_path, _snap, _impl["tree_state"])
+                            if (_recheck_fp != _now_fp or not _r_can or _r_beh
+                                    or _r_non != _tc_non):
                                 _tc_verdict = None
-                                print("  ⚠ tree changed during certification — "
-                                      "not certifying (fresh panel required)",
+                                print("  ⚠ tree/scope changed during certification "
+                                      "— not certifying (fresh panel required)",
                                       file=sys.stderr, flush=True)
                     _tc_allowed, _tc_clause = tail_cert_gate_decision(
                         can_certify=_tc_can, behavioral_nonempty=bool(_tc_beh),

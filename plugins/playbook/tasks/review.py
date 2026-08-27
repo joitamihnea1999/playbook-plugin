@@ -1128,38 +1128,43 @@ def cmd_panel_review(cmd_args):
         sys.exit(1)
 
 
-_TAIL_CERT_DIFF_CAP = 512 * 1024   # per certifiable file shown to the judge
+_TAIL_CERT_DIFF_CAP = 512 * 1024    # per certifiable file's content (fallback)
+_TAIL_CERT_TOTAL_CAP = 96 * 1024    # total judge payload — under the argv limit
 
 
-def _split_scope_prefix(prefixed, scope_names):
-    """Map a scope-PREFIXED delta path back to (scope_name, scope_relative_path).
-    Longest non-empty scope prefix wins; the outer scope ("") is the fallback."""
-    best = ""
-    for name in scope_names:
-        if name and (prefixed == name or prefixed.startswith(name + "/")):
-            if len(name) > len(best):
-                best = name
-    rel = prefixed[len(best) + 1:] if best else prefixed
-    return best, rel
+def _git_diff_text(repo, args, rel, exclude):
+    """One `git diff` restricted to `rel`, encoding-safe + rc-checked. Returns the
+    diff text (may be empty) or None on any git error."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "diff", *args, "--", rel, *exclude],
+            cwd=repo, capture_output=True, text=True,
+            encoding="utf-8", errors="replace")
+        return r.stdout if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
-def _tail_cert_review_diff(project_path, snapshot, non_behavioral) -> "str | None":
-    """The F0→final delta the certifying judge is asked to review. The SAFETY
-    guarantee (impl-panel r2 opus#1/codex:sol#3/grok#3): the CURRENT bytes of
-    EVERY certifiable (`non_behavioral`) path are shown — so no path is ever
-    certified with an empty diff, including a tracked doc reverted to HEAD (exists,
-    no hunk) and a new untracked doc. Content is read with the no-follow, bounded
-    `_safe_read_regular` (r2 codex:sol#1/grok#1: never follow an untracked symlink
-    into `/tmp/secret`, never block on a FIFO). Returns None → the caller fails
-    CLOSED — for any certifiable path whose regular-file bytes cannot be captured.
+def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
+    """The F0→final delta the certifying judge reviews, enumerated PER SCOPE from
+    the snapshot (impl-panel r5 sonnet#2: no string-prefix scope re-derivation, so
+    a `code_roots` entry named like a top-level dir can't misattribute a path).
 
-    A best-effort unified diff (encoding-safe, rc-checked — r2 grok#5/codex:sol#5)
-    is appended as CHANGE CONTEXT only; a diff failure is non-fatal because the
-    per-path content above is the real safety artifact."""
+    DIFF-FIRST for transport friendliness (r5 grok#2/opus F2): for a tracked path
+    the small unified diff — worktree-vs-HEAD, index-vs-HEAD (staged, what
+    `git commit` ships), and F0..HEAD (committed since panel) — is shown, so the
+    flagship large `docs/**/*.json` ledger tail (edited, not rewritten) stays well
+    under the judge's argv limit. Only a path with NO diff (a new untracked doc, or
+    one reverted to HEAD) falls back to its bounded, no-follow CONTENT (never
+    following a symlink or blocking on a FIFO — r2 codex:sol#1/grok#1). Every
+    certifiable path is therefore represented (diff or content or an explicit
+    REMOVED note); a path whose content cannot be captured, or a total payload
+    that would exceed the transport cap, returns None → the caller fails CLOSED."""
     import subprocess
     from tasks.core import (
-        _fingerprint_exclude_pathspecs, _safe_read_regular, _tail_cert_scopes,
-        load_config,
+        _enumerate_scope_delta, _fingerprint_exclude_pathspecs,
+        _safe_read_regular, _tail_cert_scopes, classify_delta_paths, load_config,
     )
     try:
         cfg = load_config(Path(project_path))
@@ -1167,72 +1172,79 @@ def _tail_cert_review_diff(project_path, snapshot, non_behavioral) -> "str | Non
         cfg = {}
     exclude = _fingerprint_exclude_pathspecs(cfg)
     scopes = _tail_cert_scopes(Path(project_path), cfg)
-    scope_names = list(scopes.keys())
+    snap_scopes = (snapshot or {}).get("scopes", {}) if isinstance(snapshot, dict) else {}
     parts = []
-    # (1) SAFETY: show the current WORKTREE and STAGED (index) content of every
-    # certifiable path, or fail closed. Both are checked UNCONDITIONALLY (impl-
-    # panel r4 sonnet#1/grok#1/codex:sol#4): `git add docs/evil.md && rm
-    # docs/evil.md` (porcelain `AD`) has no worktree file yet the STAGED blob is
-    # exactly what a plain `git commit` (no `-a`) ships — the judge must see it.
-    for prefixed in sorted(non_behavioral or []):
-        name, rel = _split_scope_prefix(prefixed, scope_names)
-        repo = scopes.get(name)
-        if repo is None:
-            return None                    # a path in a scope we don't know → block
-        fpath = Path(repo) / rel
-        wt_data = None
-        shown = False
-        # worktree copy
-        if fpath.exists() or fpath.is_symlink():
-            wt_data = _safe_read_regular(fpath, _TAIL_CERT_DIFF_CAP)
-            if wt_data is None:
-                return None                # non-regular / oversize / unreadable
-            parts.append(f"--- current worktree content of {prefixed} ---\n"
-                         + wt_data.decode("utf-8", "replace"))
-            shown = True
-        # index (staged) copy — what `git commit` ships
-        try:
-            in_index = subprocess.run(["git", "cat-file", "-e", f":{rel}"],
-                                      cwd=repo, capture_output=True).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            return None                    # cannot even probe the index → block
-        if in_index:
+    total = 0
+
+    def _emit(text):
+        nonlocal total
+        total += len(text)
+        if total > _TAIL_CERT_TOTAL_CAP:
+            return False                   # payload too large for the transport
+        parts.append(text)
+        return True
+
+    for name, repo in scopes.items():
+        rec = snap_scopes.get(name) or {}
+        f0 = rec.get("commit") or ""
+        f0_dirty = rec.get("dirty") if isinstance(rec.get("dirty"), dict) else {}
+        scope_paths = _enumerate_scope_delta(repo, f0, f0_dirty, exclude)
+        if scope_paths is None:
+            return None                    # git error → fail closed
+        beh, non = classify_delta_paths(sorted(scope_paths),
+                                        is_outer_scope=(name == ""))
+        if beh:
+            return None                    # a behavioral path here → fail closed
+        for rel in non:
+            prefixed = f"{name}/{rel}" if name else rel
+            # DIFF-FIRST: worktree, staged, committed-since-F0 (all restricted to
+            # rel). A git error on any → treat as "no diff" and fall to content.
+            diffs = []
+            for label, args in (("worktree vs HEAD", ["HEAD"]),
+                                ("STAGED (index) vs HEAD", ["--cached", "HEAD"]),
+                                ("committed since panel",
+                                 [f"{f0}..HEAD"] if f0 else None)):
+                if args is None:
+                    continue
+                dt = _git_diff_text(repo, args, rel, exclude)
+                if dt and dt.strip():
+                    diffs.append(f"# {prefixed} — {label}\n{dt}")
+            if diffs:
+                if not _emit("\n".join(diffs)):
+                    return None
+                continue
+            # NO diff → show bounded content (worktree + index) or REMOVED.
+            fpath = Path(repo) / rel
+            shown = False
+            if fpath.exists() or fpath.is_symlink():
+                data = _safe_read_regular(fpath, _TAIL_CERT_DIFF_CAP)
+                if data is None:
+                    return None            # non-regular / oversize / unreadable
+                if not _emit(f"--- current content of {prefixed} ---\n"
+                             + data.decode("utf-8", "replace")):
+                    return None
+                shown = True
             try:
-                gi = subprocess.run(["git", "show", f":{rel}"], cwd=repo,
-                                    capture_output=True)
+                in_index = subprocess.run(["git", "cat-file", "-e", f":{rel}"],
+                                          cwd=repo, capture_output=True).returncode == 0
             except (OSError, subprocess.SubprocessError):
                 return None
-            if gi.returncode != 0:
-                return None                # staged but unreadable → fail closed
-            if len(gi.stdout) > _TAIL_CERT_DIFF_CAP:
-                return None                # oversized staged blob not shown in full
-            if gi.stdout != wt_data:
-                parts.append(f"--- STAGED (index, ships on `git commit`) content "
-                             f"of {prefixed} ---\n"
-                             + gi.stdout.decode("utf-8", "replace"))
-            shown = True
-        if not shown:                      # absent from BOTH worktree and index
-            parts.append(f"--- {prefixed}: REMOVED/DELETED from worktree AND index "
-                         f"since F0 (a claim was withdrawn) ---")
-    # (2) CONTEXT: a best-effort unified diff per scope (never fatal).
-    for name, repo in scopes.items():
-        rec = (snapshot or {}).get("scopes", {}).get(name) or {} \
-            if isinstance(snapshot, dict) else {}
-        f0 = rec.get("commit") or ""
-        blobs = []
-        for extra in ([f"{f0}..HEAD"] if f0 else [], []):
-            try:
-                r = subprocess.run(
-                    ["git", "diff", *extra, "--", ".", *exclude],
-                    cwd=repo, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace")
-                if r.returncode == 0 and r.stdout.strip():
-                    blobs.append(r.stdout)
-            except (OSError, subprocess.SubprocessError, ValueError):
-                pass                       # context only — never blocks
-        if blobs:
-            parts.append(f"===== change context: scope {name or '(outer tree)'} "
-                         f"=====\n" + "\n".join(blobs))
+            if in_index:
+                try:
+                    gi = subprocess.run(["git", "show", f":{rel}"], cwd=repo,
+                                        capture_output=True)
+                except (OSError, subprocess.SubprocessError):
+                    return None
+                if gi.returncode != 0 or len(gi.stdout) > _TAIL_CERT_DIFF_CAP:
+                    return None
+                if not _emit(f"--- STAGED (index) content of {prefixed} ---\n"
+                             + gi.stdout.decode("utf-8", "replace")):
+                    return None
+                shown = True
+            if not shown:
+                if not _emit(f"--- {prefixed}: REMOVED/DELETED from worktree AND "
+                             f"index since F0 (a claim was withdrawn) ---"):
+                    return None
     return "\n\n".join(parts) if parts else "(no certifiable delta content)"
 
 
@@ -1263,15 +1275,15 @@ def _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce) -> str:
         "smuggle behavioral change through a doc/test file. Read the repository "
         "as needed. You are NOT re-reviewing the code the panel already passed — "
         "only whether this delta invalidates that verdict.\n\n"
-        "Answer with your reasoning FIRST. Then emit your verdict as the FINAL "
-        "line, ALONE, with NOTHING after the verdict word (the token carries a "
-        "one-time id — copy it exactly). Use `PASS` if the delta is consistent "
-        "and the panel verdict stands, or `FAIL` if it needs a fresh full panel. "
-        "The final line must be EXACTLY one of these two, and nothing else:\n"
-        f"  TAIL-CERT {nonce}: PASS\n"
-        f"  TAIL-CERT {nonce}: FAIL\n"
-        "Emit the token exactly once, with no trailing text on that line — any "
-        "other output for the final line blocks the close (fail-closed)."
+        "Answer with your reasoning FIRST. Then, as the VERY LAST line of your "
+        "response, emit your verdict token — the token carries a one-time id you "
+        "must copy exactly, and the last line is the ONLY line read:\n"
+        f"    TAIL-CERT {nonce}: VERDICT\n"
+        "replacing VERDICT with the single word PASS (the delta is consistent and "
+        "the panel verdict stands) or FAIL (it needs a fresh full panel). The last "
+        "line must contain ONLY that token and nothing else — do not quote this "
+        "template earlier, and put no text after the verdict word. Any other final "
+        "line blocks the close (fail-closed)."
     )
 
 
@@ -1317,11 +1329,22 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
     (None = block). NEVER stacks judge.md and NEVER calls cmd_single_review."""
     import secrets
     from tasks.core import parse_tail_cert_verdict
-    diff_text = _tail_cert_review_diff(project_path, snapshot, non_behavioral)
+    diff_text = _tail_cert_review_diff(project_path, snapshot)
     if diff_text is None:
         return None                    # could not capture the delta → fail closed
     nonce = secrets.token_hex(8)
     prompt = _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce)
+    # Same uncontained-judge warning the panel/single-judge paths print (impl-panel
+    # r5 opus F4): on a host with no usable OS sandbox the read-only judge runs
+    # with write access and only the tamper snapshot below defends the tree.
+    try:
+        from provider import sandbox as _sandbox_mod
+        if not _sandbox_mod.containment_available():
+            print("  ⚠ tail-cert judge running UNCONTAINED (no usable OS sandbox "
+                  "here) — the tamper guard is the only defense against repo "
+                  "mutation.", file=sys.stderr, flush=True)
+    except Exception:
+        pass
     # Tamper backstop (impl-panel r2 opus#2): the panel + single-judge paths
     # snapshot the repo before spawning and refuse the verdict if the read-only
     # judge mutated the tree. The close-time fingerprint CAS excludes `.agent/`,
