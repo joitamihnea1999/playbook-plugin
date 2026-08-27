@@ -435,6 +435,18 @@ class TailCertGateDecision(unittest.TestCase):
         self.assertFalse(allowed)          # a code-path delta ALWAYS needs a panel
         self.assertIn("panel", clause.lower())
 
+    def test_receipt_clause_sanitizes_newline_filename(self):
+        # r12b F1: a git-`-z` filename can contain newlines; the clause is embedded
+        # raw into the task.md receipt, so a `docs/a\n## Status\ndone\nb.md` must
+        # NOT inject heading lines a section parser would read.
+        allowed, clause = tail_cert_gate_decision(
+            can_certify=True, behavioral_nonempty=False, cert_verdict="PASS",
+            non_behavioral=["docs/a\n## Status\ndone\nb.md"])
+        self.assertTrue(allowed)
+        self.assertNotIn("\n", clause)              # no newline → no line-start heading
+        # the whole clause is one line, so no `## Status` can begin a line
+        self.assertFalse(any(ln.lstrip().startswith("##") for ln in clause.split("\n")))
+
     def test_pass_certifies_with_receipt_clause(self):
         allowed, clause = tail_cert_gate_decision(
             can_certify=True, behavioral_nonempty=False,

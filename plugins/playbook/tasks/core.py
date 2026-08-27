@@ -1838,7 +1838,14 @@ def tail_cert_gate_decision(*, can_certify: bool, behavioral_nonempty: bool,
         return (False, "tail certification unavailable — fresh panel required")
     if behavioral_nonempty:
         return (False, "code-path delta since the panel — fresh full panel required")
-    files = ", ".join(non_behavioral) if non_behavioral else "(none)"
+    # Collapse whitespace WITHIN each filename before joining (impl-review r12b F1):
+    # a git-`-z`-decoded path may legally contain NEWLINES, and this clause is
+    # embedded RAW into the task.md receipt — an untracked `docs/a\n## Status\ndone\nb.md`
+    # that certifies would otherwise inject real heading lines a section parser reads
+    # as `## Status` = done (the #09 disease). Mirrors the `' '.join(reason.split())`
+    # hardening the adjacent `reason` field already has.
+    files = (", ".join(" ".join(p.split()) for p in non_behavioral)
+             if non_behavioral else "(none)")
     if cert_verdict == "PASS":
         return (True, f"non-behavioral tail certified by single judge "
                       f"(delta: {files})")

@@ -389,7 +389,15 @@ def cmd_work(cmd_args):
                         # can't tell the judge whether a docs delta CONTRADICTS an
                         # approved claim. Pass a bounded slice of the impl round
                         # body (its verdict + findings).
-                        _body = (_impl.get("body") or "")[:8000]
+                        # Strip the single-line `**Panel-snapshot:**` JSON (per-
+                        # path sha256 for every dirty file — can exceed 8 KB on a
+                        # dirty tree) and the `**Tree-state:**` stamp before slicing
+                        # (impl-review r12b F2), so the judge's summary is the
+                        # VERDICT + FINDINGS, not raw descriptor bytes.
+                        _body = "\n".join(
+                            _ln for _ln in (_impl.get("body") or "").splitlines()
+                            if not _ln.startswith(("**Panel-snapshot:**",
+                                                   "**Tree-state:**")))[:8000]
                         _panel_summary = (
                             f"PANEL {_impl.get('verdict')} impl review at tree "
                             f"{_impl['tree_state']}. The panel's round (verdict + "
