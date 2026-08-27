@@ -121,16 +121,17 @@ class ClassifyDeltaPaths(unittest.TestCase):
         # control: a ROOT docs/ path (even nested UNDER it) is non-behavioral
         self._nb("docs/api/openapi.json")
 
-    def test_nested_scope_docs_json_is_behavioral(self):   # r8 sonnet#1
-        # a code_root's OWN root docs/*.json (a runtime schema) stays behavioral —
-        # owner H's .json extension was the OUTER project's ledger only.
+    def test_scope_root_docs_json_is_nonbehavioral(self):   # r9 grok#2
+        # the flagship: a code_root's OWN root docs/*.json (the guarantee ledger
+        # lives in playbook-plugin/docs/ here) IS non-behavioral, per-scope — NOT
+        # gated to the outer scope (reversing r8 sonnet#1).
         self.assertEqual(
-            classify_delta_paths(["docs/openapi.json"], is_outer_scope=False),
-            (["docs/openapi.json"], []))
-        # control: the outer scope's docs/*.json is non-behavioral (the ledger)
+            classify_delta_paths(["docs/guarantee-ledger.json"], is_outer_scope=False),
+            ([], ["docs/guarantee-ledger.json"]))
+        # control: still root-anchored — a NESTED-under-code docs is behavioral
         self.assertEqual(
-            classify_delta_paths(["docs/openapi.json"], is_outer_scope=True),
-            ([], ["docs/openapi.json"]))
+            classify_delta_paths(["src/docs/x.json"], is_outer_scope=False),
+            (["src/docs/x.json"], []))
 
     def test_code_comment_only_file_class_still_behavioral(self):
         # File-class, not content: any .py is behavioral regardless of what
@@ -712,6 +713,24 @@ class Round2Fixes(unittest.TestCase):
         self.assertIsNotNone(text)
         self.assertIn("FALSE CLAIM", text)         # not hidden behind "Binary files"
 
+    # r9 opus F1 — directly exercise the binary/None diff FALL-THROUGH to content
+    def test_diff_none_falls_through_to_content(self):
+        from unittest import mock
+
+        import tasks.review as R
+        d = _repo()
+        (d / "docs").mkdir()
+        (d / "docs" / "g.md").write_text("benign\n", encoding="utf-8")
+        _git(d, "add", "-A"); _git(d, "commit", "-qm", "seed")
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        (d / "docs" / "g.md").write_text("REAL CLAIM here\n", encoding="utf-8")
+        # force _git_diff_text to report a binary summary (None) → content fallback
+        with mock.patch.object(R, "_git_diff_text", return_value=None):
+            text = R._tail_cert_review_diff(d, snap)
+        self.assertIsNotNone(text)
+        self.assertIn("REAL CLAIM here", text)      # materialized from content
+
     # I4 — a mode change to an already-dirty code path surfaces (was content-only)
     @unittest.skipUnless(hasattr(os, "chmod") and os.name == "posix",
                          "exec-bit mode change is POSIX-only")
@@ -732,6 +751,26 @@ class Round2Fixes(unittest.TestCase):
         (d / "docs" / "note.md").write_text("doc edit\n", "utf-8")
         can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
         self.assertIn("code.py", beh)
+
+    # r9 codex:sol#1 — code ALREADY dirty at the panel, UNCHANGED at close, must
+    # NOT re-flag: a docs-only tail after a panel that reviewed dirty code certifies
+    # (the review-before-commit workflow). Red before the F0-relative comparison.
+    def test_unchanged_dirty_code_at_f0_does_not_block_docs_tail(self):
+        d = _repo()
+        (d / "docs").mkdir()
+        (d / "code.py").write_text("x = 2\n", encoding="utf-8")   # dirty AT panel
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        # code.py UNCHANGED since F0; only a docs edit follows
+        (d / "docs" / "note.md").write_text("new doc\n", encoding="utf-8")
+        can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
+        self.assertTrue(can)
+        self.assertEqual(beh, [])                       # unchanged dirty code NOT re-flagged
+        self.assertIn("docs/note.md", non)
+        # control: if code.py CHANGES after F0, it DOES surface as behavioral
+        (d / "code.py").write_text("x = 3\n", encoding="utf-8")
+        can2, beh2, non2 = tail_cert_delta(d, snap, snap["tree_fp"])
+        self.assertIn("code.py", beh2)
 
     # I3 — a git-error dirty map yields NO descriptor (not a clean {})
     def test_build_snapshot_none_on_no_head(self):

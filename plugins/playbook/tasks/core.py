@@ -1488,11 +1488,13 @@ def classify_delta_paths(paths: "list[str]", *,
                 is_nb = True
             elif base == "CLAUDE.md" and not dir_segs and is_outer_scope:
                 is_nb = True                 # repo-ROOT CLAUDE.md, OUTER scope only
-        elif low.endswith(".json") and in_root_docs and is_outer_scope:
-            # OUTER scope only (impl-panel r8 sonnet#1): owner H's `docs/**/*.json`
-            # extension was the OUTER project's guarantee ledger + baseline; a
-            # NESTED code_root's own `docs/openapi.json` may be a RUNTIME schema, so
-            # it stays behavioral — mirroring the root-CLAUDE.md rule.
+        elif low.endswith(".json") and in_root_docs:  # r9 grok#2: per-scope (flagship ledger is in a code_root)
+            # PER-SCOPE root docs/ (r9 grok#2, reversing r8 sonnet#1): owner H's
+            # flagship guarantee ledger lives in a `code_roots` NESTED checkout in
+            # this very workspace (playbook-plugin/docs/guarantee-ledger.json), so
+            # gating docs/*.json to the OUTER scope only would break the exact case
+            # H was written for. A nested code_root's docs/*.json IS non-behavioral
+            # (a judge still reviews it); a runtime schema under docs/ is unusual.
             is_nb = True
         (non_behavioral if is_nb else behavioral).add(norm)
     return sorted(behavioral), sorted(non_behavioral)
@@ -1587,10 +1589,19 @@ def _dirty_path_content_map(repo_path: Path,
             out[rel] = "unreadable"
             continue
         kind, detail, _n = _safe_hash_regular(p, _FINGERPRINT_HASH_CAP)
+        # The token includes the file MODE (impl-panel r5 codex:sol#3 + r9
+        # codex:sol#1): a mode/type change to an already-dirty path is caught here
+        # by TOKEN inequality, which lets the enumerator compare purely against F0
+        # (no unconditional worktree/staged diff that would re-flag an UNCHANGED
+        # dirty path — the review-before-commit workflow).
+        try:
+            _mode = oct(os.lstat(p).st_mode)
+        except OSError:
+            _mode = "?"
         if kind == "hash":
-            out[rel] = f"hash:{detail}"
+            out[rel] = f"hash:{detail}:m{_mode}"
         elif kind == "toolarge":
-            out[rel] = f"toolarge:{detail}"
+            out[rel] = f"toolarge:{detail}:m{_mode}"
         else:
             out[rel] = "absent"
     return out
@@ -1693,31 +1704,38 @@ def _enumerate_scope_delta(repo: Path, f0_commit: str, f0_dirty: dict,
       (a) `git diff --name-status -z -M <F0_commit>..HEAD` — every path in a
           commit made SINCE the panel (working-tree diffs compare to the NEW HEAD
           and would miss these);
-      (b) the current dirty/untracked content-token map compared against the F0
-          map — surfaces every currently-dirty path AND every F0-dirty path later
-          reverted/deleted (finding B), by TOKEN inequality.
+      (b) the F0-vs-close content-token map comparison (tokens carry content +
+          mode) over the union of F0-dirty and currently-dirty paths — surfaces
+          every path CHANGED since F0 (incl. mode/type/symlink and reverted/
+          deleted, finding B), and — crucially — does NOT surface a path that was
+          already dirty at the panel and is unchanged at close (r9 codex:sol#1).
     A stale tree whose delta is nonetheless empty (e.g. a HEAD-sha-only amend with
     an identical tree) yields the empty set here; the caller treats empty-while-
     stale as fail-closed (finding A)."""
     paths: "set[str]" = set()
-    # (a) commits made SINCE F0; (b) the current working diff; (c) the current
-    # staged diff — all via `--name-status -z -M` so a mode/type/symlink change to
-    # an already-dirty path (which leaves the content token below UNCHANGED —
-    # impl-panel codex:sol#3) is still surfaced, and both rename endpoints are
-    # kept. Any git error on any of the three → fail closed.
-    for extra in ([f"{f0_commit}..HEAD"], [], ["--cached"]):
-        try:
-            r = subprocess.run(
-                ["git", "diff", "--name-status", "-z", "-M", *extra,
-                 "--", ".", *exclude],
-                cwd=repo, capture_output=True)
-            if r.returncode != 0:
-                return None
-            paths |= _parse_name_status_z(r.stdout)
-        except (OSError, subprocess.SubprocessError):
+    # (a) commits made SINCE F0 (`--name-status -z -M`, both rename endpoints) —
+    # working-tree diffs compare to the NEW HEAD and would miss these.
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--name-status", "-z", "-M",
+             f"{f0_commit}..HEAD", "--", ".", *exclude],
+            cwd=repo, capture_output=True)
+        if r.returncode != 0:
             return None
-    # (d) the content-token comparison surfaces every currently-dirty/untracked
-    # path AND every F0-dirty path later reverted/deleted (empty final diff).
+        paths |= _parse_name_status_z(r.stdout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # (b) F0-vs-close content-token comparison over the union of F0-dirty and
+    # currently-dirty paths (tokens carry content + mode, so a mode/type/symlink
+    # change is caught). This compares against F0 DIRECTLY, so a path that was
+    # already dirty AT the panel and is UNCHANGED at close does NOT surface
+    # (impl-panel r9 codex:sol#1 — the old unconditional `git diff HEAD`/`--cached`
+    # re-flagged unchanged-dirty code and broke the review-before-commit tail);
+    # a currently-dirty NEW change, and an F0-dirty path later reverted/deleted
+    # (finding B), both surface by token inequality. A benign status-letter-only
+    # toggle (same content+mode) does not surface — safe: no content changed, and
+    # the empty-while-stale backstop (finding A) still fails closed if it is the
+    # SOLE change.
     current = _dirty_path_content_map(repo, exclude)
     if current is None:
         return None                     # git error reading current dirty state

@@ -1392,10 +1392,14 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
             return None                # tamper check itself failed → fail closed
                                        # (r4 grok#3: never certify on an errored guard)
     # A FAILED/crashed/errored judge must NEVER certify (impl-panel grok#5):
-    # format_judge_output prefixes a nonzero exit with "(FAILED", and a spawn/
-    # resolution error is "(error:" — a stray token in that tail would otherwise
-    # parse to a certification. Reject before parsing.
-    if not raw or raw.lstrip().startswith("(error:") or "(FAILED" in raw:
+    # format_judge_output PREFIXES a nonzero exit with "(FAILED \u2026" and a spawn/
+    # resolution error with "(error: \u2026" \u2014 both at the START of the output. Match
+    # only the LEADING marker (impl-panel r9 grok#1: a plain `in raw` also rejected
+    # a legitimate PASS whose prose quotes the injected panel body's failed-seat
+    # `(FAILED \u2014 exit N)` blocks, so the feature never fired). The last-line nonce
+    # parse handles the rest.
+    _rl = (raw or "").lstrip()
+    if not raw or _rl.startswith("(error:") or _rl.startswith("(FAILED"):
         return None
     return parse_tail_cert_verdict(raw, nonce)
 
