@@ -742,5 +742,119 @@ class NoProductionSeam(unittest.TestCase):
         self.assertNotIn("Task 001 done.", r.stdout)   # no seam → cannot force pass
 
 
+class Round4Fixes(unittest.TestCase):
+    """Impl-panel round-4 fixes, red-first with negative controls."""
+
+    # R4-4 — `.agent` is non-behavioral only at the scope ROOT
+    def test_nested_agent_dir_is_behavioral(self):
+        self.assertEqual(classify_delta_paths(["src/.agent/runtime.py"]),
+                         (["src/.agent/runtime.py"], []))
+        # control: a ROOT .agent path stays non-behavioral
+        self.assertEqual(classify_delta_paths([".agent/tasks/x/task.md"]),
+                         ([], [".agent/tasks/x/task.md"]))
+
+    # R4-3 — a post-panel change to fingerprint_exclude fails closed
+    def test_exclude_set_change_fails_closed(self):
+        d = _repo()
+        (d / ".agent").mkdir()
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)                # exclude = default
+        # add a fingerprint_exclude entry AFTER the panel, then touch code + docs
+        (d / ".agent" / "config.json").write_text(
+            json.dumps({"fingerprint_exclude": ["code.py"]}), encoding="utf-8")
+        (d / "code.py").write_text("x = 99\n", encoding="utf-8")
+        can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
+        self.assertFalse(can)                             # exclude-set changed → block
+        self.assertEqual((beh, non), ([], []))
+
+    # R4-1 — worktree-DELETED but index-STAGED: the staged blob is shown
+    def test_review_diff_shows_staged_blob_when_worktree_deleted(self):
+        from tasks.review import _tail_cert_review_diff
+        d = _repo()
+        (d / "docs").mkdir()
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        # stage a false claim, then DELETE the worktree file (porcelain AD)
+        (d / "docs" / "evil.md").write_text("FALSE staged claim\n", encoding="utf-8")
+        _git(d, "add", "docs/evil.md")
+        (d / "docs" / "evil.md").unlink()
+        text = _tail_cert_review_diff(d, snap, ["docs/evil.md"])
+        self.assertIsNotNone(text)
+        self.assertIn("FALSE staged claim", text)         # the shipping blob is shown
+        self.assertNotIn("REMOVED/DELETED", text)         # NOT mislabeled withdrawn
+
+
+class Round4Coverage(unittest.TestCase):
+    """Exercise the guards the mocked close-path tests skip (impl-panel r4
+    opus#1/#2)."""
+
+    # opus#1 — the TOCTOU compare-and-swap actually blocks a mutate-during-cert
+    def test_cas_blocks_when_judge_mutates_tree(self):
+        d, td, env = ClosePathTailCert("test_docs_only_delta_certifies")._setup()
+        (d / "docs" / "guide.md").write_text("# doc\n", encoding="utf-8")
+
+        def _mutating_judge(*a, **k):
+            (d / "code.py").write_text("x = 999\n", encoding="utf-8")  # perturb fp
+            return "PASS"
+        import contextlib
+        import io
+        from unittest import mock
+        from tasks.lifecycle import cmd_work
+        out, err = io.StringIO(), io.StringIO()
+        old_cwd, old_env = os.getcwd(), dict(os.environ)
+        os.chdir(d)
+        os.environ["PLAYBOOK_SESSION_ID"] = "pid-036"
+        os.environ["PYTHONPATH"] = PLUGIN_STR
+        try:
+            with mock.patch("tasks.review.run_tail_cert_judge",
+                            side_effect=_mutating_judge), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    cmd_work(["done"])
+                except SystemExit:
+                    pass
+        finally:
+            os.chdir(old_cwd)
+            os.environ.clear()
+            os.environ.update(old_env)
+        self.assertNotIn("Task 001 done.", out.getvalue())
+        self.assertIn("tree changed during certification", err.getvalue())
+
+
+class RunTailCertJudgeGuards(unittest.TestCase):
+    """opus#2 — run_tail_cert_judge's own fail-closed guards (unmocked)."""
+
+    def test_failed_judge_tail_with_pass_token_is_none(self):
+        from unittest import mock
+
+        import tasks.review as R
+        d = _repo()
+        (d / "docs").mkdir()
+        snap = build_panel_snapshot(d, tree_state_fingerprint(d))
+        (d / "docs" / "g.md").write_text("# d\n", encoding="utf-8")
+        # a crashed judge whose stdout tail happens to contain a nonced PASS
+        def _raw(project_path, prompt, timeout_secs):
+            import re
+            m = re.search(r"TAIL-CERT ([0-9a-f]+):", prompt)
+            n = m.group(1) if m else "x"
+            return f"(FAILED — exit 1)\n[stdout tail]\nTAIL-CERT {n}: PASS\n"
+        with mock.patch.object(R, "_run_tail_cert_judge_raw", side_effect=_raw):
+            v = R.run_tail_cert_judge(d, snap, ["docs/g.md"], "PANEL PASS")
+        self.assertIsNone(v)                    # crashed judge never certifies
+
+    def test_error_string_is_none(self):
+        from unittest import mock
+
+        import tasks.review as R
+        d = _repo()
+        (d / "docs").mkdir()
+        snap = build_panel_snapshot(d, tree_state_fingerprint(d))
+        (d / "docs" / "g.md").write_text("# d\n", encoding="utf-8")
+        with mock.patch.object(R, "_run_tail_cert_judge_raw",
+                               return_value="(error: judge not found)"):
+            self.assertIsNone(
+                R.run_tail_cert_judge(d, snap, ["docs/g.md"], "PANEL PASS"))
+
+
 if __name__ == "__main__":
     unittest.main()

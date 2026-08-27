@@ -1462,7 +1462,13 @@ def classify_delta_paths(paths: "list[str]", *,
         dir_segs = parts[:-1]
         low = base.lower()
         is_nb = False
-        if ".agent" in parts or "tests" in dir_segs:
+        # `.agent` is non-behavioral ONLY at the scope ROOT (impl-panel r4
+        # codex:terra#2): the fingerprint excludes only root `.agent/` (per-scope
+        # `:(exclude).agent`), so a NESTED `src/.agent/runtime.py` DOES move the
+        # fingerprint and must classify behavioral. `tests/` stays any-depth
+        # (owner decision A: "any path under a tests/ segment"; tests are not
+        # fingerprint-excluded, so non-behavioral at any depth is intended).
+        if (parts[0] == ".agent") or ("tests" in dir_segs):
             is_nb = True
         elif low.endswith(".md"):
             if "docs" in dir_segs:
@@ -1603,7 +1609,12 @@ def build_panel_snapshot(project_path: Path, tree_fp: str) -> "dict | None":
         if not commit or dm is None:
             return None                      # fail closed: no trustworthy F0 state
         scopes_out[name] = {"commit": commit, "dirty": dm}
-    return {"v": 1, "tree_fp": tree_fp, "scopes": scopes_out}
+    # Bind the effective exclusion set to F0 (impl-panel r4 codex:terra#1): adding
+    # a path to `fingerprint_exclude` AFTER the panel makes the fingerprint stale
+    # while hiding that path from the close-time enumeration — the close must
+    # reject a changed exclude set, so it is recorded here.
+    return {"v": 1, "tree_fp": tree_fp, "scopes": scopes_out,
+            "exclude": sorted(exclude)}
 
 
 _PANEL_SNAPSHOT_LABEL = "**Panel-snapshot:**"
@@ -1714,6 +1725,10 @@ def tail_cert_delta(project_path: Path, snapshot: "dict | None",
     if set(live_scopes.keys()) != set(snap_scopes.keys()):
         return (False, [], [])          # finding C: scope-set must match exactly
     exclude = _fingerprint_exclude_pathspecs(cfg)
+    # r4 codex:terra#1: the exclusion set must not have changed since F0, or a
+    # post-panel `fingerprint_exclude` addition could hide a behavioral path.
+    if sorted(exclude) != (snapshot.get("exclude") or []):
+        return (False, [], [])
     all_behavioral: "list[str]" = []
     all_non: "list[str]" = []
     for name, repo in live_scopes.items():

@@ -1169,35 +1169,51 @@ def _tail_cert_review_diff(project_path, snapshot, non_behavioral) -> "str | Non
     scopes = _tail_cert_scopes(Path(project_path), cfg)
     scope_names = list(scopes.keys())
     parts = []
-    # (1) SAFETY: the current content of every certifiable path (or a block).
+    # (1) SAFETY: show the current WORKTREE and STAGED (index) content of every
+    # certifiable path, or fail closed. Both are checked UNCONDITIONALLY (impl-
+    # panel r4 sonnet#1/grok#1/codex:sol#4): `git add docs/evil.md && rm
+    # docs/evil.md` (porcelain `AD`) has no worktree file yet the STAGED blob is
+    # exactly what a plain `git commit` (no `-a`) ships — the judge must see it.
     for prefixed in sorted(non_behavioral or []):
         name, rel = _split_scope_prefix(prefixed, scope_names)
         repo = scopes.get(name)
         if repo is None:
             return None                    # a path in a scope we don't know → block
         fpath = Path(repo) / rel
-        if not fpath.exists() and not fpath.is_symlink():
-            parts.append(f"--- {prefixed}: REMOVED/REVERTED since F0 (a claim may "
-                         f"have been withdrawn) ---")
-            continue
-        data = _safe_read_regular(fpath, _TAIL_CERT_DIFF_CAP)
-        if data is None:
-            return None                    # non-regular / oversize / unreadable
-        parts.append(f"--- current content of {prefixed} ---\n"
-                     + data.decode("utf-8", "replace"))
-        # STAGED (index) content — what a plain `git commit` (no `-a`) actually
-        # ships (impl-panel r3 grok#1): a staged false claim can differ from the
-        # worktree the judge just saw. Show the index blob when it differs.
+        wt_data = None
+        shown = False
+        # worktree copy
+        if fpath.exists() or fpath.is_symlink():
+            wt_data = _safe_read_regular(fpath, _TAIL_CERT_DIFF_CAP)
+            if wt_data is None:
+                return None                # non-regular / oversize / unreadable
+            parts.append(f"--- current worktree content of {prefixed} ---\n"
+                         + wt_data.decode("utf-8", "replace"))
+            shown = True
+        # index (staged) copy — what `git commit` ships
         try:
-            gi = subprocess.run(["git", "show", f":{rel}"], cwd=repo,
-                                capture_output=True)
-            if gi.returncode == 0 and gi.stdout != data:
-                capped = gi.stdout[:_TAIL_CERT_DIFF_CAP]
+            in_index = subprocess.run(["git", "cat-file", "-e", f":{rel}"],
+                                      cwd=repo, capture_output=True).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return None                    # cannot even probe the index → block
+        if in_index:
+            try:
+                gi = subprocess.run(["git", "show", f":{rel}"], cwd=repo,
+                                    capture_output=True)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            if gi.returncode != 0:
+                return None                # staged but unreadable → fail closed
+            if len(gi.stdout) > _TAIL_CERT_DIFF_CAP:
+                return None                # oversized staged blob not shown in full
+            if gi.stdout != wt_data:
                 parts.append(f"--- STAGED (index, ships on `git commit`) content "
                              f"of {prefixed} ---\n"
-                             + capped.decode("utf-8", "replace"))
-        except (OSError, subprocess.SubprocessError):
-            pass                           # not staged / not in index — WT covers it
+                             + gi.stdout.decode("utf-8", "replace"))
+            shown = True
+        if not shown:                      # absent from BOTH worktree and index
+            parts.append(f"--- {prefixed}: REMOVED/DELETED from worktree AND index "
+                         f"since F0 (a claim was withdrawn) ---")
     # (2) CONTEXT: a best-effort unified diff per scope (never fatal).
     for name, repo in scopes.items():
         rec = (snapshot or {}).get("scopes", {}).get(name) or {} \
@@ -1247,12 +1263,15 @@ def _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce) -> str:
         "smuggle behavioral change through a doc/test file. Read the repository "
         "as needed. You are NOT re-reviewing the code the panel already passed — "
         "only whether this delta invalidates that verdict.\n\n"
-        "Answer with your reasoning, then emit EXACTLY ONE final line, on its own, "
-        "verbatim (the token below carries a one-time id — copy it exactly):\n"
-        f"  TAIL-CERT {nonce}: PASS   (the delta is consistent — panel verdict stands)\n"
-        f"  TAIL-CERT {nonce}: FAIL   (the delta needs a fresh full panel)\n"
-        "Emit the token exactly once. Any other output for that line blocks the "
-        "close (fail-closed)."
+        "Answer with your reasoning FIRST. Then emit your verdict as the FINAL "
+        "line, ALONE, with NOTHING after the verdict word (the token carries a "
+        "one-time id — copy it exactly). Use `PASS` if the delta is consistent "
+        "and the panel verdict stands, or `FAIL` if it needs a fresh full panel. "
+        "The final line must be EXACTLY one of these two, and nothing else:\n"
+        f"  TAIL-CERT {nonce}: PASS\n"
+        f"  TAIL-CERT {nonce}: FAIL\n"
+        "Emit the token exactly once, with no trailing text on that line — any "
+        "other output for the final line blocks the close (fail-closed)."
     )
 
 
@@ -1320,7 +1339,8 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
             if _detect_tamper_safe(project_path, None, _tb):
                 return None            # repo mutated during cert → no verdict
         except Exception:
-            pass
+            return None                # tamper check itself failed → fail closed
+                                       # (r4 grok#3: never certify on an errored guard)
     # A FAILED/crashed/errored judge must NEVER certify (impl-panel grok#5):
     # format_judge_output prefixes a nonzero exit with "(FAILED", and a spawn/
     # resolution error is "(error:" — a stray token in that tail would otherwise
