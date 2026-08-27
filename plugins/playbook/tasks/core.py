@@ -1488,7 +1488,11 @@ def classify_delta_paths(paths: "list[str]", *,
                 is_nb = True
             elif base == "CLAUDE.md" and not dir_segs and is_outer_scope:
                 is_nb = True                 # repo-ROOT CLAUDE.md, OUTER scope only
-        elif low.endswith(".json") and in_root_docs:
+        elif low.endswith(".json") and in_root_docs and is_outer_scope:
+            # OUTER scope only (impl-panel r8 sonnet#1): owner H's `docs/**/*.json`
+            # extension was the OUTER project's guarantee ledger + baseline; a
+            # NESTED code_root's own `docs/openapi.json` may be a RUNTIME schema, so
+            # it stays behavioral — mirroring the root-CLAUDE.md rule.
             is_nb = True
         (non_behavioral if is_nb else behavioral).add(norm)
     return sorted(behavioral), sorted(non_behavioral)
@@ -1807,12 +1811,15 @@ def tail_cert_gate_decision(*, can_certify: bool, behavioral_nonempty: bool,
 
 
 def _tail_cert_verdict_re(nonce: "str | None") -> "re.Pattern":
-    """The verdict-line matcher, anchored to a WHOLE line. With a NONCE
-    (production — impl-panel r2 grok#2) the token is `TAIL-CERT <nonce>: PASS|FAIL`,
-    so unpredictable doc CONTENT can never forge it. `\\r?` tolerates CRLF (r2
-    grok#4). `\\b` after the verdict allows a trailing period but not `PASSPORT`."""
+    """The verdict-line matcher. With a NONCE (production — impl-panel r2 grok#2)
+    the token is `TAIL-CERT <nonce>: PASS|FAIL`, so unpredictable doc CONTENT can
+    never forge it. Common markdown DECORATION real judges add is tolerated (impl-
+    panel r8 opus#3: a bolded/fenced final line must still certify or the feature
+    fails closed on almost every real judge): optional surrounding `*`/backtick and
+    a trailing `.`/`*`/backtick after the verdict. The verdict word is still bounded
+    (`\\b`) so `PASSPORT` never matches, and only THIS one line is matched."""
     tok = "TAIL-CERT" + ((" " + re.escape(nonce)) if nonce else "")
-    return re.compile(rf"^[ \t]*{tok}:[ \t]*(PASS|FAIL)\b[ \t]*\r?$")
+    return re.compile(rf"^[ \t*`]*{tok}:[ \t]*(PASS|FAIL)\b[ \t.*`]*$")
 
 
 def parse_tail_cert_verdict(raw: "str | None",
@@ -1822,9 +1829,9 @@ def parse_tail_cert_verdict(raw: "str | None",
     scanning the whole response let a judge whose prose concludes FAIL still
     certify by having emitted a PASS line earlier, and the prompt's own example
     lines were parser-valid). Returns "PASS"/"FAIL" ONLY when the FINAL non-empty
-    line IS exactly the verdict token carrying the expected `nonce`; None for
-    everything else — missing, malformed, a spawn-error string, wrong/absent
-    nonce, or a non-terminal verdict. None always blocks."""
+    line IS the verdict token (possibly markdown-decorated) carrying the expected
+    `nonce`; None for everything else — missing, malformed, a spawn-error string,
+    wrong/absent nonce, or a non-terminal verdict. None always blocks."""
     if not raw:
         return None
     lines = [ln for ln in raw.replace("\r\n", "\n").split("\n") if ln.strip()]

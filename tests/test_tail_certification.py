@@ -121,6 +121,17 @@ class ClassifyDeltaPaths(unittest.TestCase):
         # control: a ROOT docs/ path (even nested UNDER it) is non-behavioral
         self._nb("docs/api/openapi.json")
 
+    def test_nested_scope_docs_json_is_behavioral(self):   # r8 sonnet#1
+        # a code_root's OWN root docs/*.json (a runtime schema) stays behavioral —
+        # owner H's .json extension was the OUTER project's ledger only.
+        self.assertEqual(
+            classify_delta_paths(["docs/openapi.json"], is_outer_scope=False),
+            (["docs/openapi.json"], []))
+        # control: the outer scope's docs/*.json is non-behavioral (the ledger)
+        self.assertEqual(
+            classify_delta_paths(["docs/openapi.json"], is_outer_scope=True),
+            ([], ["docs/openapi.json"]))
+
     def test_code_comment_only_file_class_still_behavioral(self):
         # File-class, not content: any .py is behavioral regardless of what
         # changed inside it (a comment-only edit still needs a fresh panel).
@@ -480,6 +491,18 @@ class TailCertVerdictParse(unittest.TestCase):
         self.assertIsNone(parse_tail_cert_verdict("TAIL-CERT: PASS\n", n))
         self.assertIsNone(parse_tail_cert_verdict("TAIL-CERT wrongnonce: PASS\n", n))
 
+    def test_markdown_decorated_final_line_certifies(self):
+        # r8 opus#3: real judges bold/fence the token; a decorated FINAL line must
+        # still certify (else the feature fails closed on almost every judge), but
+        # trailing PROSE still must not (that's the R5 fail-open guard).
+        n = "abc123abc123abc1"
+        self.assertEqual(parse_tail_cert_verdict(f"**TAIL-CERT {n}: PASS**", n), "PASS")
+        self.assertEqual(parse_tail_cert_verdict(f"`TAIL-CERT {n}: FAIL`", n), "FAIL")
+        self.assertEqual(parse_tail_cert_verdict(f"TAIL-CERT {n}: PASS.", n), "PASS")
+        # trailing prose on the verdict line still fails closed
+        self.assertIsNone(
+            parse_tail_cert_verdict(f"TAIL-CERT {n}: PASS because it is fine", n))
+
 
 PLUGIN_STR = str(PLUGIN)
 
@@ -657,16 +680,21 @@ class Round2Fixes(unittest.TestCase):
         (d / "code.py").unlink()                   # remove tracked, will shadow
         _git(d, "rm", "--cached", "code.py")
         _git(d, "commit", "-qm", "drop code.py")
+        (d / "docs").mkdir()
         os.symlink("/tmp/a", d / "code.py")        # untracked symlink named code.py
         fp = tree_state_fingerprint(d)
         snap = build_panel_snapshot(d, fp)
         (d / "code.py").unlink()
         os.symlink("/tmp/EVIL", d / "code.py")     # RETARGET the symlink
+        (d / "docs" / "note.md").write_text("doc edit\n", "utf-8")  # + a docs edit
         can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
-        # the retarget must surface code.py as behavioral (or fail closed) — never
-        # silently drop out so a docs change certifies it away.
-        if can or beh or non:
-            self.assertIn("code.py", beh)
+        # the retarget must surface code.py as behavioral — unconditionally, so a
+        # regression that drops the link-text token can't pass via empty-while-stale
+        # (impl-panel r8 opus#1/grok#1).
+        self.assertIn("code.py", beh)
+        # and prove the token itself distinguishes the two targets
+        m0 = build_panel_snapshot(d, tree_state_fingerprint(d))["scopes"][""]["dirty"]
+        self.assertTrue(m0["code.py"].startswith("symlink:"))
 
     # R6-4 — a docs file with a NUL byte (git calls it "binary") shows content
     def test_binary_docs_diff_shows_content(self):
@@ -685,22 +713,25 @@ class Round2Fixes(unittest.TestCase):
         self.assertIn("FALSE CLAIM", text)         # not hidden behind "Binary files"
 
     # I4 — a mode change to an already-dirty code path surfaces (was content-only)
+    @unittest.skipUnless(hasattr(os, "chmod") and os.name == "posix",
+                         "exec-bit mode change is POSIX-only")
     def test_mode_change_to_dirty_code_surfaces(self):
         import os as _os
         import stat as _stat
         d = _repo()
+        (d / "docs").mkdir()
         (d / "code.py").write_text("x = 2\n", encoding="utf-8")  # dirty at F0
         fp = tree_state_fingerprint(d)
         snap = build_panel_snapshot(d, fp)
-        # same content, mode change only (git tracks the exec bit)
+        # same content, mode change only (git tracks the exec bit) + a docs edit,
+        # so the tree is unambiguously stale and the assertion is unconditional
+        # (impl-panel r8 opus#1/grok#1: the old `if can or beh or non` skipped on
+        # a regression via empty-while-stale).
         p = d / "code.py"
         _os.chmod(p, _os.stat(p).st_mode | _stat.S_IXUSR)
+        (d / "docs" / "note.md").write_text("doc edit\n", "utf-8")
         can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
-        # if git records the mode change it must surface as behavioral; on a
-        # filesystem/git that ignores the bit the tree is not stale — either way
-        # NEVER a silent non-behavioral certification of code.
-        if can or beh or non:
-            self.assertIn("code.py", beh)
+        self.assertIn("code.py", beh)
 
     # I3 — a git-error dirty map yields NO descriptor (not a clean {})
     def test_build_snapshot_none_on_no_head(self):
@@ -921,6 +952,7 @@ class Round4Coverage(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old_env)
         self.assertNotIn("Task 001 done.", out.getvalue())
+        self.assertIn("changed during certification", err.getvalue())  # CAS reason
 
 
 class RunTailCertJudgeGuards(unittest.TestCase):
