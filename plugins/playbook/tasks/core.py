@@ -1906,7 +1906,20 @@ def parse_judge_rounds(text: str) -> "list[dict]":
         body = text[m.start():end]
         vm = _ROUND_VERDICT_RE.search(body)
         tm = _ROUND_TREE_RE.search(body)
-        sm = _ROUND_SNAPSHOT_RE.search(body)
+        # SECURITY (impl-review r12 finding 1): parse the F0 descriptor ONLY from
+        # the orchestrator-authored HEADER region — the prefix before the first
+        # judge/triage separator line (a run of box-drawing `\u2550`). The snapshot
+        # line is best-effort (review.py omits it on a build failure / panel-write
+        # TOCTOU, an attacker-forcible state via an unborn `code_roots` repo), so an
+        # UNANCHORED search over the whole body could otherwise adopt a forged
+        # `**Panel-snapshot:**` line emitted by a prompt-injected JUDGE's output
+        # block (appended after the header), forging the F0 baseline to hide a
+        # behavioral delta. Judge blocks live strictly after the separator, so the
+        # header region is un-forgeable by a judge; if the orchestrator omitted the
+        # line, the header has none -> snapshot None -> close fails closed.
+        _sep = re.search(r"(?m)^\u2550{6,}", body)
+        _head = body[:_sep.start()] if _sep else body
+        sm = _ROUND_SNAPSHOT_RE.search(_head)
         snapshot = None
         if sm:
             # Fail SOFT on a malformed descriptor: a `snapshot=None` round makes
