@@ -472,26 +472,14 @@ class TailCertVerdictParse(unittest.TestCase):
 
 PLUGIN_STR = str(PLUGIN)
 
-# A deterministic stub "judge": reads the prompt, extracts the one-time nonce, and
-# emits the nonced verdict token for STUB_TAIL_VERDICT ('PASS'/'FAIL'); any other
-# value is emitted raw (→ no nonce match → None → block). Proves the seam
-# SUBSTITUTES the judge program but cannot force a PASS — output still flows
-# through the fail-closed, nonce-checked parser.
-_STUB_JUDGE = (
-    "import os,re,sys;"
-    "p=sys.stdin.read();"
-    "m=re.search(r'TAIL-CERT ([0-9a-f]+):',p);"
-    "v=os.environ.get('STUB_TAIL_VERDICT','');"
-    "sys.stdout.write(('TAIL-CERT %s: %s\\n'%(m.group(1),v)) "
-    "if (m and v in ('PASS','FAIL')) else v)"
-)
-
 
 class ClosePathTailCert(unittest.TestCase):
-    """W5 — end-to-end through the real CLI. The 6 check-questions from the Design
-    Reflection gate, each with evidence from the close path. The judge spawn is
-    made deterministic by PLAYBOOK_TAIL_CERT_JUDGE_CMD (a stub echoing a verdict),
-    never a live model and never a production force-PASS."""
+    """W5 — the 6 check-questions end-to-end. Verdict-DEPENDENT cases inject the
+    verdict IN-PROCESS by monkeypatching `run_tail_cert_judge` (impl-panel r3:
+    there is NO ambient production judge seam — a gitignored config + env var was
+    a real bypass, so it was removed). Cases that block BEFORE any judge spawn
+    (behavioral / missing-descriptor / reversible / stale-ok) run as real
+    subprocesses."""
 
     def _setup(self, *, risk="assertive", panel_cfg="all", stamp=True,
                snapshot=True):
@@ -501,11 +489,6 @@ class ClosePathTailCert(unittest.TestCase):
         if panel_cfg is not None:
             (d / ".agent" / "config.json").write_text(
                 json.dumps({"panel_required_for": panel_cfg}), encoding="utf-8")
-        # The tail-cert judge stub is reachable ONLY when the COMMITTED config
-        # opts in with the __test_stub__ sentinel (impl-panel I1: an ambient env
-        # var alone can never force a pass in a real project).
-        (d / ".agent" / "models.json").write_text(
-            json.dumps({"default_judge": "__test_stub__"}), encoding="utf-8")
         td = d / ".agent" / "tasks" / "001-t"
         td.mkdir(parents=True)
         (td / "task.md").write_text(
@@ -528,15 +511,40 @@ class ClosePathTailCert(unittest.TestCase):
             f"{stamp_line}{snap_line}\nbody\n", encoding="utf-8")
         return d, td, env
 
-    def _close(self, d, env, *flags, verdict=None):
-        e = dict(env)
-        if verdict is not None:
-            e["PLAYBOOK_TAIL_CERT_JUDGE_CMD"] = (
-                f'"{sys.executable}" -c "{_STUB_JUDGE}"')
-            e["STUB_TAIL_VERDICT"] = verdict
+    def _close(self, d, env, *flags):
+        """A real subprocess close (no judge verdict injected)."""
         return subprocess.run(
             [sys.executable, "-m", "tasks.cli", "work", "done", *flags],
-            cwd=d, env=e, capture_output=True, text=True, timeout=90)
+            cwd=d, env=env, capture_output=True, text=True, timeout=90)
+
+    def _close_inproc(self, d, verdict, *flags):
+        """Close IN-PROCESS with the tail-cert judge patched to return `verdict`
+        ("PASS"/"FAIL"/None) — the only safe way to drive the verdict path now that
+        no production seam exists. Returns (stdout, stderr)."""
+        import contextlib
+        import io
+        from unittest import mock
+        from tasks.lifecycle import cmd_work
+        out, err = io.StringIO(), io.StringIO()
+        old_cwd = os.getcwd()
+        old_env = dict(os.environ)
+        os.chdir(d)
+        os.environ["PLAYBOOK_SESSION_ID"] = "pid-036"
+        os.environ["PYTHONPATH"] = PLUGIN_STR
+        try:
+            with mock.patch("tasks.review.run_tail_cert_judge",
+                            return_value=verdict), \
+                 contextlib.redirect_stdout(out), \
+                 contextlib.redirect_stderr(err):
+                try:
+                    cmd_work(["done", *flags])
+                except SystemExit:
+                    pass
+        finally:
+            os.chdir(old_cwd)
+            os.environ.clear()
+            os.environ.update(old_env)
+        return out.getvalue(), err.getvalue()
 
     def _receipt(self, td):
         return (td / "task.md").read_text(encoding="utf-8")
@@ -545,47 +553,47 @@ class ClosePathTailCert(unittest.TestCase):
     def test_docs_only_delta_certifies(self):
         d, td, env = self._setup()
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env, verdict="PASS")
-        self.assertIn("Task 001 done.", r.stdout, r.stderr)
-        self.assertIn("tail-certified", r.stderr)
+        out, err = self._close_inproc(d, "PASS")
+        self.assertIn("Task 001 done.", out, err)
+        self.assertIn("tail-certified", err)
         self.assertIn("TAIL-CERTIFIED", self._receipt(td))
 
-    # (b) a code (.py) delta — even a whitespace/comment change — still BLOCKS
+    # (b) a code (.py) delta blocks BEFORE the judge — even if it would PASS
     def test_code_delta_blocks_even_with_pass_stub(self):
         d, td, env = self._setup()
         (d / "code.py").write_text("x = 1  # comment\n", encoding="utf-8")
-        r = self._close(d, env, verdict="PASS")   # stub says PASS…
-        self.assertNotIn("Task 001 done.", r.stdout)           # …but code blocks
+        out, err = self._close_inproc(d, "PASS")   # judge WOULD pass…
+        self.assertNotIn("Task 001 done.", out)    # …but behavioral blocks first
         self.assertIn("pending", self._receipt(td))
 
     # (c) a FAIL certification blocks
     def test_fail_certification_blocks(self):
         d, td, env = self._setup()
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env, verdict="FAIL")
-        self.assertNotIn("Task 001 done.", r.stdout)
+        out, err = self._close_inproc(d, "FAIL")
+        self.assertNotIn("Task 001 done.", out)
         self.assertIn("pending", self._receipt(td))
 
-    # (c') a non-conforming stub (no token) → None → block (seam is not force-PASS)
-    def test_garbage_verdict_blocks(self):
+    # (c') a None verdict (unparseable/failed judge) → block
+    def test_none_verdict_blocks(self):
         d, td, env = self._setup()
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env, verdict="looks fine to me")
-        self.assertNotIn("Task 001 done.", r.stdout)
+        out, err = self._close_inproc(d, None)
+        self.assertNotIn("Task 001 done.", out)
 
-    # (d) missing descriptor → falls back to the stale block
+    # (d) missing descriptor → fails closed even if the judge WOULD pass
     def test_missing_snapshot_falls_back_to_block(self):
         d, td, env = self._setup(snapshot=False)
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env, verdict="PASS")
-        self.assertNotIn("Task 001 done.", r.stdout)
-        self.assertIn("code state changed after the newest impl panel", r.stderr)
+        out, err = self._close_inproc(d, "PASS")
+        self.assertNotIn("Task 001 done.", out)
+        self.assertIn("code state changed after the newest impl panel", err)
 
     # (e) a reversible close still skips freshness entirely (advisory STALE)
     def test_reversible_still_advisory(self):
         d, td, env = self._setup(risk="reversible")
         (d / "docs" / "guide.md").write_text("# new doc\n", encoding="utf-8")
-        r = self._close(d, env)   # no stub — freshness gate never fires
+        r = self._close(d, env)   # freshness gate never fires — no judge
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         self.assertIn("STALE", self._receipt(td))
 
@@ -597,16 +605,16 @@ class ClosePathTailCert(unittest.TestCase):
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         self.assertIn("STALE", self._receipt(td))
 
-    # a nested-code_root .py delta certified as docs-only must NOT happen: a
-    # rename moving code into docs/ blocks (both endpoints classified).
+    # a rename moving code into docs/ blocks (both endpoints classified) even if
+    # the judge WOULD pass — the deleted .py is behavioral.
     def test_rename_code_to_doc_blocks(self):
         d, td, env = self._setup()
         r = subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
                             "mv", "code.py", "docs/moved.md"], cwd=d,
                            capture_output=True)
         assert r.returncode == 0
-        rr = self._close(d, env, verdict="PASS")
-        self.assertNotIn("Task 001 done.", rr.stdout)   # deleted .py is behavioral
+        out, err = self._close_inproc(d, "PASS")
+        self.assertNotIn("Task 001 done.", out)   # deleted .py is behavioral
 
 
 class Round2Fixes(unittest.TestCase):
@@ -669,6 +677,32 @@ class Round2Fixes(unittest.TestCase):
         self.assertIn("CLAIM: 99% faster", text)   # the judge SEES the new claim
         self.assertIn("guide.md", text)
 
+    # R3-3 — a trailing/leading space is a REAL byte, not stripped away
+    def test_trailing_space_filename_is_behavioral(self):
+        beh, non = classify_delta_paths(["CLAUDE.md "])   # note trailing space
+        self.assertEqual(beh, ["CLAUDE.md "])
+        self.assertEqual(non, [])
+        # control: the exact root name is non-behavioral
+        self.assertEqual(classify_delta_paths(["CLAUDE.md"]), ([], ["CLAUDE.md"]))
+
+    # R3-2 — the STAGED (index) content is shown, not just the worktree
+    def test_review_diff_shows_staged_index_content(self):
+        from tasks.review import _tail_cert_review_diff
+        d = _repo()
+        (d / "docs").mkdir()
+        (d / "docs" / "g.md").write_text("benign\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "seed doc")
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        # stage a FALSE claim, then revert the worktree to benign
+        (d / "docs" / "g.md").write_text("FALSE CLAIM staged\n", encoding="utf-8")
+        _git(d, "add", "docs/g.md")
+        (d / "docs" / "g.md").write_text("benign\n", encoding="utf-8")
+        text = _tail_cert_review_diff(d, snap, ["docs/g.md"])
+        self.assertIsNotNone(text)
+        self.assertIn("FALSE CLAIM staged", text)   # the shipping index is shown
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
     def test_review_diff_refuses_to_follow_symlink(self):
         # r2 codex:sol#1/grok#1: an untracked docs symlink must NOT be followed
@@ -687,26 +721,25 @@ class Round2Fixes(unittest.TestCase):
             self.assertNotIn("TOP SECRET", text)
 
 
-class Round2Backdoor(unittest.TestCase):
-    """I1 — an ambient env var alone cannot force a certification: without the
-    committed `default_judge: __test_stub__` opt-in, the override is ignored and
-    the real (absent) judge fails closed."""
+class NoProductionSeam(unittest.TestCase):
+    """r3 grok#2/codex:sol#4 — there is NO ambient production judge seam. A real
+    subprocess close with an env var pointed at a would-be force-PASS command AND
+    a `default_judge: __test_stub__` in the (gitignored) config still BLOCKS: the
+    real adapter path runs, the unresolvable backend errors → None → block. Proves
+    the round-2 bypass is gone."""
 
-    def test_env_override_without_stub_optin_is_ignored(self):
+    def test_no_ambient_env_or_config_seam_can_force_pass(self):
         d, td, env = ClosePathTailCert("test_docs_only_delta_certifies")._setup()
-        # replace the stub opt-in with a NON-stub judge spec (unresolvable → the
-        # adapter path errors → fail closed). The point: with default_judge != the
-        # __test_stub__ sentinel, the env override is NOT consulted at all.
         (d / ".agent" / "models.json").write_text(
-            json.dumps({"default_judge": "no-such-backend-xyz"}), encoding="utf-8")
+            json.dumps({"default_judge": "__test_stub__"}), encoding="utf-8")
         (d / "docs" / "guide.md").write_text("# doc\n", encoding="utf-8")
         e = dict(env,
-                 PLAYBOOK_TAIL_CERT_JUDGE_CMD=f'"{sys.executable}" -c "{_STUB_JUDGE}"',
+                 PLAYBOOK_TAIL_CERT_JUDGE_CMD="printf 'TAIL-CERT: PASS\\n'",
                  STUB_TAIL_VERDICT="PASS")
         r = subprocess.run(
             [sys.executable, "-m", "tasks.cli", "work", "done"],
             cwd=d, env=e, capture_output=True, text=True, timeout=90)
-        self.assertNotIn("Task 001 done.", r.stdout)   # env var alone cannot pass
+        self.assertNotIn("Task 001 done.", r.stdout)   # no seam → cannot force pass
 
 
 if __name__ == "__main__":

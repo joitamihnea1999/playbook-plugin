@@ -1185,6 +1185,19 @@ def _tail_cert_review_diff(project_path, snapshot, non_behavioral) -> "str | Non
             return None                    # non-regular / oversize / unreadable
         parts.append(f"--- current content of {prefixed} ---\n"
                      + data.decode("utf-8", "replace"))
+        # STAGED (index) content — what a plain `git commit` (no `-a`) actually
+        # ships (impl-panel r3 grok#1): a staged false claim can differ from the
+        # worktree the judge just saw. Show the index blob when it differs.
+        try:
+            gi = subprocess.run(["git", "show", f":{rel}"], cwd=repo,
+                                capture_output=True)
+            if gi.returncode == 0 and gi.stdout != data:
+                capped = gi.stdout[:_TAIL_CERT_DIFF_CAP]
+                parts.append(f"--- STAGED (index, ships on `git commit`) content "
+                             f"of {prefixed} ---\n"
+                             + capped.decode("utf-8", "replace"))
+        except (OSError, subprocess.SubprocessError):
+            pass                           # not staged / not in index — WT covers it
     # (2) CONTEXT: a best-effort unified diff per scope (never fatal).
     for name, repo in scopes.items():
         rec = (snapshot or {}).get("scopes", {}).get(name) or {} \
@@ -1244,41 +1257,19 @@ def _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce) -> str:
 
 
 def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
-    """Spawn the tail-cert judge and return its raw output text. Two paths:
+    """Spawn the tail-cert judge (the configured `default_judge`, a real provider
+    adapter) READ-ONLY under the same sandbox as every other judge, and return its
+    raw output. A resolution error or a missing CLI returns an `(error: …)` string
+    that the fail-closed parser maps to None → block.
 
-    * PRODUCTION: the configured `default_judge` (a real provider adapter), run
-      READ-ONLY under the same sandbox as every other judge. A resolution error
-      or a missing CLI returns an `(error: …)` string, which the fail-closed
-      parser maps to None → block.
-    * OVERRIDE (`PLAYBOOK_TAIL_CERT_JUDGE_CMD`): run that command with the prompt
-      on stdin and return its stdout. This SUBSTITUTES the judge program (a BYO-
-      judge / test seam); it is NOT a verdict override — the output still flows
-      through `parse_tail_cert_verdict`, so a non-conforming command blocks. It is
-      never reachable in a real project (impl-panel codex:sol#1/codex:terra#1)."""
+    There is NO ambient production seam (impl-panel r3 grok#2/codex:sol#4): the
+    round-2 `__test_stub__`/env override was a bypass because BOTH `.agent/
+    models.json` and the env var are machine-local (models.json is gitignored), so
+    it is removed. Deterministic tests of the PASS/FAIL path inject a fake verdict
+    IN-PROCESS by monkeypatching `run_tail_cert_judge`."""
     import subprocess
     from provider.sandbox import load_judge_config, resolve_judge_spec
     dj = load_judge_config(project_path).get("default_judge") or "claude"
-    # TEST-ONLY judge substitution, gated on a sentinel default_judge that
-    # `resolve_judge_spec` rejects as a real provider. An ambient env var ALONE can
-    # NEVER force a certification in a real project (whose default_judge is a real
-    # backend): the project's COMMITTED config must opt in with this self-evidently
-    # fake judge name — exactly W6's "reachable only when default_judge points at
-    # it". Removes the production force-PASS backdoor two judges flagged Critical.
-    if dj == "__test_stub__":
-        override = os.environ.get("PLAYBOOK_TAIL_CERT_JUDGE_CMD")
-        if not override:
-            return ("(error: __test_stub__ tail-cert judge configured but "
-                    "PLAYBOOK_TAIL_CERT_JUDGE_CMD is unset)")
-        try:
-            r = subprocess.run(
-                override, shell=True, cwd=project_path, input=prompt,
-                capture_output=True, text=True,
-                timeout=timeout_secs if timeout_secs else 120)
-            if r.returncode != 0:
-                return f"(error: stub tail-cert judge exit {r.returncode})"
-            return r.stdout or ""
-        except (OSError, subprocess.SubprocessError) as e:
-            return f"(error: tail-cert judge stub failed: {e})"
     try:
         backend, variant = resolve_judge_spec(dj)
     except ValueError:

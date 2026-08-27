@@ -1449,9 +1449,12 @@ def classify_delta_paths(paths: "list[str]", *,
     behavioral: "set[str]" = set()
     non_behavioral: "set[str]" = set()
     for raw in paths:
-        if raw is None:
-            continue
-        norm = raw.strip()
+        if raw is None or not raw.strip():
+            continue                         # skip only empty/whitespace-only input
+        # Do NOT strip the path itself: a leading/trailing space is a REAL byte in
+        # a git-`-z` filename (impl-panel r3 codex:sol#3 — a root file `CLAUDE.md `
+        # must stay a distinct behavioral segment, not collapse to `CLAUDE.md`).
+        norm = raw
         parts = [seg for seg in norm.split("/") if seg not in ("", ".")]
         if not parts:
             continue
