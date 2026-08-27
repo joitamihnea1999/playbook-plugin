@@ -1366,11 +1366,389 @@ def tree_state_fingerprint(project_path: Path) -> str:
     return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:12]
 
 
+# ── Tail certification (task 036, owner decision A ratified 2026-08-27) ───────
+# After a quorum-PASS impl panel at tree F0, a close whose ONLY post-panel delta
+# is in non-behavioral file-classes may satisfy panel freshness via a single-judge
+# tail certification instead of blocking / burning a fresh full panel. Any
+# code-path delta (file-class, incl. a code comment) still needs a fresh panel.
+# The whole mechanism FAILS CLOSED: anything unknown/ambiguous/erroring requires
+# the full panel. `classify_delta_paths` is the file-class table — the FIRST line
+# of that safety property: a source file must never be mistaken for a doc.
+
+_DOC_BASENAME_PREFIXES = ("README", "CHANGELOG", "MIND_MAP")
+
+
+def classify_delta_paths(paths: "list[str]", *,
+                         is_outer_scope: bool = True
+                         ) -> "tuple[list[str], list[str]]":
+    """Split SCOPE-RELATIVE repo paths into (behavioral, non_behavioral) by FILE
+    CLASS ONLY — never by content (a code-comment-only edit to a `.py` is still
+    behavioral, because a `.py` is behavioral). Both lists are sorted+deduped.
+
+    Owner decision A (ratified 2026-08-27) + its H extension. A path is
+    NON-behavioral iff ONE of:
+      * any path under a `.agent/` segment  (task-record bookkeeping);
+      * any path under a `tests/` segment   (the test tree — a test .py included);
+      * a doc `.md`: suffix `.md` AND (under a `docs/` segment OR basename starts
+        with README / CHANGELOG / MIND_MAP);
+      * (H) a doc `.json`: suffix `.json` AND under a `docs/` segment
+        (the guarantee ledger + its baseline — claim-bearing, same safety
+        property as the `.md` docs); NOT arbitrary `*.json` elsewhere;
+      * (H) the repo-ROOT `CLAUDE.md` (scope-relative path == `CLAUDE.md`, no
+        directory) — a claim-bearing doc — but ONLY in the OUTER scope
+        (`is_outer_scope`); a NESTED `code_roots` checkout's own `CLAUDE.md` stays
+        behavioral (owner H pinned only the project-root CLAUDE.md — impl-panel
+        grok#2), as does any `foo/CLAUDE.md`.
+    Everything else is BEHAVIORAL: `*.py`, `scripts/*`, a top-level `*.md` that
+    is not a doc name, `config.json`/lockfiles, unknown extensions. The doc rules
+    are `.md`/`.json`-only by construction, so no rule can ever route a code file
+    into non_behavioral — the property the safety-critical negative controls pin.
+
+    Paths are git-style (`/`-separated) — git emits `/` on every platform, so a
+    literal backslash is a REAL character IN A FILENAME (legal on POSIX), never a
+    separator: it is NOT normalized (impl-panel codex:sol#4 — a root file named
+    `tests\\evil.py` must stay one behavioral segment, not become `tests/evil.py`)."""
+    behavioral: "set[str]" = set()
+    non_behavioral: "set[str]" = set()
+    for raw in paths:
+        if raw is None:
+            continue
+        norm = raw.strip()
+        parts = [seg for seg in norm.split("/") if seg not in ("", ".")]
+        if not parts:
+            continue
+        base = parts[-1]
+        dir_segs = parts[:-1]
+        low = base.lower()
+        is_nb = False
+        if ".agent" in parts or "tests" in dir_segs:
+            is_nb = True
+        elif low.endswith(".md"):
+            if "docs" in dir_segs:
+                is_nb = True
+            elif any(base.startswith(p) for p in _DOC_BASENAME_PREFIXES):
+                is_nb = True
+            elif base == "CLAUDE.md" and not dir_segs and is_outer_scope:
+                is_nb = True                 # repo-ROOT CLAUDE.md, OUTER scope only
+        elif low.endswith(".json") and "docs" in dir_segs:
+            is_nb = True
+        (non_behavioral if is_nb else behavioral).add(norm)
+    return sorted(behavioral), sorted(non_behavioral)
+
+
+def _fingerprint_exclude_pathspecs(cfg: dict) -> "list[str]":
+    """The git `:(exclude)…` pathspecs the fingerprint uses — `.agent` always,
+    plus any owner-declared `fingerprint_exclude`. The tail-cert descriptor and
+    the close-time delta enumeration reuse the SAME exclusion so they track
+    EXACTLY the paths that can move the fingerprint: a `.agent/` task-record edit
+    never moves it and so never appears in the delta (owner decision A: task
+    records are excluded from what the certification judge reviews)."""
+    specs = [":(exclude).agent"]
+    raw = cfg.get("fingerprint_exclude")
+    if isinstance(raw, list):
+        for p in raw:
+            if isinstance(p, str) and p.strip() and "\x00" not in p:
+                specs.append(f":(exclude){p.strip()}")
+    return specs
+
+
+def _git_head_commit(repo_path: Path) -> str:
+    """`git rev-parse HEAD` for a repo, or "" when git is absent / unborn / errors
+    — the STALE-safe direction (a "" commit makes the F0→HEAD diff unusable, which
+    the close-time enumerator treats as fail-closed)."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_path,
+                           capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _dirty_path_content_map(repo_path: Path,
+                            exclude: "list[str]") -> "dict[str, str] | None":
+    """Map every DIRTY or UNTRACKED path in `repo_path` (excluding `exclude`) to a
+    stable content TOKEN of its current working-tree bytes, or None on a git error
+    (so a caller can tell "clean" from "could not read" — the close-time enumerator
+    fails CLOSED on None). Computed identically at the panel stamp (F0) and at the
+    close, so a file that was dirty at F0 and later reverted/deleted is detected by
+    a token MISMATCH even though its final `git diff` is empty (plan-panel finding
+    B — the reverted/deleted-dirty hole).
+
+    Tokens: `hash:<sha256>` (a regular file within the cap), `toolarge:<n>`, or
+    `absent` (deleted / non-regular / unreadable — the STALE-safe bucket). Both
+    rename endpoints are recorded. Enumerated from `--porcelain -z` so a
+    special-character filename is byte-decoded, never mis-parsed."""
+    paths: "list[str]" = []
+    try:
+        z = subprocess.run(
+            ["git", "status", "--porcelain", "-uall", "-z", "--", ".", *exclude],
+            cwd=repo_path, capture_output=True)
+        if z.returncode != 0:
+            return None
+        entries = z.stdout.split(b"\0")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    i = 0
+    while i < len(entries):
+        e = entries[i]
+        if not e or len(e) < 4:
+            i += 1
+            continue
+        xy = e[:2]
+        paths.append(os.fsdecode(e[3:]))
+        # A rename/copy entry (`R`/`C` in either status column) is followed by a
+        # SECOND NUL-delimited element: the ORIGIN path. Record both endpoints.
+        if xy[:1] in (b"R", b"C") or xy[1:2] in (b"R", b"C"):
+            i += 1
+            if i < len(entries) and entries[i]:
+                paths.append(os.fsdecode(entries[i]))
+        i += 1
+    out: "dict[str, str]" = {}
+    for rel in paths:
+        kind, detail, _n = _safe_hash_regular(Path(repo_path) / rel,
+                                              _FINGERPRINT_HASH_CAP)
+        if kind == "hash":
+            out[rel] = f"hash:{detail}"
+        elif kind == "toolarge":
+            out[rel] = f"toolarge:{detail}"
+        else:
+            out[rel] = "absent"
+    return out
+
+
+def _tail_cert_scopes(project_path: Path, cfg: dict) -> "dict[str, Path]":
+    """The validated scope set the fingerprint folds in: `""` (the outer tree)
+    plus each containment-checked `code_roots` nested repo. Keyed by the SAME
+    scope name recorded in the descriptor, so the close can compare scope-SETS
+    (plan-panel finding C: a code_root added/removed after F0 → fail-closed)."""
+    scopes: "dict[str, Path]" = {"": Path(project_path)}
+    proj_resolved = Path(project_path).resolve()
+    for rel in _code_roots(cfg):
+        cand = Path(project_path) / rel
+        try:
+            cand_resolved = cand.resolve()
+            inside = (cand_resolved == proj_resolved
+                      or proj_resolved in cand_resolved.parents)
+        except (OSError, RuntimeError, ValueError):
+            inside = False
+        if inside:
+            scopes[rel] = cand
+    return scopes
+
+
+def build_panel_snapshot(project_path: Path, tree_fp: str) -> "dict | None":
+    """The F0 DESCRIPTOR recorded with a panel round (plan-panel finding F: it
+    rides INSIDE the round next to `**Tree-state:**`, authenticated by the same
+    stamp — not a mutable sidecar). Records, per fingerprint scope, the HEAD commit
+    and a content-token map of every dirty/untracked path, so the close can
+    enumerate the exact F0→final delta even across commits-since-panel and
+    reverted/deleted dirty files. `tree_fp` is the caller's stamp value, stored
+    verbatim so descriptor and stamp are consistent BY CONSTRUCTION.
+
+    Returns None — no descriptor emitted, so the close fails CLOSED — when ANY
+    scope cannot be captured cleanly: an empty HEAD (unborn/absent git), or a
+    dirty-map git error (impl-panel opus#2/grok#3 — storing `dirty:{}` on a git
+    error is indistinguishable from a genuinely clean F0, which would let a
+    dirty-then-reverted behavioral file escape the delta)."""
+    try:
+        cfg = load_config(Path(project_path))
+    except Exception:
+        cfg = {}
+    exclude = _fingerprint_exclude_pathspecs(cfg)
+    scopes_out: "dict[str, dict]" = {}
+    for name, repo in _tail_cert_scopes(Path(project_path), cfg).items():
+        commit = _git_head_commit(repo)
+        dm = _dirty_path_content_map(repo, exclude)
+        if not commit or dm is None:
+            return None                      # fail closed: no trustworthy F0 state
+        scopes_out[name] = {"commit": commit, "dirty": dm}
+    return {"v": 1, "tree_fp": tree_fp, "scopes": scopes_out}
+
+
+_PANEL_SNAPSHOT_LABEL = "**Panel-snapshot:**"
+
+
+def format_panel_snapshot_line(snapshot: dict) -> str:
+    """Render the descriptor as ONE markdown line embedded in the round (compact,
+    sorted JSON — deterministic, single-line so it never breaks round parsing)."""
+    return (_PANEL_SNAPSHOT_LABEL + " "
+            + json.dumps(snapshot, separators=(",", ":"), sort_keys=True))
+
+
+def _parse_name_status_z(raw: bytes) -> "set[str]":
+    """Parse `git diff --name-status -z -M` output into the set of ALL paths
+    touched — BOTH endpoints of a rename/copy (plan-panel finding A: `--name-only`
+    collapses a rename to its destination, so a `git mv src.py docs/x.md` would
+    hide the production-code deletion and certify as docs-only). With `-z` each
+    record is `STATUS\\0PATH\\0`, and a rename/copy is `R<score>\\0OLD\\0NEW\\0`."""
+    toks = raw.split(b"\0")
+    out: "set[str]" = set()
+    i, n = 0, len(toks)
+    while i < n:
+        status = toks[i]
+        if not status:
+            i += 1
+            continue
+        i += 1
+        take = 2 if status[:1] in (b"R", b"C") else 1
+        for _ in range(take):
+            if i < n:
+                if toks[i]:
+                    out.add(os.fsdecode(toks[i]))
+                i += 1
+    return out
+
+
+def _enumerate_scope_delta(repo: Path, f0_commit: str, f0_dirty: dict,
+                           exclude: "list[str]") -> "set[str] | None":
+    """The COMPLETE superset of scope-relative paths by which this repo's
+    fingerprint could have moved since F0 — or None on ANY git error (fail-closed).
+    Two sources cover every case (the fingerprint = HEAD + porcelain + diff +
+    untracked-content):
+      (a) `git diff --name-status -z -M <F0_commit>..HEAD` — every path in a
+          commit made SINCE the panel (working-tree diffs compare to the NEW HEAD
+          and would miss these);
+      (b) the current dirty/untracked content-token map compared against the F0
+          map — surfaces every currently-dirty path AND every F0-dirty path later
+          reverted/deleted (finding B), by TOKEN inequality.
+    A stale tree whose delta is nonetheless empty (e.g. a HEAD-sha-only amend with
+    an identical tree) yields the empty set here; the caller treats empty-while-
+    stale as fail-closed (finding A)."""
+    paths: "set[str]" = set()
+    # (a) commits made SINCE F0; (b) the current working diff; (c) the current
+    # staged diff — all via `--name-status -z -M` so a mode/type/symlink change to
+    # an already-dirty path (which leaves the content token below UNCHANGED —
+    # impl-panel codex:sol#3) is still surfaced, and both rename endpoints are
+    # kept. Any git error on any of the three → fail closed.
+    for extra in ([f"{f0_commit}..HEAD"], [], ["--cached"]):
+        try:
+            r = subprocess.run(
+                ["git", "diff", "--name-status", "-z", "-M", *extra,
+                 "--", ".", *exclude],
+                cwd=repo, capture_output=True)
+            if r.returncode != 0:
+                return None
+            paths |= _parse_name_status_z(r.stdout)
+        except (OSError, subprocess.SubprocessError):
+            return None
+    # (d) the content-token comparison surfaces every currently-dirty/untracked
+    # path AND every F0-dirty path later reverted/deleted (empty final diff).
+    current = _dirty_path_content_map(repo, exclude)
+    if current is None:
+        return None                     # git error reading current dirty state
+    for p in set(f0_dirty) | set(current):
+        if f0_dirty.get(p) != current.get(p):
+            paths.add(p)
+    return paths
+
+
+def tail_cert_delta(project_path: Path, snapshot: "dict | None",
+                    round_tree_fp: str) -> "tuple[bool, list[str], list[str]]":
+    """The tail-cert delta gate's I/O half (SAFETY-CRITICAL). Returns
+    `(can_certify, behavioral, non_behavioral)` — both lists scope-prefixed for
+    display, classified per-scope on scope-relative paths. PRECONDITION: called
+    only when the tree is STALE vs `round_tree_fp` (the newest impl round's stamp).
+
+    Fails CLOSED — `(False, [], [])` — on every ambiguity, so a code path can never
+    slip through unreviewed:
+      * a missing/malformed descriptor, or one whose `tree_fp` ≠ the round stamp
+        (finding: the snapshot must authenticate to THIS round);
+      * a live scope-set that differs from the descriptor's (finding C: a
+        code_root added/removed/repointed after F0);
+      * a scope with no recorded F0 commit (cannot anchor the F0→HEAD diff);
+      * ANY git error during enumeration;
+      * a stale tree with an EMPTY attributable delta (finding A)."""
+    if not isinstance(snapshot, dict) or not round_tree_fp:
+        return (False, [], [])
+    if snapshot.get("tree_fp") != round_tree_fp:
+        return (False, [], [])
+    snap_scopes = snapshot.get("scopes")
+    if not isinstance(snap_scopes, dict):
+        return (False, [], [])
+    try:
+        cfg = load_config(Path(project_path))
+    except Exception:
+        cfg = {}
+    live_scopes = _tail_cert_scopes(Path(project_path), cfg)
+    if set(live_scopes.keys()) != set(snap_scopes.keys()):
+        return (False, [], [])          # finding C: scope-set must match exactly
+    exclude = _fingerprint_exclude_pathspecs(cfg)
+    all_behavioral: "list[str]" = []
+    all_non: "list[str]" = []
+    for name, repo in live_scopes.items():
+        rec = snap_scopes.get(name)
+        if not isinstance(rec, dict):
+            return (False, [], [])
+        f0_commit = rec.get("commit") or ""
+        f0_dirty = rec.get("dirty")
+        if not f0_commit or not isinstance(f0_dirty, dict):
+            return (False, [], [])
+        scope_paths = _enumerate_scope_delta(repo, f0_commit, f0_dirty, exclude)
+        if scope_paths is None:
+            return (False, [], [])      # any git error → fail closed
+        beh, non = classify_delta_paths(sorted(scope_paths),
+                                        is_outer_scope=(name == ""))
+        prefix = (name + "/") if name else ""
+        all_behavioral += [prefix + p for p in beh]
+        all_non += [prefix + p for p in non]
+    if not all_behavioral and not all_non:
+        return (False, [], [])          # finding A: stale but unexplained
+    return (True, sorted(all_behavioral), sorted(all_non))
+
+
+def tail_cert_gate_decision(*, can_certify: bool, behavioral_nonempty: bool,
+                            cert_verdict: "str | None",
+                            non_behavioral: "list[str]") -> "tuple[bool, str]":
+    """PURE tail-cert policy → (allowed, receipt_clause). No I/O. Reached ONLY when
+    the existing freshness gate would otherwise BLOCK (stale + carrying panel +
+    assertive/irreversible/unclassified + no --force/--stale-panel-ok).
+
+    Fail-closed everywhere:
+      * `not can_certify` (missing/mismatched descriptor, scope-set change, git
+        error, empty-while-stale) → BLOCK, fall back to a fresh panel;
+      * `behavioral_nonempty` (ANY code-path delta since F0, incl. a code comment)
+        → BLOCK, a fresh full panel is required (owner decision A);
+      * a non-behavioral-only delta certifies IFF the single judge returned PASS;
+        a FAIL or a missing/unparseable verdict (None) → BLOCK."""
+    if not can_certify:
+        return (False, "tail certification unavailable — fresh panel required")
+    if behavioral_nonempty:
+        return (False, "code-path delta since the panel — fresh full panel required")
+    files = ", ".join(non_behavioral) if non_behavioral else "(none)"
+    if cert_verdict == "PASS":
+        return (True, f"non-behavioral tail certified by single judge "
+                      f"(delta: {files})")
+    return (False, "tail certification did not return PASS — fresh panel required")
+
+
+# The dedicated tail-cert judge emits EXACTLY this on its own line (finding E: a
+# structured terminal token, never a prose grep). `\b` after the verdict so a
+# trailing period is tolerated but `PASSPORT` is not.
+_TAIL_CERT_VERDICT_RE = re.compile(r"(?m)^[ \t]*TAIL-CERT:[ \t]*(PASS|FAIL)\b[ \t]*$")
+
+
+def parse_tail_cert_verdict(raw: "str | None") -> "str | None":
+    """Parse the dedicated tail-cert judge's structured verdict, FAIL-CLOSED
+    (finding E). Returns "PASS"/"FAIL" ONLY for a single unambiguous
+    `TAIL-CERT: PASS|FAIL` line; None for everything else — missing, malformed, a
+    spawn-error string, or MORE than one token (a duplicate or contradictory
+    verdict, or the judge echoing the instruction). None always blocks."""
+    if not raw:
+        return None
+    matches = _TAIL_CERT_VERDICT_RE.findall(raw)
+    if len(matches) != 1:            # zero / duplicate / contradictory → block
+        return None
+    return matches[0]
+
+
 # One round per `# Panel {Plan|Impl} Review` H1. judge.md stacks rounds NEWEST
 # FIRST (stack_judge_round), so rounds[0] is the round that decides anything.
 _ROUND_HEAD_RE = re.compile(r"^# Panel (Plan|Impl) Review\b", re.MULTILINE)
 _ROUND_VERDICT_RE = re.compile(r"\*\*PANEL VERDICT: (PASS|FAIL)\*\*")
 _ROUND_TREE_RE = re.compile(r"\*\*Tree-state:\*\* ([0-9a-f]{6,64})")
+# The tail-cert F0 descriptor rides on one line inside the round (finding F).
+_ROUND_SNAPSHOT_RE = re.compile(r"\*\*Panel-snapshot:\*\* (\{.*\})[ \t]*$",
+                                re.MULTILINE)
 JUDGE_MD_MAX_ROUNDS = 5
 JUDGE_ARCHIVE_NAME = "judge-archive.md"
 # The one-line pointer stacking leaves at the end of judge.md when rounds
@@ -1393,10 +1771,21 @@ def parse_judge_rounds(text: str) -> "list[dict]":
         body = text[m.start():end]
         vm = _ROUND_VERDICT_RE.search(body)
         tm = _ROUND_TREE_RE.search(body)
+        sm = _ROUND_SNAPSHOT_RE.search(body)
+        snapshot = None
+        if sm:
+            # Fail SOFT on a malformed descriptor: a `snapshot=None` round makes
+            # the close-time enumerator fail CLOSED (require a fresh panel), never
+            # crash the parser that every gate depends on.
+            try:
+                snapshot = json.loads(sm.group(1))
+            except (ValueError, TypeError):
+                snapshot = None
         rounds.append({
             "mode": m.group(1).lower(),
             "verdict": vm.group(1) if vm else None,
             "tree_state": tm.group(1) if tm else "",
+            "snapshot": snapshot,
             "body": body,
         })
     return rounds
@@ -1816,6 +2205,15 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
         if v == "NO-STAMP":
             out.append("- **Panel tree-state:** no stamp recorded on the "
                        "newest impl round — freshness unverifiable")
+        elif v == "TAIL-CERT-PASS":
+            # Finding G (task 036): a stale panel whose only post-panel delta was
+            # non-behavioral, re-certified by a single judge on the exact delta.
+            # The receipt names both fingerprints AND the certified delta so the
+            # close is self-documenting (not a bare STALE that hides the cert).
+            line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} "
+                    f"vs close {freshness.get('now_fp', '?')} — STALE, but "
+                    f"TAIL-CERTIFIED: {freshness.get('cert_clause', 'non-behavioral delta')}")
+            out.append(line)
         elif v in ("FRESH", "STALE"):
             line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} "
                     f"vs close {freshness.get('now_fp', '?')} — {v}")

@@ -1004,6 +1004,31 @@ def cmd_panel_review(cmd_args):
     _fp = tree_state_fingerprint(project_path)
     if _fp:
         lines.append(f"**Tree-state:** {_fp}\n")
+        # Tail-cert F0 descriptor (task 036, finding F): ride the snapshot on the
+        # round next to the stamp it is authenticated by — the close reads it to
+        # enumerate the exact F0→final delta and, when that delta is
+        # non-behavioral-only, certify freshness via a single judge instead of
+        # burning a fresh panel. Best-effort: a descriptor that cannot be built
+        # is simply absent, and the close-time enumerator fails CLOSED (require a
+        # fresh panel) rather than certify on a missing snapshot.
+        try:
+            from tasks.core import (
+                build_panel_snapshot, format_panel_snapshot_line,
+                tree_state_fingerprint as _tsf,
+            )
+            _snap = build_panel_snapshot(project_path, _fp)
+            # Panel-time TOCTOU compare-and-swap (impl-panel sonnet#1 / codex#2 /
+            # grok#2): build_panel_snapshot makes its OWN git calls after the
+            # stamp above, so a code edit in the gap could be baked into the F0
+            # baseline and never seen as a delta. Emit the descriptor ONLY if the
+            # tree still hashes to the SAME `_fp` the panel reviewed; otherwise
+            # omit it (a missing descriptor makes the close fail closed to a fresh
+            # panel — never a silent stale baseline). None (a scope that could not
+            # be captured cleanly, impl-panel opus#2/grok#3) is likewise omitted.
+            if _snap is not None and _tsf(project_path) == _fp:
+                lines.append(format_panel_snapshot_line(_snap) + "\n")
+        except Exception:
+            pass
     if failed:
         lines.append(f"**⚠ Failed judges:** {', '.join(sorted(failed))} — see their blocks below for the exit code / stderr. NOT a clean empty review.\n")
     if over_budget:
@@ -1101,6 +1126,201 @@ def cmd_panel_review(cmd_args):
               "failed seats) or set `panel_quorum` in .agent/config.json if this "
               "bar is wrong for the project.", file=sys.stderr, flush=True)
         sys.exit(1)
+
+
+_TAIL_CERT_DIFF_CAP = 512 * 1024   # per untracked file shown to the judge
+
+
+def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
+    """The F0→final delta the certifying judge is asked to review, per scope,
+    EXCLUDING `.agent` + fingerprint_exclude (owner decision A: task records are
+    not part of the review set). Returns None (→ the caller fails CLOSED) if a
+    certifiable path's content cannot be captured — a judge must never certify a
+    delta it was shown nothing for (impl-panel opus#1/codex:sol#5/codex:terra#2/
+    grok#1: the flagship case is a NEW untracked `docs/*.md`, which `git diff HEAD`
+    omits, so the judge used to be handed an empty diff and rubber-stamped it).
+
+    Three sources per scope: (1) committed-since-F0 + tracked-working diffs; (2)
+    UNTRACKED certifiable files' current bytes, materialized as an explicit block
+    (this is the close-then-commit docs tail); (3) F0-dirty paths now absent
+    (reverted/deleted) named explicitly so the judge knows a claim was removed."""
+    import subprocess
+    from tasks.core import (
+        _fingerprint_exclude_pathspecs, _tail_cert_scopes, load_config,
+    )
+    try:
+        cfg = load_config(Path(project_path))
+    except Exception:
+        cfg = {}
+    exclude = _fingerprint_exclude_pathspecs(cfg)
+    scopes = _tail_cert_scopes(Path(project_path), cfg)
+    snap_scopes = (snapshot or {}).get("scopes", {}) if isinstance(snapshot, dict) else {}
+    chunks = []
+    for name, repo in scopes.items():
+        rec = snap_scopes.get(name) or {}
+        f0 = rec.get("commit") or ""
+        f0_dirty = rec.get("dirty") if isinstance(rec.get("dirty"), dict) else {}
+        label = name or "(outer tree)"
+        parts = []
+        try:
+            if f0:
+                r = subprocess.run(
+                    ["git", "diff", f"{f0}..HEAD", "--", ".", *exclude],
+                    cwd=repo, capture_output=True, text=True)
+                if r.stdout.strip():
+                    parts.append(r.stdout)
+            r2 = subprocess.run(
+                ["git", "diff", "HEAD", "--", ".", *exclude],
+                cwd=repo, capture_output=True, text=True)
+            if r2.stdout.strip():
+                parts.append(r2.stdout)
+            # (2) untracked certifiable files — their bytes, not just their names.
+            u = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard", "-z",
+                 "--", ".", *exclude],
+                cwd=repo, capture_output=True)
+            if u.returncode != 0:
+                return None
+            for raw in u.stdout.split(b"\0"):
+                if not raw:
+                    continue
+                rel = os.fsdecode(raw)
+                fpath = Path(repo) / rel
+                try:
+                    data = fpath.read_bytes()
+                except OSError:
+                    return None            # a listed path we cannot capture → block
+                if len(data) > _TAIL_CERT_DIFF_CAP:
+                    text = (f"(untracked file {rel}: {len(data)} bytes — "
+                            f"exceeds {_TAIL_CERT_DIFF_CAP}-byte display cap; "
+                            f"first bytes below)\n"
+                            + data[:_TAIL_CERT_DIFF_CAP].decode("utf-8", "replace"))
+                else:
+                    text = data.decode("utf-8", "replace")
+                parts.append(f"--- NEW (untracked) file: {rel} ---\n{text}")
+        except (OSError, subprocess.SubprocessError):
+            return None                    # git error → fail closed, never blind
+        # (3) F0-dirty paths now absent (reverted-to-HEAD or deleted).
+        reverted = []
+        for p in sorted(f0_dirty):
+            if not (Path(repo) / p).exists():
+                reverted.append(p)
+        if reverted:
+            parts.append("(paths dirty at panel-time F0 that are now reverted or "
+                         "deleted — a claim may have been removed): "
+                         + ", ".join(reverted))
+        if parts:
+            chunks.append(f"===== scope: {label} =====\n" + "\n".join(parts))
+    return "\n\n".join(chunks) if chunks else "(no textual delta captured)"
+
+
+def _tail_cert_prompt(non_behavioral, panel_summary, diff_text) -> str:
+    """The dedicated tail-cert judge prompt (finding E — never cmd_single_review's
+    plan/impl prompt). Frames the exact contract: a full panel ALREADY PASSED the
+    code at tree F0; the only changes since are these NON-behavioral (docs/tests/
+    claim) files; confirm the delta does not invalidate that verdict or introduce
+    a false claim, and emit a single structured verdict line."""
+    files = "\n".join(f"  - {p}" for p in non_behavioral) or "  (none listed)"
+    return (
+        "You are a TAIL-CERTIFICATION judge. A full multi-model panel already "
+        "reviewed and PASSED this task's IMPLEMENTATION at an earlier tree state "
+        "(call it F0). Since F0, the ONLY changes to the reviewed code state are "
+        "in NON-BEHAVIORAL file classes — documentation, the guarantee ledger, "
+        "tests, and claim-bearing docs. NO source/behavioral code changed (that "
+        "was verified mechanically before you were called; if it had, this would "
+        "be a fresh full panel instead).\n\n"
+        f"The panel's verdict summary:\n{panel_summary}\n\n"
+        f"The non-behavioral files changed since F0:\n{files}\n\n"
+        "The exact delta diff (F0 → the tree being closed):\n"
+        "```diff\n" + (diff_text or "(empty)") + "\n```\n\n"
+        "YOUR TASK: decide whether this non-behavioral delta is consistent with "
+        "the panel's PASS — i.e. it does not introduce a FALSE or UNSUPPORTED "
+        "claim, does not contradict the code the panel approved, and does not "
+        "smuggle behavioral change through a doc/test file. Read the repository "
+        "as needed. You are NOT re-reviewing the code the panel already passed — "
+        "only whether this delta invalidates that verdict.\n\n"
+        "Answer with your reasoning, then emit EXACTLY ONE final line, on its own, "
+        "verbatim:\n"
+        "  TAIL-CERT: PASS   (the delta is consistent — the panel verdict stands)\n"
+        "  TAIL-CERT: FAIL   (the delta needs a fresh full panel)\n"
+        "Emit the token exactly once. Any other output for that line blocks the "
+        "close (fail-closed)."
+    )
+
+
+def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
+    """Spawn the tail-cert judge and return its raw output text. Two paths:
+
+    * PRODUCTION: the configured `default_judge` (a real provider adapter), run
+      READ-ONLY under the same sandbox as every other judge. A resolution error
+      or a missing CLI returns an `(error: …)` string, which the fail-closed
+      parser maps to None → block.
+    * OVERRIDE (`PLAYBOOK_TAIL_CERT_JUDGE_CMD`): run that command with the prompt
+      on stdin and return its stdout. This SUBSTITUTES the judge program (a BYO-
+      judge / test seam); it is NOT a verdict override — the output still flows
+      through `parse_tail_cert_verdict`, so a non-conforming command blocks. It is
+      never reachable in a real project (impl-panel codex:sol#1/codex:terra#1)."""
+    import subprocess
+    from provider.sandbox import load_judge_config, resolve_judge_spec
+    dj = load_judge_config(project_path).get("default_judge") or "claude"
+    # TEST-ONLY judge substitution, gated on a sentinel default_judge that
+    # `resolve_judge_spec` rejects as a real provider. An ambient env var ALONE can
+    # NEVER force a certification in a real project (whose default_judge is a real
+    # backend): the project's COMMITTED config must opt in with this self-evidently
+    # fake judge name — exactly W6's "reachable only when default_judge points at
+    # it". Removes the production force-PASS backdoor two judges flagged Critical.
+    if dj == "__test_stub__":
+        override = os.environ.get("PLAYBOOK_TAIL_CERT_JUDGE_CMD")
+        if not override:
+            return ("(error: __test_stub__ tail-cert judge configured but "
+                    "PLAYBOOK_TAIL_CERT_JUDGE_CMD is unset)")
+        try:
+            r = subprocess.run(
+                override, shell=True, cwd=project_path, input=prompt,
+                capture_output=True, text=True,
+                timeout=timeout_secs if timeout_secs else 120)
+            if r.returncode != 0:
+                return f"(error: stub tail-cert judge exit {r.returncode})"
+            return r.stdout or ""
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"(error: tail-cert judge stub failed: {e})"
+    try:
+        backend, variant = resolve_judge_spec(dj)
+    except ValueError:
+        backend, variant = dj, None
+    try:
+        from provider.subagent import _adapter_class
+        adapter = _adapter_class(backend)(session_id="tail-cert",
+                                          project_root=Path(project_path))
+        return adapter.run_headless_judge(
+            prompt=prompt, model=variant, system_context="",
+            web_search=False, timeout_secs=timeout_secs, budget_usd="10")
+    except subprocess.TimeoutExpired:
+        return "(error: tail-cert judge timed out)"
+    except Exception as e:
+        return f"(error: tail-cert judge spawn failed: {e})"
+
+
+def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
+                        *, timeout_secs=None) -> "str | None":
+    """Dedicated tail-cert judge (finding E): build the delta diff + the tail-cert
+    prompt, spawn the default single judge read-only, and parse its structured
+    `TAIL-CERT: PASS|FAIL` verdict FAIL-CLOSED. Returns "PASS"/"FAIL"/None (None =
+    block). NEVER stacks judge.md and NEVER calls cmd_single_review, so it cannot
+    forge a panel-impl stamp the freshness gate would key off."""
+    from tasks.core import parse_tail_cert_verdict
+    diff_text = _tail_cert_review_diff(project_path, snapshot)
+    if diff_text is None:
+        return None                    # could not capture the delta → fail closed
+    prompt = _tail_cert_prompt(non_behavioral, panel_summary, diff_text)
+    raw = _run_tail_cert_judge_raw(project_path, prompt, timeout_secs)
+    # A FAILED/crashed/errored judge must NEVER certify (impl-panel grok#5):
+    # format_judge_output prefixes a nonzero exit with "(FAILED", and a spawn/
+    # resolution error is "(error:" — a stray PASS token in that tail would
+    # otherwise parse to a certification. Reject before parsing.
+    if not raw or raw.lstrip().startswith("(error:") or "(FAILED" in raw:
+        return None
+    return parse_tail_cert_verdict(raw)
 
 
 def cmd_single_review(cmd, cmd_args):

@@ -278,6 +278,32 @@ and would read silently FRESH — declare those repos in
 [`code_roots`](#agentconfigjson--code_roots-project-policy) so the freshness gate
 sees them.
 
+#### Tail certification (a docs/test tail need not re-run the whole panel)
+
+The late rounds of a long assertive task are usually docs/comment/test-only —
+and re-running a full multi-model panel for each such tail burns vendor quota,
+so those closes used to be waved through with `--stale-panel-ok` on every round.
+Tail certification (owner decision A, 2026-08-27) replaces that rubber stamp
+with a real, cheap check. When the panel is STALE and would block, `tasks work
+done` computes the exact delta since the panel's tree state (F0), across the
+outer tree and every `code_roots` scope. If **every** changed path is in a
+**non-behavioral file class** — `*.md` under `docs/` or named
+`README*`/`CHANGELOG*`/`MIND_MAP*`, `*.json` under `docs/` (the guarantee
+ledger), the repo-root `CLAUDE.md`, anything under `tests/`, and task records
+under `.agent/` — the **default single judge** re-reviews just that delta against
+the panel's verdict and returns a structured `TAIL-CERT: PASS`/`FAIL`. A PASS
+satisfies freshness and the close is recorded as `STALE, but TAIL-CERTIFIED`.
+
+The safety property is that **any behavioral (code) delta still forces a fresh
+full panel** — a single changed line in a `.py` (even a comment), a `config.json`
+edit, a top-level doc that isn't a recognized doc name, or a rename that moves
+code into `docs/` (both endpoints are classified, so the deleted source is seen).
+The mechanism fails closed on every ambiguity: a missing/mismatched panel
+descriptor, a `code_roots` set that changed since the panel, a git error, a
+stale tree with no attributable delta, a non-PASS verdict, or a tree that mutates
+during the judge call. `--stale-panel-ok --reason` and `--force --reason` remain
+the manual exits; tail certification is the automatic one for the docs/test tail.
+
 ### The verify-contract guard (a change to `verify` is made visible)
 
 `verify` lives in `.agent/config.json`, which is on the management path and so
