@@ -24,6 +24,7 @@ def sticker() -> str:
     return """\
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
 > Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).
+> **Never born checked:** write each gate BEFORE you do its step, then check it — a gate may never be born checked. To record work you already finished, add the gate unchecked, then check it in a SEPARATE edit with its outcome note.
 > **Closing a gate:** check the box, append your outcome. Never replace the original text.
 > **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts \u2014 moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` \u2026 `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).
 > Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).
@@ -958,6 +959,7 @@ def sticker_quick() -> str:
     return """\
 > **Gate discipline:** One gate \u2192 do work \u2192 check box \u2192 next gate.
 > Never backfill. The document IS the execution trace. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one gate at a time).
+> **Never born checked:** write the gate BEFORE you do its step, then check it \u2014 a gate may never be born checked. To record work you already finished, add it unchecked, then check it in a SEPARATE edit with its outcome.
 > **Selection rule:** quick is for declared-reversible trivia only \u2014 anything touching docs, claims, data, or publishing belongs in `light` or heavier (risk decides review; smallness never does)."""
 
 
@@ -965,6 +967,7 @@ def sticker_light() -> str:
     return """\
 > **Light shape** \u2014 small, sub-day work; ceremony compressed, review NEVER waived: risk decides review, smallness never does. If this grows beyond small, convert: `tasks new <type> <name>`.
 > Gate discipline unchanged: one gate \u2192 do work \u2192 check box with its outcome. Never backfill. Batch-closing ALREADY-DONE gates needs an outcome note per line (hook-enforced; where no hook runs, one at a time).
+> **Never born checked:** write the gate BEFORE you do its step, then check it \u2014 a gate may never be born checked. To record work you already finished, add it unchecked, then check it in a SEPARATE edit with its outcome.
 > **Selection rule:** `quick` is for declared-reversible trivia only; docs, claims, data, or publishing belong here or heavier."""
 
 

@@ -83,6 +83,11 @@ it matters and how to do it well:
 
 - **Write 1-sentence answers**, not bare checkmarks. A checked box with no
   annotation means you skipped the thinking.
+- **A gate may never be born checked.** Write the gate BEFORE you do its step,
+  then check it — never add a gate that is already `- [x]`. To record work you
+  already finished, add the gate unchecked, then check it in a SEPARATE edit
+  with its outcome. (The batch-close guard blocks born-checked gates; this is
+  the most frequent block, and this is how to avoid it.)
 - **Define OUT of scope** before writing gates. Scope creep starts when
   boundaries aren't explicit.
 - **Write task-specific checkpoint questions at authoring time.** Bad: "is this
