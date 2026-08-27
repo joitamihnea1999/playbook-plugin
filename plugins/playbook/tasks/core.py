@@ -1739,8 +1739,19 @@ def _enumerate_scope_delta(repo: Path, f0_commit: str, f0_dirty: dict,
     current = _dirty_path_content_map(repo, exclude)
     if current is None:
         return None                     # git error reading current dirty state
+
+    def _untrusted(tok):
+        # A token whose EQUALITY cannot be trusted to mean "unchanged": an
+        # oversized file is size-keyed (`toolarge:<size>:…`), so a SAME-SIZE
+        # content edit leaves the token identical (impl-panel r10 codex:sol#1 —
+        # a 6 MiB dirty code.py edited to the same size was invisible), and an
+        # `unreadable` file has no content signal at all. Such a path must ALWAYS
+        # surface so classification can block it if it is behavioral.
+        return tok is not None and (tok.startswith("toolarge") or tok == "unreadable")
+
     for p in set(f0_dirty) | set(current):
-        if f0_dirty.get(p) != current.get(p):
+        if (f0_dirty.get(p) != current.get(p)
+                or _untrusted(f0_dirty.get(p)) or _untrusted(current.get(p))):
             paths.add(p)
     return paths
 

@@ -772,6 +772,22 @@ class Round2Fixes(unittest.TestCase):
         can2, beh2, non2 = tail_cert_delta(d, snap, snap["tree_fp"])
         self.assertIn("code.py", beh2)
 
+    # r10 codex:sol#1 — an OVERSIZED (>5 MiB) dirty code file gets a size-keyed
+    # `toolarge` token, so a SAME-SIZE edit is invisible to content comparison; it
+    # must ALWAYS surface as behavioral (else it certifies unreviewed).
+    def test_oversized_dirty_code_same_size_edit_surfaces(self):
+        d = _repo()
+        (d / "docs").mkdir()
+        big = b"a" * (6 * 1024 * 1024)               # 6 MiB > 5 MiB cap
+        (d / "code.py").write_bytes(b"# " + big)     # oversized dirty at F0
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        # SAME SIZE, different content, + a docs edit
+        (d / "code.py").write_bytes(b"# " + b"b" * (6 * 1024 * 1024))
+        (d / "docs" / "note.md").write_text("doc\n", encoding="utf-8")
+        can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
+        self.assertIn("code.py", beh)               # oversized dirty always surfaces
+
     # I3 — a git-error dirty map yields NO descriptor (not a clean {})
     def test_build_snapshot_none_on_no_head(self):
         # a fresh repo with no commits (unborn HEAD) → None, never a false-clean
