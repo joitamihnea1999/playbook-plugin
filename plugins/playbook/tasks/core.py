@@ -1466,16 +1466,21 @@ def classify_delta_paths(paths: "list[str]", *,
         # fingerprint and must classify behavioral. `tests/` stays any-depth
         # (owner decision A: "any path under a tests/ segment"; tests are not
         # fingerprint-excluded, so non-behavioral at any depth is intended).
+        # `docs/` is ROOT-anchored (impl-panel r5 grok#2): owner H pinned the
+        # project's root `docs/` tree, so a nested `src/docs/openapi.json` or
+        # `pkg/docs/schema.json` (a RUNTIME artifact) stays behavioral. Same
+        # anchoring as `.agent`. `tests/` stays any-depth (decision A).
+        in_root_docs = bool(dir_segs) and dir_segs[0] == "docs"
         if (parts[0] == ".agent") or ("tests" in dir_segs):
             is_nb = True
         elif low.endswith(".md"):
-            if "docs" in dir_segs:
+            if in_root_docs:
                 is_nb = True
             elif any(base.startswith(p) for p in _DOC_BASENAME_PREFIXES):
                 is_nb = True
             elif base == "CLAUDE.md" and not dir_segs and is_outer_scope:
                 is_nb = True                 # repo-ROOT CLAUDE.md, OUTER scope only
-        elif low.endswith(".json") and "docs" in dir_segs:
+        elif low.endswith(".json") and in_root_docs:
             is_nb = True
         (non_behavioral if is_nb else behavioral).add(norm)
     return sorted(behavioral), sorted(non_behavioral)
@@ -1557,8 +1562,19 @@ def _dirty_path_content_map(repo_path: Path,
         i += 1
     out: "dict[str, str]" = {}
     for rel in paths:
-        kind, detail, _n = _safe_hash_regular(Path(repo_path) / rel,
-                                              _FINGERPRINT_HASH_CAP)
+        p = Path(repo_path) / rel
+        # A SYMLINK is tokened by its LINK TEXT (impl-panel r5 codex:sol#2: a
+        # retargeted untracked `code.py` symlink used to collapse to a constant
+        # `absent` both times and slip the content-token comparison; the tamper
+        # guard already hashes symlinks by link text — mirror it here).
+        try:
+            if p.is_symlink():
+                out[rel] = f"symlink:{os.readlink(p)}"
+                continue
+        except OSError:
+            out[rel] = "unreadable"
+            continue
+        kind, detail, _n = _safe_hash_regular(p, _FINGERPRINT_HASH_CAP)
         if kind == "hash":
             out[rel] = f"hash:{detail}"
         elif kind == "toolarge":

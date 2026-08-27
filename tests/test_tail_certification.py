@@ -106,11 +106,20 @@ class ClassifyDeltaPaths(unittest.TestCase):
         self._nb(".agent/tasks/036-t/judge.md")
 
     # ---- behavioral (the safety-critical direction) ----
-    def test_python_is_always_behavioral(self):
-        # THE core safety property: a .py never lands in non_behavioral.
+    def test_production_python_is_behavioral(self):
+        # THE core safety property: no PRODUCTION source .py lands in
+        # non_behavioral (a tests/*.py does, by decision A — see
+        # test_tests_tree_is_nonbehavioral).
         self._beh("tasks/core.py")
         self._beh("scripts/verify")
         self._beh("plugins/playbook/tasks/review.py")
+
+    def test_nested_docs_is_behavioral(self):     # r6 grok#2: docs/ is root-anchored
+        self._beh("src/docs/openapi.json")
+        self._beh("pkg/foo/docs/schema.json")
+        self._beh("src/docs/readme.md")
+        # control: a ROOT docs/ path (even nested UNDER it) is non-behavioral
+        self._nb("docs/api/openapi.json")
 
     def test_code_comment_only_file_class_still_behavioral(self):
         # File-class, not content: any .py is behavioral regardless of what
@@ -640,6 +649,40 @@ class Round2Fixes(unittest.TestCase):
         self.assertEqual(
             classify_delta_paths(["CLAUDE.md"], is_outer_scope=True),
             ([], ["CLAUDE.md"]))
+
+    # R6-2 — a retargeted untracked symlink surfaces (token = link text)
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_untracked_symlink_retarget_surfaces(self):
+        d = _repo()
+        (d / "code.py").unlink()                   # remove tracked, will shadow
+        _git(d, "rm", "--cached", "code.py")
+        _git(d, "commit", "-qm", "drop code.py")
+        os.symlink("/tmp/a", d / "code.py")        # untracked symlink named code.py
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        (d / "code.py").unlink()
+        os.symlink("/tmp/EVIL", d / "code.py")     # RETARGET the symlink
+        can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
+        # the retarget must surface code.py as behavioral (or fail closed) — never
+        # silently drop out so a docs change certifies it away.
+        if can or beh or non:
+            self.assertIn("code.py", beh)
+
+    # R6-4 — a docs file with a NUL byte (git calls it "binary") shows content
+    def test_binary_docs_diff_shows_content(self):
+        from tasks.review import _tail_cert_review_diff
+        d = _repo()
+        (d / "docs").mkdir()
+        (d / "docs" / "g.md").write_bytes(b"benign\n")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "seed doc")
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        # edit to contain a NUL byte → git diff reports "Binary files differ"
+        (d / "docs" / "g.md").write_bytes(b"FALSE CLAIM\x00hidden\n")
+        text = _tail_cert_review_diff(d, snap)
+        self.assertIsNotNone(text)
+        self.assertIn("FALSE CLAIM", text)         # not hidden behind "Binary files"
 
     # I4 — a mode change to an already-dirty code path surfaces (was content-only)
     def test_mode_change_to_dirty_code_surfaces(self):

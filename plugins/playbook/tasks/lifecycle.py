@@ -384,9 +384,18 @@ def cmd_work(cmd_args):
                         project_path, _snap, _impl["tree_state"])
                     _tc_verdict = None
                     if _tc_can and not _tc_beh:
+                        # Give the certifying judge what the panel actually
+                        # reviewed (impl-panel r6 opus F1): a bare "PANEL PASS"
+                        # can't tell the judge whether a docs delta CONTRADICTS an
+                        # approved claim. Pass a bounded slice of the impl round
+                        # body (its verdict + findings).
+                        _body = (_impl.get("body") or "")[:8000]
                         _panel_summary = (
                             f"PANEL {_impl.get('verdict')} impl review at tree "
-                            f"{_impl['tree_state']}")
+                            f"{_impl['tree_state']}. The panel's round (verdict + "
+                            f"findings) follows — use it to judge whether this "
+                            f"non-behavioral delta contradicts what was approved:\n"
+                            f"{_body}")
                         print("  … non-behavioral post-panel delta — running "
                               "single-judge tail certification", file=sys.stderr,
                               flush=True)

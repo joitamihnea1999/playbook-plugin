@@ -1128,20 +1128,28 @@ def cmd_panel_review(cmd_args):
         sys.exit(1)
 
 
-_TAIL_CERT_DIFF_CAP = 512 * 1024    # per certifiable file's content (fallback)
 _TAIL_CERT_TOTAL_CAP = 96 * 1024    # total judge payload — under the argv limit
+_TAIL_CERT_DIFF_CAP = _TAIL_CERT_TOTAL_CAP   # a single content file's ceiling
+                                             # (impl-panel r6 opus F3: one ceiling)
 
 
 def _git_diff_text(repo, args, rel, exclude):
-    """One `git diff` restricted to `rel`, encoding-safe + rc-checked. Returns the
-    diff text (may be empty) or None on any git error."""
+    """One `git diff` restricted to `rel`, encoding-safe + rc-checked. `--text`
+    forces a textual diff so a doc with a NUL byte is shown, not summarized as
+    "Binary files … differ" (impl-panel r6 grok#1/codex:sol#3). `--no-ext-diff`
+    ignores any user difftool. Returns the diff text, or None on a git error OR a
+    binary summary — either → the caller falls through to raw content."""
     import subprocess
     try:
         r = subprocess.run(
-            ["git", "diff", *args, "--", rel, *exclude],
+            ["git", "diff", "--text", "--no-ext-diff", *args, "--", rel, *exclude],
             cwd=repo, capture_output=True, text=True,
             encoding="utf-8", errors="replace")
-        return r.stdout if r.returncode == 0 else None
+        if r.returncode != 0:
+            return None
+        if "\nBinary files " in r.stdout or r.stdout.startswith("Binary files "):
+            return None                    # still binary → fall to content
+        return r.stdout
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
 
@@ -1184,8 +1192,14 @@ def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
         parts.append(text)
         return True
 
+    # sonnet#1 (r5): explicit scope-set / commit-presence check, so fail-closed
+    # never rests on git's handling of a degenerate `""..HEAD` ref-range.
+    if set(scopes.keys()) != set(snap_scopes.keys()):
+        return None
     for name, repo in scopes.items():
         rec = snap_scopes.get(name) or {}
+        if not isinstance(rec, dict) or not (rec.get("commit") or ""):
+            return None
         f0 = rec.get("commit") or ""
         f0_dirty = rec.get("dirty") if isinstance(rec.get("dirty"), dict) else {}
         scope_paths = _enumerate_scope_delta(repo, f0, f0_dirty, exclude)
@@ -1198,8 +1212,12 @@ def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
         for rel in non:
             prefixed = f"{name}/{rel}" if name else rel
             # DIFF-FIRST: worktree, staged, committed-since-F0 (all restricted to
-            # rel). A git error on any → treat as "no diff" and fall to content.
+            # rel). If ANY source ERRORS or is BINARY (`_git_diff_text` → None),
+            # do NOT trust a partial diff — fall through to the explicit content +
+            # index path (impl-panel r6 grok#1: a binary `--cached` was silently
+            # skipped while the worktree diff still showed, hiding the staged blob).
             diffs = []
+            diff_ok = True
             for label, args in (("worktree vs HEAD", ["HEAD"]),
                                 ("STAGED (index) vs HEAD", ["--cached", "HEAD"]),
                                 ("committed since panel",
@@ -1207,9 +1225,12 @@ def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
                 if args is None:
                     continue
                 dt = _git_diff_text(repo, args, rel, exclude)
-                if dt and dt.strip():
+                if dt is None:
+                    diff_ok = False
+                    break
+                if dt.strip():
                     diffs.append(f"# {prefixed} — {label}\n{dt}")
-            if diffs:
+            if diff_ok and diffs:
                 if not _emit("\n".join(diffs)):
                     return None
                 continue
