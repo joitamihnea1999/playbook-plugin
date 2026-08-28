@@ -9582,8 +9582,12 @@
     {
       "id": "PB-SESSION-POINTER-ISOLATION",
       "category": "sessions-and-attribution",
-      "statement": "A sandboxed judge or subagent cannot shadow the foreground session's active-task pointer: its child environment is stripped of the parent session-identity variables (CLAUDE_ENV_FILE plus the CLAUDE_CODE_* / CLAUDE_PID identity and IPC vars) and its PLAYBOOK_SESSION_ID is pinned to an isolated per-invocation id, so a concurrent background review can neither append a competing session id to the file the foreground resolves from nor resolve (and delete) the foreground session directory.",
+      "statement": "A sandboxed judge or subagent — and the direct `claude -p` model-availability probe — cannot shadow the FOREGROUND session's active-task pointer: every such spawn scrubs the parent-session identity vars (CLAUDE_ENV_FILE plus the CLAUDE_CODE_* / CLAUDE_PID identity and IPC vars) through the single shared scrubber, and writable subagents additionally pin an isolated per-invocation PLAYBOOK_SESSION_ID so they never resolve the foreground session directory. Read-only judges share a fixed non-foreground `judge` identity, which is harmless because they cannot write an active-task pointer.",
       "owner": [
+        {
+          "path": "plugins/playbook/provider/sandbox.py",
+          "reference": "symbol:scrub_parent_session_env"
+        },
         {
           "path": "plugins/playbook/provider/sandbox.py",
           "reference": "symbol:_child_env"
@@ -9631,11 +9635,11 @@
         {
           "type": "executable integration",
           "path": "tests/test_session_pointer_isolation.py",
-          "reference": "SandboxRunReachesTheRealSpawn.test_timeout_branch_child_env_is_clean",
+          "reference": "RunWithTimeoutForwardsStrippedEnv.test_popen_receives_the_child_env_verbatim",
           "boundary": "unit",
           "negative_control": null,
           "limitations": [
-            "Proves the timeout branch (the one background reviews take) receives the stripped child_env, via _run_with_timeout patch."
+            "Asserts _run_with_timeout hands child_env verbatim to subprocess.Popen (the branch background reviews take), via a sentinel key."
           ]
         },
         {
@@ -9645,6 +9649,24 @@
           "boundary": "unit",
           "negative_control": null,
           "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_session_pointer_isolation.py",
+          "reference": "SubagentDoesNotShareForegroundSession.test_stream_subagent_env_does_not_carry_foreground_session",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_session_pointer_isolation.py",
+          "reference": "ModelsProbeDoesNotShadowForeground.test_probe_env_is_scrubbed",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Monkeypatches models_check.subprocess.run; asserts the env the probe would hand a real `claude -p` is scrubbed."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -9657,10 +9679,11 @@
       ],
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
-        "RESIDUAL, out of scope here: the code-edit gate hooks Edit/Write/MultiEdit/NotebookEdit, NOT Bash. A shell-based file write (e.g. Bash `python -c` or a redirect) still bypasses the gate entirely. This is the OS-sandbox roadmap item (the real filesystem blast-radius ceiling), not a defect of this guarantee, which only concerns the pointer NOT being shadowed.",
-        "RESIDUAL (panel sonnet F1): every adapter's launch_interactive/launch_headless build os.environ.copy() and call subprocess.run DIRECTLY, bypassing sandbox._child_env, so they do not strip these vars. They have ZERO callers in tasks/ today (only referenced in shell-script comments), so no live path is affected; if one is ever wired to spawn a background claude, route it through _child_env or the bug reappears.",
-        "Owner decision 2026-08-21: agent-mode hook enforcement is a SUPPORTED capability on Claude only; grok/codex judge subprocesses inherit the same strip in code but carry no support claim, so applicable_providers is narrowed to claude.",
-        "The strip and the subagent isolation are proven at the _child_env / run() / run_subagent boundaries; they are not exercised against a live nested Claude Code SessionStart hook writing to a shared CLAUDE_ENV_FILE (the field repro in task 036, reproduced mechanically by the negative control rather than end-to-end)."
+        "RESIDUAL, out of scope here: the code-edit gate hooks Edit/Write/MultiEdit/NotebookEdit, NOT Bash. A shell-based file write (Bash `python -c` / a redirect) still bypasses the gate entirely — the OS-sandbox roadmap item (the real filesystem blast-radius ceiling), not a defect of this guarantee.",
+        "SCOPE NOTE (panel codex-sol/codex-terra round-3): read-only panel judges share the fixed `.agent/sessions/judge` identity (review.py sets session_id='judge' for every seat), so concurrent judges share that dir. This is NOT foreground-shadowing: `judge` is not any foreground `pid-XXXX`, judges are read-only, and the judge-session Bash guard blocks task activation — so there is no active-task pointer to lose. Minting a unique id per judge seat is unnecessary churn on a read-only path and is deliberately not done; the guarantee is scoped to isolation FROM THE FOREGROUND.",
+        "RESIDUAL (panel sonnet F1): every adapter's launch_interactive/launch_headless build os.environ.copy() and call subprocess.run DIRECTLY, bypassing the scrubber. They have ZERO callers in tasks/ today (only shell-comment references); if one is ever wired to spawn a background claude, route it through sandbox.scrub_parent_session_env or the leak reappears. The shared scrubber now exists for exactly that.",
+        "Owner decision 2026-08-21: agent-mode hook enforcement is a SUPPORTED capability on Claude only; grok/codex judge subprocesses inherit the same scrub in code but carry no support claim, so applicable_providers is narrowed to claude.",
+        "The scrub + subagent isolation are proven at the _child_env / run() / run_subagent / stream_subagent / models-check-probe boundaries; they are not exercised against a live nested Claude Code SessionStart hook writing a shared CLAUDE_ENV_FILE (the field repro in task 036, reproduced mechanically by the negative control rather than end-to-end)."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],

@@ -203,6 +203,106 @@ class SubagentDoesNotShareForegroundSession(unittest.TestCase):
             subagent.run_subagent(spec, project_root=proj)
         self.assertEqual(len(set(seen)), 2, f"ids collided: {seen}")
 
+    def test_stream_subagent_env_does_not_carry_foreground_session(self):
+        """The streaming path got the same one-line fix — pin it so a revert to
+        env=None (re-inheriting the foreground id) can't pass silently (opus F1
+        round-3)."""
+        proj = Path(tempfile.mkdtemp()).resolve()
+        captured = {}
+
+        class _FakeProc:
+            stdin = None
+            stdout = iter(())
+
+            def wait(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        def _fake_popen(agent, argv, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return _FakeProc()
+
+        spec = subagent.SubagentSpec(agent="claude", prompt="hi", timeout_secs=300)
+        with mock.patch.dict(os.environ,
+                             {"PLAYBOOK_SESSION_ID": "pid-foreground-1112687"},
+                             clear=False), \
+             mock.patch.object(subagent._sandbox, "popen", _fake_popen):
+            list(subagent.stream_subagent(spec, project_root=proj))
+        env = captured["env"]
+        self.assertIsNotNone(env, "stream_subagent must pass an explicit env")
+        self.assertNotEqual(env.get("PLAYBOOK_SESSION_ID"), "pid-foreground-1112687")
+        self.assertTrue(
+            str(env.get("PLAYBOOK_SESSION_ID", "")).startswith("subagent-"),
+            f"expected an isolated subagent id, got {env.get('PLAYBOOK_SESSION_ID')!r}")
+
+
+class RunWithTimeoutForwardsStrippedEnv(unittest.TestCase):
+    """_run_with_timeout must hand the caller's child_env to subprocess.Popen
+    verbatim — not substitute os.environ (which carries CLAUDE_ENV_FILE). Locks
+    the layer the wholesale-_run_with_timeout mock skipped (opus F2 round-3)."""
+
+    def test_popen_receives_the_child_env_verbatim(self):
+        proj = Path(tempfile.mkdtemp()).resolve()
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, wrapped, cwd=None, env=None, **kw):
+                captured["env"] = env
+                self.returncode = 0
+
+            def communicate(self, input=None, timeout=None):
+                return ("", "")
+
+        # A child_env already stripped by run(), carrying a sentinel so a
+        # regression to env=os.environ is unmistakable.
+        child_env = {"PLAYBOOK_SANDBOXED": "1", "PLAYBOOK_SESSION_ID": "judge",
+                     "PB_SENTINEL": "x"}
+        with mock.patch.object(sandbox.subprocess, "Popen", _FakePopen):
+            sandbox._run_with_timeout(["true"], str(proj), child_env,
+                                      True, False, {"timeout": 5})
+        env = captured["env"]
+        self.assertIsNotNone(env)
+        self.assertEqual(env.get("PB_SENTINEL"), "x",
+                         "_run_with_timeout substituted os.environ for child_env")
+        self.assertNotIn("CLAUDE_ENV_FILE", env)
+
+
+class ModelsProbeDoesNotShadowForeground(unittest.TestCase):
+    """models_check.probe_claude_model launches `claude -p` DIRECTLY (not via
+    the sandbox), so it must scrub the parent-session vars itself — otherwise a
+    `tasks models check` probe's SessionStart hook appends to the foreground's
+    shared CLAUDE_ENV_FILE (codex-terra F1 round-3)."""
+
+    def test_probe_env_is_scrubbed(self):
+        from tasks import models_check
+        captured = {}
+
+        def _fake_run(argv, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+        parent = {
+            "CLAUDE_ENV_FILE": "/tmp/foreground-env-file",
+            "CLAUDE_CODE_SESSION_ID": "parent-uuid",
+            "CLAUDE_CODE_MESSAGING_SOCKET": "/run/parent.sock",
+            "CLAUDE_CODE_MESSAGING_TOKEN": "secret",
+            "CLAUDE_PID": "1112687",
+        }
+        with mock.patch.dict(os.environ, parent, clear=False), \
+             mock.patch.object(models_check.subprocess, "run", _fake_run):
+            models_check.probe_claude_model("claude-opus-4-8")
+        env = captured["env"]
+        self.assertIsNotNone(env, "the probe must pass an explicit env")
+        for leaked in ("CLAUDE_ENV_FILE", "CLAUDE_CODE_SESSION_ID",
+                       "CLAUDE_CODE_MESSAGING_SOCKET",
+                       "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID"):
+            self.assertNotIn(leaked, env,
+                             f"{leaked} leaked into the models-check probe — its "
+                             "SessionStart hook could shadow the foreground pointer")
+        self.assertEqual(env.get("PLAYBOOK_SESSION_ID"), "models-check")
+
 
 class PollutionVectorIsReal(unittest.TestCase):
     """Negative control: prove the test is not vacuous. A child that DOES

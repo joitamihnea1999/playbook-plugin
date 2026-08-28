@@ -365,17 +365,20 @@ def probe_grok_model(model: str, timeout: int = PROBE_TIMEOUT_SECS) -> tuple[str
 def probe_claude_model(model: str, timeout: int = PROBE_TIMEOUT_SECS) -> tuple[str, str]:
     """Tiny live probe of one claude model id → (verdict, detail).
 
-    Scrubs the same session env vars as ClaudeAdapter.run_headless_judge
-    (claude.py:111-116) and runs from a throwaway temp cwd: the env vars —
-    not the cwd — are the vector by which a nested claude session attaches
-    to (and clobbers) the calling playbook session. Budget-capped so a probe
-    can never spend more than pennies; timeouts are UNKNOWN, never GONE.
+    Scrubs the parent-session env vars via the single shared
+    `sandbox.scrub_parent_session_env` (the same set `_child_env` strips,
+    including CLAUDE_ENV_FILE) and runs from a throwaway temp cwd: the env
+    vars — not the cwd — are the vector by which a nested claude session
+    attaches to (and clobbers) the calling playbook session. In particular a
+    leaked CLAUDE_ENV_FILE would let this probe's SessionStart hook append
+    `models-check` to the foreground's shared env file and shadow its
+    active-task pointer (task 037, PB-SESSION-POINTER-ISOLATION). Budget-capped
+    so a probe can never spend more than pennies; timeouts are UNKNOWN, never GONE.
     """
+    from provider import sandbox as _sandbox
     env = os.environ.copy()
     env["CLAUDECODE"] = ""
-    env.pop("CLAUDE_CODE_SSE_PORT", None)
-    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
-    env.pop("CLAUDE_PROJECT_DIR", None)
+    _sandbox.scrub_parent_session_env(env)
     env["PLAYBOOK_SESSION_ID"] = "models-check"
     with tempfile.TemporaryDirectory(prefix="playbook-models-probe-") as td:
         try:

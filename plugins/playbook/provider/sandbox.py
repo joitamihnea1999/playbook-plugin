@@ -726,10 +726,21 @@ _PARENT_SESSION_ENV = (
 )
 
 
+def scrub_parent_session_env(env: dict[str, str]) -> dict[str, str]:
+    """Remove the parent-session identity vars (`_PARENT_SESSION_ENV`) from `env`
+    IN PLACE and return it. The single source of the strip: `_child_env` uses it
+    for everything routed through the sandbox, and a direct-spawn site that does
+    NOT go through the sandbox (e.g. `models_check.probe_claude_model` running
+    `claude -p` itself) calls it too, so no spawn point re-opens the leak
+    piecemeal (task 037 round-4, panel codex-terra F1)."""
+    for var in _PARENT_SESSION_ENV:
+        env.pop(var, None)
+    return env
+
+
 def _child_env(env: dict[str, str] | None) -> dict[str, str]:
     child_env = dict(os.environ) if env is None else dict(env)
-    for var in _PARENT_SESSION_ENV:
-        child_env.pop(var, None)
+    scrub_parent_session_env(child_env)
     child_env["PLAYBOOK_SANDBOXED"] = "1"
     return child_env
 
