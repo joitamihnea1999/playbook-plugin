@@ -695,8 +695,31 @@ def network_isolation_available() -> bool:
     return bool(shutil.which("bwrap"))
 
 
+# Parent-session identity that a sandboxed child must never inherit. The lead
+# case is CLAUDE_ENV_FILE: the foreground writes its `export PLAYBOOK_SESSION_ID`
+# there, and a child that keeps the variable has its OWN Claude-Code SessionStart
+# hook APPEND to that same shared file — shadowing the foreground's active-task
+# pointer so the code-edit gate resolves an empty `sessions/<wrong-id>/` and
+# reports "No active task" mid-task (found live in task 036;
+# PB-SESSION-POINTER-ISOLATION). The CLAUDE_CODE_* / CLAUDE_PROJECT_DIR siblings
+# name the parent session/socket/entrypoint; the claude adapter already popped
+# those three on its own judge path — stripping here makes it uniform across
+# EVERY sandboxed subprocess (panel, single judge, sandbox CLI, stream sidebars,
+# all providers), which is the single boundary they all funnel through. The
+# child agent (Claude Code) mints its own fresh values at launch, and judges
+# carry an explicit isolated PLAYBOOK_SESSION_ID, so nothing loses its identity.
+_PARENT_SESSION_ENV = (
+    "CLAUDE_ENV_FILE",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_PROJECT_DIR",
+)
+
+
 def _child_env(env: dict[str, str] | None) -> dict[str, str]:
     child_env = dict(os.environ) if env is None else dict(env)
+    for var in _PARENT_SESSION_ENV:
+        child_env.pop(var, None)
     child_env["PLAYBOOK_SANDBOXED"] = "1"
     return child_env
 
