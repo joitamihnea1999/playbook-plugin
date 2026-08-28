@@ -263,10 +263,46 @@ class RunWithTimeoutForwardsStrippedEnv(unittest.TestCase):
             sandbox._run_with_timeout(["true"], str(proj), child_env,
                                       True, False, {"timeout": 5})
         env = captured["env"]
-        self.assertIsNotNone(env)
-        self.assertEqual(env.get("PB_SENTINEL"), "x",
-                         "_run_with_timeout substituted os.environ for child_env")
-        self.assertNotIn("CLAUDE_ENV_FILE", env)
+        # Identity, not a vacuous assertNotIn on a key the input never held
+        # (opus F2): _run_with_timeout must hand Popen the caller's exact dict.
+        self.assertIs(env, child_env,
+                      "_run_with_timeout substituted a different env for child_env")
+
+
+class LiveJudgeSpawnReachesTheScrub(unittest.TestCase):
+    """Bind the REAL judge spawn to the scrub: run_headless_judge builds
+    env=os.environ.copy() and trusts sandbox.run to scrub. Mock ONLY the final
+    subprocess.run so _child_env actually executes, and assert the env that would
+    reach `claude` lacks the parent-session vars (opus F1 round-5). A refactor
+    that spawned claude directly, or scrubbed a different subset, fails here."""
+
+    def test_run_headless_judge_env_is_scrubbed(self):
+        from provider.adapters.claude import ClaudeAdapter
+        proj = Path(tempfile.mkdtemp()).resolve()
+        captured = {}
+
+        def _fake_run(wrapped, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(wrapped, 0, stdout="ok", stderr="")
+
+        adapter = ClaudeAdapter(session_id="judge", project_root=proj)
+        parent = {"CLAUDE_ENV_FILE": "/tmp/fg-env",
+                  "CLAUDE_CODE_SESSION_ID": "parent-uuid",
+                  "CLAUDE_CODE_MESSAGING_TOKEN": "secret"}
+        with mock.patch.dict(os.environ, parent, clear=False), \
+             mock.patch("shutil.which", return_value="/usr/bin/claude"), \
+             mock.patch.object(sandbox.subprocess, "run", _fake_run):
+            adapter.run_headless_judge(
+                "review this", None, "context",
+                web_search=False, timeout_secs=None, budget_usd="0.10")
+        env = captured["env"]
+        self.assertIsNotNone(env, "the judge spawn must receive an env")
+        for leaked in ("CLAUDE_ENV_FILE", "CLAUDE_CODE_SESSION_ID",
+                       "CLAUDE_CODE_MESSAGING_TOKEN"):
+            self.assertNotIn(leaked, env,
+                             f"{leaked} reached the live judge spawn — the "
+                             "adapter→sandbox seam did not scrub")
+        self.assertEqual(env.get("PLAYBOOK_SESSION_ID"), "judge")
 
 
 class ModelsProbeDoesNotShadowForeground(unittest.TestCase):
@@ -283,21 +319,15 @@ class ModelsProbeDoesNotShadowForeground(unittest.TestCase):
             captured["env"] = kwargs.get("env")
             return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
-        parent = {
-            "CLAUDE_ENV_FILE": "/tmp/foreground-env-file",
-            "CLAUDE_CODE_SESSION_ID": "parent-uuid",
-            "CLAUDE_CODE_MESSAGING_SOCKET": "/run/parent.sock",
-            "CLAUDE_CODE_MESSAGING_TOKEN": "secret",
-            "CLAUDE_PID": "1112687",
-        }
+        # Seed the COMPLETE parent-session set (import it, so the test tracks
+        # the list and a probe reverting to a partial pop is caught) — codex-sol.
+        parent = {var: f"parent-{var}" for var in sandbox._PARENT_SESSION_ENV}
         with mock.patch.dict(os.environ, parent, clear=False), \
              mock.patch.object(models_check.subprocess, "run", _fake_run):
             models_check.probe_claude_model("claude-opus-4-8")
         env = captured["env"]
         self.assertIsNotNone(env, "the probe must pass an explicit env")
-        for leaked in ("CLAUDE_ENV_FILE", "CLAUDE_CODE_SESSION_ID",
-                       "CLAUDE_CODE_MESSAGING_SOCKET",
-                       "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID"):
+        for leaked in sandbox._PARENT_SESSION_ENV:
             self.assertNotIn(leaked, env,
                              f"{leaked} leaked into the models-check probe — its "
                              "SessionStart hook could shadow the foreground pointer")

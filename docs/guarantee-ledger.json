@@ -9582,7 +9582,7 @@
     {
       "id": "PB-SESSION-POINTER-ISOLATION",
       "category": "sessions-and-attribution",
-      "statement": "A sandboxed judge or subagent — and the direct `claude -p` model-availability probe — cannot shadow the FOREGROUND session's active-task pointer: every such spawn scrubs the parent-session identity vars (CLAUDE_ENV_FILE plus the CLAUDE_CODE_* / CLAUDE_PID identity and IPC vars) through the single shared scrubber, and writable subagents additionally pin an isolated per-invocation PLAYBOOK_SESSION_ID so they never resolve the foreground session directory. Read-only judges share a fixed non-foreground `judge` identity, which is harmless because they cannot write an active-task pointer.",
+      "statement": "On the review and probe spawn paths — panel and single-judge reviews, run_subagent / stream_subagent, and the direct `claude -p` model-availability probe — a nested process cannot shadow the FOREGROUND session's active-task pointer: every such spawn scrubs the parent-session identity vars (CLAUDE_ENV_FILE plus the CLAUDE_CODE_* / CLAUDE_PID identity and IPC vars) through the single shared scrubber, and writable subagents additionally pin an isolated per-invocation PLAYBOOK_SESSION_ID so they never resolve the foreground session directory. Read-only judges share a fixed non-foreground `judge` identity, which is harmless because they cannot write an active-task pointer.",
       "owner": [
         {
           "path": "plugins/playbook/provider/sandbox.py",
@@ -9643,6 +9643,16 @@
           ]
         },
         {
+          "type": "executable integration",
+          "path": "tests/test_session_pointer_isolation.py",
+          "reference": "LiveJudgeSpawnReachesTheScrub.test_run_headless_judge_env_is_scrubbed",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Binds ClaudeAdapter.run_headless_judge through the real _child_env (mocks only the final subprocess.run), not a live claude process."
+          ]
+        },
+        {
           "type": "executable unit",
           "path": "tests/test_session_pointer_isolation.py",
           "reference": "SubagentDoesNotShareForegroundSession.test_run_subagent_env_does_not_carry_foreground_session",
@@ -9682,6 +9692,7 @@
         "RESIDUAL, out of scope here: the code-edit gate hooks Edit/Write/MultiEdit/NotebookEdit, NOT Bash. A shell-based file write (Bash `python -c` / a redirect) still bypasses the gate entirely — the OS-sandbox roadmap item (the real filesystem blast-radius ceiling), not a defect of this guarantee.",
         "SCOPE NOTE (panel codex-sol/codex-terra round-3): read-only panel judges share the fixed `.agent/sessions/judge` identity (review.py sets session_id='judge' for every seat), so concurrent judges share that dir. This is NOT foreground-shadowing: `judge` is not any foreground `pid-XXXX`, judges are read-only, and the judge-session Bash guard blocks task activation — so there is no active-task pointer to lose. Minting a unique id per judge seat is unnecessary churn on a read-only path and is deliberately not done; the guarantee is scoped to isolation FROM THE FOREGROUND.",
         "RESIDUAL (panel sonnet F1): every adapter's launch_interactive/launch_headless build os.environ.copy() and call subprocess.run DIRECTLY, bypassing the scrubber. They have ZERO callers in tasks/ today (only shell-comment references); if one is ever wired to spawn a background claude, route it through sandbox.scrub_parent_session_env or the leak reappears. The shared scrubber now exists for exactly that.",
+        "RESIDUAL (panel codex-terra round-5), SCOPED OUT of the statement: the raw `sandbox --` CLI passthrough (provider/sandbox.py _main) calls run() with no env, so a WRITABLE manual `sandbox -- claude ...` run inherits the foreground PLAYBOOK_SESSION_ID and its session-end-hook could delete the foreground session dir. This is a MANUAL dev escape-hatch, not a review/subagent path; a safe fix must preserve the monitor's explicit identity, so it is deferred to a follow-up hardening task alongside the launch_* residual. The shared scrubber now exists for it.",
         "Owner decision 2026-08-21: agent-mode hook enforcement is a SUPPORTED capability on Claude only; grok/codex judge subprocesses inherit the same scrub in code but carry no support claim, so applicable_providers is narrowed to claude.",
         "The scrub + subagent isolation are proven at the _child_env / run() / run_subagent / stream_subagent / models-check-probe boundaries; they are not exercised against a live nested Claude Code SessionStart hook writing a shared CLAUDE_ENV_FILE (the field repro in task 036, reproduced mechanically by the negative control rather than end-to-end)."
       ],
