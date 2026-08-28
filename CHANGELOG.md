@@ -2,6 +2,111 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.41] — 2026-08-28
+
+The headline is **tail certification**: a non-behavioral post-panel delta — one
+confined to docs / tests / the guarantee ledger / root `CLAUDE.md` —
+now closes a stale task through one dedicated single-judge certification of the
+exact delta instead of forcing a fresh 5-seat panel; any code-path delta still
+requires a fresh full panel. Alongside it, three durability/visibility fixes to
+the review machinery: overflowing `judge.md` rounds are now archived verbatim
+(never dropped) to `judge-archive.md`; review/subagent subprocesses no longer
+inherit the foreground session pointer (closing a spurious `No active task`
+mid-task); and the review commands advise a background launch when a run can
+outlast the host's 600 s tool-call cap. The items below are sourced from the
+range `08ec4f0..HEAD` and state only what that diff shows. (The fence-discipline
+consolidation follow-up — one shared strict fence scanner with per-consumer fail
+directions, the P-A..P-F residuals from tasks 032/033 — is specced as task 039
+and remains **pending**, not in this release.)
+
+### Added
+
+- **Tail certification — a non-behavioral tail need not re-run the whole panel
+  (headline).** Owner decisions A + H (2026-08-27). A STALE close whose only
+  post-panel delta falls in non-behavioral file classes (`docs/*.md`,
+  `docs/*.json`, README / CHANGELOG / MIND_MAP, root `CLAUDE.md`, `tests/`) is now
+  re-certified by a dedicated single judge against the F0-anchored close delta —
+  the changed-path set plus the current closing content (an original uncommitted
+  at F0 is not byte-persisted, so that path is reviewed as current-vs-HEAD, not a
+  literal A→B diff; disclosed in the ledger) — and recorded as
+  `STALE, but TAIL-CERTIFIED`, instead of
+  demanding a fresh full panel; any behavioral (code-path) delta still forces a
+  panel. (Root `.agent/` task records are separately excluded from the freshness
+  fingerprint, so an `.agent/` edit never stales a panel and never enters the
+  certified delta at all.) New machinery in `core.py` (`classify_delta_paths`,
+  `build_panel_snapshot`, `_enumerate_scope_delta`, `tail_cert_delta`,
+  `tail_cert_gate_decision`, `parse_tail_cert_verdict`, the `TAIL-CERT-PASS`
+  receipt), a dedicated headless judge in `review.py` (`run_tail_cert_judge`
+  with an un-forgeable F0 descriptor embedded in the impl round, never routed
+  through `cmd_single_review`), and close-path integration in `lifecycle.py`
+  with a close-time compare-and-swap. It **fails closed** on every ambiguity
+  (missing/mismatched descriptor, scope change, git error, empty-while-stale,
+  mode/symlink change, rename endpoints, non-PASS verdict, unreadable-dirty gap,
+  oversized-dirty, and the mutate-during-certification window — the close-time
+  recheck re-runs the whole fingerprint+delta as a compare-and-swap against the
+  panel snapshot). One residual is disclosed, not closed: that recheck and the
+  subsequent receipt/status write are not held under a single lock, so a
+  concurrent behavioral commit landing in that narrow window is not re-checked —
+  an unlocked best-effort bound, tracked as a follow-up. `PB-PANEL-FRESHNESS`
+  updated (statement + proofs + owner decision).
+- **Reviews advise a background launch when they can exceed the 600 s cap.**
+  `tasks panel-review` / `impl-review` / `plan-review` now print a one-line
+  advisory at start when their hard timeout is unlimited or over 600 s — the
+  host's foreground tool-call cap — so a long review is launched detached and
+  polled rather than lost to a mid-flight kill. New `_print_background_advisory`
+  helper (`review.py`), called after the panel banner and once before the
+  single-review backend dispatch. Docs instruct background runs (both
+  `base-template.md` copies, `skills/playbook/SKILL.md`,
+  `scripts/CLAUDE.md.template`, and `docs/cli.md`). No behavior change beyond the
+  print.
+
+### Fixed
+
+- **Overflowing `judge.md` rounds are archived, never dropped.** `stack_judge_round`
+  capped `judge.md` at `JUDGE_MD_MAX_ROUNDS` (5) and dropped older rounds with only
+  a "…full history is in git" pointer — unreliable, since `judge.md` is rewritten
+  in place and committed at most once per task, so intra-session paid rounds were
+  lost (and a task's true panel count could read as merely 5). Overflow rounds now
+  move verbatim to a sibling `judge-archive.md` (newest-first, never deleted — the
+  same "moving history is not deleting it" contract as `task-archive.md`), with
+  `judge.md` carrying a one-line pointer. Hardened over an impl panel: an
+  archive-write failure keeps `judge.md` untrimmed rather than dropping a round; an
+  unreadable/opaque existing archive fails closed and is preserved, not clobbered;
+  a failed `judge.md` write rolls the archive back via the atomic (fsync) primitive
+  and is idempotent against crash-retry; the close gate is unaffected (it reads only
+  `judge.md`'s newest round). The true round count is now the round headings in
+  `judge.md` **plus** `judge-archive.md`. Scope of "never dropped": like the
+  pre-existing `judge.md`/receipt writers, stacking is an unlocked
+  read-modify-write, so the guarantee holds under **sequential** use — two panels
+  stacking the SAME task concurrently can still last-writer-win a round
+  (best-effort under concurrency). A serialization lock and a machine
+  round-delimiter for exact counting are parked follow-ups.
+- **Review/subagent subprocesses no longer inherit the foreground session
+  pointer.** Every sandboxed judge/subagent funnelled through `_child_env`, which
+  copied the full environment including `CLAUDE_ENV_FILE`; a Claude judge seat
+  inheriting it let its own SessionStart hook append `export PLAYBOOK_SESSION_ID`
+  to the file the foreground session sources — shadowing the foreground's
+  active-task pointer, so the code-edit gate resolved an empty session and
+  hard-blocked legitimate edits mid-task (the `No active task` ghost, found live
+  during task 036). `_child_env` now strips the parent-session identity vars
+  (`CLAUDE_ENV_FILE` plus the `CLAUDE_CODE_*` / `CLAUDE_PID` / `CLAUDE_PROJECT_DIR`
+  siblings) from every sandboxed child through one shared scrubber — a single
+  chokepoint covering panel, single judge, sandbox CLI, stream sidebars, and the
+  `claude -p` model-availability probe; writable subagents keep their own isolated
+  `PLAYBOOK_SESSION_ID`, read-only judges a fixed non-foreground `judge` identity.
+  New guarantee **`PB-SESSION-POINTER-ISOLATION`** (residual disclosed: shell
+  writes still bypass the code-edit gate — the OS-sandbox roadmap item).
+
+### Changed
+
+- **Born-checked gate guidance on the templates and the playbook skill.** The most
+  frequent batch-close block is a born-checked gate — an agent adds an already-`[x]`
+  gate to record completed work and the guard refuses. One guidance line was added
+  to all three gate-discipline stickers (full/light/quick) and `skills/playbook/SKILL.md`:
+  write the gate BEFORE the step, never born-checked; record already-done work as an
+  unchecked gate plus a separate check-edit carrying its outcome. Documentation only —
+  born-checked enforcement is unchanged.
+
 ## [1.5.40] — 2026-08-26
 
 Two correctness fixes to task.md fence parsing, closing a gate-bypass vector and
