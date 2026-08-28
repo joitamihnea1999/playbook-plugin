@@ -15,12 +15,13 @@ to the file the FOREGROUND session sources, shadowing the foreground pointer.
 The foreground's session id then resolved to an empty
 `sessions/<wrong-id>/current_state`.
 
-Fix (owning boundary): `_child_env` strips `CLAUDE_ENV_FILE` (and the
-CLAUDE_CODE_* session-identity siblings) so no sandboxed subprocess can ever
-write into the parent's env file. The judge keeps its own identity via the
-`PLAYBOOK_SESSION_ID` the adapter sets explicitly.
+Fix (owning boundary): `_child_env` strips the parent session-identity vars
+(`CLAUDE_ENV_FILE` + the `CLAUDE_CODE_*`/`CLAUDE_PROJECT_DIR` siblings) so no
+sandboxed subprocess can ever write into the parent's env file or attach to its
+session. The subagent entrypoints additionally pin an isolated
+`PLAYBOOK_SESSION_ID`, so a subagent never resolves the FOREGROUND session dir.
 
-Run: python3 tests/test_session_pointer_isolation.py
+Run: python3 -m unittest tests.test_session_pointer_isolation
 """
 from __future__ import annotations
 
@@ -33,8 +34,11 @@ from pathlib import Path
 from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent))                 # repo root: `tests` package
 sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
 from provider import sandbox  # noqa: E402
+from provider import subagent  # noqa: E402
+from tests._bashcheck import bash_or_skip  # noqa: E402
 
 
 class ChildEnvStripsEnvFile(unittest.TestCase):
@@ -67,21 +71,33 @@ class ChildEnvStripsEnvFile(unittest.TestCase):
         self.assertEqual(child.get("PATH"), "/usr/bin",
                          "unrelated env must pass through untouched")
 
-    def test_strips_claude_code_session_identity_siblings(self):
-        """The CLAUDE_CODE_* vars name the PARENT session/socket; a child that
-        keeps them can attach to the parent's session channel. Strip them too."""
+    def test_strips_every_parent_session_identity_var(self):
+        """The CLAUDE_CODE_* / CLAUDE_PID vars name the PARENT session, socket,
+        and IPC token; a child that keeps them can resume the parent transcript
+        or attach to its messaging channel. Strip the whole set (codex-sol F1)."""
         supplied = {
+            "CLAUDE_ENV_FILE": "/tmp/env",
             "CLAUDE_CODE_SSE_PORT": "9999",
             "CLAUDE_CODE_ENTRYPOINT": "cli",
             "CLAUDE_PROJECT_DIR": "/parent/project",
+            "CLAUDE_CODE_SESSION_ID": "parent-session-uuid",
+            "CLAUDE_CODE_CHILD_SESSION": "1",
+            "CLAUDE_CODE_MESSAGING_SOCKET": "/run/parent.sock",
+            "CLAUDE_CODE_MESSAGING_TOKEN": "secret-token",
+            "CLAUDE_PID": "1112687",
             "PLAYBOOK_SESSION_ID": "judge",
         }
         child = sandbox._child_env(supplied)
-        for leaked in ("CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT",
-                       "CLAUDE_PROJECT_DIR"):
+        for leaked in ("CLAUDE_ENV_FILE", "CLAUDE_CODE_SSE_PORT",
+                       "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR",
+                       "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+                       "CLAUDE_CODE_MESSAGING_SOCKET",
+                       "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID"):
             self.assertNotIn(leaked, child,
                              f"{leaked} names the parent session and must not "
                              "reach a sandboxed child")
+        # The pin the child DOES need survives.
+        self.assertEqual(child.get("PLAYBOOK_SESSION_ID"), "judge")
 
     def test_does_not_invent_env_when_absent(self):
         """Stripping must be a delete, never a crash, when the var is absent."""
@@ -91,10 +107,11 @@ class ChildEnvStripsEnvFile(unittest.TestCase):
 
 
 class SandboxRunReachesTheRealSpawn(unittest.TestCase):
-    """Integration: the strip must reach the actual subprocess env, not just
-    the helper — this is the boundary a background judge really crosses."""
+    """Integration: the strip must reach the actual subprocess env on BOTH
+    run() branches — the timeout-less branch AND the timeout branch panels
+    actually take (background reviews always set a timeout)."""
 
-    def test_run_child_env_has_no_env_file_and_keeps_session_id(self):
+    def test_no_timeout_branch_child_env_is_clean(self):
         proj = Path(tempfile.mkdtemp()).resolve()
         captured = {}
 
@@ -111,11 +128,80 @@ class SandboxRunReachesTheRealSpawn(unittest.TestCase):
             sandbox.run("claude", ["--version"], project_root=proj,
                         env=judge_env, capture_output=True)
         env = captured["env"]
-        self.assertIsNotNone(env, "sandbox.run must pass an env to subprocess")
-        self.assertNotIn("CLAUDE_ENV_FILE", env,
-                         "the env that actually reaches the judge spawn still "
-                         "carried the foreground env file")
+        self.assertIsNotNone(env)
+        self.assertNotIn("CLAUDE_ENV_FILE", env)
         self.assertEqual(env.get("PLAYBOOK_SESSION_ID"), "judge")
+
+    def test_timeout_branch_child_env_is_clean(self):
+        """A timeout (which every background review sets) routes run() through
+        _run_with_timeout → subprocess.Popen; the child_env that branch receives
+        must be the same stripped env, not the raw one (opus/sonnet F2)."""
+        proj = Path(tempfile.mkdtemp()).resolve()
+        captured = {}
+
+        def _fake_rwt(wrapped, project, child_env, capture_output, check, kwargs):
+            captured["env"] = child_env
+            return subprocess.CompletedProcess(wrapped, 0, stdout="", stderr="")
+
+        with mock.patch.object(sandbox, "_run_with_timeout", _fake_rwt):
+            sandbox.run("claude", ["--version"], project_root=proj,
+                        env={"CLAUDE_ENV_FILE": "/tmp/env",
+                             "PLAYBOOK_SESSION_ID": "judge",
+                             "PATH": os.environ.get("PATH", "/usr/bin")},
+                        capture_output=True, timeout=5)
+        env = captured["env"]
+        self.assertIsNotNone(env, "the timeout branch must receive a child_env")
+        self.assertNotIn("CLAUDE_ENV_FILE", env,
+                         "the env reaching the REAL background-judge spawn "
+                         "(timeout branch) still carried the foreground env file")
+        self.assertEqual(env.get("PLAYBOOK_SESSION_ID"), "judge")
+
+
+class SubagentDoesNotShareForegroundSession(unittest.TestCase):
+    """run_subagent/stream_subagent must pin an ISOLATED PLAYBOOK_SESSION_ID —
+    otherwise `_child_env(None)` preserves the foreground id and the subagent
+    resolves (and on SessionEnd could delete) the foreground session dir
+    (codex-sol F2)."""
+
+    def test_run_subagent_env_does_not_carry_foreground_session(self):
+        proj = Path(tempfile.mkdtemp()).resolve()
+        captured = {}
+
+        def _fake_run(agent, argv, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        spec = subagent.SubagentSpec(agent="claude", prompt="hi", timeout_secs=300)
+        with mock.patch.dict(os.environ,
+                             {"PLAYBOOK_SESSION_ID": "pid-foreground-1112687"},
+                             clear=False), \
+             mock.patch.object(subagent._sandbox, "run", _fake_run):
+            subagent.run_subagent(spec, project_root=proj)
+        env = captured["env"]
+        self.assertIsNotNone(env, "run_subagent must pass an explicit env")
+        self.assertNotEqual(
+            env.get("PLAYBOOK_SESSION_ID"), "pid-foreground-1112687",
+            "a subagent must not inherit the foreground session id — it could "
+            "delete the foreground session dir on SessionEnd")
+        self.assertTrue(
+            str(env.get("PLAYBOOK_SESSION_ID", "")).startswith("subagent-"),
+            f"expected an isolated subagent id, got {env.get('PLAYBOOK_SESSION_ID')!r}")
+
+    def test_two_subagents_get_distinct_ids(self):
+        """Unique-per-invocation ids: two concurrent subagents must not share a
+        session dir (so one's SessionEnd can't reclaim the other's)."""
+        proj = Path(tempfile.mkdtemp()).resolve()
+        seen = []
+
+        def _fake_run(agent, argv, **kwargs):
+            seen.append(kwargs.get("env", {}).get("PLAYBOOK_SESSION_ID"))
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        spec = subagent.SubagentSpec(agent="claude", prompt="hi", timeout_secs=300)
+        with mock.patch.object(subagent._sandbox, "run", _fake_run):
+            subagent.run_subagent(spec, project_root=proj)
+            subagent.run_subagent(spec, project_root=proj)
+        self.assertEqual(len(set(seen)), 2, f"ids collided: {seen}")
 
 
 class PollutionVectorIsReal(unittest.TestCase):
@@ -124,6 +210,7 @@ class PollutionVectorIsReal(unittest.TestCase):
     shadowing the strip prevents."""
 
     def test_inheriting_child_pollutes_the_shared_env_file(self):
+        bash = bash_or_skip()   # skip (not error) where bash is unusable (win lane)
         with tempfile.TemporaryDirectory() as d:
             env_file = Path(d) / "claude_env_file"
             env_file.write_text("export PLAYBOOK_SESSION_ID=pid-foreground\n",
@@ -133,7 +220,7 @@ class PollutionVectorIsReal(unittest.TestCase):
             child_env = dict(os.environ)
             child_env["CLAUDE_ENV_FILE"] = str(env_file)
             subprocess.run(
-                ["bash", "-c",
+                [bash, "-c",
                  'printf "export PLAYBOOK_SESSION_ID=%s\\n" "judge" >> "$CLAUDE_ENV_FILE"'],
                 env=child_env, check=True,
             )

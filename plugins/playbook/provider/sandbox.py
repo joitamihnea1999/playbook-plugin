@@ -713,6 +713,16 @@ _PARENT_SESSION_ENV = (
     "CLAUDE_CODE_SSE_PORT",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_PROJECT_DIR",
+    # Parent-session IDENTITY + IPC credentials (not the pointer vector, but a
+    # sandboxed read-only judge/subagent must not inherit them: a child
+    # `claude -p` that keeps CLAUDE_CODE_SESSION_ID could resume/append to the
+    # parent's session transcript, and the messaging socket/token attach it to
+    # the parent's IPC channel). The child mints its own at launch.
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_PID",
 )
 
 

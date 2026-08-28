@@ -9582,11 +9582,15 @@
     {
       "id": "PB-SESSION-POINTER-ISOLATION",
       "category": "sessions-and-attribution",
-      "statement": "A sandboxed judge or subagent cannot shadow the foreground session's active-task pointer: its child environment is stripped of the parent session-identity variables (led by CLAUDE_ENV_FILE) that a concurrent background review would otherwise use to append a competing session id to the file the foreground resolves from.",
+      "statement": "A sandboxed judge or subagent cannot shadow the foreground session's active-task pointer: its child environment is stripped of the parent session-identity variables (CLAUDE_ENV_FILE plus the CLAUDE_CODE_* / CLAUDE_PID identity and IPC vars) and its PLAYBOOK_SESSION_ID is pinned to an isolated per-invocation id, so a concurrent background review can neither append a competing session id to the file the foreground resolves from nor resolve (and delete) the foreground session directory.",
       "owner": [
         {
           "path": "plugins/playbook/provider/sandbox.py",
           "reference": "symbol:_child_env"
+        },
+        {
+          "path": "plugins/playbook/provider/subagent.py",
+          "reference": "symbol:_isolated_subagent_env"
         }
       ],
       "failure_consequence": "High",
@@ -9606,15 +9610,7 @@
         {
           "type": "executable unit",
           "path": "tests/test_session_pointer_isolation.py",
-          "reference": "ChildEnvStripsEnvFile.test_strips_claude_env_file_inherited_from_os_environ",
-          "boundary": "unit",
-          "negative_control": null,
-          "limitations": []
-        },
-        {
-          "type": "executable unit",
-          "path": "tests/test_session_pointer_isolation.py",
-          "reference": "ChildEnvStripsEnvFile.test_strips_claude_code_session_identity_siblings",
+          "reference": "ChildEnvStripsEnvFile.test_strips_every_parent_session_identity_var",
           "boundary": "unit",
           "negative_control": null,
           "limitations": []
@@ -9622,15 +9618,33 @@
         {
           "type": "executable integration",
           "path": "tests/test_session_pointer_isolation.py",
-          "reference": "SandboxRunReachesTheRealSpawn.test_run_child_env_has_no_env_file_and_keeps_session_id",
+          "reference": "SandboxRunReachesTheRealSpawn.test_no_timeout_branch_child_env_is_clean",
           "boundary": "unit",
           "negative_control": {
             "path": "tests/test_session_pointer_isolation.py",
             "reference": "PollutionVectorIsReal.test_inheriting_child_pollutes_the_shared_env_file"
           },
           "limitations": [
-            "Monkeypatches subprocess.run to capture the child env at the real run() boundary; does not spawn a live provider CLI."
+            "Monkeypatches subprocess.run at the real run() boundary; does not spawn a live provider CLI."
           ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_session_pointer_isolation.py",
+          "reference": "SandboxRunReachesTheRealSpawn.test_timeout_branch_child_env_is_clean",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Proves the timeout branch (the one background reviews take) receives the stripped child_env, via _run_with_timeout patch."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_session_pointer_isolation.py",
+          "reference": "SubagentDoesNotShareForegroundSession.test_run_subagent_env_does_not_carry_foreground_session",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": []
         }
       ],
       "applicable_platforms": [
@@ -9644,8 +9658,9 @@
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
         "RESIDUAL, out of scope here: the code-edit gate hooks Edit/Write/MultiEdit/NotebookEdit, NOT Bash. A shell-based file write (e.g. Bash `python -c` or a redirect) still bypasses the gate entirely. This is the OS-sandbox roadmap item (the real filesystem blast-radius ceiling), not a defect of this guarantee, which only concerns the pointer NOT being shadowed.",
+        "RESIDUAL (panel sonnet F1): every adapter's launch_interactive/launch_headless build os.environ.copy() and call subprocess.run DIRECTLY, bypassing sandbox._child_env, so they do not strip these vars. They have ZERO callers in tasks/ today (only referenced in shell-script comments), so no live path is affected; if one is ever wired to spawn a background claude, route it through _child_env or the bug reappears.",
         "Owner decision 2026-08-21: agent-mode hook enforcement is a SUPPORTED capability on Claude only; grok/codex judge subprocesses inherit the same strip in code but carry no support claim, so applicable_providers is narrowed to claude.",
-        "The strip is proven at the _child_env boundary and the run() call boundary; it is not exercised against a live nested Claude Code SessionStart hook writing to a shared CLAUDE_ENV_FILE (that path was the field repro in task 036, reproduced mechanically by the negative control rather than end-to-end)."
+        "The strip and the subagent isolation are proven at the _child_env / run() / run_subagent boundaries; they are not exercised against a live nested Claude Code SessionStart hook writing to a shared CLAUDE_ENV_FILE (the field repro in task 036, reproduced mechanically by the negative control rather than end-to-end)."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
