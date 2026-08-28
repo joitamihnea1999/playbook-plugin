@@ -27,6 +27,24 @@ from tasks.core import _safe_hash_regular, resolve_agent_dir
 from tasks.mindmap import _load_mind_map
 from tasks.shared import find_project_root
 
+# The host caps a single foreground tool call at 600 s. A review whose hard
+# timeout can outlast that will be killed mid-run if launched in the foreground,
+# so the CLI advises a background launch up front (task 038).
+_FOREGROUND_TOOL_CAP_SECS = 600
+
+
+def _print_background_advisory(hard_timeout_secs: "int | None") -> None:
+    """Print a one-line advisory when a review's hard timeout can exceed the
+    600 s foreground tool-call cap. `None` = unlimited, which also can exceed it.
+    No-op for a bounded run at/under the cap."""
+    if hard_timeout_secs is None or hard_timeout_secs > _FOREGROUND_TOOL_CAP_SECS:
+        print(
+            "  ⚠ this run may exceed the 600 s foreground tool-call cap — launch "
+            "it in the background (run detached / '&') and poll, or the host may "
+            "kill it mid-run.",
+            flush=True,
+        )
+
 
 def _panel_triage_frame() -> list[str]:
     """Return the lines to append to a panel-review judge.md so the reading
@@ -851,6 +869,7 @@ def cmd_panel_review(cmd_args):
         f"({len(judges)} judges, timeout {timeout_label})...",
         flush=True,
     )
+    _print_background_advisory(timeout_secs)
 
     def run_judge(judge_spec):
         adapter_cls, variant = judge_spec
@@ -1657,6 +1676,9 @@ def cmd_single_review(cmd, cmd_args):
               "the tamper guard is the only defense against repo mutation.",
               file=sys.stderr, flush=True)
     _tamper_before = _snapshot_repo_state(project_path, task_file)
+    # One advisory before the backend dispatch — covers plan-review AND
+    # impl-review across every backend (task 038).
+    _print_background_advisory(review_timeout)
 
     if backend == "claude":
         claude_bin = shutil.which("claude")

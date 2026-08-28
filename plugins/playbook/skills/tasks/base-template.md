@@ -52,7 +52,7 @@ pending
 - [ ] The work plan below has the right granularity (not too coarse, not micro-steps)
 
 ## Plan Review
-- [ ] Run `tasks plan-review <N>` — wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only and will NOT touch your gates). Re-read this file to see its findings below, then address valid concerns by revising Work Plan gates yourself. **Justify lens:** does every work gate trace up to something in Intent/Design? Are there gates that justify nothing above them (scope creep)? Intent claims with no gate to satisfy them (gaps)?
+- [ ] Run `tasks plan-review <N>` — **launch it in the background** (a panel or large review can exceed the 600 s foreground tool-call cap and be killed mid-run; the CLI prints an advisory when it might) and poll; wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only and will NOT touch your gates). Re-read this file to see its findings below, then address valid concerns by revising Work Plan gates yourself. **Justify lens:** does every work gate trace up to something in Intent/Design? Are there gates that justify nothing above them (scope creep)? Intent claims with no gate to satisfy them (gaps)?
 - [ ] **Triage plan-review findings: judge = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale). Push back where you have concrete evidence — you live with the outcomes, the reviewer doesn't. Verify file:line claims before applying — single-judge reviews can cite wrong locations.
 
 (plan review findings appear here)
@@ -69,7 +69,7 @@ pending
 ---
 
 ## Implementation Review
-- [ ] Run `tasks impl-review <N>` — wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only). Re-read findings. **Satisfy lens:** does every Intent claim trace down through code to tests? Where does the chain break?
+- [ ] Run `tasks impl-review <N>` — **launch it in the background** (a panel or large review can exceed the 600 s foreground tool-call cap and be killed mid-run; the CLI prints an advisory when it might) and poll; wait for it to finish (it writes the judge's findings into this file; the judge itself is sandboxed read-only). Re-read findings. **Satisfy lens:** does every Intent claim trace down through code to tests? Where does the chain break?
 - [ ] **Triage impl-review findings: judge = opinion, not gospel.** For each finding, document accept (with rationale) / park (with rationale) / reject (with rationale). Push back where you have concrete evidence — you live with the outcomes, the reviewer doesn't. Verify file:line claims before applying — single-judge reviews can cite wrong locations.
 
 (implementation review findings appear here)

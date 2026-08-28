@@ -318,6 +318,10 @@ After all work patterns complete, before code becomes permanent:
 
 ---
 
+## Running a review — always in the background
+
+`tasks panel-review` / `impl-review` / `plan-review` routinely take longer than the 600 s foreground tool-call cap (a full panel is minutes per seat). Launched in the foreground they get **killed mid-run** and you lose the work. Always launch them **detached** (`… &`) and poll for completion, then read `judge.md`. The CLI prints a one-line advisory at start whenever a run's hard timeout can exceed the cap.
+
 ## Limits of Review — what a panel structurally cannot catch
 
 Judges (single or panel) do **conformance** review: does the code match the intent, does the intent match what the user asked. That is genuinely valuable and it is the strongest part of the tool. But three classes of failure are **outside** what any judge can verify, and assuming a clean panel covers them is exactly how they ship. A green panel is *not evidence* on any of these:
