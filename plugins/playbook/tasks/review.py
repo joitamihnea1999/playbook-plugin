@@ -27,6 +27,24 @@ from tasks.core import _safe_hash_regular, resolve_agent_dir
 from tasks.mindmap import _load_mind_map
 from tasks.shared import find_project_root
 
+# The host caps a single foreground tool call at 600 s. A review whose hard
+# timeout can outlast that will be killed mid-run if launched in the foreground,
+# so the CLI advises a background launch up front (task 038).
+_FOREGROUND_TOOL_CAP_SECS = 600
+
+
+def _print_background_advisory(hard_timeout_secs: "int | None") -> None:
+    """Print a one-line advisory when a review's hard timeout can exceed the
+    600 s foreground tool-call cap. `None` = unlimited, which also can exceed it.
+    No-op for a bounded run at/under the cap."""
+    if hard_timeout_secs is None or hard_timeout_secs > _FOREGROUND_TOOL_CAP_SECS:
+        print(
+            "  ⚠ this run may exceed the 600 s foreground tool-call cap — launch "
+            "it in the background (run detached / '&') and poll, or the host may "
+            "kill it mid-run.",
+            flush=True,
+        )
+
 
 def _panel_triage_frame() -> list[str]:
     """Return the lines to append to a panel-review judge.md so the reading
@@ -851,6 +869,7 @@ def cmd_panel_review(cmd_args):
         f"({len(judges)} judges, timeout {timeout_label})...",
         flush=True,
     )
+    _print_background_advisory(timeout_secs)
 
     def run_judge(judge_spec):
         adapter_cls, variant = judge_spec
@@ -1004,6 +1023,31 @@ def cmd_panel_review(cmd_args):
     _fp = tree_state_fingerprint(project_path)
     if _fp:
         lines.append(f"**Tree-state:** {_fp}\n")
+        # Tail-cert F0 descriptor (task 036, finding F): ride the snapshot on the
+        # round next to the stamp it is authenticated by — the close reads it to
+        # enumerate the exact F0→final delta and, when that delta is
+        # non-behavioral-only, certify freshness via a single judge instead of
+        # burning a fresh panel. Best-effort: a descriptor that cannot be built
+        # is simply absent, and the close-time enumerator fails CLOSED (require a
+        # fresh panel) rather than certify on a missing snapshot.
+        try:
+            from tasks.core import (
+                build_panel_snapshot, format_panel_snapshot_line,
+                tree_state_fingerprint as _tsf,
+            )
+            _snap = build_panel_snapshot(project_path, _fp)
+            # Panel-time TOCTOU compare-and-swap (impl-panel sonnet#1 / codex#2 /
+            # grok#2): build_panel_snapshot makes its OWN git calls after the
+            # stamp above, so a code edit in the gap could be baked into the F0
+            # baseline and never seen as a delta. Emit the descriptor ONLY if the
+            # tree still hashes to the SAME `_fp` the panel reviewed; otherwise
+            # omit it (a missing descriptor makes the close fail closed to a fresh
+            # panel — never a silent stale baseline). None (a scope that could not
+            # be captured cleanly, impl-panel opus#2/grok#3) is likewise omitted.
+            if _snap is not None and _tsf(project_path) == _fp:
+                lines.append(format_panel_snapshot_line(_snap) + "\n")
+        except Exception:
+            pass
     if failed:
         lines.append(f"**⚠ Failed judges:** {', '.join(sorted(failed))} — see their blocks below for the exit code / stderr. NOT a clean empty review.\n")
     if over_budget:
@@ -1101,6 +1145,285 @@ def cmd_panel_review(cmd_args):
               "failed seats) or set `panel_quorum` in .agent/config.json if this "
               "bar is wrong for the project.", file=sys.stderr, flush=True)
         sys.exit(1)
+
+
+_TAIL_CERT_TOTAL_CAP = 96 * 1024    # total judge payload — under the argv limit
+_TAIL_CERT_DIFF_CAP = _TAIL_CERT_TOTAL_CAP   # a single content file's ceiling
+                                             # (impl-panel r6 opus F3: one ceiling)
+
+
+def _git_diff_text(repo, args, rel, exclude):
+    """One `git diff` restricted to `rel`, encoding-safe + rc-checked. `--text`
+    forces a textual diff so a doc with a NUL byte is shown, not summarized as
+    "Binary files … differ" (impl-panel r6 grok#1/codex:sol#3). `--no-ext-diff`
+    ignores any user difftool. Returns the diff text, or None on a git error OR a
+    binary summary — either → the caller falls through to raw content."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--text", "--no-ext-diff", *args, "--", rel, *exclude],
+            cwd=repo, capture_output=True, text=True,
+            encoding="utf-8", errors="replace")
+        if r.returncode != 0:
+            return None
+        if "\nBinary files " in r.stdout or r.stdout.startswith("Binary files "):
+            return None                    # still binary → fall to content
+        return r.stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _tail_cert_review_diff(project_path, snapshot) -> "str | None":
+    """The F0→final delta the certifying judge reviews, enumerated PER SCOPE from
+    the snapshot (impl-panel r5 sonnet#2: no string-prefix scope re-derivation, so
+    a `code_roots` entry named like a top-level dir can't misattribute a path).
+
+    DIFF-FIRST for transport friendliness (r5 grok#2/opus F2): for a tracked path
+    the small unified diff — worktree-vs-HEAD, index-vs-HEAD (staged, what
+    `git commit` ships), and F0..HEAD (committed since panel) — is shown, so the
+    flagship large `docs/**/*.json` ledger tail (edited, not rewritten) stays well
+    under the judge's argv limit. Only a path with NO diff (a new untracked doc, or
+    one reverted to HEAD) falls back to its bounded, no-follow CONTENT (never
+    following a symlink or blocking on a FIFO — r2 codex:sol#1/grok#1). Every
+    certifiable path is therefore represented (diff or content or an explicit
+    REMOVED note); a path whose content cannot be captured, or a total payload
+    that would exceed the transport cap, returns None → the caller fails CLOSED."""
+    import subprocess
+    from tasks.core import (
+        _enumerate_scope_delta, _fingerprint_exclude_pathspecs,
+        _safe_read_regular, _tail_cert_scopes, classify_delta_paths, load_config,
+    )
+    try:
+        cfg = load_config(Path(project_path))
+    except Exception:
+        cfg = {}
+    exclude = _fingerprint_exclude_pathspecs(cfg)
+    scopes = _tail_cert_scopes(Path(project_path), cfg)
+    snap_scopes = (snapshot or {}).get("scopes", {}) if isinstance(snapshot, dict) else {}
+    parts = []
+    total = 0
+
+    def _emit(text):
+        nonlocal total
+        # Count BYTES, not characters (impl-panel r11 opus F1): the transport
+        # limit this protects (an argv judge's ~30 KiB cap) is bytes, so a
+        # multi-byte-UTF-8 doc could otherwise exceed it while `total` stayed under.
+        total += len(text.encode("utf-8", "replace"))
+        if total > _TAIL_CERT_TOTAL_CAP:
+            return False                   # payload too large for the transport
+        parts.append(text)
+        return True
+
+    # sonnet#1 (r5): explicit scope-set / commit-presence check, so fail-closed
+    # never rests on git's handling of a degenerate `""..HEAD` ref-range.
+    if set(scopes.keys()) != set(snap_scopes.keys()):
+        return None
+    for name, repo in scopes.items():
+        rec = snap_scopes.get(name) or {}
+        if not isinstance(rec, dict) or not (rec.get("commit") or ""):
+            return None
+        f0 = rec.get("commit") or ""
+        f0_dirty = rec.get("dirty") if isinstance(rec.get("dirty"), dict) else {}
+        scope_paths = _enumerate_scope_delta(repo, f0, f0_dirty, exclude)
+        if scope_paths is None:
+            return None                    # git error → fail closed
+        beh, non = classify_delta_paths(sorted(scope_paths),
+                                        is_outer_scope=(name == ""))
+        if beh:
+            return None                    # a behavioral path here → fail closed
+        for rel in non:
+            prefixed = f"{name}/{rel}" if name else rel
+            # DIFF-FIRST: worktree, staged, committed-since-F0 (all restricted to
+            # rel). If ANY source ERRORS or is BINARY (`_git_diff_text` → None),
+            # do NOT trust a partial diff — fall through to the explicit content +
+            # index path (impl-panel r6 grok#1: a binary `--cached` was silently
+            # skipped while the worktree diff still showed, hiding the staged blob).
+            diffs = []
+            diff_ok = True
+            for label, args in (("worktree vs HEAD", ["HEAD"]),
+                                ("STAGED (index) vs HEAD", ["--cached", "HEAD"]),
+                                ("committed since panel",
+                                 [f"{f0}..HEAD"] if f0 else None)):
+                if args is None:
+                    continue
+                dt = _git_diff_text(repo, args, rel, exclude)
+                if dt is None:
+                    diff_ok = False
+                    break
+                if dt.strip():
+                    diffs.append(f"# {prefixed} — {label}\n{dt}")
+            if diff_ok and diffs:
+                if not _emit("\n".join(diffs)):
+                    return None
+                continue
+            # NO diff → show bounded content (worktree + index) or REMOVED.
+            fpath = Path(repo) / rel
+            shown = False
+            if fpath.exists() or fpath.is_symlink():
+                data = _safe_read_regular(fpath, _TAIL_CERT_DIFF_CAP)
+                if data is None:
+                    return None            # non-regular / oversize / unreadable
+                if not _emit(f"--- current content of {prefixed} ---\n"
+                             + data.decode("utf-8", "replace")):
+                    return None
+                shown = True
+            try:
+                in_index = subprocess.run(["git", "cat-file", "-e", f":{rel}"],
+                                          cwd=repo, capture_output=True).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                return None
+            if in_index:
+                try:
+                    gi = subprocess.run(["git", "show", f":{rel}"], cwd=repo,
+                                        capture_output=True)
+                except (OSError, subprocess.SubprocessError):
+                    return None
+                if gi.returncode != 0 or len(gi.stdout) > _TAIL_CERT_DIFF_CAP:
+                    return None
+                if not _emit(f"--- STAGED (index) content of {prefixed} ---\n"
+                             + gi.stdout.decode("utf-8", "replace")):
+                    return None
+                shown = True
+            if not shown:
+                if not _emit(f"--- {prefixed}: REMOVED/DELETED from worktree AND "
+                             f"index since F0 (a claim was withdrawn) ---"):
+                    return None
+    return "\n\n".join(parts) if parts else "(no certifiable delta content)"
+
+
+def _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce) -> str:
+    """The dedicated tail-cert judge prompt (finding E — never cmd_single_review's
+    plan/impl prompt). Frames the exact contract: a full panel ALREADY PASSED the
+    code at tree F0; the only changes since are these NON-behavioral (docs/tests/
+    claim) files; confirm the delta does not invalidate that verdict or introduce
+    a false claim, and emit a single structured verdict line. The verdict token
+    carries a per-invocation `nonce` so nothing in the reviewed CONTENT can forge
+    it (impl-panel r2 grok#2)."""
+    files = "\n".join(f"  - {p}" for p in non_behavioral) or "  (none listed)"
+    return (
+        "You are a TAIL-CERTIFICATION judge. A full multi-model panel already "
+        "reviewed and PASSED this task's IMPLEMENTATION at an earlier tree state "
+        "(call it F0). Since F0, the ONLY changes to the reviewed code state are "
+        "in NON-BEHAVIORAL file classes — documentation, the guarantee ledger, "
+        "tests, and claim-bearing docs. NO source/behavioral code changed (that "
+        "was verified mechanically before you were called; if it had, this would "
+        "be a fresh full panel instead).\n\n"
+        f"The panel's verdict summary:\n{panel_summary}\n\n"
+        f"The non-behavioral files changed since F0:\n{files}\n\n"
+        "The exact delta diff (F0 → the tree being closed):\n"
+        "```diff\n" + (diff_text or "(empty)") + "\n```\n\n"
+        "YOUR TASK: decide whether this non-behavioral delta is consistent with "
+        "the panel's PASS — i.e. it does not introduce a FALSE or UNSUPPORTED "
+        "claim, does not contradict the code the panel approved, and does not "
+        "smuggle behavioral change through a doc/test file. Read the repository "
+        "as needed. You are NOT re-reviewing the code the panel already passed — "
+        "only whether this delta invalidates that verdict.\n\n"
+        "Answer with your reasoning FIRST. Then, as the VERY LAST line of your "
+        "response, emit your verdict token — the token carries a one-time id you "
+        "must copy exactly, and the last line is the ONLY line read:\n"
+        f"    TAIL-CERT {nonce}: VERDICT\n"
+        "replacing VERDICT with the single word PASS (the delta is consistent and "
+        "the panel verdict stands) or FAIL (it needs a fresh full panel). The last "
+        "line must contain ONLY that token and nothing else — do not quote this "
+        "template earlier, and put no text after the verdict word. Any other final "
+        "line blocks the close (fail-closed)."
+    )
+
+
+def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
+    """Spawn the tail-cert judge (the configured `default_judge`, a real provider
+    adapter) READ-ONLY under the same sandbox as every other judge, and return its
+    raw output. A resolution error or a missing CLI returns an `(error: …)` string
+    that the fail-closed parser maps to None → block.
+
+    There is NO ambient production seam (impl-panel r3 grok#2/codex:sol#4): the
+    round-2 `__test_stub__`/env override was a bypass because BOTH `.agent/
+    models.json` and the env var are machine-local (models.json is gitignored), so
+    it is removed. Deterministic tests of the PASS/FAIL path inject a fake verdict
+    IN-PROCESS by monkeypatching `run_tail_cert_judge`."""
+    import subprocess
+    from provider.sandbox import load_judge_config, resolve_judge_spec
+    dj = load_judge_config(project_path).get("default_judge") or "claude"
+    try:
+        backend, variant = resolve_judge_spec(dj)
+    except ValueError:
+        backend, variant = dj, None
+    try:
+        from provider.subagent import _adapter_class
+        from tasks.core import resolve_judge_budget
+        adapter = _adapter_class(backend)(session_id="tail-cert",
+                                          project_root=Path(project_path))
+        return adapter.run_headless_judge(
+            prompt=prompt, model=variant, system_context="",
+            web_search=False, timeout_secs=timeout_secs,
+            budget_usd=resolve_judge_budget(project_path))
+    except subprocess.TimeoutExpired:
+        return "(error: tail-cert judge timed out)"
+    except Exception as e:
+        return f"(error: tail-cert judge spawn failed: {e})"
+
+
+def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
+                        *, timeout_secs=None, task_file=None) -> "str | None":
+    """Dedicated tail-cert judge (finding E): materialize the certifiable delta,
+    build the tail-cert prompt, spawn the default single judge READ-ONLY under the
+    same tamper backstop the other judge paths use, and parse its NONCED
+    `TAIL-CERT <nonce>: PASS|FAIL` verdict FAIL-CLOSED. Returns "PASS"/"FAIL"/None
+    (None = block). NEVER stacks judge.md and NEVER calls cmd_single_review.
+
+    `task_file` is passed to the tamper guard so it fingerprints `task.md`
+    specifically (impl-panel r7 opus#2/grok#1: `.agent/` is gitignored, so without
+    naming the task file the guard's porcelain/dirty-hash sweep never covers the
+    task record a rogue judge could rewrite during certification)."""
+    import secrets
+    from tasks.core import parse_tail_cert_verdict
+    diff_text = _tail_cert_review_diff(project_path, snapshot)
+    if diff_text is None:
+        return None                    # could not capture the delta → fail closed
+    nonce = secrets.token_hex(8)
+    prompt = _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce)
+    # Same uncontained-judge warning the panel/single-judge paths print (impl-panel
+    # r5 opus F4): on a host with no usable OS sandbox the read-only judge runs
+    # with write access and only the tamper snapshot below defends the tree.
+    try:
+        from provider import sandbox as _sandbox_mod
+        if not _sandbox_mod.containment_available():
+            print("  ⚠ tail-cert judge running UNCONTAINED (no usable OS sandbox "
+                  "here) — the tamper guard is the only defense against repo "
+                  "mutation.", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+    # Tamper backstop (impl-panel r2 opus#2): the panel + single-judge paths
+    # snapshot the repo before spawning and refuse the verdict if the read-only
+    # judge mutated the tree. The close-time fingerprint CAS excludes `.agent/`,
+    # so without this a rogue write to task.md/judge.md during certification is
+    # invisible. Best-effort snapshot: if it can't be taken we still run, matching
+    # the other paths' posture on uncontained platforms.
+    _tf = Path(task_file) if task_file else None
+    _tb = None
+    try:
+        _tb = _snapshot_repo_state(project_path, _tf)
+    except Exception:
+        _tb = None
+    raw = _run_tail_cert_judge_raw(project_path, prompt, timeout_secs)
+    if _tb is not None:
+        try:
+            if _detect_tamper_safe(project_path, _tf, _tb):
+                return None            # repo mutated during cert → no verdict
+        except Exception:
+            return None                # tamper check itself failed → fail closed
+                                       # (r4 grok#3: never certify on an errored guard)
+    # A FAILED/crashed/errored judge must NEVER certify (impl-panel grok#5):
+    # format_judge_output PREFIXES a nonzero exit with "(FAILED \u2026" and a spawn/
+    # resolution error with "(error: \u2026" \u2014 both at the START of the output. Match
+    # only the LEADING marker (impl-panel r9 grok#1: a plain `in raw` also rejected
+    # a legitimate PASS whose prose quotes the injected panel body's failed-seat
+    # `(FAILED \u2014 exit N)` blocks, so the feature never fired). The last-line nonce
+    # parse handles the rest.
+    _rl = (raw or "").lstrip()
+    if not raw or _rl.startswith("(error:") or _rl.startswith("(FAILED"):
+        return None
+    return parse_tail_cert_verdict(raw, nonce)
 
 
 def cmd_single_review(cmd, cmd_args):
@@ -1353,6 +1676,9 @@ def cmd_single_review(cmd, cmd_args):
               "the tamper guard is the only defense against repo mutation.",
               file=sys.stderr, flush=True)
     _tamper_before = _snapshot_repo_state(project_path, task_file)
+    # One advisory before the backend dispatch — covers plan-review AND
+    # impl-review across every backend (task 038).
+    _print_background_advisory(review_timeout)
 
     if backend == "claude":
         claude_bin = shutil.which("claude")

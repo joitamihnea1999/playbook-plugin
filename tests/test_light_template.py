@@ -134,6 +134,31 @@ class RenderedShape(unittest.TestCase):
         self.assertIn("light", quick.lower(),
                       "quick's sticker must carry the selection rule too")
 
+    def test_born_checked_guidance_on_every_sticker(self):
+        # S3 (1.5.41): `born-checked` is the single most frequent block —
+        # agents keep adding ALREADY-checked gates to record completed work.
+        # Every gate-discipline sticker must carry the rule where agents read
+        # it: write the gate BEFORE the step, a gate may never be born checked,
+        # and to record already-done work add it unchecked then check it in a
+        # SEPARATE edit with its outcome. Pins the guidance text so it cannot
+        # silently regress.
+        for ttype in ("build", "light", "quick"):
+            text = render_template(1, "X", ttype).lower()
+            self.assertIn("born checked", text,
+                          f"{ttype} sticker missing the born-checked rule")
+            self.assertIn("separate edit", text,
+                          f"{ttype} sticker missing how to record already-done work")
+
+
+class SkillGuidance(unittest.TestCase):
+    def test_playbook_skill_carries_born_checked_guidance(self):
+        # The playbook skill is the OTHER place agents read gate rules; the
+        # same born-checked guidance must live there too (S3).
+        skill = (PLUGIN / "skills" / "playbook" / "SKILL.md").read_text(
+            encoding="utf-8").lower()
+        self.assertIn("born checked", skill)
+        self.assertIn("separate edit", skill)
+
 
 class CloseSideBar(unittest.TestCase):
     """Default config (no panel_required_for) unless stated."""

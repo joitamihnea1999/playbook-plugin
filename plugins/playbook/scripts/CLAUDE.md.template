@@ -74,6 +74,7 @@ The close is **earned, not asserted** — these are enforced by the CLI, not con
   A failing verify blocks the close. `--force` requires `--reason "why"` — recorded in the receipt.
 - **`tasks audit`** — run before any review: mechanical sweeps (conflict markers, merge artifacts, stale markers, mind-map drift) so judges spend tokens on hard problems, not greppable ones. Reviews warn when the audit is missing or stale.
 - **Judges are advisors, not oracles.** Triage every finding (accept/park/reject with rationale). A clean panel does NOT clear correspondence (does it match the world? check the real artifact), disclosure (secrets/provenance — a grep's job), or blast radius (the `## Risk` gate's job).
+- **Always run reviews in the background.** `tasks panel-review` / `impl-review` / `plan-review` routinely exceed the 600 s foreground tool-call cap and get killed mid-run if launched in the foreground — launch them detached (`&`) and poll for completion. The CLI prints an advisory at start when a run's timeout can exceed the cap.
 - **Test claims need executable proof.** A test you haven't watched fail is not evidence; assert against real output, not a mock you wrote.
 - **Judges can execute what you declare safe.** Add `"judge_verify": ["<command>"]` to `.agent/config.json` — commands that never write inside the repo (redirect caches, unique temp dirs, parallel-safe) — and reviewers may run them to check a specific suspicion. Write your tests to qualify.
 - **Keep task.md reviewable.** Judges read it through a bounded window (newest sections + Intent/Design survive trimming; receipts in judge.md say exactly what was delivered). When a task file grows past the budget, `tasks audit` nudges the sanctioned compaction: wrap old review-round narrative in `<!-- archive:start -->` … `<!-- archive:end -->` and run `tasks compact <N>` — it moves each block VERBATIM to `task-archive.md` and refuses to touch gates, Intent/Design/Parked, or pins. A section that must survive any trim gets `<!-- pin -->` on its own line right under the heading.
@@ -82,7 +83,7 @@ The close is **earned, not asserted** — these are enforced by the CLI, not con
 
 ```bash
 .claude/bin/tasks work <number>              # activate task, hook starts tracking
-.claude/bin/tasks work done                  # verify + receipt + deactivate (--force --reason overrides all; --stale-panel-ok --reason clears only a stale panel)
+.claude/bin/tasks work done                  # verify + receipt + deactivate (--force --reason overrides all; --stale-panel-ok --reason clears only a stale panel; a docs/tests/ledger-only tail is auto-certified by a single judge, but any code delta still needs a fresh panel)
 .claude/bin/tasks new <type> <name>          # create task — does NOT activate
 .claude/bin/tasks list [--pending]           # task overview
 .claude/bin/tasks status                     # current gate position

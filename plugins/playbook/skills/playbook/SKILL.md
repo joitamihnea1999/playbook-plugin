@@ -83,6 +83,11 @@ it matters and how to do it well:
 
 - **Write 1-sentence answers**, not bare checkmarks. A checked box with no
   annotation means you skipped the thinking.
+- **A gate may never be born checked.** Write the gate BEFORE you do its step,
+  then check it — never add a gate that is already `- [x]`. To record work you
+  already finished, add the gate unchecked, then check it in a SEPARATE edit
+  with its outcome. (The batch-close guard blocks born-checked gates; this is
+  the most frequent block, and this is how to avoid it.)
 - **Define OUT of scope** before writing gates. Scope creep starts when
   boundaries aren't explicit.
 - **Write task-specific checkpoint questions at authoring time.** Bad: "is this
@@ -312,6 +317,10 @@ After all work patterns complete, before code becomes permanent:
 - **Full ceremony for trivial changes.** 4 Design Phase gates for 5-line changes. Match template weight to task weight.
 
 ---
+
+## Running a review — always in the background
+
+`tasks panel-review` / `impl-review` / `plan-review` routinely take longer than the 600 s foreground tool-call cap (a full panel is minutes per seat). Launched in the foreground they get **killed mid-run** and you lose the work. Always launch them **detached** (`… &`) and poll for completion, then read `judge.md`. The CLI prints a one-line advisory at start whenever a run's hard timeout can exceed the cap.
 
 ## Limits of Review — what a panel structurally cannot catch
 

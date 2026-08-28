@@ -695,8 +695,52 @@ def network_isolation_available() -> bool:
     return bool(shutil.which("bwrap"))
 
 
+# Parent-session identity that a sandboxed child must never inherit. The lead
+# case is CLAUDE_ENV_FILE: the foreground writes its `export PLAYBOOK_SESSION_ID`
+# there, and a child that keeps the variable has its OWN Claude-Code SessionStart
+# hook APPEND to that same shared file — shadowing the foreground's active-task
+# pointer so the code-edit gate resolves an empty `sessions/<wrong-id>/` and
+# reports "No active task" mid-task (found live in task 036;
+# PB-SESSION-POINTER-ISOLATION). The CLAUDE_CODE_* / CLAUDE_PROJECT_DIR siblings
+# name the parent session/socket/entrypoint; the claude adapter already popped
+# those three on its own judge path — stripping here makes it uniform across
+# EVERY sandboxed subprocess (panel, single judge, sandbox CLI, stream sidebars,
+# all providers), which is the single boundary they all funnel through. The
+# child agent (Claude Code) mints its own fresh values at launch, and judges
+# carry an explicit isolated PLAYBOOK_SESSION_ID, so nothing loses its identity.
+_PARENT_SESSION_ENV = (
+    "CLAUDE_ENV_FILE",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_PROJECT_DIR",
+    # Parent-session IDENTITY + IPC credentials (not the pointer vector, but a
+    # sandboxed read-only judge/subagent must not inherit them: a child
+    # `claude -p` that keeps CLAUDE_CODE_SESSION_ID could resume/append to the
+    # parent's session transcript, and the messaging socket/token attach it to
+    # the parent's IPC channel). The child mints its own at launch.
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_PID",
+)
+
+
+def scrub_parent_session_env(env: dict[str, str]) -> dict[str, str]:
+    """Remove the parent-session identity vars (`_PARENT_SESSION_ENV`) from `env`
+    IN PLACE and return it. The single source of the strip: `_child_env` uses it
+    for everything routed through the sandbox, and a direct-spawn site that does
+    NOT go through the sandbox (e.g. `models_check.probe_claude_model` running
+    `claude -p` itself) calls it too, so no spawn point re-opens the leak
+    piecemeal (task 037 round-4, panel codex-terra F1)."""
+    for var in _PARENT_SESSION_ENV:
+        env.pop(var, None)
+    return env
+
+
 def _child_env(env: dict[str, str] | None) -> dict[str, str]:
     child_env = dict(os.environ) if env is None else dict(env)
+    scrub_parent_session_env(child_env)
     child_env["PLAYBOOK_SANDBOXED"] = "1"
     return child_env
 

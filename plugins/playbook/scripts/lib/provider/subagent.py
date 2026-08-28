@@ -20,11 +20,27 @@ Sinks:
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal, Optional
 
 from . import sandbox as _sandbox
+
+
+def _isolated_subagent_env(session_id: str) -> dict[str, str]:
+    """Env for a sandboxed subagent that CANNOT share the foreground session.
+
+    Without an explicit env, `sandbox.run(env=None)` builds `dict(os.environ)`,
+    which PRESERVES the foreground `PLAYBOOK_SESSION_ID` — so a writable subagent
+    resolves the foreground session dir and its SessionEnd hook could delete the
+    foreground's active-task pointer (panel codex-sol F2, task 037). Pin an
+    isolated per-invocation id; `sandbox._child_env` strips the remaining
+    parent-session identity vars (CLAUDE_ENV_FILE, the CLAUDE_CODE_* siblings)."""
+    env = dict(os.environ)
+    env["PLAYBOOK_SESSION_ID"] = session_id
+    return env
 
 
 def _adapter_class(agent: str):
@@ -76,15 +92,20 @@ class SubagentResult:
 
 
 def build_invocation(spec: SubagentSpec, *, project_root: Path | str,
-                     stream: bool = False):
+                     stream: bool = False, session_id: str = "subagent"):
     """Build the agent's native headless invocation WITHOUT running it.
 
     Split out of run_subagent so `sandbox --print-argv --prompt ...` inspects the
     same argv the run would use — one source of truth, so the dry run can never
     drift from the real one.
+
+    `session_id` names the adapter's identity; the run/stream entrypoints pass a
+    unique isolated id (matching the env's `PLAYBOOK_SESSION_ID`) so a subagent
+    never shares the foreground session. Defaults to the legacy "subagent" for
+    the dry-run/inspection path where no run happens.
     """
     adapter = _adapter_class(spec.agent)(
-        session_id="subagent", project_root=Path(project_root))
+        session_id=session_id, project_root=Path(project_root))
     return adapter.headless_argv(
         spec.prompt, spec.model, context=spec.context, bare=spec.bare,
         **({"stream": True} if stream else {}))
@@ -97,7 +118,8 @@ def run_subagent(spec: SubagentSpec, *, project_root: Path | str) -> SubagentRes
     a single value — it yields events as they arrive.
     """
     project_root = Path(project_root)
-    inv = build_invocation(spec, project_root=project_root)
+    sub_sid = f"subagent-{uuid.uuid4().hex[:12]}"
+    inv = build_invocation(spec, project_root=project_root, session_id=sub_sid)
 
     extra_rw = list(spec.extra_rw)
     if spec.workspace:
@@ -109,6 +131,7 @@ def run_subagent(spec: SubagentSpec, *, project_root: Path | str) -> SubagentRes
         spec.agent, inv.argv,
         project_root=project_root,
         input=inv.stdin,
+        env=_isolated_subagent_env(sub_sid),
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=spec.timeout_secs,
         extra_rw=extra_rw or None,
@@ -187,7 +210,9 @@ def stream_subagent(spec: SubagentSpec, *, project_root: Path | str) -> Iterator
     import subprocess
     import threading
     project_root = Path(project_root)
-    inv = build_invocation(spec, project_root=project_root, stream=True)
+    sub_sid = f"subagent-{uuid.uuid4().hex[:12]}"
+    inv = build_invocation(spec, project_root=project_root, stream=True,
+                           session_id=sub_sid)
     extra_rw = list(spec.extra_rw)
     if spec.workspace:
         extra_rw.append(str(spec.workspace))
@@ -199,6 +224,7 @@ def stream_subagent(spec: SubagentSpec, *, project_root: Path | str) -> Iterator
     proc = _sandbox.popen(
         spec.agent, inv.argv,
         project_root=project_root,
+        env=_isolated_subagent_env(sub_sid),
         extra_rw=extra_rw or None,
         project_writable=project_writable,
         **popen_kwargs,

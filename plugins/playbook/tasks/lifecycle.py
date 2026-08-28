@@ -362,6 +362,94 @@ def cmd_work(cmd_args):
                     now_fp=_now_fp, force=force,
                     stale_ok=stale_panel_ok, stale_reason=reason,
                 )
+                # TAIL CERTIFICATION (task 036, owner decision A). When the panel
+                # is STALE and would block, but the ONLY post-panel delta is in
+                # non-behavioral file classes (docs/tests/ledger/claim docs), a
+                # single judge may re-certify the exact delta instead of forcing a
+                # fresh full panel. Any code-path delta (incl. a code comment) still
+                # blocks. Reached ONLY on the plain stale block (not --force, not
+                # --stale-panel-ok, an actual STALE verdict on a carrying panel);
+                # everything fails CLOSED (missing descriptor, scope change, git
+                # error, behavioral delta, non-PASS verdict, or a tree that mutates
+                # during the judge call — the TOCTOU compare-and-swap below).
+                if (not _f_allowed and not force and not stale_panel_ok
+                        and _carries and _impl is not None and _freshness
+                        and _freshness.get("verdict") == "STALE"):
+                    from tasks.core import (
+                        tail_cert_delta, tail_cert_gate_decision,
+                    )
+                    from tasks.review import run_tail_cert_judge
+                    _snap = _impl.get("snapshot") if _impl else None
+                    _tc_can, _tc_beh, _tc_non = tail_cert_delta(
+                        project_path, _snap, _impl["tree_state"])
+                    _tc_verdict = None
+                    if _tc_can and not _tc_beh:
+                        # Give the certifying judge what the panel actually
+                        # reviewed (impl-panel r6 opus F1): a bare "PANEL PASS"
+                        # can't tell the judge whether a docs delta CONTRADICTS an
+                        # approved claim. Pass a bounded slice of the impl round
+                        # body (its verdict + findings).
+                        # Strip the single-line `**Panel-snapshot:**` JSON (per-
+                        # path sha256 for every dirty file — can exceed 8 KB on a
+                        # dirty tree) and the `**Tree-state:**` stamp before slicing
+                        # (impl-review r12b F2), so the judge's summary is the
+                        # VERDICT + FINDINGS, not raw descriptor bytes.
+                        _body = "\n".join(
+                            _ln for _ln in (_impl.get("body") or "").splitlines()
+                            if not _ln.startswith(("**Panel-snapshot:**",
+                                                   "**Tree-state:**")))[:8000]
+                        _panel_summary = (
+                            f"PANEL {_impl.get('verdict')} impl review at tree "
+                            f"{_impl['tree_state']}. The panel's round (verdict + "
+                            f"findings) follows — use it to judge whether this "
+                            f"non-behavioral delta contradicts what was approved:\n"
+                            f"{_body}")
+                        print("  … non-behavioral post-panel delta — running "
+                              "single-judge tail certification", file=sys.stderr,
+                              flush=True)
+                        from tasks.core import resolve_review_timeout
+                        _tc_verdict = run_tail_cert_judge(
+                            project_path, _snap, _tc_non, _panel_summary,
+                            timeout_secs=resolve_review_timeout(project_path),
+                            task_file=task_file)
+                        if _tc_verdict == "PASS":
+                            # Finding D (TOCTOU): the judge call is long; recompute
+                            # the fingerprint and require it to equal the one the
+                            # certification was computed against — a compare-and-
+                            # swap that closes the mutate-during-cert window
+                            # without a lock. impl-panel r5 codex:terra#1/sol#1: the
+                            # scope-set + exclude-set + delta checks live INSIDE
+                            # tail_cert_delta and ran BEFORE the judge, so re-run
+                            # the WHOLE thing here and require the identical
+                            # non-behavioral-only result (a fingerprint match alone
+                            # doesn't re-validate a code_root removal or an exclude
+                            # change made during the judge call).
+                            _recheck_fp = tree_state_fingerprint(project_path)
+                            _r_can, _r_beh, _r_non = tail_cert_delta(
+                                project_path, _snap, _impl["tree_state"])
+                            if (_recheck_fp != _now_fp or not _r_can or _r_beh
+                                    or _r_non != _tc_non):
+                                _tc_verdict = None
+                                print("  ⚠ tree/scope changed during certification "
+                                      "— not certifying (fresh panel required)",
+                                      file=sys.stderr, flush=True)
+                    _tc_allowed, _tc_clause = tail_cert_gate_decision(
+                        can_certify=_tc_can, behavioral_nonempty=bool(_tc_beh),
+                        cert_verdict=_tc_verdict, non_behavioral=_tc_non)
+                    if _tc_allowed:
+                        _f_allowed = True
+                        _freshness = {
+                            "verdict": "TAIL-CERT-PASS",
+                            "round_fp": _impl["tree_state"],
+                            "now_fp": _now_fp,
+                            "cert_clause": _tc_clause,
+                        }
+                        print(f"  ✓ tail-certified: {_tc_clause}",
+                              file=sys.stderr, flush=True)
+                    else:
+                        _f_reason = (_f_reason
+                                     + f"\n  (tail certification attempted: "
+                                       f"{_tc_clause})")
                 if not _f_allowed:
                     print(f"\nBlocked: cannot close task {prev_task} — {_f_reason}",
                           file=sys.stderr, flush=True)
