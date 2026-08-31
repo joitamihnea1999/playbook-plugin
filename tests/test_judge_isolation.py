@@ -190,6 +190,68 @@ class TamperGuardTest(unittest.TestCase):
         changes = treview._detect_tamper(d, tf, before)
         self.assertTrue(changes, "a non-monitor .agent file must still flag")
 
+    def test_untracked_task_dir_record_churn_is_not_tamper(self):
+        # E1 (1.5.42): when the task's OWN directory is UNTRACKED in the repo at
+        # first-panel/snapshot time, `git status -uall` enumerates every record
+        # file inside it as a `??` line. A panel then legitimately writes judge.md
+        # and other review artifacts into that dir WHILE it runs — sanctioned
+        # task-record churn, the same class as the .agent/*/monitor/ writer.
+        # Before the fix those new record lines surfaced as working-tree tamper
+        # and voided a paid panel. task.md's own CONTENT stays guarded by
+        # task_hash, so a rogue rewriting the work plan is still caught.
+        d = self._git_repo()
+        (d / "README").write_text("x\n")                  # committed baseline
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
+        taskdir = d / ".agent" / "tasks" / "041-foo"
+        taskdir.mkdir(parents=True)
+        tf = taskdir / "task.md"
+        tf.write_text("gate1\n")                          # untracked task dir
+        before = treview._snapshot_repo_state(d, tf)
+        (taskdir / "judge.md").write_text("panel verdict\n")   # sanctioned record
+        (taskdir / "reviews").mkdir()
+        (taskdir / "reviews" / "opus.md").write_text("finding\n")
+        self.assertEqual(treview._detect_tamper(d, tf, before), [],
+                         "the task's own untracked record dir must not read as tamper")
+
+    def test_rogue_untracked_file_outside_task_dir_still_flags(self):
+        # Negative control for E1: the exclusion is the task's OWN dir ONLY — a
+        # rogue writing an untracked file ELSEWHERE still trips the guard even
+        # when the task dir itself is untracked and excluded.
+        d = self._git_repo()
+        (d / "README").write_text("x\n")
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
+        taskdir = d / ".agent" / "tasks" / "041-foo"
+        taskdir.mkdir(parents=True)
+        tf = taskdir / "task.md"
+        tf.write_text("gate1\n")
+        before = treview._snapshot_repo_state(d, tf)
+        (taskdir / "judge.md").write_text("panel verdict\n")   # sanctioned
+        (d / "rogue.py").write_text("import os\n")             # real tamper
+        changes = treview._detect_tamper(d, tf, before)
+        self.assertTrue(any("rogue.py" in c for c in changes),
+                        "a write outside the task dir must still flag as tamper")
+
+    def test_tracked_task_dir_edit_still_flags(self):
+        # Negative control for E1 (impl-review, codex): the exemption is gated on
+        # the task dir being UNTRACKED at snapshot. When the task dir is TRACKED,
+        # the guard stays fully armed — a rogue editing a tracked file inside it
+        # (e.g. judge.md / task-archive.md) is still caught.
+        d = self._git_repo()
+        taskdir = d / ".agent" / "tasks" / "041-foo"
+        taskdir.mkdir(parents=True)
+        tf = taskdir / "task.md"
+        tf.write_text("gate1\n")
+        (taskdir / "judge.md").write_text("v1\n")         # tracked record file
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
+        before = treview._snapshot_repo_state(d, tf)
+        (taskdir / "judge.md").write_text("v1\nrogue\n")   # edit a tracked record
+        changes = treview._detect_tamper(d, tf, before)
+        self.assertTrue(any("judge.md" in c for c in changes),
+                        "editing a tracked file in a tracked task dir must flag")
+
     def test_git_tamper_catches_taskmd_edit_and_new_file(self):
         d = self._git_repo()
         tf = d / "task.md"

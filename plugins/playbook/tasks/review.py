@@ -481,6 +481,30 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     _monitor_re = re.compile(r"^..\s+\"?\.agent(/[^/]+)?/monitor/")
     _monitor_path_re = re.compile(r"^\.agent(/[^/]+)?/monitor/")
     b_porc, a_porc = before.get("porcelain"), after.get("porcelain")
+    # E1: the task's OWN record directory is sanctioned churn — a panel
+    # legitimately writes judge.md / review artifacts / task.md updates there
+    # WHILE it runs. When that directory is UNTRACKED at snapshot time, `-uall`
+    # enumerates each record file as a `??` line, and the panel's later record
+    # writes add more `??` lines that would otherwise surface as working-tree
+    # tamper and void a paid panel — the same class as the monitor exclusion
+    # above. Scope the exemption to that actual condition (the task dir was
+    # untracked at snapshot, so at least one `??` line under it is present in
+    # `before`): when the task dir is TRACKED the guard already worked and stays
+    # fully armed — a rogue editing a tracked file there is still caught. Either
+    # way task.md's own CONTENT stays guarded by `task_hash` (below), so a rogue
+    # rewriting the work plan is caught regardless.
+    _taskdir_re = None
+    _taskdir_path_re = None
+    if task_file is not None and b_porc:
+        try:
+            _td = task_file.parent.relative_to(project_path).as_posix()
+        except (ValueError, AttributeError):
+            _td = None
+        if _td and _td != ".":
+            _untracked_td_re = re.compile(r'^\?\?\s+"?' + re.escape(_td) + r"/")
+            if any(_untracked_td_re.match(ln) for ln in b_porc.splitlines()):
+                _taskdir_re = re.compile(r'^..\s+"?' + re.escape(_td) + r"/")
+                _taskdir_path_re = re.compile(r"^" + re.escape(_td) + r"/")
     # Fail CLOSED if the content-hash guard could not run: a git repo whose `-z`
     # enumeration failed on either snapshot has an empty/partial `dirty_hashes`,
     # so a content-only edit to an already-dirty file would slip the compare
@@ -524,9 +548,13 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
         for line in sorted(a_lines - b_lines):
             if _monitor_re.match(line):
                 continue
+            if _taskdir_re and _taskdir_re.match(line):
+                continue
             changes.append(f"working tree: {line.strip()}")
         for line in sorted(b_lines - a_lines):
             if _monitor_re.match(line):
+                continue
+            if _taskdir_re and _taskdir_re.match(line):
                 continue
             changes.append(f"working tree reverted/removed: {line.strip()}")
     # Content edits to files that were ALREADY dirty at snapshot time — an
@@ -546,6 +574,8 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     a_dirty = after.get("dirty_hashes") or {}
     for rel in sorted(set(b_dirty) & set(a_dirty)):
         if _monitor_path_re.match(rel) or rel == _task_rel:
+            continue
+        if _taskdir_path_re and _taskdir_path_re.match(rel):
             continue
         if b_dirty[rel] != a_dirty[rel]:
             changes.append(f"working tree content changed: {rel}")
