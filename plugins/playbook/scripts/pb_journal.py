@@ -253,9 +253,15 @@ def _write_record(agent_dir, rec) -> None:
     data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     # O_NONBLOCK: a FIFO with no reader fails ENXIO here rather than blocking.
     # O_NOFOLLOW: a symlinked final component fails ELOOP (no lane escape).
+    # Both are POSIX-only — Windows Python defines neither, so getattr(...,0)
+    # makes them no-ops there (Windows has no FIFO/symlink-hang vector on this
+    # path; the fstat regular-file check below still applies). Using os.O_NONBLOCK
+    # directly raised AttributeError on Windows, which the caller swallowed and
+    # silently dropped EVERY journal write, incl. the enforcement journal.
     fd = os.open(str(jdir / "enforcement.jsonl"),
-                 os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK
-                 | getattr(os, "O_NOFOLLOW", 0), 0o644)
+                 os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                 | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+                 0o644)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):    # FIFO/device/dir/socket → not our sink

@@ -54,6 +54,22 @@ def _read_journal(agent_dir: Path) -> "list[dict]":
     return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
+def _can_symlink() -> bool:
+    """os.symlink EXISTS on Windows but usually raises without privilege — probe
+    the real capability rather than skipUnless(hasattr(os,'symlink'))."""
+    if not hasattr(os, "symlink"):
+        return False
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            os.symlink(Path(d) / "target", Path(d) / "link")
+            return True
+        except (OSError, NotImplementedError):
+            return False
+
+
+_CAN_SYMLINK = _can_symlink()
+
+
 @contextlib.contextmanager
 def _chdir(d: Path):
     prev = Path.cwd()
@@ -192,7 +208,7 @@ class AppendReviewFormat(unittest.TestCase):
         pbj.append_review(self.agent, seat="claude:opus:high", task="1",
                           round_no=1, kind="single", duration_ms=1, status="ok")
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink")
+    @unittest.skipUnless(_CAN_SYMLINK, "requires working symlink")
     def test_symlinked_journal_file_writes_nothing_outside_lane(self):
         # O_NOFOLLOW: a symlinked enforcement.jsonl must not let a write escape
         # the lane (impl-panel round 3).
@@ -204,7 +220,7 @@ class AppendReviewFormat(unittest.TestCase):
                           round_no=1, kind="single", duration_ms=1, status="ok")
         self.assertEqual(outside.read_text(encoding="utf-8"), "")
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink")
+    @unittest.skipUnless(_CAN_SYMLINK, "requires working symlink")
     def test_symlinked_journal_dir_writes_nothing_outside_lane(self):
         # O_NOFOLLOW only guards the leaf file; a symlinked journal/ DIRECTORY
         # would still resolve the write outside the lane (impl-panel round 4).
