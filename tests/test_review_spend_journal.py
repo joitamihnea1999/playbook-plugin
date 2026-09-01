@@ -204,6 +204,19 @@ class AppendReviewFormat(unittest.TestCase):
                           round_no=1, kind="single", duration_ms=1, status="ok")
         self.assertEqual(outside.read_text(encoding="utf-8"), "")
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink")
+    def test_symlinked_journal_dir_writes_nothing_outside_lane(self):
+        # O_NOFOLLOW only guards the leaf file; a symlinked journal/ DIRECTORY
+        # would still resolve the write outside the lane (impl-panel round 4).
+        # The lstat-skip on the journal parent closes it.
+        outside = Path(self._tmp.name) / "outside_dir"
+        outside.mkdir()
+        os.symlink(outside, self.agent / "journal")   # journal/ is a symlink
+        pbj.append_review(self.agent, seat="claude:opus:high", task="1",
+                          round_no=1, kind="single", duration_ms=1, status="ok")
+        self.assertFalse((outside / "enforcement.jsonl").exists(),
+                         "a symlinked journal/ dir must not let the write escape the lane")
+
     def test_unwritable_lane_is_silent_noop(self):
         # journal PATH is a regular file → mkdir + open both fail. Must not raise.
         (self.agent / "journal").write_text("i am a file", encoding="utf-8")
@@ -449,6 +462,31 @@ class SingleSpendE2E(_E2EBase):
         # A timed-out judge that also tampered: the banner already fired, and the
         # uniform "tamper records nothing" rule applies (gated on _to_changes).
         self.assertEqual(self._run_single_timeout(tampered=True), [])
+
+    def test_failed_judge_still_records_fail(self):
+        # "the tokens were spent regardless of the verdict" — a FAILED/nonzero
+        # single-judge output must still land one record (status=fail), because
+        # the emit sits BEFORE the failure sys.exit (impl-panel round 4, opus F2).
+        import shutil
+        import types
+        import unittest.mock as mock
+        from provider import sandbox
+        patches = [
+            mock.patch.object(sandbox, "run",
+                              lambda agent, args, **kw: types.SimpleNamespace(
+                                  returncode=1, stdout="model is not supported", stderr="")),
+            mock.patch.object(shutil, "which", lambda name: "/usr/bin/" + name),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with _chdir(self.project):
+            with contextlib.suppress(SystemExit):
+                review.cmd_single_review(
+                    "plan-review", ["042", "--backend", "claude", "--model", "opus"])
+        recs = [r for r in _read_journal(self.agent) if r["hook"] == "review"]
+        self.assertEqual(len(recs), 1, recs)
+        self.assertEqual(recs[0]["status"], "fail")
 
     def test_unwritable_journal_changes_nothing(self):
         # Baseline: writable journal.

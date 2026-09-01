@@ -86,11 +86,15 @@ therefore does NOT imply tokens were spent; it means "no usable review," with
 
 All numeric fields (`round`, `duration_ms`, and the usage token counts) are
 magnitude-capped (to 15 digits) and all string fields are byte-capped with
-control characters stripped, so no pathological value or injected control
-character can push the serialized line past the PIPE_BUF atomic-write bound. The
-journal file is opened non-blocking and without following symlinks and confirmed
-to be a regular file before any write, so a hostile-tree swap of the journal path
-to a FIFO/symlink is skipped rather than hanging or escaping the lane.
+control characters stripped, so **real** records stay well under the PIPE_BUF
+atomic-write bound. This is a best-effort bound, not an absolute one: a
+pathological caller could still exceed it (e.g. a field stuffed with `"`/`\`,
+which JSON escapes to two bytes each) — an accepted bound, never a correctness
+risk, because the write never affects any decision. The journal file is opened
+non-blocking and without following symlinks, its `journal/` parent is lstat-
+checked, and the fd is confirmed to be a regular file before any write, so a
+hostile-tree swap of the journal path (or its parent dir) to a FIFO/symlink is
+skipped rather than hanging or escaping the lane.
 
 On a **panel**, one record lands per seat, all sharing the same `round`.
 

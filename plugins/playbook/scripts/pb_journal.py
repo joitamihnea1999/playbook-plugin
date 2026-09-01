@@ -134,12 +134,15 @@ def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
                         the claude judge runs in plain-text mode and codex/grok do
                         not surface per-call tokens here, so `unknown` is the norm.
 
-    EVERY field is bounded so the record stays well under the 512-byte
-    atomic-write floor — the same bound `append` documents. `session_id` is
-    byte-capped and `usage` is normalized to the fixed `{status[,in,out]}` schema
-    (arbitrary caller dicts are NOT copied verbatim), because an unbounded
-    session id or a large usage dict would blow the PIPE_BUF concurrent-append
-    bound (impl-panel codex, task 042).
+    Every field is bounded so REAL records stay well under the 512-byte
+    atomic-write floor: strings are byte-capped with control characters stripped,
+    numerics are magnitude-capped, `session_id` is capped, and `usage` is
+    normalized to the fixed `{status[,in,out]}` schema (arbitrary caller dicts are
+    NOT copied verbatim). This is the same HONEST bound `append` documents: a
+    pathological caller could still exceed PIPE_BUF (e.g. a field stuffed with
+    `"`/`\\`, which JSON escapes 2×) — an accepted best-effort bound, never a
+    correctness risk, because the write never affects a decision (impl-panel
+    rounds 2-4, task 042).
     """
     try:
         rec = {
@@ -230,6 +233,19 @@ def _write_record(agent_dir, rec) -> None:
     if not agent_dir.is_dir():              # playbook-managed lane only
         return
     jdir = agent_dir / "journal"
+    # A symlinked `journal` DIRECTORY would let the file open below resolve
+    # OUTSIDE the lane — O_NOFOLLOW on the leaf file does NOT protect an
+    # intermediate symlinked component (impl-panel round 4, unanimous). lstat the
+    # journal component and skip if it is a symlink. (Residual, honestly bounded:
+    # a TOCTOU swap of the dir between this lstat and the open below is a tiny
+    # window on a best-effort log with no reader waiting — far under this
+    # feature's threat model; a dirfd/openat anchor would close it fully but is
+    # not portable to Windows-Git-Bash.)
+    try:
+        if jdir.is_symlink():
+            return
+    except OSError:
+        return
     try:
         jdir.mkdir(exist_ok=True)           # inside an existing lane; not `.agent`
     except OSError:
