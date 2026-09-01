@@ -17,10 +17,12 @@ command module (design-1.5.9.md §4).
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 from tasks.atomic import atomic_write
 from tasks.core import _safe_hash_regular, resolve_agent_dir
@@ -31,6 +33,153 @@ from tasks.shared import find_project_root
 # timeout can outlast that will be killed mid-run if launched in the foreground,
 # so the CLI advises a background launch up front (task 038).
 _FOREGROUND_TOOL_CAP_SECS = 600
+
+
+# ── Review-spend journal (task 042) ──────────────────────────────────────────
+# Every judge invocation appends ONE best-effort spend record to the enforcement
+# journal (hook="review", decision="record") via pb_journal.append_review — seat,
+# task, round, kind, wall duration, exit status, token usage. IDENTICAL hard
+# contract to the enforcement journal: a write failure NEVER changes or breaks a
+# review or any decision. Emitted from the review runner itself where the judge
+# subprocess has ALREADY completed — no new interpreter startup on any hot path.
+
+_PB_JOURNAL_MOD = None
+_PB_JOURNAL_LOADED = False
+
+
+def _load_pb_journal():
+    """Load scripts/pb_journal.py once, in-process, and cache it. Returns the
+    module or None. Loaded like command_guard's helper (by file path) so its
+    absence can never break a review. This is an in-process import, NOT a
+    subprocess — the 'no new interpreter startups on hot paths' constraint."""
+    global _PB_JOURNAL_MOD, _PB_JOURNAL_LOADED
+    if _PB_JOURNAL_LOADED:
+        return _PB_JOURNAL_MOD
+    _PB_JOURNAL_LOADED = True
+    try:
+        import importlib.util as _ilu
+        _p = Path(__file__).resolve().parent.parent / "scripts" / "pb_journal.py"
+        _spec = _ilu.spec_from_file_location("_pb_journal_review", _p)
+        if _spec is not None and _spec.loader is not None:
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _PB_JOURNAL_MOD = _mod
+    except Exception:
+        _PB_JOURNAL_MOD = None
+    return _PB_JOURNAL_MOD
+
+
+def _journal_review_spend(project_path, *, kind, seat, task, round_no,
+                          duration_ms, status, usage=None, session_id=""):
+    """Best-effort review-spend record. NEVER raises; a failure is swallowed so a
+    review is unaffected. `usage=None` → the explicit `{"status":"unknown"}`
+    marker (numbers are never fabricated)."""
+    try:
+        pbj = _load_pb_journal()
+        if pbj is None:
+            return
+        agent_dir = pbj.resolve_lane_dir(project_path)
+        sid = session_id or os.environ.get("PLAYBOOK_SESSION_ID", "") or ""
+        pbj.append_review(
+            agent_dir, session_id=sid, seat=seat or "",
+            task=(str(task) if task else "-"), round_no=round_no,
+            kind=kind, duration_ms=duration_ms, status=status, usage=usage)
+    except Exception:
+        pass
+
+
+def _judge_status(output, timed_out=False):
+    """Map a judge result to the spend status enum: ok | fail | timeout | dnf.
+
+    dnf = did-not-finish: a spawn/resolution error ("(error: …)" — CLI missing,
+    adapter raised) that never produced a review. A budget/failure-marked output
+    is `fail`; a clean review is `ok`. The tail-cert path returns its timeout as
+    an "(error: … timed out)" string rather than raising, so a leading error
+    that says so is classified `timeout`, not `dnf`."""
+    if timed_out:
+        return "timeout"
+    _o = (output or "").lstrip()
+    if _o.startswith("(error:"):
+        return "timeout" if "timed out" in _o.lower() else "dnf"
+    try:
+        from tasks.models_check import judge_failed as _jf
+        if _jf(output):
+            return "fail"
+    except Exception:
+        pass
+    return "ok"
+
+
+def _parse_judge_usage(output_text):
+    """Best-effort token usage IF the judge output carries it — else None (the
+    caller then records `{"status":"unknown"}`). NEVER fabricates numbers.
+
+    The claude judge runs in PLAIN-TEXT mode (no `--output-format json`) and
+    codex/grok do not surface per-call tokens on this path, so this normally
+    returns None. It recognizes claude's REAL JSON usage shape
+    (`"usage":{"input_tokens":N,"output_tokens":N}`) should a future/other path
+    ever emit it — a real format, not an invented one.
+
+    ANCHORED to a structured envelope (impl-panel sonnet, task 042): the output
+    must PARSE AS A SINGLE JSON OBJECT carrying the usage shape. A bare substring
+    search over free-form judge prose was self-poisoning — a judge that merely
+    QUOTES a `"usage":{"input_tokens":…}` string (e.g. citing this task's own
+    test file) would have made us record ITS quote as real token spend,
+    fabricating a number. Free-form judge prose never parses as one JSON object,
+    so it can never trip this now."""
+    if not output_text:
+        return None
+    s = output_text.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    usage = obj.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    try:
+        _in = usage.get("input_tokens")
+        _out = usage.get("output_tokens")
+        if isinstance(_in, int) and isinstance(_out, int):
+            return {"status": "known", "in": _in, "out": _out}
+    except Exception:
+        return None
+    return None
+
+
+def _next_review_round(project_path, task_file):
+    """The review iteration this spend belongs to = existing rounds + 1.
+    Best-effort: any failure → 0 (unknown). This is a log field, never a gate
+    input. Uniform across kinds — for single/tail-cert it reflects the panel
+    rounds recorded so far (an approximate spend-correlation hint), documented
+    as such in the record shape doc.
+
+    Counts BOTH judge.md and its overflow sibling judge-archive.md (impl-panel
+    codex:sol, task 042): judge.md retains only the newest JUDGE_MD_MAX_ROUNDS
+    (5) rounds and archives the rest, so counting judge.md alone would cap the
+    round at 6 once archiving begins. The true count = rounds in both files (see
+    MIND_MAP [8])."""
+    try:
+        if not task_file:
+            return 1
+        from tasks.core import parse_judge_rounds
+        total = 0
+        seen = False
+        for name in ("judge.md", "judge-archive.md"):
+            p = Path(task_file).parent / name
+            if p.exists():
+                seen = True
+                total += len(parse_judge_rounds(
+                    p.read_text(encoding="utf-8", errors="replace")))
+        if not seen:
+            return 1
+        return total + 1
+    except Exception:
+        return 0
 
 
 def _print_background_advisory(hard_timeout_secs: "int | None") -> None:
@@ -928,6 +1077,9 @@ def cmd_panel_review(cmd_args):
 
         # Single attempt only — never restart a long-running judge. The
         # hard timeout is hang safety alone (None = no kill at all).
+        # `_t0` wall clock brackets the subprocess for the spend record (task
+        # 042); every return path reports its own elapsed + timed-out flag.
+        _t0 = time.monotonic()
         try:
             adapter = adapter_cls(session_id="judge", project_root=project_path)
             output = adapter.run_headless_judge(
@@ -938,12 +1090,13 @@ def cmd_panel_review(cmd_args):
                 timeout_secs=timeout_secs,
                 budget_usd=panel_budget,
             )
-            return label, output
+            return label, output, int((time.monotonic() - _t0) * 1000), False
         except subprocess.TimeoutExpired as expired:
             # Keep whatever this seat had written. The marker stays FIRST so
             # the seat is still classified as failed and no reader mistakes a
             # truncated block for a finished review — but a seat that spent
             # the whole budget should still contribute what it found.
+            _dur = int((time.monotonic() - _t0) * 1000)
             raw = getattr(expired, "stdout", None) or getattr(expired, "output", None) or ""
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", errors="replace")
@@ -954,10 +1107,10 @@ def cmd_panel_review(cmd_args):
                     f"{marker}\n\n**INCOMPLETE** — killed mid-response; the "
                     f"findings below may be cut off and reached no conclusion:"
                     f"\n\n{raw}"
-                )
-            return label, marker
+                ), _dur, True
+            return label, marker, _dur, True
         except Exception as e:
-            return label, f"(error: {e})"
+            return label, f"(error: {e})", int((time.monotonic() - _t0) * 1000), False
 
     # Judge tamper guard (#1): judges are read-only evaluators, so snapshot
     # the repo before spawning and refuse to trust the run if the working
@@ -974,12 +1127,25 @@ def cmd_panel_review(cmd_args):
     # Run all judges in parallel
     import concurrent.futures
     results = {}
+    # Spend record (task 042): one line PER SEAT, all sharing this panel's round.
+    # Computed once here (not per seat) so every seat reports the same iteration.
+    # The per-seat spend metadata is COLLECTED in the loop but EMITTED only after
+    # the tamper hard-stop below — the journal write must never precede the tamper
+    # banner, or a hostile-tree hang inside it (e.g. a FIFO-swapped lane path)
+    # would suppress the banner, exactly the operation-before-banner class the
+    # panels hunted down (rounds 1,5,7,8,9,10). A tamper hard-stop therefore
+    # records no spend — consistent with the single/tail-cert paths.
+    _spend_round = _next_review_round(project_path, task_file)
+    _spend_pending = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(judges)) as executor:
         futures = {executor.submit(run_judge, j): j for j in judges}
         for future in concurrent.futures.as_completed(futures):
-            label, output = future.result()
+            label, output, _dur_ms, _timed_out = future.result()
             results[label] = output
             print(f"  [{label}] done", flush=True)
+            _spend_pending.append((label, _dur_ms,
+                                   _judge_status(output, timed_out=_timed_out),
+                                   _parse_judge_usage(output)))
 
     _tamper_changes = _detect_tamper_safe(project_path, task_file, _tamper_before)
     # On tamper the panel, like the single-judge path, does NOTHING but emit the
@@ -991,6 +1157,15 @@ def cmd_panel_review(cmd_args):
     if _tamper_changes:
         print("\n" + _tamper_banner(_tamper_changes), file=sys.stderr, flush=True)
         sys.exit(1)
+
+    # Clean tree: NOW emit the per-seat spend records (best-effort — fully
+    # swallowed inside the helper, so they never affect the review; and past the
+    # tamper banner, so they can never suppress it). One line per seat.
+    for _lbl, _dms, _st, _usg in _spend_pending:
+        _journal_review_spend(
+            project_path, kind="panel", seat=_lbl,
+            task=(task_num if task_file else None), round_no=_spend_round,
+            duration_ms=_dms, status=_st, usage=_usg)
 
     # Classify each judge as succeeded vs failed — a failed judge must NOT
     # read as a clean empty review (T139) or a successful one. Shared
@@ -1360,6 +1535,33 @@ def _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce) -> str:
     )
 
 
+def _tail_cert_seat(project_path) -> str:
+    """Resolve the tail-cert judge's seat spec (backend[:variant]) — the same
+    `default_judge` the raw runner spawns — for the spend record. Best-effort:
+    any failure → "default_judge" as an opaque marker (never raises)."""
+    try:
+        from provider.sandbox import load_judge_config, resolve_judge_spec
+        dj = load_judge_config(project_path).get("default_judge") or "claude"
+        try:
+            backend, variant = resolve_judge_spec(dj)
+        except ValueError:
+            backend, variant = dj, None
+        return f"{backend}:{variant}" if variant else backend
+    except Exception:
+        return "default_judge"
+
+
+def _tail_cert_task_num(task_file):
+    """Best-effort task number from a tail-cert task_file path (its parent dir
+    is `<NNN>-<slug>`). Returns the leading digits or None."""
+    try:
+        name = Path(task_file).parent.name
+        num = name.split("-", 1)[0]
+        return num if num.isdigit() else None
+    except Exception:
+        return None
+
+
 def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
     """Spawn the tail-cert judge (the configured `default_judge`, a real provider
     adapter) READ-ONLY under the same sandbox as every other judge, and return its
@@ -1435,6 +1637,12 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
         _tb = _snapshot_repo_state(project_path, _tf)
     except Exception:
         _tb = None
+    # Spend record (task 042): bracket the raw tail-cert call here in the caller
+    # (it has task_file + timeout in scope, and leaving the raw runner's 3-arg
+    # signature untouched keeps its many test doubles valid). The elapsed spans
+    # the judge subprocess. This caller is monkeypatched wholesale in the verdict
+    # tests, so the emit runs in production, not in those doubles (by design).
+    _tc_t0 = time.monotonic()
     raw = _run_tail_cert_judge_raw(project_path, prompt, timeout_secs)
     if _tb is not None:
         try:
@@ -1443,6 +1651,17 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
         except Exception:
             return None                # tamper check itself failed → fail closed
                                        # (r4 grok#3: never certify on an errored guard)
+    # Emit the spend record only PAST the tamper check (clean tree) — consistent
+    # with the panel/single paths, and so the journal write can never precede /
+    # hang and suppress a tamper stop. A FAILED/errored judge is still recorded
+    # here (it ran and spent) before the fail-closed return below; only a tamper
+    # hard-stop records nothing.
+    _journal_review_spend(
+        project_path, kind="tail-cert", seat=_tail_cert_seat(project_path),
+        task=(_tail_cert_task_num(task_file) if task_file else None),
+        round_no=_next_review_round(project_path, task_file),
+        duration_ms=int((time.monotonic() - _tc_t0) * 1000),
+        status=_judge_status(raw), usage=_parse_judge_usage(raw))
     # A FAILED/crashed/errored judge must NEVER certify (impl-panel grok#5):
     # format_judge_output PREFIXES a nonzero exit with "(FAILED \u2026" and a spawn/
     # resolution error with "(error: \u2026" \u2014 both at the START of the output. Match
@@ -1696,6 +1915,19 @@ def cmd_single_review(cmd, cmd_args):
             + saved_note,
             file=sys.stderr, flush=True,
         )
+        # Spend record (task 042): the timeout path exits here, before the common
+        # completion emit below, so record the timed-out seat's spend now — but
+        # ONLY on a clean tree. If the timed-out judge also tampered, the banner
+        # already fired above and we record nothing, keeping the uniform rule "a
+        # tamper hard-stop records no spend" across every review path. The closure
+        # resolves `_spend_t0`/`_spend_seat`/`_spend_round` at call time (all call
+        # sites are after their assignment). Best-effort — swallowed.
+        if not _to_changes:
+            _journal_review_spend(
+                project_path, kind="single", seat=_spend_seat,
+                task=task_num, round_no=_spend_round,
+                duration_ms=int((time.monotonic() - _spend_t0) * 1000),
+                status="timeout", usage=None)
         sys.exit(1)
 
     # Judge tamper guard (#1), same contract as the panel path: snapshot the
@@ -1709,6 +1941,13 @@ def cmd_single_review(cmd, cmd_args):
     # One advisory before the backend dispatch — covers plan-review AND
     # impl-review across every backend (task 038).
     _print_background_advisory(review_timeout)
+
+    # Spend record (task 042): bracket the judge subprocess. Only one backend
+    # branch runs, so a single start stamp here measures whichever dispatch
+    # fires. The seat spec + round are fixed for this single-judge invocation.
+    _spend_t0 = time.monotonic()
+    _spend_seat = f"{backend}:{model}" if model else backend
+    _spend_round = _next_review_round(project_path, task_file)
 
     if backend == "claude":
         claude_bin = shutil.which("claude")
@@ -2036,6 +2275,19 @@ def cmd_single_review(cmd, cmd_args):
 
     # Save output — backend-specific log files (tamper already exited above)
     output = (result.stdout or "").strip()
+    # Spend record (task 042): ONE line for this single-judge invocation, on the
+    # clean-tree completion path. Placed here (before the budget/failure exits
+    # below) so it covers ok, budget-exhausted (`fail`), and failure-marked runs
+    # alike — the tokens were spent regardless of the verdict. The timeout path
+    # already recorded in `_bail_review_timeout`; the tamper hard-stop above
+    # deliberately records nothing (its banner-exit must have no trailing op).
+    # Status is classified on the FORMATTED result (what `judge_failed` expects).
+    _journal_review_spend(
+        project_path, kind="single", seat=_spend_seat,
+        task=task_num, round_no=_spend_round,
+        duration_ms=int((time.monotonic() - _spend_t0) * 1000),
+        status=_judge_status(_sandbox.format_judge_output(result)),
+        usage=_parse_judge_usage(output))
     # Budget exhaustion arrives as exit-0 stdout (task 012 L3): detect it
     # BEFORE saving so it never overwrites a prior good review, tell the
     # user how to raise the cap, and exit nonzero — it's not a review.

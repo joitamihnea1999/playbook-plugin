@@ -92,16 +92,6 @@ def append(agent_dir, hook, decision, reason, session_id="",
     inside it; `.agent` is never minted here.
     """
     try:
-        if not agent_dir:
-            return
-        agent_dir = Path(agent_dir)
-        if not agent_dir.is_dir():          # playbook-managed lane only
-            return
-        jdir = agent_dir / "journal"
-        try:
-            jdir.mkdir(exist_ok=True)       # inside an existing lane; not `.agent`
-        except OSError:
-            pass                            # e.g. path is a file — the open below fails, swallowed
         rec = {
             "ts": _utcnow(),
             "session_id": session_id or "",
@@ -115,15 +105,115 @@ def append(agent_dir, hook, decision, reason, session_id="",
             rec["path"] = path
         if command:
             rec["command"] = _head(command)
-        data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-        fd = os.open(str(jdir / "enforcement.jsonl"),
-                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-        try:
-            os.write(fd, data)              # single append; atomic under PIPE_BUF
-        finally:
-            os.close(fd)
+        _write_record(agent_dir, rec)
     except Exception as exc:                # defence in depth: never propagate
         _warn(exc)
+
+
+def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
+                  kind="", duration_ms=None, status="", usage=None) -> None:
+    """Append one REVIEW-SPEND record and return None. Never raises.
+
+    Same HARD CONTRACT as `append`: a write failure must NEVER change or break a
+    review or any decision, one O_APPEND write of a single line kept under
+    PIPE_BUF, and the write is skipped unless the resolved lane dir already
+    exists. This records what a judge invocation COST — nothing it decides.
+
+    The record shares the enforcement envelope (`hook="review"`,
+    `decision="record"`, `reason="review spend"`) so a journal reader sees it as
+    one more `record` line, plus review-specific fields:
+      * `kind`        — "panel" | "single" | "tail-cert"
+      * `seat`        — the judge spec, e.g. "claude:opus" / "codex:gpt-5.6:medium"
+      * `task`        — task number ("042") or "-" for a taskless/--prompt review
+      * `round`       — the review iteration this spend belongs to (int; 0 = unknown)
+      * `duration_ms` — wall time of the judge subprocess, milliseconds (omitted if unknown)
+      * `status`      — "ok" | "fail" | "timeout" | "dnf" (did-not-finish/spawn error)
+      * `usage`       — token usage WHERE the CLI reports it, else the explicit
+                        marker `{"status":"unknown"}`. Numbers are NEVER fabricated:
+                        the claude judge runs in plain-text mode and codex/grok do
+                        not surface per-call tokens here, so `unknown` is the norm.
+
+    EVERY field is bounded so the record stays well under the 512-byte
+    atomic-write floor — the same bound `append` documents. `session_id` is
+    byte-capped and `usage` is normalized to the fixed `{status[,in,out]}` schema
+    (arbitrary caller dicts are NOT copied verbatim), because an unbounded
+    session id or a large usage dict would blow the PIPE_BUF concurrent-append
+    bound (impl-panel codex, task 042).
+    """
+    try:
+        rec = {
+            "ts": _utcnow(),
+            "session_id": _head(session_id or "", 80),
+            "hook": "review",
+            "decision": "record",
+            "reason": "review spend",
+            "kind": _head(kind, 24),
+            "seat": _head(seat, 80),
+            "task": _head(str(task), 16),
+            "round": int(round_no) if _is_int(round_no) else 0,
+        }
+        if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
+            rec["duration_ms"] = int(duration_ms)
+        if status:
+            rec["status"] = _head(status, 16)
+        rec["usage"] = _normalize_usage(usage)
+        _write_record(agent_dir, rec)
+    except Exception as exc:                # defence in depth: never propagate
+        _warn(exc)
+
+
+def _normalize_usage(usage) -> dict:
+    """Coerce any caller `usage` into the fixed, bounded shape the record shape
+    doc pins — never a verbatim copy of an arbitrary dict (which could blow the
+    PIPE_BUF bound). Returns `{"status":"known","in":<int>,"out":<int>}` only
+    when both token counts are real ints; otherwise `{"status":"unknown"}`.
+    Numbers are never fabricated — a non-int in/out degrades to unknown."""
+    if isinstance(usage, dict) and usage.get("status") == "known":
+        _in, _out = usage.get("in"), usage.get("out")
+        if isinstance(_in, int) and not isinstance(_in, bool) \
+                and isinstance(_out, int) and not isinstance(_out, bool):
+            return {"status": "known", "in": _in, "out": _out}
+    return {"status": "unknown"}
+
+
+def _is_int(v) -> bool:
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return True
+    try:
+        return str(v).strip().lstrip("-").isdigit()
+    except Exception:
+        return False
+
+
+def _write_record(agent_dir, rec) -> None:
+    """Write ONE record dict as a single O_APPEND line into the lane's journal.
+
+    Shared by `append` and `append_review`. Skips silently unless the resolved
+    lane dir already exists (playbook-managed project); the `journal/` subdir is
+    created inside that existing lane, never `.agent` itself. One `os.write` of
+    one line: POSIX makes an O_APPEND write of at most PIPE_BUF bytes atomic
+    against concurrent appenders, so lines from separate processes (multi-lane,
+    parallel panel seats) do not interleave. The caller is responsible for
+    keeping the record under that bound (the field caps above do)."""
+    if not agent_dir:
+        return
+    agent_dir = Path(agent_dir)
+    if not agent_dir.is_dir():              # playbook-managed lane only
+        return
+    jdir = agent_dir / "journal"
+    try:
+        jdir.mkdir(exist_ok=True)           # inside an existing lane; not `.agent`
+    except OSError:
+        pass                                # e.g. path is a file — the open below fails, swallowed
+    data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(str(jdir / "enforcement.jsonl"),
+                 os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, data)                  # single append; atomic under PIPE_BUF
+    finally:
+        os.close(fd)
 
 
 def _utcnow() -> str:
