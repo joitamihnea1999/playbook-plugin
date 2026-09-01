@@ -74,9 +74,23 @@ Additional fields:
 (the owner's ask). codex and grok already encode effort in the model variant
 (`gpt-5.6-terra:medium`, `grok-4.6:high`); the claude judge runs at a fixed
 `--effort high` not present in its variant, so `:high` is appended for claude
-seats. All numeric fields (`round`, `duration_ms`, and the usage token counts)
-are magnitude-capped (to 15 digits) so no pathological value can push the line
-past the PIPE_BUF atomic-write bound.
+seats. A codex/grok seat configured WITHOUT an explicit effort in its variant is
+recorded without one (the ambient CLI default is not resolved) — the record
+reflects what was specified, never a guessed effort.
+
+`status` is `dnf` (did-not-finish) for any judge output that begins with
+`(error: …)` — this covers BOTH a pre-spawn resolution error (a missing CLI, an
+adapter raise) and a judge that spawned and then crashed. A `dnf` record
+therefore does NOT imply tokens were spent; it means "no usable review," with
+`usage` unknown.
+
+All numeric fields (`round`, `duration_ms`, and the usage token counts) are
+magnitude-capped (to 15 digits) and all string fields are byte-capped with
+control characters stripped, so no pathological value or injected control
+character can push the serialized line past the PIPE_BUF atomic-write bound. The
+journal file is opened non-blocking and without following symlinks and confirmed
+to be a regular file before any write, so a hostile-tree swap of the journal path
+to a FIFO/symlink is skipped rather than hanging or escaping the lane.
 
 On a **panel**, one record lands per seat, all sharing the same `round`.
 

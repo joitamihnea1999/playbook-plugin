@@ -32,6 +32,7 @@ import datetime
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -214,7 +215,15 @@ def _write_record(agent_dir, rec) -> None:
     one line: POSIX makes an O_APPEND write of at most PIPE_BUF bytes atomic
     against concurrent appenders, so lines from separate processes (multi-lane,
     parallel panel seats) do not interleave. The caller is responsible for
-    keeping the record under that bound (the field caps above do)."""
+    keeping the record under that bound (the field caps above do).
+
+    Hostile-tree safe (impl-panel round 3): the journal file is opened
+    O_NONBLOCK|O_NOFOLLOW and its fd fstat'd to confirm a regular file before any
+    write. Without this, a rogue judge that swapped `enforcement.jsonl` for a
+    FIFO would turn the next review's O_WRONLY open into an indefinite HANG
+    (worse than the "a write never affects the review" contract allows), and a
+    symlinked `journal/` could write outside the lane. A non-regular / symlinked
+    sink is silently skipped instead."""
     if not agent_dir:
         return
     agent_dir = Path(agent_dir)
@@ -226,9 +235,15 @@ def _write_record(agent_dir, rec) -> None:
     except OSError:
         pass                                # e.g. path is a file — the open below fails, swallowed
     data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    # O_NONBLOCK: a FIFO with no reader fails ENXIO here rather than blocking.
+    # O_NOFOLLOW: a symlinked final component fails ELOOP (no lane escape).
     fd = os.open(str(jdir / "enforcement.jsonl"),
-                 os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+                 os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK
+                 | getattr(os, "O_NOFOLLOW", 0), 0o644)
     try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):    # FIFO/device/dir/socket → not our sink
+            return
         os.write(fd, data)                  # single append; atomic under PIPE_BUF
     finally:
         os.close(fd)
@@ -244,8 +259,17 @@ def _head(command, limit: int = _HEAD_LIMIT) -> str:
     record under PIPE_BUF: 200 multi-byte characters (e.g. emoji) are up to 800
     bytes and would blow the 512-byte atomic-write bound (panel). A truncated
     trailing multi-byte sequence is dropped (errors='ignore'), never emitted
-    half-encoded."""
+    half-encoded.
+
+    Control characters are stripped FIRST (impl-panel round 3): a byte cap alone
+    does not bound the SERIALIZED line, because json.dumps escapes each control
+    char to a 6-byte `\\uXXXX`, so an all-NUL field within the byte cap could
+    still expand the record past PIPE_BUF. These fields (seat/kind/task/status/
+    session_id/command-head) never legitimately carry control chars, so dropping
+    them keeps the encoded line bounded (the only remaining JSON expansion is `"`
+    and `\\` → 2 bytes, which the small caps already absorb)."""
     s = str(command).strip().split("\n", 1)[0]
+    s = "".join(ch for ch in s if ch >= " " and ch != "\x7f")
     return s.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 

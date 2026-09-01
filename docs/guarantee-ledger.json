@@ -9719,7 +9719,30 @@
           "boundary": "unit",
           "negative_control": null,
           "limitations": [
-            "Pins the model:effort seat: claude gets its fixed :high appended (not in the variant); codex/grok keep the effort already in their variant."
+            "Pins the model:effort seat: claude gets its fixed :high appended (not in the variant); codex/grok keep the effort already in their variant. SpendHelpers.test_claude_effort_constant_matches_the_adapter pins the effort literal against the adapter so the seat cannot silently misattribute."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "AppendReviewFormat.test_control_chars_do_not_expand_the_line",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Pins that control characters are stripped so json escaping cannot expand the serialized line past PIPE_BUF (an 80-NUL field once serialized to ~694 bytes)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "AppendReviewFormat.test_fifo_journal_does_not_hang",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "AppendReviewFormat.test_symlinked_journal_file_writes_nothing_outside_lane"
+          },
+          "limitations": [
+            "POSIX-only (skipUnless mkfifo/symlink): a FIFO journal path fails fast under O_NONBLOCK instead of hanging (the test completing is the proof), and a symlinked path writes nothing outside the lane under O_NOFOLLOW."
           ]
         }
       ],
@@ -9738,7 +9761,8 @@
         "The `round` field is best-effort: it sums panel rounds across judge.md + judge-archive.md + 1, so for single/tail-cert it is an approximate spend-correlation hint rather than an exact iteration index.",
         "Evidence exercises the provider-agnostic Python emit path via claude seats (panel + single + tail-cert). codex/grok/experimental seats traverse the identical emit (usage always unknown for them), so applicable_providers is scoped to claude where there is executable evidence.",
         "A tamper hard-stop on any review path records NO spend by design — the journal write must never precede the tamper banner (a hostile-tree hang inside it could suppress the banner). Pinned by TailCertSpendE2E.test_tail_cert_tamper_records_nothing + TamperRecordsNothing.test_panel_tamper_no_records.",
-        "Atomicity bound (same as PB-ENFORCEMENT-JOURNAL): one O_APPEND os.write with no fsync/locking; concurrent appenders (parallel panel seats, multi-lane) do not interleave only while a record stays under PIPE_BUF (>=512 bytes; 4096 on Linux). Every field is bounded — string fields (session_id, seat, kind, task, status) byte-capped and numeric fields (round, duration_ms, usage in/out) magnitude-capped to 15 digits — so even a pathological caller cannot push the line past that bound.",
+        "Atomicity bound (same as PB-ENFORCEMENT-JOURNAL): one O_APPEND os.write with no fsync/locking; concurrent appenders (parallel panel seats, multi-lane) do not interleave only while a record stays under PIPE_BUF (>=512 bytes; 4096 on Linux). Every field is bounded so even a pathological caller cannot exceed it: string fields (session_id, seat, kind, task, status) are byte-capped AND have control characters stripped (json escapes each control char to a 6-byte \\uXXXX, so a byte cap alone would not bound the SERIALIZED line), and numeric fields (round, duration_ms, usage in/out) are magnitude-capped to 15 digits.",
+        "Hostile-tree write safety (impl-panel round 3): _write_record opens the journal O_NONBLOCK|O_NOFOLLOW and fstat-confirms a regular file before writing, so a rogue judge that swapped enforcement.jsonl for a FIFO cannot turn the next review into a hang, and a symlinked journal path cannot escape the lane — the unsafe sink is silently skipped. This hardening applies to the shared writer, so it also strengthens PB-ENFORCEMENT-JOURNAL.",
         "seat records model:effort. codex/grok already carry effort in the model variant; the claude judge runs at a fixed --effort high (in provider/adapters/claude.py::run_headless_judge and the single-judge claude branch) that _seat_with_effort appends. If that constant changes it must change in all three places, or the recorded effort drifts from the real one — a source-coupling bound, not a runtime one.",
         "windows-git-bash / macos are not separately live-tested for this feature; the emitter is stdlib os.open with O_APPEND, identical to the enforcement journal's python path."
       ],

@@ -166,6 +166,44 @@ class AppendReviewFormat(unittest.TestCase):
         self.assertEqual(raw.count(b"\n"), 1)
         self.assertLess(len(raw), 512)
 
+    def test_control_chars_do_not_expand_the_line(self):
+        # json escapes each control char to 6 bytes (\uXXXX), so a byte cap alone
+        # would not bound the SERIALIZED line — an 80-NUL seat once serialized to
+        # ~694 bytes (impl-panel round 3). Control chars are stripped, so the line
+        # stays one record under 512 bytes.
+        pbj.append_review(self.agent, session_id="\x00" * 200, seat="\x00" * 200,
+                          task="\x01" * 50, round_no=1, kind="\x1f" * 50,
+                          status="ok\x00", duration_ms=1)
+        raw = (self.agent / "journal" / "enforcement.jsonl").read_bytes()
+        self.assertEqual(raw.count(b"\n"), 1)
+        self.assertLess(len(raw), 512)
+        r = _read_journal(self.agent)[0]           # still valid JSON
+        self.assertEqual(r["seat"], "")            # control chars dropped
+        self.assertEqual(r["status"], "ok")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires mkfifo (POSIX)")
+    def test_fifo_journal_does_not_hang(self):
+        # A rogue judge that swaps enforcement.jsonl for a FIFO must not turn the
+        # next write into an indefinite hang (impl-panel round 3). O_NONBLOCK
+        # makes the open fail fast; the call returns and records nothing. The test
+        # completing at all is the proof it did not block.
+        (self.agent / "journal").mkdir()
+        os.mkfifo(self.agent / "journal" / "enforcement.jsonl")
+        pbj.append_review(self.agent, seat="claude:opus:high", task="1",
+                          round_no=1, kind="single", duration_ms=1, status="ok")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink")
+    def test_symlinked_journal_file_writes_nothing_outside_lane(self):
+        # O_NOFOLLOW: a symlinked enforcement.jsonl must not let a write escape
+        # the lane (impl-panel round 3).
+        outside = Path(self._tmp.name) / "outside.txt"
+        outside.write_text("", encoding="utf-8")
+        (self.agent / "journal").mkdir()
+        os.symlink(outside, self.agent / "journal" / "enforcement.jsonl")
+        pbj.append_review(self.agent, seat="claude:opus:high", task="1",
+                          round_no=1, kind="single", duration_ms=1, status="ok")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "")
+
     def test_unwritable_lane_is_silent_noop(self):
         # journal PATH is a regular file → mkdir + open both fail. Must not raise.
         (self.agent / "journal").write_text("i am a file", encoding="utf-8")
@@ -211,6 +249,37 @@ class SpendHelpers(unittest.TestCase):
         # Even a leading brace that is not a valid single object stays None.
         self.assertIsNone(review._parse_judge_usage(
             '{ blah "usage":{"input_tokens":1,"output_tokens":2} trailing prose'))
+
+    def test_claude_effort_constant_matches_the_adapter(self):
+        # The recorded claude seat's :effort is only truthful while
+        # _CLAUDE_JUDGE_EFFORT equals the --effort the adapter actually passes
+        # (impl-panel round 3). Pin the two literals together.
+        adapter_src = (_PLAYBOOK / "provider" / "adapters" / "claude.py").read_text(
+            encoding="utf-8")
+        self.assertIn(f'"--effort", "{review._CLAUDE_JUDGE_EFFORT}"', adapter_src)
+        cli_src = (_PLAYBOOK / "tasks" / "review.py").read_text(encoding="utf-8")
+        self.assertIn(f'"--effort", "{review._CLAUDE_JUDGE_EFFORT}"', cli_src)
+
+    def test_tail_cert_seat_resolves_model_effort(self):
+        # Exercise the REAL _tail_cert_seat wiring (the e2e monkeypatches it), so
+        # a regression dropping the effort suffix is caught (impl-panel round 3).
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d)
+            (proj / ".agent" / "tasks").mkdir(parents=True)
+            (proj / ".agent" / "models.json").write_text(
+                json.dumps({"default_judge": "opus"}), encoding="utf-8")
+            with _chdir(proj):
+                # resolve_judge_spec expands the "opus" alias to the model id;
+                # the point is the claude :high effort suffix is appended.
+                seat = review._tail_cert_seat(proj)
+                self.assertTrue(seat.startswith("claude:"), seat)
+                self.assertTrue(seat.endswith(":high"), seat)
+            (proj / ".agent" / "models.json").write_text(
+                json.dumps({"default_judge": "codex:gpt-5.6-terra:medium"}),
+                encoding="utf-8")
+            with _chdir(proj):
+                self.assertEqual(review._tail_cert_seat(proj),
+                                 "codex:gpt-5.6-terra:medium")
 
     def test_next_review_round(self):
         with tempfile.TemporaryDirectory() as d:
