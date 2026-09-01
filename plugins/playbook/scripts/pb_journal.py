@@ -241,6 +241,15 @@ def _write_record(agent_dir, rec) -> None:
     # window on a best-effort log with no reader waiting — far under this
     # feature's threat model; a dirfd/openat anchor would close it fully but is
     # not portable to Windows-Git-Bash.)
+    jfile = jdir / "enforcement.jsonl"
+    # Skip a symlinked `journal` DIRECTORY or a symlinked leaf FILE — either would
+    # let the open below resolve OUTSIDE the lane. lstat both components: this is
+    # the PORTABLE guard (O_NOFOLLOW below is POSIX-only and absent on Windows, so
+    # on Windows it is these islink checks doing the work). Residual, honestly
+    # bounded: a TOCTOU swap between an lstat and the open is a tiny window on a
+    # best-effort log with no reader waiting — far under this feature's threat
+    # model; a dirfd/openat anchor would close it fully but is not portable to
+    # Windows-Git-Bash (impl-panel round 4 + CI).
     try:
         if jdir.is_symlink():
             return
@@ -250,15 +259,20 @@ def _write_record(agent_dir, rec) -> None:
         jdir.mkdir(exist_ok=True)           # inside an existing lane; not `.agent`
     except OSError:
         pass                                # e.g. path is a file — the open below fails, swallowed
+    try:
+        if jfile.is_symlink():
+            return
+    except OSError:
+        return
     data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     # O_NONBLOCK: a FIFO with no reader fails ENXIO here rather than blocking.
     # O_NOFOLLOW: a symlinked final component fails ELOOP (no lane escape).
     # Both are POSIX-only — Windows Python defines neither, so getattr(...,0)
-    # makes them no-ops there (Windows has no FIFO/symlink-hang vector on this
-    # path; the fstat regular-file check below still applies). Using os.O_NONBLOCK
-    # directly raised AttributeError on Windows, which the caller swallowed and
-    # silently dropped EVERY journal write, incl. the enforcement journal.
-    fd = os.open(str(jdir / "enforcement.jsonl"),
+    # makes them no-ops there (the islink check above is the portable guard, and
+    # Windows has no FIFO-hang vector; the fstat regular-file check below still
+    # applies). Using os.O_NONBLOCK directly raised AttributeError on Windows,
+    # which the caller swallowed and silently dropped EVERY journal write.
+    fd = os.open(str(jfile),
                  os.O_WRONLY | os.O_APPEND | os.O_CREAT
                  | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
                  0o644)
