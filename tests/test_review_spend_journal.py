@@ -140,6 +140,24 @@ class AppendReviewFormat(unittest.TestCase):
                           usage={"status": "known", "in": "lots", "out": 5})
         self.assertEqual(_read_journal(self.agent)[2]["usage"], {"status": "unknown"})
 
+    def test_pathological_numeric_magnitudes_capped(self):
+        # Numeric fields (round, duration_ms, usage in/out) must be magnitude-
+        # capped so a pathological caller cannot blow the PIPE_BUF line bound
+        # (impl-panel round 2). A 1000-digit int must not produce a 4KB line.
+        big = 10 ** 1000
+        pbj.append_review(self.agent, seat="claude:opus:high", task="1",
+                          round_no=big, kind="single", duration_ms=big,
+                          status="ok",
+                          usage={"status": "known", "in": big, "out": big})
+        raw = (self.agent / "journal" / "enforcement.jsonl").read_bytes()
+        self.assertEqual(raw.count(b"\n"), 1)
+        self.assertLess(len(raw), 512)
+        r = _read_journal(self.agent)[0]
+        cap = 10 ** 15 - 1
+        self.assertEqual(r["round"], cap)
+        self.assertEqual(r["duration_ms"], cap)
+        self.assertEqual(r["usage"], {"status": "known", "in": cap, "out": cap})
+
     def test_oversized_session_id_capped_line_small(self):
         pbj.append_review(self.agent, session_id="s" * 5000, seat="claude:opus",
                           task="1", round_no=1, kind="single", duration_ms=1,
@@ -208,6 +226,16 @@ class SpendHelpers(unittest.TestCase):
                 encoding="utf-8")
             self.assertEqual(review._next_review_round(d, tf), 2)
 
+    def test_seat_with_effort(self):
+        # Claude runs at a fixed --effort not in the variant → appended.
+        self.assertEqual(review._seat_with_effort("claude", "opus"), "claude:opus:high")
+        self.assertEqual(review._seat_with_effort("claude", None), "claude:high")
+        # codex/grok already encode effort in the variant → left as-is.
+        self.assertEqual(review._seat_with_effort("codex", "gpt-5.6-terra:medium"),
+                         "codex:gpt-5.6-terra:medium")
+        self.assertEqual(review._seat_with_effort("grok", "grok-4.6:high"),
+                         "grok:grok-4.6:high")
+
     def test_next_review_round_counts_archive(self):
         """After retention (5) archives older rounds, counting judge.md alone
         would cap the round at 6 (impl-panel codex). Both files must be summed."""
@@ -264,8 +292,9 @@ class PanelSpendE2E(_E2EBase):
 
         recs = [r for r in _read_journal(self.agent) if r["hook"] == "review"]
         self.assertEqual(len(recs), 2, recs)
+        # Claude seats carry the fixed judge effort (model:effort) — the owner ask.
         self.assertEqual({r["seat"] for r in recs},
-                         {"claude:opus", "claude:sonnet"})
+                         {"claude:opus:high", "claude:sonnet:high"})
         for r in recs:
             self.assertEqual(r["kind"], "panel")
             self.assertEqual(r["task"], "042")
@@ -308,10 +337,49 @@ class SingleSpendE2E(_E2EBase):
         self.assertEqual(len(recs), 1, recs)
         r = recs[0]
         self.assertEqual(r["kind"], "single")
-        self.assertEqual(r["seat"], "claude:opus")
+        self.assertEqual(r["seat"], "claude:opus:high")   # model:effort (owner ask)
         self.assertEqual(r["task"], "042")
         self.assertEqual(r["status"], "ok")
         self.assertIn("duration_ms", r)
+
+    def _run_single_timeout(self, *, tampered=False):
+        """Force the hard-timeout bail path (a finite --timeout + a dispatch that
+        raises TimeoutExpired) and return the journal records."""
+        import shutil
+        import subprocess
+        import unittest.mock as mock
+        from provider import sandbox
+
+        def _boom(agent, args, **kw):
+            raise subprocess.TimeoutExpired(cmd="claude", timeout=5)
+
+        patches = [
+            mock.patch.object(sandbox, "run", _boom),
+            mock.patch.object(shutil, "which", lambda name: "/usr/bin/" + name),
+            mock.patch.object(review, "_detect_tamper_safe",
+                              lambda pp, t, b: (["dirty"] if tampered else [])),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with _chdir(self.project):
+            with contextlib.suppress(SystemExit):
+                review.cmd_single_review(
+                    "plan-review",
+                    ["042", "--backend", "claude", "--model", "opus", "--timeout", "5"])
+        return [r for r in _read_journal(self.agent) if r["hook"] == "review"]
+
+    def test_timeout_records_timeout_status(self):
+        recs = self._run_single_timeout()
+        self.assertEqual(len(recs), 1, recs)
+        self.assertEqual(recs[0]["status"], "timeout")
+        self.assertEqual(recs[0]["kind"], "single")
+        self.assertEqual(recs[0]["seat"], "claude:opus:high")
+
+    def test_timeout_with_tamper_records_nothing(self):
+        # A timed-out judge that also tampered: the banner already fired, and the
+        # uniform "tamper records nothing" rule applies (gated on _to_changes).
+        self.assertEqual(self._run_single_timeout(tampered=True), [])
 
     def test_unwritable_journal_changes_nothing(self):
         # Baseline: writable journal.

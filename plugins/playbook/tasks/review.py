@@ -88,6 +88,27 @@ def _journal_review_spend(project_path, *, kind, seat, task, round_no,
         pass
 
 
+# The fixed reasoning effort claude judges run at — kept in step with
+# provider/adapters/claude.py::run_headless_judge and the single-judge claude
+# branch below (both hardcode `--effort high`). If that constant ever changes,
+# change it in all three so the recorded seat effort stays truthful.
+_CLAUDE_JUDGE_EFFORT = "high"
+
+
+def _seat_with_effort(provider_name, variant):
+    """The spend-record seat spec as `model:effort` (owner ask, task 042).
+
+    codex and grok already encode their reasoning effort INSIDE the variant
+    (e.g. `gpt-5.6-terra:medium`, `grok-4.6:high`), so their seat already carries
+    it. Claude runs at a FIXED `--effort` not present in the model variant, so it
+    is appended here — the one provider that would otherwise lose the effort
+    attribution the owner wants for spend analysis."""
+    base = f"{provider_name}:{variant}" if variant else provider_name
+    if provider_name == "claude":
+        return f"{base}:{_CLAUDE_JUDGE_EFFORT}"
+    return base
+
+
 def _judge_status(output, timed_out=False):
     """Map a judge result to the spend status enum: ok | fail | timeout | dnf.
 
@@ -1143,7 +1164,11 @@ def cmd_panel_review(cmd_args):
             label, output, _dur_ms, _timed_out = future.result()
             results[label] = output
             print(f"  [{label}] done", flush=True)
-            _spend_pending.append((label, _dur_ms,
+            # Seat carries model:effort (not the display `label`, which omits
+            # claude's fixed effort) — derived from the judge spec for this future.
+            _cls, _var = futures[future]
+            _spend_pending.append((_seat_with_effort(_cls.binary_name(), _var),
+                                   _dur_ms,
                                    _judge_status(output, timed_out=_timed_out),
                                    _parse_judge_usage(output)))
 
@@ -1546,7 +1571,7 @@ def _tail_cert_seat(project_path) -> str:
             backend, variant = resolve_judge_spec(dj)
         except ValueError:
             backend, variant = dj, None
-        return f"{backend}:{variant}" if variant else backend
+        return _seat_with_effort(backend, variant)
     except Exception:
         return "default_judge"
 
@@ -1946,7 +1971,7 @@ def cmd_single_review(cmd, cmd_args):
     # branch runs, so a single start stamp here measures whichever dispatch
     # fires. The seat spec + round are fixed for this single-judge invocation.
     _spend_t0 = time.monotonic()
-    _spend_seat = f"{backend}:{model}" if model else backend
+    _spend_seat = _seat_with_effort(backend, model)
     _spend_round = _next_review_round(project_path, task_file)
 
     if backend == "claude":

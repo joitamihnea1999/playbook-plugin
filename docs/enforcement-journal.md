@@ -63,19 +63,27 @@ Additional fields:
 | key           | type          | meaning                                                            |
 |---------------|---------------|--------------------------------------------------------------------|
 | `kind`        | string        | `panel` \| `single` \| `tail-cert`                                 |
-| `seat`        | string        | the judge spec, `model` or `model:effort` (e.g. `claude:opus`)     |
+| `seat`        | string        | the judge spec as `model:effort` (e.g. `claude:opus:high`, `codex:gpt-5.6-terra:medium`) |
 | `task`        | string        | task number (`"042"`) or `"-"` for a taskless / `--prompt` review  |
 | `round`       | int           | review iteration (see the round note below); `0` = unknown         |
 | `duration_ms` | int, optional | wall time of the judge subprocess in milliseconds (absent if unknown) |
 | `status`      | string        | `ok` \| `fail` \| `timeout` \| `dnf` (did-not-finish / spawn error)|
 | `usage`       | object        | token usage — see the usage note below                            |
 
+`seat` carries reasoning effort so spend can be attributed by `model:effort`
+(the owner's ask). codex and grok already encode effort in the model variant
+(`gpt-5.6-terra:medium`, `grok-4.6:high`); the claude judge runs at a fixed
+`--effort high` not present in its variant, so `:high` is appended for claude
+seats. All numeric fields (`round`, `duration_ms`, and the usage token counts)
+are magnitude-capped (to 15 digits) so no pathological value can push the line
+past the PIPE_BUF atomic-write bound.
+
 On a **panel**, one record lands per seat, all sharing the same `round`.
 
 Example:
 
 ```json
-{"ts":"2026-09-01T16:41:19Z","session_id":"pid-123","hook":"review","decision":"record","reason":"review spend","kind":"panel","seat":"claude:opus","task":"042","round":3,"duration_ms":48210,"status":"ok","usage":{"status":"unknown"}}
+{"ts":"2026-09-01T16:41:19Z","session_id":"pid-123","hook":"review","decision":"record","reason":"review spend","kind":"panel","seat":"claude:opus:high","task":"042","round":3,"duration_ms":48210,"status":"ok","usage":{"status":"unknown"}}
 ```
 
 ### The `usage` field — honest bounds

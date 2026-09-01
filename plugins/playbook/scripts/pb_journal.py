@@ -150,16 +150,32 @@ def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
             "kind": _head(kind, 24),
             "seat": _head(seat, 80),
             "task": _head(str(task), 16),
-            "round": int(round_no) if _is_int(round_no) else 0,
+            "round": _cap_int(int(round_no)) if _is_int(round_no) else 0,
         }
         if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
-            rec["duration_ms"] = int(duration_ms)
+            rec["duration_ms"] = _cap_int(int(duration_ms))
         if status:
             rec["status"] = _head(status, 16)
         rec["usage"] = _normalize_usage(usage)
         _write_record(agent_dir, rec)
     except Exception as exc:                # defence in depth: never propagate
         _warn(exc)
+
+
+# Numeric magnitude cap (impl-panel round 2): the string fields are byte-capped,
+# but a pathological caller could pass an arbitrarily large `round`/`duration_ms`/
+# token int whose DECIMAL LENGTH blows the PIPE_BUF atomic-write bound. Clamp
+# every numeric to this ceiling so "every field is bounded" is literally true.
+# 10**15 - 1 (15 digits) sits far above every real value — round is < 10^4, a
+# multi-hour review is ~10^7 ms, token counts are < ~10^8 — so the clamp is only
+# ever reached by a pathological/synthetic call; even then the line stays small.
+_INT_CAP = 10 ** 15 - 1
+
+
+def _cap_int(v: int) -> int:
+    if v < 0:
+        return 0
+    return v if v <= _INT_CAP else _INT_CAP
 
 
 def _normalize_usage(usage) -> dict:
@@ -172,7 +188,9 @@ def _normalize_usage(usage) -> dict:
         _in, _out = usage.get("in"), usage.get("out")
         if isinstance(_in, int) and not isinstance(_in, bool) \
                 and isinstance(_out, int) and not isinstance(_out, bool):
-            return {"status": "known", "in": _in, "out": _out}
+            # Magnitude-capped like every other numeric so a pathological token
+            # count cannot blow the PIPE_BUF line bound (impl-panel round 2).
+            return {"status": "known", "in": _cap_int(_in), "out": _cap_int(_out)}
     return {"status": "unknown"}
 
 
