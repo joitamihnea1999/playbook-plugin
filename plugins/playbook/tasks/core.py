@@ -933,48 +933,82 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     return [(i, s) for i, s in _iter_nonfenced(lines) if _RISK_HEADING_RE.match(s)]
 
 
-def _iter_nonfenced(lines: "list[str]"):
-    """Yield ``(index, stripped_line)`` for every line OUTSIDE a Markdown code
-    fence, so section writers/readers never treat a heading quoted inside a fenced
-    example as a live section — the #09 hazard, re-raised for the handoff/blocked
-    writers by the C1/P1 impl panels (a fenced `## Handoff`/`## Blocked`/`##
-    Verification Receipt` must not corrupt the file or fake bootstrap/handoff
-    state).
+def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[bool]":
+    """The ONE strict CommonMark fence scanner for task.md (task 039). Returns a
+    ``list[bool]`` parallel to ``lines``: index ``i`` is True when line ``i`` is
+    a code-fence opener, closer, or interior line — i.e. NOT a live heading or
+    section boundary.
 
-    Applies the SAME CommonMark opener/closer rules as `_closed_fence_line_indices`
-    (<=3-space indent — `_FENCE_OPEN_RE`; a backtick opener whose info string holds
-    a backtick is not a fence; a closer is the same char, >= the opener's length,
-    and whitespace-only after the run), so a ```lang line or a >=4-space marker
-    inside a fence is content, not a boundary. This is the shared source for the
-    blocked/handoff writers AND `_risk_heading_lines`.
+    Opener/closer rules (identical for every consumer):
+      * opener = <=3 leading spaces + a run of >=3 backticks/tildes
+        (`_FENCE_OPEN_RE`); a BACKTICK opener whose info string contains a
+        backtick is inline code, not a fence, and stays live;
+      * closer = <=3 spaces + a run of the SAME char at least as long as the
+        opener, followed by whitespace only.
 
-    It differs from `_closed_fence_line_indices` in ONE deliberate direction: an
-    UNCLOSED opener fences everything through EOF (fail CLOSED). These consumers
-    DELETE/replace sections, so on a malformed unclosed fence the safe choice is to
-    treat the remainder as fenced and never delete it — the opposite of the receipt
-    writer's fail-open, which only ever INSERTS (panel round-3: codex found the
-    fail-open delegation let set_task_blocked delete a decoy after an unclosed
-    fence). The stricter of the two on every axis; never the more destructive."""
+    ``unclosed_is_live`` is the ONE deliberate per-consumer difference — the fail
+    direction for a fence opener never closed before EOF:
+      * False → the opener and its remainder are fenced THROUGH EOF (fail
+        CLOSED). The section-locating DELETE/replace writers and the risk/section
+        readers that must never treat content after a malformed fence as live
+        pass False, so a malformed unclosed fence never lets a delete run past it.
+      * True → an unclosed opener contributes NOTHING; the opener and remainder
+        stay live (fail OPEN). The receipt WRITER (only inserts) and the pure
+        bootstrap/handoff READERS pass True, so a malformed fence never refuses
+        an insert nor hides a real `## Blocked`/`## Handoff`/receipt.
+
+    This is the shared engine for `_iter_nonfenced` (fail closed) and
+    `_closed_fence_line_indices` (fail open); indented-code-block awareness (V4)
+    and the ASCII-only closer (V6) are layered on it in their own commits.
+    """
+    n = len(lines)
+    flags = [False] * n
     fence_char = ""
     fence_len = 0
+    open_i = -1
     for i, line in enumerate(lines):
-        raw = line.lstrip("﻿")                 # keep indentation, drop BOM
+        raw = line.lstrip("﻿")            # keep indentation, drop BOM
         fm = _FENCE_OPEN_RE.match(raw)
         if fence_char:
             if (fm and fm.group(1)[0] == fence_char
                     and len(fm.group(1)) >= fence_len
                     and fm.group(2).strip() == ""):
-                fence_char = ""
-                fence_len = 0
-            continue                            # inside fence (incl. unclosed→EOF)
+                for j in range(open_i, i + 1):
+                    flags[j] = True            # opener..closer inclusive
+                fence_char, fence_len, open_i = "", 0, -1
+            continue                            # interior (marked at close / EOF)
         if fm:
             if fm.group(1)[0] == "`" and "`" in fm.group(2):
-                yield i, raw.strip()
-                continue
+                continue                        # inline-code opener stays live
             fence_char = fm.group(1)[0]
             fence_len = len(fm.group(1))
+            open_i = i
             continue
-        yield i, raw.strip()
+    if fence_char and not unclosed_is_live:     # unclosed opener, fail CLOSED
+        for j in range(open_i, n):
+            flags[j] = True
+    return flags
+
+
+def _iter_nonfenced(lines: "list[str]"):
+    """Yield ``(index, stripped_line)`` for every line OUTSIDE a code fence or
+    indented code block, so section writers/readers never treat a heading quoted
+    inside a fenced/indented example as a live section — the #09 hazard, re-raised
+    for the handoff/blocked writers by the C1/P1 impl panels (a fenced
+    `## Handoff`/`## Blocked`/`## Verification Receipt` must not corrupt the file
+    or fake bootstrap/handoff state).
+
+    Thin wrapper over the shared strict scanner `_iter_fenced_flags` with
+    ``unclosed_is_live=False`` (fail CLOSED): an UNCLOSED opener fences everything
+    through EOF. These consumers DELETE/replace sections, so on a malformed
+    unclosed fence the safe choice is to treat the remainder as fenced and never
+    delete it — the opposite of the receipt writer's fail-open, which only ever
+    INSERTS (panel round-3: codex found the fail-open delegation let
+    set_task_blocked delete a decoy after an unclosed fence)."""
+    flags = _iter_fenced_flags(lines, unclosed_is_live=False)
+    for i, line in enumerate(lines):
+        if not flags[i]:
+            yield i, line.lstrip("﻿").strip()
 
 
 def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
@@ -2837,37 +2871,15 @@ _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 def _closed_fence_line_indices(lines: "list[str]") -> set:
-    """Line indices inside a properly CLOSED CommonMark code fence — the ONE
-    scanner shared by the receipt WRITER (upsert_task_section) and the audit
-    READER (verify-contract drift sweep) so they can never disagree on what a
-    fence is (panel rounds 8-10). Rules: opener = <=3 leading spaces + a run of
-    >=3 backticks/tildes, and a BACKTICK opener's info string may not contain a
-    backtick (else it is not a fence). Closer = <=3 spaces + a run of the SAME
-    char at least as long, followed by WHITESPACE ONLY. An UNCLOSED fence
-    contributes nothing (fail closed for the reader: a malformed fence never
-    hides a receipt; fail open for the writer: it never treats a live heading as
-    fenced)."""
-    skip: set = set()
-    fence_char = ""
-    fence_len = 0
-    open_i = -1
-    for i, ln in enumerate(lines):
-        s = ln.lstrip("﻿")
-        m = _FENCE_OPEN_RE.match(s)
-        if fence_char:
-            if (m and m.group(1)[0] == fence_char
-                    and len(m.group(1)) >= fence_len
-                    and m.group(2).strip() == ""):
-                skip.update(range(open_i, i + 1))
-                fence_char, fence_len, open_i = "", 0, -1
-            continue
-        if m:
-            char = m.group(1)[0]
-            info = m.group(2)
-            if char == "`" and "`" in info:
-                continue
-            fence_char, fence_len, open_i = char, len(m.group(1)), i
-    return skip
+    """Line indices inside a properly CLOSED CommonMark code fence — used by the
+    receipt WRITER (upsert_task_section) and the audit READER (verify-contract
+    drift sweep) so they can never disagree on what a fence is (panel rounds
+    8-10). Thin wrapper over the shared strict scanner `_iter_fenced_flags` with
+    ``unclosed_is_live=True``: an UNCLOSED fence contributes nothing (fail closed
+    for the reader — a malformed fence never hides a receipt; fail open for the
+    writer — it never treats a live heading as fenced)."""
+    flags = _iter_fenced_flags(lines, unclosed_is_live=True)
+    return {i for i, fenced in enumerate(flags) if fenced}
 
 
 def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
