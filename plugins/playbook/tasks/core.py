@@ -1099,6 +1099,28 @@ def _has_unclosed_fence(lines: "list[str]") -> bool:
     return closed != strict
 
 
+def _unclosed_fence_hides_risk(lines: "list[str]") -> bool:
+    """True when an UNCLOSED fence's hidden remainder contains a `## Risk`-shaped
+    heading (V10, round-3 opus F1). This is the PRECISE condition under which
+    extract_risk must not trust a classification: a higher class hidden after a
+    malformed opener could be shadowed by a lower one read clean above it
+    (codex-terra's round-2 Critical). A STRAY unbalanced fence with NO `## Risk`
+    inside it (e.g. an unclosed snippet in a receipt/notes section below the risk
+    field) does NOT hide the classification, so it must not force `unclassified`
+    and over-block an otherwise-clean reversible close.
+
+    The hidden region is exactly the lines the fail-CLOSED scanner fences but the
+    fail-OPEN scanner leaves live (the unclosed opener through EOF)."""
+    closed = _iter_fenced_flags(lines, unclosed_is_live=True)   # fail open
+    strict = _iter_fenced_flags(lines, unclosed_is_live=False)  # fail closed
+    for i in range(len(lines)):
+        if strict[i] and not closed[i]:        # inside the unclosed-fence remainder
+            s = _ATX_CLOSING_HASHES_RE.sub("", lines[i].lstrip("﻿").strip())
+            if _RISK_HEADING_RE.match(s):
+                return True
+    return False
+
+
 def _iter_nonfenced(lines: "list[str]", *, unclosed_is_live: bool = False):
     """Yield ``(index, stripped_line)`` for every line OUTSIDE a code fence, so
     section writers/readers never treat a heading quoted inside a fenced example
@@ -1184,14 +1206,15 @@ def extract_risk(task_file) -> str:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return DEFAULT_RISK
-    # V9 (round-2 panel, codex-terra CRITICAL): an UNCLOSED fence means the parse
-    # is uncertain — a higher classification could be hidden after the malformed
-    # opener while a lower one reads clean above it (`## Risk\nreversible` shown,
-    # `## Risk\nassertive` hidden). Do not return a trusted value from an uncertain
-    # file: degrade to unclassified. has_risk_section still returns True (presence),
-    # so present + unclassified = BLOCK (recoverable by fixing the fence /
-    # --force --reason). This is the value-side twin of V2's presence-side strictness.
-    if _has_unclosed_fence(lines):
+    # V9 (round-2 codex-terra CRITICAL) + V10 (round-3 opus F1): an unclosed fence
+    # that HIDES a `## Risk`-shaped heading makes the parse untrustworthy — a higher
+    # class hidden after the opener could be shadowed by a lower one read clean
+    # above it. Degrade to unclassified ONLY in that precise case (not on any stray
+    # unbalanced fence, which V9 over-did — that punished a clean reversible whose
+    # long task.md merely had a stray ``` below the risk field). has_risk_section
+    # still returns True (presence), so present + unclassified = BLOCK (recoverable
+    # by fixing the fence / --force --reason). Value-side twin of V2's presence rule.
+    if _unclosed_fence_hides_risk(lines):
         return DEFAULT_RISK
     headings = _risk_heading_lines(lines)
     if len(headings) != 1:
@@ -3072,10 +3095,12 @@ def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
     # must agree on what counts as a real heading (panel round-9 grok/codex).
     fenced = _closed_fence_line_indices(lines)
     for i, ln in enumerate(lines):
-        # strip + lstrip BOM exactly like the audit reader (str.strip does NOT
-        # remove a BOM), so writer and reader normalize a heading identically
-        # and cannot disagree on which line is the section (panel round-12 opus).
-        if i not in fenced and ln.strip().lstrip("\ufeff") == marker:
+        # Match the heading through the strict shared ATX matcher (V10, round-3
+        # opus F2 + codex-terra), exactly like the readers (_latest_receipt_line,
+        # the audit drift sweep): so a valid `## {heading} ##` / `##\t{heading}` is
+        # found by the WRITER too and not appended as a duplicate the reader then
+        # reads stale \u2014 writer and reader must agree on what a real heading is.
+        if i not in fenced and _atx_h2_text(ln) == marker:
             new = lines[:i + 1] + ["", *entry.rstrip("\n").splitlines()] + lines[i + 1:]
             _atomic_write(p, "\n".join(new) + "\n")
             return

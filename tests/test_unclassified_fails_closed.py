@@ -279,12 +279,20 @@ class RiskSectionDetection(unittest.TestCase):
         self.assertEqual(extract_risk(p), "unclassified")
         self.assertTrue(has_risk_section(p))
 
-    def test_trailing_unclosed_fence_forces_unclassified(self):
-        # Even without a hidden second heading, a trailing unclosed fence is an
-        # uncertain parse → the classification is not trusted → block.
-        p = self._md("# T\n\n## Risk\nreversible\n\n```\nunterminated\n")
-        self.assertEqual(extract_risk(p), "unclassified")
-        self.assertTrue(has_risk_section(p))
+    def test_stray_unclosed_fence_below_a_classified_risk_does_not_over_block(self):
+        # V10/opus F1 (round-3 panel): V9 degraded on ANY unclosed fence, which
+        # over-blocked a clean `reversible` whose long task.md merely has a stray
+        # unbalanced ``` BELOW the risk (a receipt/notes snippet) that cannot hide
+        # a `## Risk`. Refined: degrade ONLY when the unclosed-fence region hides a
+        # `## Risk`-shape. A stray fence with no hidden risk keeps the real value.
+        p = self._md("# T\n\n## Risk\nreversible\n\n## Notes\n```\nstray, no risk here\n")
+        self.assertEqual(extract_risk(p), "reversible",
+                         "a stray fence with no hidden ## Risk must not over-block")
+
+    def test_balanced_fences_classified_risk_reads_its_class(self):
+        # opus F3: a normal classified task with BALANCED fences reads its class.
+        p = self._md("# T\n\n## Risk\nreversible\n\n## Docs\n```\nexample\n```\n")
+        self.assertEqual(extract_risk(p), "reversible")
 
 
 class CloseEndToEnd(unittest.TestCase):

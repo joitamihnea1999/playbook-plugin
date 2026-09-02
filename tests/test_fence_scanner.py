@@ -256,6 +256,21 @@ class StrictAtxH2Matcher(unittest.TestCase):
         self.assertEqual(_extract_block_reason(p), "handoff",
                          "a `## Blocked ##` handoff must not be lost by the reader")
 
+    def test_receipt_writer_agrees_with_reader_on_closing_hash_heading(self):
+        # V10/opus F2 + codex-terra: upsert_task_section (writer) must match the
+        # reader on a valid `## Verification Receipt ##` — else it appends a
+        # DUPLICATE section and the reader keeps reporting the stale first entry.
+        from tasks.core import upsert_task_section, _latest_receipt_line
+        d = Path(tempfile.mkdtemp())
+        p = d / "task.md"
+        p.write_text("# T\n\n## Verification Receipt ##\n\n### old entry\n",
+                     encoding="utf-8")
+        upsert_task_section(p, "Verification Receipt", "### new entry")
+        body = p.read_text(encoding="utf-8")
+        self.assertEqual(body.count("Verification Receipt"), 1,
+                         "writer appended a duplicate receipt section (writer≠reader)")
+        self.assertEqual(_latest_receipt_line(p), "new entry")
+
 
 class ReadersFailOpen(unittest.TestCase):
     """V3 — the PURE readers surface a real section even under an unclosed fence.
