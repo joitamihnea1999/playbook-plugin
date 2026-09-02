@@ -278,6 +278,35 @@ class ReadersFailOpen(unittest.TestCase):
         self.assertEqual(found[0], 7)
 
 
+class CrlfLineEndings(unittest.TestCase):
+    """The scanner must tolerate CRLF/keepends line endings. `compact` opens the
+    task.md with newline='' and splits with keepends=True to preserve a Windows
+    file's real endings, so `_closed_fence_line_indices` receives lines ending in
+    `\\r\\n`. The old `str.strip()` closer test ate the `\\r`; the V6 ASCII-only
+    closer must still treat `` ```\\r\\n `` as a valid closer (the `\\r` is a line
+    ending, not content) — else a fence never closes on Windows and the compact
+    protected-span scan is wrong (the Windows-only CI failure this guards)."""
+
+    def test_crlf_fence_closer_still_closes(self):
+        lines = ["a\r\n", "```\r\n", "x\r\n", "```\r\n", "## Risk\r\n"]
+        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
+        self.assertEqual(flags, [False, True, True, True, False],
+                         "```+CRLF must close the fence; the heading stays live")
+
+    def test_crlf_closed_indices_match(self):
+        lines = ["a\r\n", "```\r\n", "x\r\n", "```\r\n", "b\r\n"]
+        self.assertEqual(_closed_fence_line_indices(lines), {1, 2, 3})
+
+    def test_lf_keepends_fence_closer_still_closes(self):
+        lines = ["a\n", "```\n", "x\n", "```\n", "## Risk\n"]
+        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
+        self.assertEqual(flags, [False, True, True, True, False])
+
+    def test_atx_matcher_tolerates_crlf(self):
+        self.assertEqual(_atx_h2_text("## Blocked\r\n"), "## Blocked")
+        self.assertEqual(_atx_h2_text("##\tBlocked\r\n"), "## Blocked")
+
+
 class NonCorruptingReadersFenceAware(unittest.TestCase):
     """Side-effect cleanup: the pure display readers route through the shared
     scanner so a fenced example is not misread. They never rewrite the file, so

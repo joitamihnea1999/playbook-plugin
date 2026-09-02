@@ -984,7 +984,12 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
     prev_blank = True                           # start-of-doc counts as a blank
     in_indented_code = False
     for i, line in enumerate(lines):
-        raw = line.lstrip("﻿")            # keep indentation, drop BOM
+        # keep indentation, drop BOM, and drop the trailing line ending: callers
+        # may pass keepends/newline='' lines (compact preserves a Windows file's
+        # CRLF), so a closer `` ```\r\n `` must still count — the old str.strip()
+        # ate the `\r`; the ASCII-only closer (V6) would otherwise miss it and a
+        # fence would never close on Windows (Windows-only CI regression).
+        raw = line.lstrip("﻿").rstrip("\r\n")
         fm = _FENCE_OPEN_RE.match(raw)
         if fence_char:
             if (fm and fm.group(1)[0] == fence_char
@@ -1094,7 +1099,7 @@ def _atx_h2_text(raw: str) -> "str | None":
         writer and could be duplicated or mis-spliced);
       * `###…` is level-3, never an H2 (the required `[ \\t]+` after `##` excludes
         `###`, whose next char is `#`)."""
-    m = _ATX_H2_RE.match(raw.lstrip("﻿"))
+    m = _ATX_H2_RE.match(raw.lstrip("﻿").rstrip("\r\n"))
     return f"## {m.group(1)}" if m else None
 
 
