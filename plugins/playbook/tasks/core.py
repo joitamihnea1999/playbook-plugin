@@ -933,6 +933,12 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     return [(i, s) for i, s in _iter_nonfenced(lines) if _RISK_HEADING_RE.match(s)]
 
 
+# A fence CLOSER's tail must be ASCII whitespace only (V6). `str.strip()` eats
+# U+00A0 and other Unicode whitespace, so a ```+NBSP line falsely closed a fence
+# and exposed an interior `## Risk`/reversible decoy (P-A). A tab still closes.
+_ASCII_WS_ONLY_RE = re.compile(r"[ \t]*\Z")
+
+
 def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[bool]":
     """The ONE strict CommonMark fence scanner for task.md (task 039). Returns a
     ``list[bool]`` parallel to ``lines``: index ``i`` is True when line ``i`` is
@@ -944,7 +950,8 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
         (`_FENCE_OPEN_RE`); a BACKTICK opener whose info string contains a
         backtick is inline code, not a fence, and stays live;
       * closer = <=3 spaces + a run of the SAME char at least as long as the
-        opener, followed by whitespace only.
+        opener, followed by ASCII whitespace only (`_ASCII_WS_ONLY_RE`, V6 — NOT
+        `str.strip()`, which eats U+00A0 so a ```+NBSP falsely closed a fence).
 
     ``unclosed_is_live`` is the ONE deliberate per-consumer difference — the fail
     direction for a fence opener never closed before EOF:
@@ -967,8 +974,7 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
     the strict ATX matcher (V5), since ATX headings allow at most 3 leading spaces.
 
     This is the shared engine for `_iter_nonfenced` (fail closed) and
-    `_closed_fence_line_indices` (fail open); the ASCII-only closer (V6) is
-    layered on it in its own commit.
+    `_closed_fence_line_indices` (fail open).
     """
     n = len(lines)
     flags = [False] * n
@@ -983,7 +989,7 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
         if fence_char:
             if (fm and fm.group(1)[0] == fence_char
                     and len(fm.group(1)) >= fence_len
-                    and fm.group(2).strip() == ""):
+                    and _ASCII_WS_ONLY_RE.match(fm.group(2))):
                 for j in range(open_i, i + 1):
                     flags[j] = True            # opener..closer inclusive
                 fence_char, fence_len, open_i = "", 0, -1

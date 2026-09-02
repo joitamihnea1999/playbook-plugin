@@ -160,6 +160,37 @@ class IndentedCodeBlocks(unittest.TestCase):
         self.assertTrue(has_risk_section(p))
 
 
+class NbspFenceCloser(unittest.TestCase):
+    """V6 — a fence closer's tail must be ASCII whitespace only. `str.strip()`
+    eats U+00A0/other Unicode whitespace, so a ```+NBSP line falsely CLOSED a
+    fence and exposed an interior `## Risk` decoy as live (P-A). A tab after the
+    run still closes (tab is valid ASCII whitespace)."""
+
+    def _md(self, body: str) -> Path:
+        d = Path(tempfile.mkdtemp())
+        p = d / "task.md"
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_nbsp_after_the_run_does_not_close_the_fence(self):
+        lines = ["## Docs", "```", "hidden", "``` ", "## Risk", "reversible"]
+        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
+        self.assertTrue(flags[4] and flags[5],
+                        "a ```+NBSP must NOT close the fence and expose the decoy")
+
+    def test_tab_after_the_run_still_closes(self):
+        # Control: a tab is ASCII whitespace, so ```+tab is a real closer.
+        lines = ["```", "x", "```\t", "## Risk"]
+        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
+        self.assertFalse(flags[3], "```+tab is a valid closer; the heading is live")
+
+    def test_nbsp_false_closer_does_not_leak_a_risk_decoy(self):
+        from tasks.core import extract_risk
+        p = self._md("# T\n\n## Docs\n```\nhidden\n``` \n## Risk\nreversible\n")
+        self.assertEqual(extract_risk(p), "unclassified",
+                         "an NBSP false-closer leaked a reversible decoy")
+
+
 class StrictAtxH2Matcher(unittest.TestCase):
     """V5 — one strict ATX-H2 matcher (<=3 leading spaces; `## ` OR `##\\t`), so
     the section WRITERS and READERS agree on what a boundary is (P-D)."""
