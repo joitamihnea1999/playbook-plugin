@@ -25,10 +25,15 @@ _HERE = Path(__file__).resolve().parent
 PLUGIN = _HERE.parent / "plugins/playbook"
 sys.path.insert(0, str(PLUGIN))
 
+import tempfile  # noqa: E402
+
 from tasks.core import (  # noqa: E402
     _closed_fence_line_indices,
+    _extract_block_reason,
     _iter_fenced_flags,
     _iter_nonfenced,
+    _latest_receipt_line,
+    find_unconsumed_handoff,
 )
 
 
@@ -97,6 +102,53 @@ class PublicScannersMatchEngine(unittest.TestCase):
     def test_closed_indices_mark_a_closed_fence(self):
         lines = "a\n```\nx\n```\nb\n".splitlines()
         self.assertEqual(_closed_fence_line_indices(lines), {1, 2, 3})
+
+
+class ReadersFailOpen(unittest.TestCase):
+    """V3 — the PURE readers surface a real section even under an unclosed fence.
+
+    A reader can't corrupt the file, and hiding a real `## Blocked`/`## Handoff`/
+    receipt under a malformed unclosed fence breaks bootstrap (a real handoff is
+    silently lost). So the pure readers fail OPEN. A properly CLOSED fenced decoy
+    is still ignored (that protection is unchanged — only the UNCLOSED case flips).
+    """
+
+    def _md(self, body: str) -> Path:
+        d = Path(tempfile.mkdtemp())
+        p = d / "task.md"
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_extract_block_reason_surfaces_under_unclosed_fence(self):
+        p = self._md("# T\n\n## Status\nblocked\n\n## Docs\n```\nquoted\n\n"
+                     "## Blocked\n> handoff  (since 2026-01-01T00:00+00:00)\n")
+        self.assertEqual(_extract_block_reason(p), "handoff",
+                         "an unclosed fence hid a real ## Blocked from bootstrap")
+
+    def test_closed_fenced_blocked_decoy_is_still_ignored(self):
+        # Control: a properly CLOSED fenced `## Blocked` example is NOT live, and
+        # there is no real block → None (the C1 protection is preserved).
+        p = self._md("# T\n\n## Status\nin_progress\n\n## Docs\n```\n"
+                     "## Blocked\n> not a real block\n```\n\nplain body\n")
+        self.assertIsNone(_extract_block_reason(p))
+
+    def test_latest_receipt_surfaces_under_unclosed_fence(self):
+        p = self._md("# T\n\n## Docs\n```\nquoted example\n\n"
+                     "## Verification Receipt\n\n### close · risk reversible · commit abc\n")
+        self.assertEqual(_latest_receipt_line(p), "close · risk reversible · commit abc",
+                         "an unclosed fence hid a real receipt entry")
+
+    def test_find_unconsumed_handoff_finds_it_under_unclosed_fence(self):
+        proj = Path(tempfile.mkdtemp())
+        td = proj / ".agent" / "tasks" / "007-x"
+        td.mkdir(parents=True)
+        (td / "task.md").write_text(
+            "# 007 - X\n\n## Status\nblocked\n\n## Docs\n```\nquoted\n\n"
+            "## Blocked\n> handoff  (since 2026-01-01T00:00+00:00)\n",
+            encoding="utf-8")
+        found = find_unconsumed_handoff(proj)
+        self.assertIsNotNone(found, "a real handoff under an unclosed fence was lost")
+        self.assertEqual(found[0], 7)
 
 
 if __name__ == "__main__":

@@ -1002,22 +1002,27 @@ def _has_unclosed_fence(lines: "list[str]") -> bool:
     return closed != strict
 
 
-def _iter_nonfenced(lines: "list[str]"):
-    """Yield ``(index, stripped_line)`` for every line OUTSIDE a code fence or
-    indented code block, so section writers/readers never treat a heading quoted
-    inside a fenced/indented example as a live section — the #09 hazard, re-raised
-    for the handoff/blocked writers by the C1/P1 impl panels (a fenced
-    `## Handoff`/`## Blocked`/`## Verification Receipt` must not corrupt the file
-    or fake bootstrap/handoff state).
+def _iter_nonfenced(lines: "list[str]", *, unclosed_is_live: bool = False):
+    """Yield ``(index, stripped_line)`` for every line OUTSIDE a code fence, so
+    section writers/readers never treat a heading quoted inside a fenced example
+    as a live section — the #09 hazard, re-raised for the handoff/blocked writers
+    by the C1/P1 impl panels (a fenced `## Handoff`/`## Blocked`/`## Verification
+    Receipt` must not corrupt the file or fake bootstrap/handoff state).
 
-    Thin wrapper over the shared strict scanner `_iter_fenced_flags` with
-    ``unclosed_is_live=False`` (fail CLOSED): an UNCLOSED opener fences everything
-    through EOF. These consumers DELETE/replace sections, so on a malformed
-    unclosed fence the safe choice is to treat the remainder as fenced and never
-    delete it — the opposite of the receipt writer's fail-open, which only ever
-    INSERTS (panel round-3: codex found the fail-open delegation let
-    set_task_blocked delete a decoy after an unclosed fence)."""
-    flags = _iter_fenced_flags(lines, unclosed_is_live=False)
+    Thin wrapper over the shared strict scanner `_iter_fenced_flags`. The default
+    ``unclosed_is_live=False`` (fail CLOSED) is for the section-locating
+    DELETE/replace WRITERS and the risk reader: an UNCLOSED opener fences
+    everything through EOF, so a malformed fence never lets a delete run past it
+    (panel round-3: codex found the fail-open delegation let set_task_blocked
+    delete a decoy after an unclosed fence).
+
+    ``unclosed_is_live=True`` (fail OPEN) is for the PURE bootstrap/handoff READERS
+    (`_extract_block_reason`, `_latest_receipt_line`, `find_unconsumed_handoff` via
+    the first) — V3: a reader can't corrupt the file, and hiding a real
+    `## Blocked`/`## Handoff`/receipt under a malformed unclosed fence silently
+    loses a real handoff at bootstrap. A properly CLOSED fenced decoy is still
+    skipped in both directions (only the UNCLOSED case differs)."""
+    flags = _iter_fenced_flags(lines, unclosed_is_live=unclosed_is_live)
     for i, line in enumerate(lines):
         if not flags[i]:
             yield i, line.lstrip("﻿").strip()
@@ -3027,7 +3032,8 @@ def _latest_receipt_line(task_file: Path) -> "str | None":
     except OSError:
         return None
     in_receipt = False
-    for _i, s in _iter_nonfenced(lines):   # fence-aware (impl-panel C1)
+    # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real receipt.
+    for _i, s in _iter_nonfenced(lines, unclosed_is_live=True):
         if s == "## Verification Receipt":
             in_receipt = True
             continue
@@ -3172,7 +3178,9 @@ def _extract_block_reason(task_file: Path) -> "str | None":
     except OSError:
         return None
     in_blocked = False
-    for _i, s in _iter_nonfenced(lines):
+    # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real
+    # `## Blocked` (find_unconsumed_handoff → bootstrap depends on this).
+    for _i, s in _iter_nonfenced(lines, unclosed_is_live=True):
         if s == "## Blocked":
             in_blocked = True
             continue
