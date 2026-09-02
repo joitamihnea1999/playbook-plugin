@@ -28,11 +28,13 @@ sys.path.insert(0, str(PLUGIN))
 import tempfile  # noqa: E402
 
 from tasks.core import (  # noqa: E402
+    _atx_h2_text,
     _closed_fence_line_indices,
     _extract_block_reason,
     _iter_fenced_flags,
     _iter_nonfenced,
     _latest_receipt_line,
+    _live_section_span,
     find_unconsumed_handoff,
 )
 
@@ -156,6 +158,44 @@ class IndentedCodeBlocks(unittest.TestCase):
         self.assertEqual(extract_risk(p), "assertive",
                          "an indented ## Risk decoy must not shadow the real class")
         self.assertTrue(has_risk_section(p))
+
+
+class StrictAtxH2Matcher(unittest.TestCase):
+    """V5 — one strict ATX-H2 matcher (<=3 leading spaces; `## ` OR `##\\t`), so
+    the section WRITERS and READERS agree on what a boundary is (P-D)."""
+
+    def test_space_separator_matches(self):
+        self.assertEqual(_atx_h2_text("## Blocked"), "## Blocked")
+
+    def test_up_to_three_leading_spaces_matches(self):
+        self.assertEqual(_atx_h2_text("   ## Blocked"), "## Blocked")
+
+    def test_tab_after_hash_is_a_boundary(self):
+        # `##\tX` was missed by startswith("## ") — it must normalize to `## X`.
+        self.assertEqual(_atx_h2_text("##\tBlocked"), "## Blocked")
+
+    def test_four_leading_spaces_is_not_a_heading(self):
+        self.assertIsNone(_atx_h2_text("    ## Blocked"))
+
+    def test_h3_is_not_an_h2(self):
+        self.assertIsNone(_atx_h2_text("### Entry"))
+
+    def test_no_separator_is_not_an_h2(self):
+        self.assertIsNone(_atx_h2_text("##Blocked"))
+
+    def test_bom_prefix_is_tolerated(self):
+        self.assertEqual(_atx_h2_text("﻿## Blocked"), "## Blocked")
+
+    def test_live_section_span_finds_a_tab_separated_title(self):
+        lines = ["# T", "", "##\tBlocked", "> reason", "", "## Work Plan", "- [ ] g"]
+        span = _live_section_span(lines, "## Blocked")
+        self.assertIsNotNone(span, "a tab-after-hash ## Blocked must be locatable")
+        self.assertEqual(span, (2, 5))
+
+    def test_live_section_span_boundary_stops_at_tab_heading(self):
+        # The section must END at a `##\tNext` boundary, not run through it.
+        lines = ["## Blocked", "> r", "##\tNext", "body"]
+        self.assertEqual(_live_section_span(lines, "## Blocked"), (0, 2))
 
 
 class ReadersFailOpen(unittest.TestCase):

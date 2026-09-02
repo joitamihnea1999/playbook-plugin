@@ -1071,6 +1071,27 @@ def _iter_nonfenced(lines: "list[str]", *, unclosed_is_live: bool = False):
             yield i, line.lstrip("﻿").strip()
 
 
+_ATX_H2_RE = re.compile(r"^ {0,3}##[ \t]+(.*?)[ \t]*$")
+
+
+def _atx_h2_text(raw: str) -> "str | None":
+    """The strict ATX level-2 heading matcher shared by every task.md section
+    WRITER and READER (V5, P-D). Returns the NORMALIZED heading `"## <title>"`
+    (separator collapsed to one space, trailing whitespace trimmed) when `raw` is
+    a valid H2, else None. `raw` is BOM-tolerant.
+
+    CommonMark rules the old `startswith("## ")`/`== title` tests got wrong:
+      * at most 3 leading spaces — a >=4-column indent is code/text, NOT a heading
+        (so a `>=4-space ## X` decoy no longer over-matches as a section boundary);
+      * the `##` may be followed by a TAB, not only a space (`##\\tX` IS a heading —
+        `startswith("## ")` missed it, so a tab-titled section was invisible to the
+        writer and could be duplicated or mis-spliced);
+      * `###…` is level-3, never an H2 (the required `[ \\t]+` after `##` excludes
+        `###`, whose next char is `#`)."""
+    m = _ATX_H2_RE.match(raw.lstrip("﻿"))
+    return f"## {m.group(1)}" if m else None
+
+
 def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
     """[start, end) of the first NON-FENCED level-2 `## {title}` section, or None.
     `title` includes the `## ` prefix. `end` is the first non-fenced H2 strictly
@@ -1081,13 +1102,13 @@ def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | Non
     WRITER on the task.md path must be fence-aware so a fenced `## Blocked` /
     `## Handoff` example (documentation of the ritual) can never be treated as the
     live section and delete or mis-splice the real record (the #09 hazard; P1
-    parked by the 1.5.39 panel)."""
-    nf = list(_iter_nonfenced(lines))
-    start = next((i for i, s in nf if s == title), None)
+    parked by the 1.5.39 panel). Boundary detection uses the strict ATX matcher on
+    the RAW line (V5) so `##\\tX` is a boundary and a >=4-space `## X` is not."""
+    nf = [i for i, _s in _iter_nonfenced(lines)]
+    start = next((i for i in nf if _atx_h2_text(lines[i]) == title), None)
     if start is None:
         return None
-    end = next((i for i, s in nf
-                if i > start and s.startswith("## ") and not s.startswith("### ")),
+    end = next((i for i in nf if i > start and _atx_h2_text(lines[i]) is not None),
                len(lines))
     return (start, end)
 
@@ -3076,12 +3097,13 @@ def _latest_receipt_line(task_file: Path) -> "str | None":
         return None
     in_receipt = False
     # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real receipt.
-    for _i, s in _iter_nonfenced(lines, unclosed_is_live=True):
-        if s == "## Verification Receipt":
+    # H2 detection via the strict ATX matcher (V5).
+    for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
+        if _atx_h2_text(lines[i]) == "## Verification Receipt":
             in_receipt = True
             continue
         if in_receipt:
-            if s.startswith("## ") and not s.startswith("### "):
+            if _atx_h2_text(lines[i]) is not None:
                 break
             if s.startswith("### "):
                 return s[4:].strip()
@@ -3169,13 +3191,14 @@ def write_handoff(task_file: Path, section: str) -> None:
     def _section_span(title: str) -> "tuple[int, int] | None":
         # [start, end) of a non-fenced level-2 section, or None. `end` is the
         # first non-fenced H2 strictly after start (a fenced heading, or the
-        # section's own H3s, never end it).
-        nf = list(_iter_nonfenced(lines))
-        start = next((i for i, s in nf if s == title), None)
+        # section's own H3s, never end it). Strict ATX matcher on the raw line
+        # (V5): `##\tX` is a boundary, a >=4-space `## X` is not — writer and
+        # reader must agree so no splice runs into the wrong heading.
+        nf = [i for i, _s in _iter_nonfenced(lines)]
+        start = next((i for i in nf if _atx_h2_text(lines[i]) == title), None)
         if start is None:
             return None
-        end = next((i for i, s in nf
-                    if i > start and s.startswith("## ") and not s.startswith("### ")),
+        end = next((i for i in nf if i > start and _atx_h2_text(lines[i]) is not None),
                    len(lines))
         return (start, end)
 
@@ -3223,12 +3246,13 @@ def _extract_block_reason(task_file: Path) -> "str | None":
     in_blocked = False
     # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real
     # `## Blocked` (find_unconsumed_handoff → bootstrap depends on this).
-    for _i, s in _iter_nonfenced(lines, unclosed_is_live=True):
-        if s == "## Blocked":
+    # H2 detection via the strict ATX matcher (V5): `##\tBlocked` is the section.
+    for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
+        if _atx_h2_text(lines[i]) == "## Blocked":
             in_blocked = True
             continue
         if in_blocked:
-            if s.startswith("## ") and not s.startswith("### "):
+            if _atx_h2_text(lines[i]) is not None:
                 break
             if s.startswith(">"):
                 body = s.lstrip(">").strip()
