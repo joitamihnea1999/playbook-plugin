@@ -1,7 +1,7 @@
 {
   "$schema": "guarantee-ledger.schema.json",
   "schema_version": 1,
-  "ledger_version": "2026-08-28",
+  "ledger_version": "2026-09-02",
   "guarantees": [
     {
       "id": "PB-TASK-ACTIVATE",
@@ -744,6 +744,10 @@
         {
           "path": "plugins/playbook/tasks/core.py",
           "reference": "symbol:_risk_heading_lines"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:_has_unclosed_fence"
         }
       ],
       "failure_consequence": "High",
@@ -808,14 +812,40 @@
         {
           "type": "executable unit",
           "path": "tests/test_unclassified_fails_closed.py",
-          "reference": "RiskSectionDetection.test_unclosed_fence_hides_a_risk_decoy_fail_closed",
+          "reference": "RiskSectionDetection.test_unclosed_fence_value_fails_closed_never_leaks_a_decoy",
           "boundary": "unit",
           "negative_control": {
             "path": "tests/test_unclassified_fails_closed.py",
             "reference": "RiskSectionDetection.test_bom_tabs_case_crlf_and_trailing_space_are_real_headings"
           },
           "limitations": [
-            "Proves the risk classifier fails CLOSED on an unclosed fence: a `## Risk` quoted after an unclosed opener is fenced-through-EOF, so it cannot become the classification (returns unclassified). The negative control confirms genuine non-fenced headings are still recognized."
+            "Proves the risk VALUE fails CLOSED on an unclosed fence: a `## Risk` quoted after an unclosed opener is fenced-through-EOF, so it can never BECOME the classification (extract_risk returns unclassified). The negative control confirms genuine non-fenced headings are still recognized. Section-PRESENCE on the same input is the opposite direction (fail strict) — see the V2 proof below."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_unclosed_fence_counts_as_offered_and_is_strict",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_fenced_risk_example_does_not_block_a_legacy_close"
+          },
+          "limitations": [
+            "V2 (task 039, codex-sol #1 Critical): has_risk_section fails toward STRICT on an UNCERTAIN parse — an unclosed fence anywhere in the file counts as an offered (present) Risk gate (True), so a `## Risk` buried under an unclosed fence can no longer read as ABSENT and buy the pre-1.5.0 lenient legacy close (the P-C bypass). Combined with the fail-closed VALUE (unclassified), present+unclassified = BLOCK. The negative control proves a properly CLOSED fenced `## Risk` example does NOT over-block a legacy close (only an UNCLOSED fence is uncertain). Detection is `_has_unclosed_fence` (the two scanner fail-directions diverge exactly on an unclosed opener); it does not attempt to distinguish a malformed-but-benign unclosed fence from an adversarial one — both are held to the high-consequence bar, recoverable by fixing the fence / classifying / review evidence / `--force --reason`."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "CloseEndToEnd.test_unclosed_fence_hiding_the_real_risk_blocks_the_close",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_fenced_risk_example_does_not_block_a_legacy_close"
+          },
+          "limitations": [
+            "End-to-end through the real CLI: a task.md whose real `## Risk` is buried under an unclosed fence is BLOCKED at close (was a lenient legacy close before V2), and is recoverable with `--force --reason`. Best-effort bound (unchanged posture): the guard is against a self-authored/committed malformed task.md; human diff review + the OS sandbox remain the containment for adversarial raw-content crafting."
           ]
         }
       ],
@@ -830,7 +860,8 @@
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
-        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."
+        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
+        "V2 tightening (task 039): has_risk_section fails toward STRICT on an uncertain parse (any unclosed fence in the file counts as an offered Risk gate), closing the P-C bypass where a `## Risk` buried under an unclosed fence read as a pre-1.5.0 legacy task and bought a lenient close. extract_risk still fails closed on the VALUE. Both scanners route through the single strict engine _iter_fenced_flags (task 039 V1). Residual (disclosed, unchanged posture): the guard is best-effort against a self-authored/committed malformed task.md; adversarial raw-content crafting is contained by human diff review + the OS sandbox, not by the parser."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],

@@ -198,14 +198,30 @@ class RiskSectionDetection(unittest.TestCase):
                 self.assertEqual(extract_risk(p), "assertive",
                                  "a fenced Risk decoy must not shadow the real class")
 
-    def test_unclosed_fence_hides_a_risk_decoy_fail_closed(self):
-        # Panel round-3: the risk classifier must fail CLOSED on an unclosed fence
-        # — a `## Risk` quoted after an unclosed opener is fenced-through-EOF, not
-        # live metadata, so it cannot become the classification. (Fail-open reads
-        # the decoy and returns `reversible`.)
+    def test_unclosed_fence_value_fails_closed_never_leaks_a_decoy(self):
+        # Panel round-3: the risk VALUE must fail CLOSED on an unclosed fence — a
+        # `## Risk` quoted after an unclosed opener is fenced-through-EOF, not live
+        # metadata, so it can never BECOME the classification. (Fail-open reads the
+        # decoy and returns `reversible`.) extract_risk stays fail-closed.
         p = self._md("# T\n\n## Docs\n```\n## Risk\nreversible\n> still quoted\n")
-        self.assertFalse(has_risk_section(p))
         self.assertEqual(extract_risk(p), "unclassified")
+
+    def test_unclosed_fence_counts_as_offered_and_is_strict(self):
+        # V2 (task 039, codex-sol #1 Critical): an unclosed fence makes the parse
+        # UNCERTAIN. has_risk_section must fail toward STRICT ("offered") — True —
+        # so the close is held to the high-consequence bar, not the lenient legacy
+        # path. Previously this returned False, so burying the real `## Risk` under
+        # an unclosed fence bought a pre-1.5.0 lenient close (the P-C bypass).
+        # Value still fails closed (unclassified); present=True + unclassified =
+        # BLOCK in close_decision.
+        buried = self._md("# T\n\n## Docs\n```\n## Risk\nassertive\n> real class hidden\n")
+        self.assertTrue(has_risk_section(buried),
+                        "an unclosed fence must count as an offered (uncertain) risk gate")
+        self.assertEqual(extract_risk(buried), "unclassified")
+        # Negative control: a well-formed file with NO risk heading and no unclosed
+        # fence is still legacy (present=False) — V2 does not over-block clean files.
+        clean_legacy = self._md("# T\n\n## Docs\nplain paragraph, no fence, no risk\n")
+        self.assertFalse(has_risk_section(clean_legacy))
 
     def test_unreadable_file_is_treated_as_legacy(self):
         """Fail toward the documented old behavior, never toward inventing a
@@ -296,6 +312,22 @@ class CloseEndToEnd(unittest.TestCase):
             "## Work Plan", "```md\n## Risk\nunclassified\n```\n\n## Work Plan")
         _, r = self._work_then_close(body)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_unclosed_fence_hiding_the_real_risk_blocks_the_close(self):
+        # V2 (task 039, codex-sol #1 Critical): burying the real `## Risk` under an
+        # UNCLOSED fence used to make has_risk_section=False → the pre-1.5.0 lenient
+        # legacy close, defeating the review requirement (P-C bypass). Now the
+        # uncertain parse is strict: the close must BLOCK (no review evidence).
+        body = ("# 001 - T\n\n## Status\npending\n\n"
+                "## Docs\n```\n## Risk\nassertive\n> real class hidden below an "
+                "unclosed fence\n\n## Work Plan\n- [x] G1: do it\n")
+        d, r = self._work_then_close(body)
+        self.assertNotEqual(r.returncode, 0,
+                            f"an unclosed fence bought a lenient close:\n{r.stdout}")
+        self.assertNotIn("Task 001 done.", r.stdout)
+        # Recoverable the same way any strict block is: --force --reason.
+        r2 = self._cli(d, "work", "done", "--force", "--reason", "malformed import")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
 
 
 if __name__ == "__main__":

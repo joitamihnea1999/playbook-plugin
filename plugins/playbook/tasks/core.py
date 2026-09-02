@@ -990,6 +990,18 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
     return flags
 
 
+def _has_unclosed_fence(lines: "list[str]") -> bool:
+    """True when a code-fence opener is never closed before EOF — i.e. the fence
+    parse is UNCERTAIN. The two fail directions disagree exactly here: the
+    fail-closed pass fences the opener's remainder through EOF, the fail-open pass
+    does not, so any divergence between them is an unclosed fence. Used by the
+    risk close-gate (V2) to fail toward STRICT on a malformed task.md rather than
+    letting a buried `## Risk` masquerade as a pre-1.5.0 legacy task."""
+    closed = _iter_fenced_flags(lines, unclosed_is_live=True)
+    strict = _iter_fenced_flags(lines, unclosed_is_live=False)
+    return closed != strict
+
+
 def _iter_nonfenced(lines: "list[str]"):
     """Yield ``(index, stripped_line)`` for every line OUTSIDE a code fence or
     indented code block, so section writers/readers never treat a heading quoted
@@ -1083,7 +1095,16 @@ def has_risk_section(task_file) -> bool:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    return bool(_risk_heading_lines(lines))
+    # V2 (task 039, codex-sol #1 Critical): fail toward STRICT on an uncertain
+    # parse. A real non-fenced `## Risk…` heading counts as offered; SO DOES an
+    # unclosed fence — because the fail-closed scanner hides everything after a
+    # malformed opener, so a `## Risk` buried under an unclosed fence would
+    # otherwise read as ABSENT (has_risk_section=False) and buy the pre-1.5.0
+    # lenient legacy close (the P-C bypass). extract_risk still fails closed on
+    # the VALUE (returns unclassified), so present + unclassified = BLOCK: a
+    # malformed task.md is held to the high-consequence bar, recoverable by fixing
+    # the fence, classifying, supplying review evidence, or `--force --reason`.
+    return bool(_risk_heading_lines(lines)) or _has_unclosed_fence(lines)
 
 
 # Per-file ceiling for hashing UNTRACKED content in the freshness fingerprint
