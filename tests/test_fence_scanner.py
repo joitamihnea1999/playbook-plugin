@@ -31,10 +31,12 @@ from tasks.core import (  # noqa: E402
     _atx_h2_text,
     _closed_fence_line_indices,
     _extract_block_reason,
+    _extract_problem,
     _iter_fenced_flags,
     _iter_nonfenced,
     _latest_receipt_line,
     _live_section_span,
+    extract_parked_items,
     find_unconsumed_handoff,
 )
 
@@ -274,6 +276,31 @@ class ReadersFailOpen(unittest.TestCase):
         found = find_unconsumed_handoff(proj)
         self.assertIsNotNone(found, "a real handoff under an unclosed fence was lost")
         self.assertEqual(found[0], 7)
+
+
+class NonCorruptingReadersFenceAware(unittest.TestCase):
+    """Side-effect cleanup: the pure display readers route through the shared
+    scanner so a fenced example is not misread. They never rewrite the file, so
+    they fail OPEN (surface a real section under an unclosed fence)."""
+
+    def test_parked_ignores_a_closed_fenced_example(self):
+        text = ("## Parked\n- real debt item\n\n## Docs\n```\n## Parked\n"
+                "- phantom from a fenced example\n```\n")
+        items = extract_parked_items(text)
+        self.assertIn("real debt item", items)
+        self.assertNotIn("phantom from a fenced example", items,
+                         "a fenced ## Parked example produced a phantom debt item")
+
+    def test_parked_surfaces_under_an_unclosed_fence(self):
+        text = "## Docs\n```\nquoted\n\n## Parked\n- real debt under an unclosed fence\n"
+        self.assertIn("real debt under an unclosed fence", extract_parked_items(text))
+
+    def test_extract_problem_ignores_a_fenced_intent_example(self):
+        d = Path(tempfile.mkdtemp())
+        p = d / "task.md"
+        p.write_text("# T\n\n## Docs\n```\n## Intent\nfenced example intent\n```\n\n"
+                     "## Intent\nthe real intent\n", encoding="utf-8")
+        self.assertEqual(_extract_problem(p), "the real intent")
 
 
 if __name__ == "__main__":

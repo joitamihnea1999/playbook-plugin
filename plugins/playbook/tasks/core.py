@@ -2561,14 +2561,19 @@ def extract_parked_items(task_md_text: str) -> "list[str]":
     agent (or a receipt upsert reordering the file) can easily produce a second
     one — and a first-match read makes every later section invisible. Found live
     by the 1.5.3 gauntlet; the multi-heading hazard, same family as #09."""
+    # Fence-aware (task 039): a fenced `## Parked` example must not mint phantom
+    # debt items. Pure reader → fail OPEN (unclosed_is_live=True): a real ## Parked
+    # under an unclosed fence must still surface. H2 via the strict ATX matcher.
+    lines = task_md_text.splitlines()
     in_section = False
     body: "list[str]" = []
-    for line in task_md_text.splitlines():
-        if line.strip() == "## Parked":
+    for i, _s in _iter_nonfenced(lines, unclosed_is_live=True):
+        line = lines[i]
+        if _atx_h2_text(line) == "## Parked":
             in_section = True
             continue
         if in_section:
-            if line.startswith("## "):
+            if _atx_h2_text(line) is not None:
                 in_section = False  # keep scanning — there may be another section
                 continue
             body.append(line)
@@ -2889,17 +2894,20 @@ def _extract_problem(task_file: Path) -> str:
     """Extract first line of Problem/Intent section from task file."""
     try:
         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        # Fence-aware (task 039): a fenced `## Intent`/`## Problem` example must
+        # not be read as the live summary. Pure reader → fail OPEN.
         in_section = False
-        for line in lines:
-            if line.strip() in ("## Problem", "## Intent"):
+        for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
+            h2 = _atx_h2_text(lines[i])
+            if h2 in ("## Problem", "## Intent"):
                 in_section = True
                 continue
             if in_section:
-                if not line.strip():
+                if not s:
                     continue
-                if line.startswith("##"):
+                if h2 is not None or s.startswith("##"):
                     break
-                text = line.strip()
+                text = s
                 if text.startswith("(") and text.endswith(")"):
                     text = text[1:-1]
                 return text
