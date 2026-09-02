@@ -957,15 +957,26 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
         bootstrap/handoff READERS pass True, so a malformed fence never refuses
         an insert nor hides a real `## Blocked`/`## Handoff`/receipt.
 
+    Indented code blocks (V4): a non-blank line indented >=4 COLUMNS (space or
+    tab, a tab counting to the next 4-column stop per CommonMark) that begins
+    after a blank line — or continues a run already begun — is an indented code
+    block, so a `## Risk`/`## Blocked` decoy inside one is content, not a live
+    heading (codex-sol #2 Critical). CommonMark's "an indented code block cannot
+    interrupt a paragraph" is honored by the after-a-blank start rule; a >=4-column
+    heading that is NOT inside such a block is instead rejected as a boundary by
+    the strict ATX matcher (V5), since ATX headings allow at most 3 leading spaces.
+
     This is the shared engine for `_iter_nonfenced` (fail closed) and
-    `_closed_fence_line_indices` (fail open); indented-code-block awareness (V4)
-    and the ASCII-only closer (V6) are layered on it in their own commits.
+    `_closed_fence_line_indices` (fail open); the ASCII-only closer (V6) is
+    layered on it in its own commit.
     """
     n = len(lines)
     flags = [False] * n
     fence_char = ""
     fence_len = 0
     open_i = -1
+    prev_blank = True                           # start-of-doc counts as a blank
+    in_indented_code = False
     for i, line in enumerate(lines):
         raw = line.lstrip("﻿")            # keep indentation, drop BOM
         fm = _FENCE_OPEN_RE.match(raw)
@@ -976,18 +987,50 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
                 for j in range(open_i, i + 1):
                     flags[j] = True            # opener..closer inclusive
                 fence_char, fence_len, open_i = "", 0, -1
+            prev_blank = False                  # fence content is non-blank context
             continue                            # interior (marked at close / EOF)
-        if fm:
+        if fm:                                  # <=3-space fence opener wins
+            in_indented_code = False
+            prev_blank = False
             if fm.group(1)[0] == "`" and "`" in fm.group(2):
                 continue                        # inline-code opener stays live
             fence_char = fm.group(1)[0]
             fence_len = len(fm.group(1))
             open_i = i
             continue
+        stripped = raw.strip()
+        if stripped == "":                      # blank line: never a heading
+            prev_blank = True                   # keeps an indented run alive
+            continue
+        if in_indented_code:
+            if _indent_columns(raw) >= 4:
+                flags[i] = True                 # still inside the indented block
+                prev_blank = False
+                continue
+            in_indented_code = False            # de-indented → block ended
+        if prev_blank and _indent_columns(raw) >= 4:
+            in_indented_code = True             # starts after a blank (not a para)
+            flags[i] = True
+        prev_blank = False
     if fence_char and not unclosed_is_live:     # unclosed opener, fail CLOSED
         for j in range(open_i, n):
             flags[j] = True
     return flags
+
+
+def _indent_columns(raw: str) -> int:
+    """Leading-whitespace width in COLUMNS, a tab expanding to the next multiple
+    of 4 (CommonMark's tab stop for indented code blocks). `raw` is already
+    BOM-stripped. Counts space/tab only, stopping at the first other character."""
+    col = 0
+    for ch in raw:
+        if ch == " ":
+            col += 1
+        elif ch == "\t":
+            col += 4 - (col % 4)
+        else:
+            break
+    return col
 
 
 def _has_unclosed_fence(lines: "list[str]") -> bool:

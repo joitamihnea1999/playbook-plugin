@@ -104,6 +104,60 @@ class PublicScannersMatchEngine(unittest.TestCase):
         self.assertEqual(_closed_fence_line_indices(lines), {1, 2, 3})
 
 
+class IndentedCodeBlocks(unittest.TestCase):
+    """V4 — a heading inside a bare indented code block (>=4 columns, no fence,
+    after a blank line) is content, not a live section (codex-sol #2 Critical,
+    P-B). CommonMark: an indented code block starts on a >=4-column line after a
+    blank line and cannot interrupt a paragraph."""
+
+    def _nf(self, text: str) -> "list[str]":
+        return _nonfenced_texts(text)
+
+    def test_four_space_indented_heading_after_blank_is_code(self):
+        text = "## Docs\n\n    ## Risk\n    reversible\n"
+        self.assertNotIn("## Risk", self._nf(text),
+                         "a 4-space-indented ## Risk after a blank must be code")
+
+    def test_tab_indented_heading_after_blank_is_code(self):
+        text = "## Docs\n\n\t## Risk\n\treversible\n"
+        self.assertNotIn("## Risk", self._nf(text),
+                         "a tab-indented ## Risk (tab=4 cols) must be code")
+
+    def test_heading_deep_in_a_multiline_indented_block_is_code(self):
+        # The heading is NOT the first line of the block — proper state tracking,
+        # not just "line after a blank".
+        text = "## Docs\n\n    some code\n    ## Risk\n    reversible\n"
+        self.assertNotIn("## Risk", self._nf(text),
+                         "a ## Risk inside a running indented block must be code")
+
+    def test_three_space_indent_is_still_a_live_heading(self):
+        # Control: <4 columns is NOT an indented code block.
+        text = "## Docs\n\n   ## Risk\nreversible\n"
+        self.assertIn("## Risk", self._nf(text),
+                      "a 3-space indent must remain a live heading")
+
+    def test_indented_line_continuing_a_paragraph_is_not_code(self):
+        # Control: an indented code block cannot INTERRUPT a paragraph (no blank
+        # line before the indent) — so a real column-0 heading right after stays
+        # a live boundary and the paragraph's own indented tail is not spuriously
+        # treated as opening code that swallows it.
+        text = "a paragraph line\n    ## Risk\n\n## Work Plan\n"
+        nf = self._nf(text)
+        self.assertIn("## Work Plan", nf,
+                      "a real heading after a paragraph must stay live")
+
+    def test_indented_risk_decoy_does_not_become_the_classification(self):
+        from tasks.core import extract_risk, has_risk_section
+        d = Path(tempfile.mkdtemp())
+        p = d / "task.md"
+        # Indented decoy `reversible` + a real column-0 `assertive`.
+        p.write_text("# T\n\n## Docs\n\n    ## Risk\n    reversible\n\n"
+                     "## Risk\nassertive\n\n## Work Plan\n- [ ] g\n", encoding="utf-8")
+        self.assertEqual(extract_risk(p), "assertive",
+                         "an indented ## Risk decoy must not shadow the real class")
+        self.assertTrue(has_risk_section(p))
+
+
 class ReadersFailOpen(unittest.TestCase):
     """V3 — the PURE readers surface a real section even under an unclosed fence.
 
