@@ -912,25 +912,67 @@ _RISK_HEADING_RE = re.compile(
     r"^##[ \t]+Risk[ \t]*(?::.*)?$", re.IGNORECASE
 )
 _RISK_FIELD_RE = re.compile(r"^##[ \t]+Risk[ \t]*$", re.IGNORECASE)
+# A CommonMark ATX closing-hash sequence: ` ##` (spaces/tabs + hashes) at EOL.
+_ATX_CLOSING_HASHES_RE = re.compile(r"[ \t]+#+[ \t]*$")
+
+
+def _normalize_atx_title(heading: "str | None") -> "str | None":
+    """Given a `_atx_h2_text` result (`"## <title>"` or None), strip a trailing
+    CommonMark closing-hash sequence from the title and return the normalized
+    `"## <title>"` \u2014 so `## Risk ##` compares equal to `## Risk` (V8, codex-sol
+    #3). None passes through."""
+    if heading is None:
+        return None
+    return f"## {_ATX_CLOSING_HASHES_RE.sub('', heading[3:])}"
 
 
 def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
-    """Risk headings outside Markdown fences as ``(index, stripped_line)``.
+    """LIVE `## Risk` headings as ``(index, normalized_heading)``.
 
-    A task may quote the template in a fenced review/example.  Such text is not
-    metadata.  BOMs are ignored at line starts (not just at file start), and
-    heading case/tabs follow Markdown's ordinary permissiveness.  Duplicates are
-    returned deliberately: callers treat more than one field as malformed
-    rather than letting an attacker choose which duplicate wins.
+    Uses the strict shared ATX matcher `_atx_h2_text` on the RAW line (V8), not a
+    regex on the fence-scanner's indentation-stripped output: so a heading is a
+    live risk field ONLY when it is a genuine ATX H2 \u2014 at most 3 leading spaces,
+    ASCII whitespace (a NBSP-led line is not a heading), `## ` or `##\\t`, not
+    `###` \u2014 with a CommonMark closing-hash sequence normalized away. This closes
+    the risk-path holes the first impl panel found (opus + codex-sol #1/#2/#3):
+    an indented (>=4-col) or NBSP-led `## Risk` is no longer read as a live value,
+    and `## Risk ##` is recognized. Fenced/indented-code examples are already
+    hidden by `_iter_nonfenced` (fail closed). Duplicates are returned
+    deliberately: callers treat more than one field as malformed rather than
+    letting an attacker choose which duplicate wins.
     """
-    # Fence detection reuses `_iter_nonfenced` \u2014 the shared strict CommonMark
-    # scanner. The prior hand-rolled loop treated a ```lang line (and a >=4-space
-    # marker) as a closer, so a fenced `## Risk` example could "close" early and be
-    # read as live metadata \u2014 shadowing the real class and letting an assertive
-    # task close on the reversible bar (panel: codex-sol Critical, task 032).
-    # Sharing the scanner closes that gate bypass and inherits its fail-closed
-    # handling of an unclosed fence.
-    return [(i, s) for i, s in _iter_nonfenced(lines) if _RISK_HEADING_RE.match(s)]
+    out: "list[tuple[int, str]]" = []
+    for i, _s in _iter_nonfenced(lines):
+        norm = _normalize_atx_title(_atx_h2_text(lines[i]))
+        if norm is not None and _RISK_HEADING_RE.match(norm):
+            out.append((i, norm))
+    return out
+
+
+def _any_risk_heading_offered(lines: "list[str]") -> bool:
+    """LIBERAL presence test for `has_risk_section` (V8): does ANY line look like a
+    `## Risk` heading once leading/trailing whitespace (incl. NBSP via str.strip),
+    BOM, and a closing-hash sequence are removed \u2014 EXCLUDING only lines inside a
+    properly CLOSED code fence (an explicit ``` example is documentation)?
+
+    Fails STRICT: a `## Risk` hidden by a >=4-col indent, a NBSP, a closing-hash,
+    or an UNCLOSED fence still means the gate was OFFERED, so the close is held to
+    the high bar (extract_risk degrades such a hidden heading to unclassified \u2192
+    block) rather than the pre-1.5.0 lenient path (opus CRITICAL: V4 had let an
+    indented real `## Risk` read as legacy-absent). The fence-only view
+    (`track_indented_code=False`) is deliberate: a closed FENCE example stays
+    documentation (lenient, test_fenced_risk_example_does_not_block_a_legacy_close),
+    but an indented heading is an ambiguous hide and must block."""
+    fenced_only = {i for i, f in enumerate(
+        _iter_fenced_flags(lines, unclosed_is_live=True, track_indented_code=False))
+        if f}
+    for i, line in enumerate(lines):
+        if i in fenced_only:
+            continue
+        s = _ATX_CLOSING_HASHES_RE.sub("", line.lstrip("\ufeff").strip())
+        if _RISK_HEADING_RE.match(s):
+            return True
+    return False
 
 
 # A fence CLOSER's tail must be ASCII whitespace only (V6). `str.strip()` eats
@@ -939,7 +981,8 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
 _ASCII_WS_ONLY_RE = re.compile(r"[ \t]*\Z")
 
 
-def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[bool]":
+def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool,
+                       track_indented_code: bool = True) -> "list[bool]":
     """The ONE strict CommonMark fence scanner for task.md (task 039). Returns a
     ``list[bool]`` parallel to ``lines``: index ``i`` is True when line ``i`` is
     a code-fence opener, closer, or interior line — i.e. NOT a live heading or
@@ -972,6 +1015,14 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
     interrupt a paragraph" is honored by the after-a-blank start rule; a >=4-column
     heading that is NOT inside such a block is instead rejected as a boundary by
     the strict ATX matcher (V5), since ATX headings allow at most 3 leading spaces.
+
+    ``track_indented_code`` (default True) turns the V4 indented-code tracking on.
+    The risk PRESENCE test (`_any_risk_heading_offered`, V8) passes False to get a
+    FENCE-ONLY view: a properly-closed fenced `## Risk` example is documentation
+    (stays lenient), but an INDENTED `## Risk` is a malformed/ambiguous hide that
+    must fail STRICT (offered → block) — so the presence scan must NOT treat an
+    indented heading as skippable code the way extract_risk's fail-closed reader
+    (which correctly ignores it as a value) does.
 
     This is the shared engine for `_iter_nonfenced` (fail closed) and
     `_closed_fence_line_indices` (fail open).
@@ -1013,15 +1064,16 @@ def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool) -> "list[b
         if stripped == "":                      # blank line: never a heading
             prev_blank = True                   # keeps an indented run alive
             continue
-        if in_indented_code:
-            if _indent_columns(raw) >= 4:
-                flags[i] = True                 # still inside the indented block
-                prev_blank = False
-                continue
-            in_indented_code = False            # de-indented → block ended
-        if prev_blank and _indent_columns(raw) >= 4:
-            in_indented_code = True             # starts after a blank (not a para)
-            flags[i] = True
+        if track_indented_code:
+            if in_indented_code:
+                if _indent_columns(raw) >= 4:
+                    flags[i] = True             # still inside the indented block
+                    prev_blank = False
+                    continue
+                in_indented_code = False        # de-indented → block ended
+            if prev_blank and _indent_columns(raw) >= 4:
+                in_indented_code = True          # starts after a blank (not a para)
+                flags[i] = True
         prev_blank = False
     if fence_char and not unclosed_is_live:     # unclosed opener, fail CLOSED
         for j in range(open_i, n):
@@ -1175,16 +1227,17 @@ def has_risk_section(task_file) -> bool:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    # V2 (task 039, codex-sol #1 Critical): fail toward STRICT on an uncertain
-    # parse. A real non-fenced `## Risk…` heading counts as offered; SO DOES an
-    # unclosed fence — because the fail-closed scanner hides everything after a
-    # malformed opener, so a `## Risk` buried under an unclosed fence would
-    # otherwise read as ABSENT (has_risk_section=False) and buy the pre-1.5.0
-    # lenient legacy close (the P-C bypass). extract_risk still fails closed on
-    # the VALUE (returns unclassified), so present + unclassified = BLOCK: a
-    # malformed task.md is held to the high-consequence bar, recoverable by fixing
-    # the fence, classifying, supplying review evidence, or `--force --reason`.
-    return bool(_risk_heading_lines(lines)) or _has_unclosed_fence(lines)
+    # V2 + V8 (task 039, impl panel): fail toward STRICT on an uncertain parse.
+    # `_any_risk_heading_offered` is the LIBERAL presence test — a `## Risk` hidden
+    # by a >=4-col indent, a NBSP, a closing-hash, an UNCLOSED fence, or simply
+    # live all count as "the gate was OFFERED" (only a properly CLOSED fenced
+    # example is excluded as documentation). extract_risk still fails closed on the
+    # VALUE (returns unclassified for anything not a genuine live ATX heading), so
+    # present + unclassified = BLOCK: a malformed task.md is held to the
+    # high-consequence bar, recoverable by fixing the markdown, classifying,
+    # supplying review evidence, or `--force --reason`. The `_has_unclosed_fence`
+    # term also covers an unclosed fence with NO `## Risk`-shape at all (V2).
+    return _any_risk_heading_offered(lines) or _has_unclosed_fence(lines)
 
 
 # Per-file ceiling for hashing UNTRACKED content in the freshness fingerprint

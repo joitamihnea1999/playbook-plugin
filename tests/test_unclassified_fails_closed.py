@@ -127,6 +127,47 @@ class RiskSectionDetection(unittest.TestCase):
         p = self._md("# 001 - T\n\n## Status\npending\n\n## Work Plan\n- [x] G1\n")
         self.assertFalse(has_risk_section(p))
 
+    # ── V8 (task 039 impl-panel): the risk path must use the strict shared
+    # machinery, and PRESENCE must fail STRICT so a hidden/malformed `## Risk`
+    # blocks rather than reading as pre-1.5.0 legacy-absent (lenient). ──────────
+
+    def test_indented_sole_risk_after_blank_still_counts_as_offered(self):
+        # opus CRITICAL: V4 marked the >=4-indent heading as code → hidden →
+        # has_risk_section=False → lenient legacy close of an assertive task
+        # (a regression V4 introduced). Presence must fail STRICT.
+        p = self._md("# T\n\n## Docs\n\n    ## Risk\n    assertive\n")
+        self.assertTrue(has_risk_section(p),
+                        "an indented (hidden) ## Risk must still count as offered")
+        self.assertEqual(extract_risk(p), "unclassified",
+                         "an indented ## Risk is not a live classification (>=4 = code)")
+
+    def test_indented_risk_no_blank_is_not_read_as_live(self):
+        # codex-sol #1: `## Docs\n    ## Risk\n    reversible` read as reversible;
+        # a >=4-indent heading is code per CommonMark, never a live value.
+        p = self._md("# T\n\n## Docs\n    ## Risk\n    reversible\n")
+        self.assertEqual(extract_risk(p), "unclassified")
+        self.assertTrue(has_risk_section(p))
+
+    def test_nbsp_led_risk_is_not_read_as_live_but_counts_as_offered(self):
+        # codex-sol #2: a NBSP-led `## Risk` was read as a live reversible value
+        # (NBSP-led is not an ATX heading). Value must not leak; presence blocks.
+        p = self._md("# T\n\n ## Risk\nreversible\n")
+        self.assertEqual(extract_risk(p), "unclassified")
+        self.assertTrue(has_risk_section(p))
+
+    def test_closing_hash_risk_heading_is_recognized(self):
+        # codex-sol #3: `## Risk ##` (CommonMark closing sequence) is a valid H2;
+        # it must be recognized so an assertive task is NOT legacy-lenient-closed.
+        p = self._md("# T\n\n## Risk ##\nassertive\n")
+        self.assertTrue(has_risk_section(p))
+        self.assertEqual(extract_risk(p), "assertive")
+
+    def test_nbsp_led_decoy_does_not_shadow_the_real_classification(self):
+        # A NBSP-led decoy `reversible` must not turn the real col-0 `assertive`
+        # into a duplicate-unclassified; the real class wins.
+        p = self._md("# T\n\n ## Risk\nreversible\n\n## Risk\nassertive\n")
+        self.assertEqual(extract_risk(p), "assertive")
+
     def test_a_mention_in_prose_is_not_a_section(self):
         """Negative control: the word must be a heading, not narrative — else
         every task that discusses risk gets silently promoted to strict."""
