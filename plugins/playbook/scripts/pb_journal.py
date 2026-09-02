@@ -32,6 +32,7 @@ import datetime
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -92,16 +93,6 @@ def append(agent_dir, hook, decision, reason, session_id="",
     inside it; `.agent` is never minted here.
     """
     try:
-        if not agent_dir:
-            return
-        agent_dir = Path(agent_dir)
-        if not agent_dir.is_dir():          # playbook-managed lane only
-            return
-        jdir = agent_dir / "journal"
-        try:
-            jdir.mkdir(exist_ok=True)       # inside an existing lane; not `.agent`
-        except OSError:
-            pass                            # e.g. path is a file — the open below fails, swallowed
         rec = {
             "ts": _utcnow(),
             "session_id": session_id or "",
@@ -115,15 +106,183 @@ def append(agent_dir, hook, decision, reason, session_id="",
             rec["path"] = path
         if command:
             rec["command"] = _head(command)
-        data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-        fd = os.open(str(jdir / "enforcement.jsonl"),
-                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-        try:
-            os.write(fd, data)              # single append; atomic under PIPE_BUF
-        finally:
-            os.close(fd)
+        _write_record(agent_dir, rec)
     except Exception as exc:                # defence in depth: never propagate
         _warn(exc)
+
+
+def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
+                  kind="", duration_ms=None, status="", usage=None) -> None:
+    """Append one REVIEW-SPEND record and return None. Never raises.
+
+    Same HARD CONTRACT as `append`: a write failure must NEVER change or break a
+    review or any decision, one O_APPEND write of a single line kept under
+    PIPE_BUF, and the write is skipped unless the resolved lane dir already
+    exists. This records what a judge invocation COST — nothing it decides.
+
+    The record shares the enforcement envelope (`hook="review"`,
+    `decision="record"`, `reason="review spend"`) so a journal reader sees it as
+    one more `record` line, plus review-specific fields:
+      * `kind`        — "panel" | "single" | "tail-cert"
+      * `seat`        — the judge spec, e.g. "claude:opus" / "codex:gpt-5.6:medium"
+      * `task`        — task number ("042") or "-" for a taskless/--prompt review
+      * `round`       — the review iteration this spend belongs to (int; 0 = unknown)
+      * `duration_ms` — wall time of the judge subprocess, milliseconds (omitted if unknown)
+      * `status`      — "ok" | "fail" | "timeout" | "dnf" (did-not-finish/spawn error)
+      * `usage`       — token usage WHERE the CLI reports it, else the explicit
+                        marker `{"status":"unknown"}`. Numbers are NEVER fabricated:
+                        the claude judge runs in plain-text mode and codex/grok do
+                        not surface per-call tokens here, so `unknown` is the norm.
+
+    Every field is bounded so REAL records stay well under the 512-byte
+    atomic-write floor: strings are byte-capped with control characters stripped,
+    numerics are magnitude-capped, `session_id` is capped, and `usage` is
+    normalized to the fixed `{status[,in,out]}` schema (arbitrary caller dicts are
+    NOT copied verbatim). This is the same HONEST bound `append` documents: a
+    pathological caller could still exceed PIPE_BUF (e.g. a field stuffed with
+    `"`/`\\`, which JSON escapes 2×) — an accepted best-effort bound, never a
+    correctness risk, because the write never affects a decision (impl-panel
+    rounds 2-4, task 042).
+    """
+    try:
+        rec = {
+            "ts": _utcnow(),
+            "session_id": _head(session_id or "", 80),
+            "hook": "review",
+            "decision": "record",
+            "reason": "review spend",
+            "kind": _head(kind, 24),
+            "seat": _head(seat, 80),
+            "task": _head(str(task), 16),
+            "round": _cap_int(int(round_no)) if _is_int(round_no) else 0,
+        }
+        if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
+            rec["duration_ms"] = _cap_int(int(duration_ms))
+        if status:
+            rec["status"] = _head(status, 16)
+        rec["usage"] = _normalize_usage(usage)
+        _write_record(agent_dir, rec)
+    except Exception as exc:                # defence in depth: never propagate
+        _warn(exc)
+
+
+# Numeric magnitude cap (impl-panel round 2): the string fields are byte-capped,
+# but a pathological caller could pass an arbitrarily large `round`/`duration_ms`/
+# token int whose DECIMAL LENGTH blows the PIPE_BUF atomic-write bound. Clamp
+# every numeric to this ceiling so "every field is bounded" is literally true.
+# 10**15 - 1 (15 digits) sits far above every real value — round is < 10^4, a
+# multi-hour review is ~10^7 ms, token counts are < ~10^8 — so the clamp is only
+# ever reached by a pathological/synthetic call; even then the line stays small.
+_INT_CAP = 10 ** 15 - 1
+
+
+def _cap_int(v: int) -> int:
+    if v < 0:
+        return 0
+    return v if v <= _INT_CAP else _INT_CAP
+
+
+def _normalize_usage(usage) -> dict:
+    """Coerce any caller `usage` into the fixed, bounded shape the record shape
+    doc pins — never a verbatim copy of an arbitrary dict (which could blow the
+    PIPE_BUF bound). Returns `{"status":"known","in":<int>,"out":<int>}` only
+    when both token counts are real ints; otherwise `{"status":"unknown"}`.
+    Numbers are never fabricated — a non-int in/out degrades to unknown."""
+    if isinstance(usage, dict) and usage.get("status") == "known":
+        _in, _out = usage.get("in"), usage.get("out")
+        if isinstance(_in, int) and not isinstance(_in, bool) \
+                and isinstance(_out, int) and not isinstance(_out, bool):
+            # Magnitude-capped like every other numeric so a pathological token
+            # count cannot blow the PIPE_BUF line bound (impl-panel round 2).
+            return {"status": "known", "in": _cap_int(_in), "out": _cap_int(_out)}
+    return {"status": "unknown"}
+
+
+def _is_int(v) -> bool:
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return True
+    try:
+        return str(v).strip().lstrip("-").isdigit()
+    except Exception:
+        return False
+
+
+def _write_record(agent_dir, rec) -> None:
+    """Write ONE record dict as a single O_APPEND line into the lane's journal.
+
+    Shared by `append` and `append_review`. Skips silently unless the resolved
+    lane dir already exists (playbook-managed project); the `journal/` subdir is
+    created inside that existing lane, never `.agent` itself. One `os.write` of
+    one line: POSIX makes an O_APPEND write of at most PIPE_BUF bytes atomic
+    against concurrent appenders, so lines from separate processes (multi-lane,
+    parallel panel seats) do not interleave. The caller is responsible for
+    keeping the record under that bound (the field caps above do).
+
+    Hostile-tree safe (impl-panel round 3): the journal file is opened
+    O_NONBLOCK|O_NOFOLLOW and its fd fstat'd to confirm a regular file before any
+    write. Without this, a rogue judge that swapped `enforcement.jsonl` for a
+    FIFO would turn the next review's O_WRONLY open into an indefinite HANG
+    (worse than the "a write never affects the review" contract allows), and a
+    symlinked `journal/` could write outside the lane. A non-regular / symlinked
+    sink is silently skipped instead."""
+    if not agent_dir:
+        return
+    agent_dir = Path(agent_dir)
+    if not agent_dir.is_dir():              # playbook-managed lane only
+        return
+    jdir = agent_dir / "journal"
+    # A symlinked `journal` DIRECTORY would let the file open below resolve
+    # OUTSIDE the lane — O_NOFOLLOW on the leaf file does NOT protect an
+    # intermediate symlinked component (impl-panel round 4, unanimous). lstat the
+    # journal component and skip if it is a symlink. (Residual, honestly bounded:
+    # a TOCTOU swap of the dir between this lstat and the open below is a tiny
+    # window on a best-effort log with no reader waiting — far under this
+    # feature's threat model; a dirfd/openat anchor would close it fully but is
+    # not portable to Windows-Git-Bash.)
+    jfile = jdir / "enforcement.jsonl"
+    # Skip a symlinked `journal` DIRECTORY or a symlinked leaf FILE — either would
+    # let the open below resolve OUTSIDE the lane. lstat both components: this is
+    # the PORTABLE guard (O_NOFOLLOW below is POSIX-only and absent on Windows, so
+    # on Windows it is these islink checks doing the work). Residual, honestly
+    # bounded: a TOCTOU swap between an lstat and the open is a tiny window on a
+    # best-effort log with no reader waiting — far under this feature's threat
+    # model; a dirfd/openat anchor would close it fully but is not portable to
+    # Windows-Git-Bash (impl-panel round 4 + CI).
+    try:
+        if jdir.is_symlink():
+            return
+    except OSError:
+        return
+    try:
+        jdir.mkdir(exist_ok=True)           # inside an existing lane; not `.agent`
+    except OSError:
+        pass                                # e.g. path is a file — the open below fails, swallowed
+    try:
+        if jfile.is_symlink():
+            return
+    except OSError:
+        return
+    data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    # O_NONBLOCK: a FIFO with no reader fails ENXIO here rather than blocking.
+    # O_NOFOLLOW: a symlinked final component fails ELOOP (no lane escape).
+    # Both are POSIX-only — Windows Python defines neither, so getattr(...,0)
+    # makes them no-ops there (the islink check above is the portable guard, and
+    # Windows has no FIFO-hang vector; the fstat regular-file check below still
+    # applies). Using os.O_NONBLOCK directly raised AttributeError on Windows,
+    # which the caller swallowed and silently dropped EVERY journal write.
+    fd = os.open(str(jfile),
+                 os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                 | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+                 0o644)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):    # FIFO/device/dir/socket → not our sink
+            return
+        os.write(fd, data)                  # single append; atomic under PIPE_BUF
+    finally:
+        os.close(fd)
 
 
 def _utcnow() -> str:
@@ -136,8 +295,17 @@ def _head(command, limit: int = _HEAD_LIMIT) -> str:
     record under PIPE_BUF: 200 multi-byte characters (e.g. emoji) are up to 800
     bytes and would blow the 512-byte atomic-write bound (panel). A truncated
     trailing multi-byte sequence is dropped (errors='ignore'), never emitted
-    half-encoded."""
+    half-encoded.
+
+    Control characters are stripped FIRST (impl-panel round 3): a byte cap alone
+    does not bound the SERIALIZED line, because json.dumps escapes each control
+    char to a 6-byte `\\uXXXX`, so an all-NUL field within the byte cap could
+    still expand the record past PIPE_BUF. These fields (seat/kind/task/status/
+    session_id/command-head) never legitimately carry control chars, so dropping
+    them keeps the encoded line bounded (the only remaining JSON expansion is `"`
+    and `\\` → 2 bytes, which the small caps already absorb)."""
     s = str(command).strip().split("\n", 1)[0]
+    s = "".join(ch for ch in s if ch >= " " and ch != "\x7f")
     return s.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 

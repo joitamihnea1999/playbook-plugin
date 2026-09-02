@@ -9572,7 +9572,199 @@
         "Atomicity bound (documented honestly): each record is one O_APPEND write (bash: a single `printf >>`; python: one os.write) with no fsync and no locking. Concurrent appenders from separate hook processes do not interleave only while a record stays under PIPE_BUF (>=512 bytes; 4096 on Linux); the command/path fields are capped so real records stay well under that, and the write is best-effort — it never affects a decision.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here; the grok/codex command-guard journal path is retained in code but EXPERIMENTAL (no support claim, no live evidence).",
         "windows-git-bash is not live-tested for this feature; the bash emitter uses only portable builtins plus `date`, and the python emitter uses stdlib os.open with O_APPEND.",
-        "Owner-ratified decision (M173, R5 2026-08-26): the `decision` contract is {allow, block, record} and the close path emits `record` (was the out-of-contract `verify-contract`). External consumers of this journal (e.g. playbook-lens) that do not yet know `record` will flag it as an unexpected decision until they add it — expected, one-time skew, theirs to update; this repo's format is the source of truth."
+        "Owner-ratified decision (M173, R5 2026-08-26): the `decision` contract is {allow, block, record} and the close path emits `record` (was the out-of-contract `verify-contract`). External consumers of this journal (e.g. playbook-lens) that do not yet know `record` will flag it as an unexpected decision until they add it — expected, one-time skew, theirs to update; this repo's format is the source of truth.",
+        "Sibling surface (task 042, owner decision 2026-09-01): the review runner also appends `record` lines with hook=\"review\" (reason=\"review spend\") for every judge invocation — a separate observability guarantee, PB-REVIEW-SPEND-JOURNAL, owns that shape and its evidence. This entry stays scoped to the ENFORCEMENT-decision emitters (hook != \"review\")."
+      ],
+      "follow_up_phases": [],
+      "required_live_evidence": [],
+      "semantic_protocol": null,
+      "violation_reproduction": null
+    },
+    {
+      "id": "PB-REVIEW-SPEND-JOURNAL",
+      "category": "judges-and-reviews",
+      "statement": "Every judge invocation the review runner makes — each panel seat, the single judge, and the tail-cert judge — appends, on its completion or timeout, one best-effort, log-only spend record to the lane-resolved .agent/<lane>/journal/enforcement.jsonl via pb_journal.append_review, sharing the enforcement envelope (hook=\"review\", decision=\"record\", reason=\"review spend\") plus the fields kind (panel|single|tail-cert), seat as model:effort, task, round, duration_ms, status (ok|fail|timeout|dnf), and usage. The one exception is a tamper hard-stop, which records nothing so the journal write can never precede and suppress the tamper banner. Token usage is recorded only WHERE the CLI reports it as a structured JSON envelope, else the explicit marker {\"status\":\"unknown\"}, and append_review normalizes usage to the fixed {status[,in,out]} schema — numbers are never fabricated and free-form judge prose can never poison the field. A journal write failure never changes or breaks a review or any decision, every field is bounded (strings byte-capped with control chars stripped, numerics magnitude-capped) so REAL records are a single O_APPEND line well under PIPE_BUF — a best-effort bound, not absolute (a pathologically escape-heavy field could exceed it, accepted and harmless since the write affects no decision), and the journal is not written through a symlinked/FIFO path (skipped, not followed).",
+      "owner": [
+        {
+          "path": "plugins/playbook/scripts/pb_journal.py",
+          "reference": "symbol:append_review"
+        },
+        {
+          "path": "plugins/playbook/scripts/pb_journal.py",
+          "reference": "symbol:_write_record"
+        },
+        {
+          "path": "plugins/playbook/scripts/pb_journal.py",
+          "reference": "symbol:_normalize_usage"
+        },
+        {
+          "path": "plugins/playbook/scripts/pb_journal.py",
+          "reference": "symbol:_cap_int"
+        },
+        {
+          "path": "plugins/playbook/tasks/review.py",
+          "reference": "symbol:_journal_review_spend"
+        },
+        {
+          "path": "plugins/playbook/tasks/review.py",
+          "reference": "symbol:_parse_judge_usage"
+        },
+        {
+          "path": "plugins/playbook/tasks/review.py",
+          "reference": "symbol:_seat_with_effort"
+        },
+        {
+          "path": "plugins/playbook/tasks/review.py",
+          "reference": "symbol:cmd_panel_review"
+        },
+        {
+          "path": "plugins/playbook/tasks/review.py",
+          "reference": "symbol:cmd_single_review"
+        },
+        {
+          "path": "plugins/playbook/tasks/review.py",
+          "reference": "symbol:run_tail_cert_judge"
+        }
+      ],
+      "failure_consequence": "Low",
+      "claim_kind": "mechanical",
+      "proofs": [
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "AppendReviewFormat.test_envelope_and_fields_pinned",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "AppendReviewFormat.test_unwritable_lane_is_silent_noop"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "PanelSpendE2E.test_one_record_per_seat",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Drives cmd_panel_review in-process with a faked run_headless_judge and two claude seats; asserts one record per seat sharing the panel round."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "SingleSpendE2E.test_one_single_record",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "SingleSpendE2E.test_unwritable_journal_changes_nothing"
+          },
+          "limitations": [
+            "Decision-independence is proved by making the journal dir a regular file so the append hard-fails; the review's exit code and judge.log are byte-for-byte identical to the writable-journal run."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "TailCertSpendE2E.test_tail_cert_records_one",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "TailCertSpendE2E.test_tail_cert_tamper_records_nothing"
+          },
+          "limitations": [
+            "Drives run_tail_cert_judge in-process with a faked raw judge; the negative control asserts a tamper hard-stop records nothing, and TamperRecordsNothing.test_panel_tamper_no_records pins the same rule for the panel."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "SpendHelpers.test_parse_usage_prose_quote_is_never_fabricated",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "SpendHelpers.test_parse_usage_unknown_and_known"
+          },
+          "limitations": [
+            "Pins the anti-fabrication anchor: a judge that merely quotes a usage-shaped string in prose is NOT recorded as real usage (only a whole-output JSON envelope is); AppendReviewFormat.test_usage_normalized_not_copied_verbatim pins the fixed-schema normalization + PIPE_BUF bound."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "AppendReviewFormat.test_pathological_numeric_magnitudes_capped",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Pins the numeric magnitude cap: a 1000-digit round/duration_ms/token value is clamped so the record stays one line under 512 bytes — the 'every field bounded' half of the atomicity claim."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "SingleSpendE2E.test_timeout_records_timeout_status",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "SingleSpendE2E.test_timeout_with_tamper_records_nothing"
+          },
+          "limitations": [
+            "Drives the hard-timeout bail path (a finite --timeout + a dispatch raising TimeoutExpired) and asserts one status=timeout record on a clean tree, none on tamper — covering the 'or timeout' clause and the closure's late-bound seat/round."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "SpendHelpers.test_seat_with_effort",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Pins the model:effort seat: claude gets its fixed :high appended (not in the variant); codex/grok keep the effort already in their variant. SpendHelpers.test_claude_effort_constant_matches_the_adapter pins the effort literal against the adapter so the seat cannot silently misattribute."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "AppendReviewFormat.test_control_chars_do_not_expand_the_line",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Pins that control characters are stripped so json escaping cannot expand the serialized line past PIPE_BUF (an 80-NUL field once serialized to ~694 bytes)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "AppendReviewFormat.test_fifo_journal_does_not_hang",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "AppendReviewFormat.test_symlinked_journal_file_writes_nothing_outside_lane"
+          },
+          "limitations": [
+            "POSIX-only (skipUnless mkfifo/symlink): a FIFO journal path fails fast under O_NONBLOCK instead of hanging (the test completing is the proof), and a symlinked path writes nothing outside the lane under O_NOFOLLOW."
+          ]
+        }
+      ],
+      "applicable_platforms": [
+        "linux",
+        "macos",
+        "windows-git-bash"
+      ],
+      "applicable_providers": [
+        "claude"
+      ],
+      "status": "verified_by_current_executable_evidence",
+      "missing_evidence_or_limitation": [
+        "Owner-ratified observability addition (decision 2026-09-01): review-spend records, same class and hard contract as the enforcement journal (PB-ENFORCEMENT-JOURNAL). Log-only; the reader/analytics (playbook-lens) is a SEPARATE repo and consumes this shape — no reader tooling ships here.",
+        "Token usage is honestly `unknown` in practice: the claude judge runs in plain-text mode (no --output-format json) and codex/grok do not surface per-call tokens on this path, so the usage parser (anchored to a whole-output JSON envelope, so free-form prose can never poison it) records {\"status\":\"unknown\"} unless a real structured usage envelope appears; it never fabricates numbers. Populating real token counts would require a future switch to structured judge output.",
+        "The `round` field is best-effort: it sums panel rounds across judge.md + judge-archive.md + 1, so for single/tail-cert it is an approximate spend-correlation hint rather than an exact iteration index.",
+        "Evidence exercises the provider-agnostic Python emit path via claude seats (panel + single + tail-cert). codex/grok/experimental seats traverse the identical emit (usage always unknown for them), so applicable_providers is scoped to claude where there is executable evidence.",
+        "A tamper hard-stop on any review path records NO spend by design — the journal write must never precede the tamper banner (a hostile-tree hang inside it could suppress the banner). Pinned by TailCertSpendE2E.test_tail_cert_tamper_records_nothing + TamperRecordsNothing.test_panel_tamper_no_records.",
+        "Atomicity bound (same HONEST bound as PB-ENFORCEMENT-JOURNAL's append): one O_APPEND os.write with no fsync/locking; concurrent appenders (parallel panel seats, multi-lane) do not interleave only while a record stays under PIPE_BUF (>=512 bytes; 4096 on Linux). String fields are byte-capped with control chars stripped and numerics magnitude-capped to 15 digits, so REAL records stay well under the bound — but it is best-effort, not absolute: a pathological caller could still exceed it (e.g. a field stuffed with quotes/backslashes, which JSON escapes 2x). Accepted and harmless because the write never affects a decision (impl-panel round 4).",
+        "Hostile-tree write safety (impl-panel rounds 3-4): _write_record opens the journal O_NONBLOCK|O_NOFOLLOW and fstat-confirms a regular file, and lstat-skips a symlinked journal/ parent directory, so a rogue judge that swapped enforcement.jsonl (or its parent dir) for a FIFO/symlink cannot hang the next review or escape the lane — the unsafe sink is skipped. Residual (honestly bounded): a TOCTOU swap of the parent dir between the lstat and the open is a tiny window on a best-effort log; a dirfd/openat anchor would close it fully but is not portable to Windows-Git-Bash. This hardening is in the shared writer, so it also strengthens PB-ENFORCEMENT-JOURNAL.",
+        "seat records model:effort. codex/grok already carry effort in the model variant; the claude judge runs at a fixed --effort high (in provider/adapters/claude.py::run_headless_judge and the single-judge claude branch) that _seat_with_effort appends. If that constant changes it must change in all three places, or the recorded effort drifts from the real one — a source-coupling bound, not a runtime one.",
+        "windows-git-bash / macos are not separately live-tested for this feature; the emitter is stdlib os.open with O_APPEND, identical to the enforcement journal's python path."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
