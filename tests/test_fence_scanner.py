@@ -230,6 +230,32 @@ class StrictAtxH2Matcher(unittest.TestCase):
         lines = ["## Blocked", "> r", "##\tNext", "body"]
         self.assertEqual(_live_section_span(lines, "## Blocked"), (0, 2))
 
+    # V9 (round-2 panel, convergent sonnet/codex-sol/codex-terra): the CommonMark
+    # closing-hash normalization must live in _atx_h2_text so EVERY section
+    # consumer (not just the risk path) finds `## Blocked ##` / `## Handoff ##`.
+    def test_closing_hash_sequence_is_normalized(self):
+        self.assertEqual(_atx_h2_text("## Blocked ##"), "## Blocked")
+        self.assertEqual(_atx_h2_text("## Handoff ###"), "## Handoff")
+        self.assertEqual(_atx_h2_text("##\tRisk ##"), "## Risk")
+
+    def test_no_space_before_hashes_is_not_a_closing_sequence(self):
+        # CommonMark requires whitespace before the closing run: `## Blocked##`
+        # keeps the hashes as content.
+        self.assertEqual(_atx_h2_text("## Blocked##"), "## Blocked##")
+
+    def test_live_section_span_finds_a_closing_hash_title(self):
+        lines = ["## Blocked ##", "> r", "", "## Work Plan"]
+        self.assertEqual(_live_section_span(lines, "## Blocked"), (0, 3),
+                         "a valid `## Blocked ##` must be locatable by the writers")
+
+    def test_block_reason_reader_finds_a_closing_hash_heading(self):
+        d = Path(tempfile.mkdtemp())
+        p = d / "task.md"
+        p.write_text("# T\n\n## Status\nblocked\n\n## Blocked ##\n"
+                     "> handoff  (since 2026-01-01T00:00+00:00)\n", encoding="utf-8")
+        self.assertEqual(_extract_block_reason(p), "handoff",
+                         "a `## Blocked ##` handoff must not be lost by the reader")
+
 
 class ReadersFailOpen(unittest.TestCase):
     """V3 — the PURE readers surface a real section even under an unclosed fence.
@@ -264,6 +290,25 @@ class ReadersFailOpen(unittest.TestCase):
                      "## Verification Receipt\n\n### close · risk reversible · commit abc\n")
         self.assertEqual(_latest_receipt_line(p), "close · risk reversible · commit abc",
                          "an unclosed fence hid a real receipt entry")
+
+    def test_reader_open_writer_closed_asymmetry_under_unclosed_fence(self):
+        # V9/opus #2: pin the DELIBERATE, disclosed asymmetry on a `## Blocked`
+        # sitting below an UNCLOSED fence (a malformed committed task.md). The pure
+        # READER fails OPEN and surfaces it; the section-locating WRITER fails
+        # CLOSED and cannot see it (so it never deletes past a malformed fence —
+        # it no-ops / would append fresh instead). This is the safe pair, pinned so
+        # the asymmetry is an invariant, not an accident.
+        d = Path(tempfile.mkdtemp())
+        p = d / "task.md"
+        p.write_text("# T\n\n## Status\nblocked\n\n## Docs\n```\nquoted\n\n"
+                     "## Blocked\n> handoff  (since 2026-01-01T00:00+00:00)\n",
+                     encoding="utf-8")
+        # reader (fail open) surfaces it:
+        self.assertEqual(_extract_block_reason(p), "handoff")
+        # writer's locator (fail closed) does NOT see it (unclosed fence hides it):
+        lines = p.read_text(encoding="utf-8").splitlines()
+        self.assertIsNone(_live_section_span(lines, "## Blocked"),
+                          "the delete-writer must fail CLOSED under an unclosed fence")
 
     def test_find_unconsumed_handoff_finds_it_under_unclosed_fence(self):
         proj = Path(tempfile.mkdtemp())

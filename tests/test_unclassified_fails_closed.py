@@ -269,6 +269,23 @@ class RiskSectionDetection(unittest.TestCase):
         block from an I/O error."""
         self.assertFalse(has_risk_section(self.d / "does-not-exist.md"))
 
+    def test_unclosed_fence_forces_unclassified_even_with_a_read_value(self):
+        # V9/codex-terra CRITICAL (round-2 panel): an unclosed fence = UNCERTAIN
+        # parse. `## Risk\nreversible` shown at top with `## Risk\nassertive` HIDDEN
+        # under an unclosed fence would otherwise read reversible (the assertive
+        # silently shadowed) and close on the low bar. extract_risk must degrade to
+        # unclassified when the parse is uncertain → present+unclassified → BLOCK.
+        p = self._md("# T\n\n## Risk\nreversible\n\n## Docs\n```\n## Risk\nassertive\n")
+        self.assertEqual(extract_risk(p), "unclassified")
+        self.assertTrue(has_risk_section(p))
+
+    def test_trailing_unclosed_fence_forces_unclassified(self):
+        # Even without a hidden second heading, a trailing unclosed fence is an
+        # uncertain parse → the classification is not trusted → block.
+        p = self._md("# T\n\n## Risk\nreversible\n\n```\nunterminated\n")
+        self.assertEqual(extract_risk(p), "unclassified")
+        self.assertTrue(has_risk_section(p))
+
 
 class CloseEndToEnd(unittest.TestCase):
     """Through the real CLI, because the wiring is the half that broke."""

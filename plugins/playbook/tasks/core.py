@@ -916,16 +916,6 @@ _RISK_FIELD_RE = re.compile(r"^##[ \t]+Risk[ \t]*$", re.IGNORECASE)
 _ATX_CLOSING_HASHES_RE = re.compile(r"[ \t]+#+[ \t]*$")
 
 
-def _normalize_atx_title(heading: "str | None") -> "str | None":
-    """Given a `_atx_h2_text` result (`"## <title>"` or None), strip a trailing
-    CommonMark closing-hash sequence from the title and return the normalized
-    `"## <title>"` \u2014 so `## Risk ##` compares equal to `## Risk` (V8, codex-sol
-    #3). None passes through."""
-    if heading is None:
-        return None
-    return f"## {_ATX_CLOSING_HASHES_RE.sub('', heading[3:])}"
-
-
 def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     """LIVE `## Risk` headings as ``(index, normalized_heading)``.
 
@@ -933,17 +923,18 @@ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
     regex on the fence-scanner's indentation-stripped output: so a heading is a
     live risk field ONLY when it is a genuine ATX H2 \u2014 at most 3 leading spaces,
     ASCII whitespace (a NBSP-led line is not a heading), `## ` or `##\\t`, not
-    `###` \u2014 with a CommonMark closing-hash sequence normalized away. This closes
-    the risk-path holes the first impl panel found (opus + codex-sol #1/#2/#3):
-    an indented (>=4-col) or NBSP-led `## Risk` is no longer read as a live value,
-    and `## Risk ##` is recognized. Fenced/indented-code examples are already
-    hidden by `_iter_nonfenced` (fail closed). Duplicates are returned
+    `###` \u2014 with a CommonMark closing-hash sequence normalized away by
+    `_atx_h2_text` itself (V9 \u2014 central, so every section consumer agrees). This
+    closes the risk-path holes the first impl panel found (opus + codex-sol
+    #1/#2/#3): an indented (>=4-col) or NBSP-led `## Risk` is no longer read as a
+    live value, and `## Risk ##` is recognized. Fenced/indented-code examples are
+    already hidden by `_iter_nonfenced` (fail closed). Duplicates are returned
     deliberately: callers treat more than one field as malformed rather than
     letting an attacker choose which duplicate wins.
     """
     out: "list[tuple[int, str]]" = []
     for i, _s in _iter_nonfenced(lines):
-        norm = _normalize_atx_title(_atx_h2_text(lines[i]))
+        norm = _atx_h2_text(lines[i])
         if norm is not None and _RISK_HEADING_RE.match(norm):
             out.append((i, norm))
     return out
@@ -1150,9 +1141,18 @@ def _atx_h2_text(raw: str) -> "str | None":
         `startswith("## ")` missed it, so a tab-titled section was invisible to the
         writer and could be duplicated or mis-spliced);
       * `###…` is level-3, never an H2 (the required `[ \\t]+` after `##` excludes
-        `###`, whose next char is `#`)."""
+        `###`, whose next char is `#`);
+      * a CommonMark CLOSING-HASH sequence (whitespace + a run of `#` at EOL, e.g.
+        `## Blocked ##`) is not title text — it is stripped, so `## Blocked ##`
+        normalizes to `## Blocked` and is found by every section writer/reader (V9,
+        round-2 panel: it was previously normalized only on the risk path, so a
+        valid `## Blocked ##`/`## Handoff ##` was invisible to the block/handoff
+        writers and readers). `## Blocked##` (no space before the run) is content,
+        per CommonMark, and is left intact."""
     m = _ATX_H2_RE.match(raw.lstrip("﻿").rstrip("\r\n"))
-    return f"## {m.group(1)}" if m else None
+    if not m:
+        return None
+    return f"## {_ATX_CLOSING_HASHES_RE.sub('', m.group(1))}"
 
 
 def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
@@ -1183,6 +1183,15 @@ def extract_risk(task_file) -> str:
     try:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
+        return DEFAULT_RISK
+    # V9 (round-2 panel, codex-terra CRITICAL): an UNCLOSED fence means the parse
+    # is uncertain — a higher classification could be hidden after the malformed
+    # opener while a lower one reads clean above it (`## Risk\nreversible` shown,
+    # `## Risk\nassertive` hidden). Do not return a trusted value from an uncertain
+    # file: degrade to unclassified. has_risk_section still returns True (presence),
+    # so present + unclassified = BLOCK (recoverable by fixing the fence /
+    # --force --reason). This is the value-side twin of V2's presence-side strictness.
+    if _has_unclosed_fence(lines):
         return DEFAULT_RISK
     headings = _risk_heading_lines(lines)
     if len(headings) != 1:

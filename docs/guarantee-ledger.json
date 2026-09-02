@@ -333,7 +333,8 @@
         "The no-heading guarantee is retained because current production behavior is correct: set_task_blocked collapses the reason to one line and renders it as a blockquote, which is what prevents the forged heading. The gap is in the evidence, not in the product; no runtime change is made or needed here.",
         "An exact regression proof - assert that no new Markdown heading appears at line start after a hostile reason, alongside the existing gate-count assertion - is scheduled for Phase 3; adding it is a product-test change and is deliberately NOT performed in Phase 1.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
-        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."
+        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
+        "Closing-hash normalization (task 039 V9, round-2 panel): the shared ATX matcher `_atx_h2_text` now strips a CommonMark closing-hash sequence (`## Blocked ##` → `## Blocked`) centrally, so `_live_section_span`, write_handoff._section_span, `_extract_block_reason` and `_latest_receipt_line` all find a valid `## Blocked ##`/`## Handoff ##` heading — previously normalization was on the risk path only, so such a heading was invisible to the block/handoff writers (duplicate/no-op) and readers (lost handoff). `## Blocked##` (no space before the run) stays content per CommonMark. The reader-fail-open / writer-fail-closed asymmetry on a section under an UNCLOSED fence is a deliberate, now test-pinned bound (test_fence_scanner.py::ReadersFailOpen.test_reader_open_writer_closed_asymmetry_under_unclosed_fence): the reader surfaces the handoff for bootstrap, the destructive writer never deletes past the malformed fence."
       ],
       "follow_up_phases": [
         3
@@ -895,6 +896,19 @@
           "limitations": [
             "V8/codex-sol #3: `## Risk ##` (CommonMark closing-hash) is recognized so an assertive task is not legacy-lenient-closed."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_unclosed_fence_forces_unclassified_even_with_a_read_value",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_classified_reversible_is_unaffected"
+          },
+          "limitations": [
+            "V9/codex-terra CRITICAL: an unclosed fence anywhere degrades extract_risk to unclassified so a higher class hidden after the malformed opener cannot be shadowed by a lower one read clean above it; present+unclassified blocks."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -909,7 +923,7 @@
       "missing_evidence_or_limitation": [
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
         "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
-        "V2 + V8 tightening (task 039, impl panel): the risk path fails toward STRICT on an uncertain/malformed parse. PRESENCE (has_risk_section) uses `_any_risk_heading_offered` — a `## Risk` hidden by a >=4-column indent, a leading NBSP, a CommonMark closing-hash sequence (`## Risk ##`), or an UNCLOSED fence all count as an OFFERED gate (only a properly CLOSED fenced example is excluded as documentation), so a malformed hide can no longer read as a pre-1.5.0 legacy-absent task and buy a lenient close (opus CRITICAL: V4 indented-code marking had reopened exactly this on the risk path; codex-sol #1/#2/#3). VALUE (extract_risk via `_risk_heading_lines`) is read ONLY from a genuine live ATX H2 through the strict shared `_atx_h2_text` (<=3 leading spaces, ASCII whitespace, `## `/`##\\t`, not `###`, closing-hash normalized), so an indented/NBSP `## Risk` decoy is never read as a classification. present + unclassified = BLOCK. Both scanners route through the single strict engine `_iter_fenced_flags` (V1); the presence test uses its fence-only view (track_indented_code=False) so a closed fenced example stays lenient while an indented heading blocks. Residual (disclosed, unchanged posture): best-effort against a self-authored/committed malformed task.md; adversarial raw-content crafting is contained by human diff review + the OS sandbox. V4's indented-code detection uses a prev_blank approximation of CommonMark's paragraph-context rule (an indented block starting immediately after a heading/fence without a blank is treated as live), but this has no risk/section-detection consequence because both paths independently gate on `_atx_h2_text`'s <=3-space rule."
+        "V2 + V8 + V9 tightening (task 039, impl panel rounds 1-2): the risk path fails toward STRICT on an uncertain/malformed parse. PRESENCE (has_risk_section) uses `_any_risk_heading_offered` — a `## Risk` hidden by a >=4-column indent, a leading NBSP, a CommonMark closing-hash sequence (`## Risk ##`), or an UNCLOSED fence all count as an OFFERED gate (only a properly CLOSED fenced example is excluded as documentation), so a malformed hide can no longer read as a pre-1.5.0 legacy-absent task and buy a lenient close (opus CRITICAL: V4 indented-code marking had reopened exactly this on the risk path; codex-sol #1/#2/#3). VALUE (extract_risk via `_risk_heading_lines`) is read ONLY from a genuine live ATX H2 through the strict shared `_atx_h2_text` (<=3 leading spaces, ASCII whitespace, `## `/`##\\t`, not `###`, closing-hash normalized), so an indented/NBSP `## Risk` decoy is never read as a classification. V9 (round-2 codex-terra CRITICAL) adds the value-side twin of V2: when the file has ANY unclosed fence, extract_risk degrades to unclassified — an uncertain parse must not yield a TRUSTED classification, because a higher class (`## Risk\\nassertive`) hidden after the malformed opener would otherwise be shadowed by a lower one (`## Risk\\nreversible`) read clean above it. present + unclassified = BLOCK. Both scanners route through the single strict engine `_iter_fenced_flags` (V1); the presence test uses its fence-only view (track_indented_code=False) so a closed fenced example stays lenient while an indented heading blocks. Residual (disclosed, unchanged posture): best-effort against a self-authored/committed malformed task.md; adversarial raw-content crafting is contained by human diff review + the OS sandbox. V4's indented-code detection uses a prev_blank approximation of CommonMark's paragraph-context rule (an indented block starting immediately after a heading/fence without a blank is treated as live), but this has no risk/section-detection consequence because both paths independently gate on `_atx_h2_text`'s <=3-space rule."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
