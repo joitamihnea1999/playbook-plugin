@@ -6,7 +6,7 @@ A plugin for building software you can trust with coding agents — a Claude Cod
 
 → [Slide deck](docs/Playbook.pdf) — where Playbook fits among current coding agent harnesses (April 2026).
 
-**Docs:** [CLI reference](docs/cli.md) · [Configuration](docs/configuration.md) · [Providers](docs/providers.md) · [Architecture](docs/architecture.md) · [Changelog](CHANGELOG.md)
+**Docs:** [CLI reference](docs/cli.md) · [Configuration](docs/configuration.md) · [Providers](docs/providers.md) · [Architecture](docs/architecture.md) · [Enforcement journal](docs/enforcement-journal.md) · [Changelog](CHANGELOG.md)
 
 ## What it looks like
 
@@ -143,4 +143,4 @@ Not everything needs a task. Questions, shell commands, docs, git - just ask. Th
 
 Works on macOS, Linux, and Windows (Git Bash / MSYS).
 
-<!-- readme-audit: v1.5.41 @ 2026-08-28 -->
+<!-- readme-audit: v1.5.42 @ 2026-09-03 -->

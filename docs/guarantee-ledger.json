@@ -1,7 +1,7 @@
 {
   "$schema": "guarantee-ledger.schema.json",
   "schema_version": 1,
-  "ledger_version": "2026-09-02",
+  "ledger_version": "2026-09-03",
   "guarantees": [
     {
       "id": "PB-TASK-ACTIVATE",
@@ -3320,7 +3320,8 @@
         "Concurrent reviews are not serialized: if one review delivers findings (a trusted parent write-back) while another review of the same repo is between its own snapshot and compare, the second can read the first's write and OVER-report it as tamper. This is a SAFE-direction false accusation (never a missed real mutation), it requires two reviews running against one working tree at once (not a normal single-review flow), and it predates and is orthogonal to the exit-path wiring. A repo-wide review lock is a follow-up (Phase 8).",
         "The pre-exec / spawn-failure exits in cmd_single_review (a missing CLI binary; a grok/pi OSError from an argv-too-long dispatch) do not emit a tamper banner. They are reachable only BEFORE the judge subprocess executes, so no judge ran and no tamper is possible; the absence of a banner there is correct, not a gap (panel round-4 opus, self-down-ranked).",
         "Owner decision 2026-08-21: judge-seat is supported on claude, grok, and codex; antigravity and pi are experimental and removed from applicable_providers.",
-        "Live evidence 2026-08-22 (owner Linux account): judge pins opus, sonnet, codex:gpt-5.6-terra:high, codex:gpt-5.6-sol:high, and grok:grok-4.6:high all responded on the `tasks init` live-check; the Phase 8 required_live_evidence (CI-observed judge behavior) remains pending."
+        "Live evidence 2026-08-22 (owner Linux account): judge pins opus, sonnet, codex:gpt-5.6-terra:high, codex:gpt-5.6-sol:high, and grok:grok-4.6:high all responded on the `tasks init` live-check; the Phase 8 required_live_evidence (CI-observed judge behavior) remains pending.",
+        "The tamper guard EXEMPTS the active task's OWN record directory when it is UNTRACKED at snapshot time (a `?? …taskdir/` line in the `before` porcelain) — its record-file churn (the record files, plus the panel's own later judge.md / review-artifact writes) is sanctioned-writer noise, the same class as the existing `.agent/*/monitor/` exclusion — so the porcelain-line and dirty-hash compares skip it. task.md CONTENT stays guarded by task_hash regardless, and judges are write-denied under the OS sandbox where available. BEST-EFFORT BOUND (impl-panel task 045, codex-sol): the gate keys off ANY `?? <taskdir>/` porcelain line, so a TRACKED task dir that merely has a coexisting untracked child also trips the exemption, broadening it to a tracked sibling record (e.g. task-archive.md) for that window; narrowing the gate to the dir/task.md's actual tracked-ness (+ a mixed tracked-dir/untracked-child regression test) is PARKED (task 041, cca748f; red-first test_untracked_task_dir_record_churn_is_not_tamper, negative control test_tracked_task_dir_edit_still_flags). This scopes the statement's “newly written non-ignored files … are caught” for that sanctioned-writer case."
       ],
       "follow_up_phases": [
         2,

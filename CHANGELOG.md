@@ -2,6 +2,81 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [1.5.42] — 2026-09-03
+
+The headline is the **review-spend journal**: every judge invocation the review
+runner makes now appends one best-effort, log-only spend record to the lane's
+`.agent/<lane>/journal/enforcement.jsonl` — the observability layer for
+token/effort attribution, consumed by the external **playbook-lens** reader
+(v0.3). Alongside it, the **fence-discipline consolidation** (task 039) collapses
+the two hand-rolled `task.md` fence scanners into one strict CommonMark engine
+with per-consumer fail directions, and a **judge-tamper false positive** on
+untracked task dirs is fixed. Items are sourced from the range `9cd97c6..HEAD`
+and state only what that diff shows.
+
+### Added
+
+- **Review-spend journal — one record per judge invocation.** Owner decision
+  2026-09-01. Every judge the review runner invokes — each panel seat, the single
+  judge, and the tail-cert judge — appends, on its completion or timeout, one
+  `hook:"review"` `decision:"record"` line (`reason:"review spend"`) to the
+  lane-resolved `enforcement.jsonl`, carrying `kind` (panel|single|tail-cert),
+  `seat` as `model:effort`, `task`, `round`, `duration_ms`, `status`
+  (ok|fail|timeout|dnf) and `usage`. A **tamper hard-stop records nothing** (the
+  journal write must never precede the tamper banner). `usage` is honestly
+  `{"status":"unknown"}` in practice — the claude judge runs plain-text and
+  codex/grok surface no per-call tokens; the parser is anchored to a whole-output
+  JSON envelope, so free-form judge prose can never fabricate a number, and
+  `append_review` normalizes usage to a fixed `{status[,in,out]}` schema. Every
+  field is bounded so a real record is a single `O_APPEND` line under `PIPE_BUF`;
+  a journal-write failure never changes or breaks a review or any decision.
+  Shares the enforcement journal's hard contract as a sibling guarantee. New
+  `pb_journal.append_review` + `_normalize_usage` and the `review.py` emit path
+  (`_journal_review_spend`, `_parse_judge_usage`, `_seat_with_effort`); guarantee
+  `PB-REVIEW-SPEND-JOURNAL`; record shapes documented in the new
+  `docs/enforcement-journal.md`. Log-only — no reader tooling ships in this repo;
+  the consumer (playbook-lens v0.3) is a separate repo.
+
+### Changed
+
+- **Fence discipline consolidated onto one strict scanner (task 039).** The two
+  parallel hand-rolled `task.md` fence scanners are unified onto a single
+  CommonMark engine `_iter_fenced_flags`, with the fail direction chosen per
+  consumer: the destructive section-rewriting **writers fail closed** (an
+  unclosed fence runs through EOF, so content after a malformed fence is never
+  deleted), the pure bootstrap/handoff/receipt **readers fail open** (an unclosed
+  fence never hides a real `## Blocked` / `## Handoff` / receipt), and the **risk
+  close-gate fails strict** — a `## Risk` hidden under an unclosed/indented/NBSP
+  fence now counts as present-and-unclassified and BLOCKS the close, so it can no
+  longer read as a pre-1.5.0 legacy-absent task and buy a lenient close. One
+  strict shared ATX-H2 matcher (`_atx_h2_text`: ≤3 leading spaces, space-or-tab
+  separator, CommonMark closing-hash normalized, not `###`) is used by writer and
+  reader alike so they always agree, and indented code blocks are tracked in the
+  shared engine. Closed vectors: an NBSP false fence-closer (ASCII-only closer),
+  a tab/indented `## Risk` decoy, a `## Risk ##` closing-hash heading, and an
+  unclosed fence shadowing a higher risk class with a lower one read clean above
+  it; CRLF `keepends` tolerated for the Windows lane; the receipt writer and
+  reader (and the audit drift-sweep boundary) now match the heading through the
+  same strict matcher. Guarantees `PB-BLOCKED-STATE-NO-CORRUPTION` and
+  `PB-RISK-CLASSIFY` updated with the new symbols and proofs.
+
+### Fixed
+
+- **Judge-tamper false positive on an untracked task dir.** When the active
+  task's own directory is untracked at panel-snapshot time, `git status -uall`
+  lists each record file as `??` and the panel's own later `judge.md`/artifact
+  writes add more — which the tamper guard's new-porcelain-line diff flagged as
+  tamper, voiding a paid panel (it bit the 1.5.41 release live). The task's own
+  record dir is now exempt from the porcelain-line and dirty-hash compares — the
+  same sanctioned-writer class as the existing `.agent/*/monitor/` exclusion —
+  **gated on a `?? <taskdir>/` porcelain line at snapshot** (the untracked-dir
+  case); `task.md` content stays guarded by its hash regardless. Red-first
+  `test_untracked_task_dir_record_churn_is_not_tamper`; negative control
+  `test_tracked_task_dir_edit_still_flags`. (Best-effort bound: the gate also
+  trips for a tracked task dir with a coexisting untracked child, broadening the
+  exemption to a tracked sibling record for that window — narrowing it is a
+  parked follow-up.)
+
 ## [1.5.41] — 2026-08-28
 
 The headline is **tail certification**: a non-behavioral post-panel delta — one
