@@ -961,6 +961,18 @@ def coverage_summary(data: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Portability (task 039): the ledger legitimately contains non-ASCII (em-dashes
+    # and, going forward, any Unicode a limitation needs). On Windows the default
+    # stdout codec is cp1252, which raises UnicodeEncodeError on a character it
+    # cannot map (e.g. U+2192 '->') and fails the whole verify lane — a break a
+    # Linux/macOS run never surfaces. Force UTF-8 so `--summary` prints the same on
+    # every platform; guarded because a redirected/replaced stream may not be
+    # reconfigurable. (The project's hard constraint is Linux/macOS/Windows parity.)
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):
+            pass
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ledger", type=Path, default=LEDGER)
     parser.add_argument("--schema", type=Path, default=SCHEMA)

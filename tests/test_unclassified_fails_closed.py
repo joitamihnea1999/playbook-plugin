@@ -127,6 +127,47 @@ class RiskSectionDetection(unittest.TestCase):
         p = self._md("# 001 - T\n\n## Status\npending\n\n## Work Plan\n- [x] G1\n")
         self.assertFalse(has_risk_section(p))
 
+    # ── V8 (task 039 impl-panel): the risk path must use the strict shared
+    # machinery, and PRESENCE must fail STRICT so a hidden/malformed `## Risk`
+    # blocks rather than reading as pre-1.5.0 legacy-absent (lenient). ──────────
+
+    def test_indented_sole_risk_after_blank_still_counts_as_offered(self):
+        # opus CRITICAL: V4 marked the >=4-indent heading as code → hidden →
+        # has_risk_section=False → lenient legacy close of an assertive task
+        # (a regression V4 introduced). Presence must fail STRICT.
+        p = self._md("# T\n\n## Docs\n\n    ## Risk\n    assertive\n")
+        self.assertTrue(has_risk_section(p),
+                        "an indented (hidden) ## Risk must still count as offered")
+        self.assertEqual(extract_risk(p), "unclassified",
+                         "an indented ## Risk is not a live classification (>=4 = code)")
+
+    def test_indented_risk_no_blank_is_not_read_as_live(self):
+        # codex-sol #1: `## Docs\n    ## Risk\n    reversible` read as reversible;
+        # a >=4-indent heading is code per CommonMark, never a live value.
+        p = self._md("# T\n\n## Docs\n    ## Risk\n    reversible\n")
+        self.assertEqual(extract_risk(p), "unclassified")
+        self.assertTrue(has_risk_section(p))
+
+    def test_nbsp_led_risk_is_not_read_as_live_but_counts_as_offered(self):
+        # codex-sol #2: a NBSP-led `## Risk` was read as a live reversible value
+        # (NBSP-led is not an ATX heading). Value must not leak; presence blocks.
+        p = self._md("# T\n\n ## Risk\nreversible\n")
+        self.assertEqual(extract_risk(p), "unclassified")
+        self.assertTrue(has_risk_section(p))
+
+    def test_closing_hash_risk_heading_is_recognized(self):
+        # codex-sol #3: `## Risk ##` (CommonMark closing sequence) is a valid H2;
+        # it must be recognized so an assertive task is NOT legacy-lenient-closed.
+        p = self._md("# T\n\n## Risk ##\nassertive\n")
+        self.assertTrue(has_risk_section(p))
+        self.assertEqual(extract_risk(p), "assertive")
+
+    def test_nbsp_led_decoy_does_not_shadow_the_real_classification(self):
+        # A NBSP-led decoy `reversible` must not turn the real col-0 `assertive`
+        # into a duplicate-unclassified; the real class wins.
+        p = self._md("# T\n\n ## Risk\nreversible\n\n## Risk\nassertive\n")
+        self.assertEqual(extract_risk(p), "assertive")
+
     def test_a_mention_in_prose_is_not_a_section(self):
         """Negative control: the word must be a heading, not narrative — else
         every task that discusses risk gets silently promoted to strict."""
@@ -198,19 +239,60 @@ class RiskSectionDetection(unittest.TestCase):
                 self.assertEqual(extract_risk(p), "assertive",
                                  "a fenced Risk decoy must not shadow the real class")
 
-    def test_unclosed_fence_hides_a_risk_decoy_fail_closed(self):
-        # Panel round-3: the risk classifier must fail CLOSED on an unclosed fence
-        # — a `## Risk` quoted after an unclosed opener is fenced-through-EOF, not
-        # live metadata, so it cannot become the classification. (Fail-open reads
-        # the decoy and returns `reversible`.)
+    def test_unclosed_fence_value_fails_closed_never_leaks_a_decoy(self):
+        # Panel round-3: the risk VALUE must fail CLOSED on an unclosed fence — a
+        # `## Risk` quoted after an unclosed opener is fenced-through-EOF, not live
+        # metadata, so it can never BECOME the classification. (Fail-open reads the
+        # decoy and returns `reversible`.) extract_risk stays fail-closed.
         p = self._md("# T\n\n## Docs\n```\n## Risk\nreversible\n> still quoted\n")
-        self.assertFalse(has_risk_section(p))
         self.assertEqual(extract_risk(p), "unclassified")
+
+    def test_unclosed_fence_counts_as_offered_and_is_strict(self):
+        # V2 (task 039, codex-sol #1 Critical): an unclosed fence makes the parse
+        # UNCERTAIN. has_risk_section must fail toward STRICT ("offered") — True —
+        # so the close is held to the high-consequence bar, not the lenient legacy
+        # path. Previously this returned False, so burying the real `## Risk` under
+        # an unclosed fence bought a pre-1.5.0 lenient close (the P-C bypass).
+        # Value still fails closed (unclassified); present=True + unclassified =
+        # BLOCK in close_decision.
+        buried = self._md("# T\n\n## Docs\n```\n## Risk\nassertive\n> real class hidden\n")
+        self.assertTrue(has_risk_section(buried),
+                        "an unclosed fence must count as an offered (uncertain) risk gate")
+        self.assertEqual(extract_risk(buried), "unclassified")
+        # Negative control: a well-formed file with NO risk heading and no unclosed
+        # fence is still legacy (present=False) — V2 does not over-block clean files.
+        clean_legacy = self._md("# T\n\n## Docs\nplain paragraph, no fence, no risk\n")
+        self.assertFalse(has_risk_section(clean_legacy))
 
     def test_unreadable_file_is_treated_as_legacy(self):
         """Fail toward the documented old behavior, never toward inventing a
         block from an I/O error."""
         self.assertFalse(has_risk_section(self.d / "does-not-exist.md"))
+
+    def test_unclosed_fence_forces_unclassified_even_with_a_read_value(self):
+        # V9/codex-terra CRITICAL (round-2 panel): an unclosed fence = UNCERTAIN
+        # parse. `## Risk\nreversible` shown at top with `## Risk\nassertive` HIDDEN
+        # under an unclosed fence would otherwise read reversible (the assertive
+        # silently shadowed) and close on the low bar. extract_risk must degrade to
+        # unclassified when the parse is uncertain → present+unclassified → BLOCK.
+        p = self._md("# T\n\n## Risk\nreversible\n\n## Docs\n```\n## Risk\nassertive\n")
+        self.assertEqual(extract_risk(p), "unclassified")
+        self.assertTrue(has_risk_section(p))
+
+    def test_stray_unclosed_fence_below_a_classified_risk_does_not_over_block(self):
+        # V10/opus F1 (round-3 panel): V9 degraded on ANY unclosed fence, which
+        # over-blocked a clean `reversible` whose long task.md merely has a stray
+        # unbalanced ``` BELOW the risk (a receipt/notes snippet) that cannot hide
+        # a `## Risk`. Refined: degrade ONLY when the unclosed-fence region hides a
+        # `## Risk`-shape. A stray fence with no hidden risk keeps the real value.
+        p = self._md("# T\n\n## Risk\nreversible\n\n## Notes\n```\nstray, no risk here\n")
+        self.assertEqual(extract_risk(p), "reversible",
+                         "a stray fence with no hidden ## Risk must not over-block")
+
+    def test_balanced_fences_classified_risk_reads_its_class(self):
+        # opus F3: a normal classified task with BALANCED fences reads its class.
+        p = self._md("# T\n\n## Risk\nreversible\n\n## Docs\n```\nexample\n```\n")
+        self.assertEqual(extract_risk(p), "reversible")
 
 
 class CloseEndToEnd(unittest.TestCase):
@@ -296,6 +378,22 @@ class CloseEndToEnd(unittest.TestCase):
             "## Work Plan", "```md\n## Risk\nunclassified\n```\n\n## Work Plan")
         _, r = self._work_then_close(body)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_unclosed_fence_hiding_the_real_risk_blocks_the_close(self):
+        # V2 (task 039, codex-sol #1 Critical): burying the real `## Risk` under an
+        # UNCLOSED fence used to make has_risk_section=False → the pre-1.5.0 lenient
+        # legacy close, defeating the review requirement (P-C bypass). Now the
+        # uncertain parse is strict: the close must BLOCK (no review evidence).
+        body = ("# 001 - T\n\n## Status\npending\n\n"
+                "## Docs\n```\n## Risk\nassertive\n> real class hidden below an "
+                "unclosed fence\n\n## Work Plan\n- [x] G1: do it\n")
+        d, r = self._work_then_close(body)
+        self.assertNotEqual(r.returncode, 0,
+                            f"an unclosed fence bought a lenient close:\n{r.stdout}")
+        self.assertNotIn("Task 001 done.", r.stdout)
+        # Recoverable the same way any strict block is: --force --reason.
+        r2 = self._cli(d, "work", "done", "--force", "--reason", "malformed import")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
 
 
 if __name__ == "__main__":

@@ -912,69 +912,269 @@ _RISK_HEADING_RE = re.compile(
     r"^##[ \t]+Risk[ \t]*(?::.*)?$", re.IGNORECASE
 )
 _RISK_FIELD_RE = re.compile(r"^##[ \t]+Risk[ \t]*$", re.IGNORECASE)
+# A CommonMark ATX closing-hash sequence: ` ##` (spaces/tabs + hashes) at EOL.
+_ATX_CLOSING_HASHES_RE = re.compile(r"[ \t]+#+[ \t]*$")
 
 
 def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
-    """Risk headings outside Markdown fences as ``(index, stripped_line)``.
+    """LIVE `## Risk` headings as ``(index, normalized_heading)``.
 
-    A task may quote the template in a fenced review/example.  Such text is not
-    metadata.  BOMs are ignored at line starts (not just at file start), and
-    heading case/tabs follow Markdown's ordinary permissiveness.  Duplicates are
-    returned deliberately: callers treat more than one field as malformed
-    rather than letting an attacker choose which duplicate wins.
+    Uses the strict shared ATX matcher `_atx_h2_text` on the RAW line (V8), not a
+    regex on the fence-scanner's indentation-stripped output: so a heading is a
+    live risk field ONLY when it is a genuine ATX H2 \u2014 at most 3 leading spaces,
+    ASCII whitespace (a NBSP-led line is not a heading), `## ` or `##\\t`, not
+    `###` \u2014 with a CommonMark closing-hash sequence normalized away by
+    `_atx_h2_text` itself (V9 \u2014 central, so every section consumer agrees). This
+    closes the risk-path holes the first impl panel found (opus + codex-sol
+    #1/#2/#3): an indented (>=4-col) or NBSP-led `## Risk` is no longer read as a
+    live value, and `## Risk ##` is recognized. Fenced/indented-code examples are
+    already hidden by `_iter_nonfenced` (fail closed). Duplicates are returned
+    deliberately: callers treat more than one field as malformed rather than
+    letting an attacker choose which duplicate wins.
     """
-    # Fence detection reuses `_iter_nonfenced` \u2014 the shared strict CommonMark
-    # scanner. The prior hand-rolled loop treated a ```lang line (and a >=4-space
-    # marker) as a closer, so a fenced `## Risk` example could "close" early and be
-    # read as live metadata \u2014 shadowing the real class and letting an assertive
-    # task close on the reversible bar (panel: codex-sol Critical, task 032).
-    # Sharing the scanner closes that gate bypass and inherits its fail-closed
-    # handling of an unclosed fence.
-    return [(i, s) for i, s in _iter_nonfenced(lines) if _RISK_HEADING_RE.match(s)]
+    out: "list[tuple[int, str]]" = []
+    for i, _s in _iter_nonfenced(lines):
+        norm = _atx_h2_text(lines[i])
+        if norm is not None and _RISK_HEADING_RE.match(norm):
+            out.append((i, norm))
+    return out
 
 
-def _iter_nonfenced(lines: "list[str]"):
-    """Yield ``(index, stripped_line)`` for every line OUTSIDE a Markdown code
-    fence, so section writers/readers never treat a heading quoted inside a fenced
-    example as a live section — the #09 hazard, re-raised for the handoff/blocked
-    writers by the C1/P1 impl panels (a fenced `## Handoff`/`## Blocked`/`##
-    Verification Receipt` must not corrupt the file or fake bootstrap/handoff
-    state).
+def _any_risk_heading_offered(lines: "list[str]") -> bool:
+    """LIBERAL presence test for `has_risk_section` (V8): does ANY line look like a
+    `## Risk` heading once leading/trailing whitespace (incl. NBSP via str.strip),
+    BOM, and a closing-hash sequence are removed \u2014 EXCLUDING only lines inside a
+    properly CLOSED code fence (an explicit ``` example is documentation)?
 
-    Applies the SAME CommonMark opener/closer rules as `_closed_fence_line_indices`
-    (<=3-space indent — `_FENCE_OPEN_RE`; a backtick opener whose info string holds
-    a backtick is not a fence; a closer is the same char, >= the opener's length,
-    and whitespace-only after the run), so a ```lang line or a >=4-space marker
-    inside a fence is content, not a boundary. This is the shared source for the
-    blocked/handoff writers AND `_risk_heading_lines`.
+    Fails STRICT: a `## Risk` hidden by a >=4-col indent, a NBSP, a closing-hash,
+    or an UNCLOSED fence still means the gate was OFFERED, so the close is held to
+    the high bar (extract_risk degrades such a hidden heading to unclassified \u2192
+    block) rather than the pre-1.5.0 lenient path (opus CRITICAL: V4 had let an
+    indented real `## Risk` read as legacy-absent). The fence-only view
+    (`track_indented_code=False`) is deliberate: a closed FENCE example stays
+    documentation (lenient, test_fenced_risk_example_does_not_block_a_legacy_close),
+    but an indented heading is an ambiguous hide and must block."""
+    fenced_only = {i for i, f in enumerate(
+        _iter_fenced_flags(lines, unclosed_is_live=True, track_indented_code=False))
+        if f}
+    for i, line in enumerate(lines):
+        if i in fenced_only:
+            continue
+        s = _ATX_CLOSING_HASHES_RE.sub("", line.lstrip("\ufeff").strip())
+        if _RISK_HEADING_RE.match(s):
+            return True
+    return False
 
-    It differs from `_closed_fence_line_indices` in ONE deliberate direction: an
-    UNCLOSED opener fences everything through EOF (fail CLOSED). These consumers
-    DELETE/replace sections, so on a malformed unclosed fence the safe choice is to
-    treat the remainder as fenced and never delete it — the opposite of the receipt
-    writer's fail-open, which only ever INSERTS (panel round-3: codex found the
-    fail-open delegation let set_task_blocked delete a decoy after an unclosed
-    fence). The stricter of the two on every axis; never the more destructive."""
+
+# A fence CLOSER's tail must be ASCII whitespace only (V6). `str.strip()` eats
+# U+00A0 and other Unicode whitespace, so a ```+NBSP line falsely closed a fence
+# and exposed an interior `## Risk`/reversible decoy (P-A). A tab still closes.
+_ASCII_WS_ONLY_RE = re.compile(r"[ \t]*\Z")
+
+
+def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool,
+                       track_indented_code: bool = True) -> "list[bool]":
+    """The ONE strict CommonMark fence scanner for task.md (task 039). Returns a
+    ``list[bool]`` parallel to ``lines``: index ``i`` is True when line ``i`` is
+    a code-fence opener, closer, or interior line — i.e. NOT a live heading or
+    section boundary.
+
+    Opener/closer rules (identical for every consumer):
+      * opener = <=3 leading spaces + a run of >=3 backticks/tildes
+        (`_FENCE_OPEN_RE`); a BACKTICK opener whose info string contains a
+        backtick is inline code, not a fence, and stays live;
+      * closer = <=3 spaces + a run of the SAME char at least as long as the
+        opener, followed by ASCII whitespace only (`_ASCII_WS_ONLY_RE`, V6 — NOT
+        `str.strip()`, which eats U+00A0 so a ```+NBSP falsely closed a fence).
+
+    ``unclosed_is_live`` is the ONE deliberate per-consumer difference — the fail
+    direction for a fence opener never closed before EOF:
+      * False → the opener and its remainder are fenced THROUGH EOF (fail
+        CLOSED). The section-locating DELETE/replace writers and the risk/section
+        readers that must never treat content after a malformed fence as live
+        pass False, so a malformed unclosed fence never lets a delete run past it.
+      * True → an unclosed opener contributes NOTHING; the opener and remainder
+        stay live (fail OPEN). The receipt WRITER (only inserts) and the pure
+        bootstrap/handoff READERS pass True, so a malformed fence never refuses
+        an insert nor hides a real `## Blocked`/`## Handoff`/receipt.
+
+    Indented code blocks (V4): a non-blank line indented >=4 COLUMNS (space or
+    tab, a tab counting to the next 4-column stop per CommonMark) that begins
+    after a blank line — or continues a run already begun — is an indented code
+    block, so a `## Risk`/`## Blocked` decoy inside one is content, not a live
+    heading (codex-sol #2 Critical). CommonMark's "an indented code block cannot
+    interrupt a paragraph" is honored by the after-a-blank start rule; a >=4-column
+    heading that is NOT inside such a block is instead rejected as a boundary by
+    the strict ATX matcher (V5), since ATX headings allow at most 3 leading spaces.
+
+    ``track_indented_code`` (default True) turns the V4 indented-code tracking on.
+    The risk PRESENCE test (`_any_risk_heading_offered`, V8) passes False to get a
+    FENCE-ONLY view: a properly-closed fenced `## Risk` example is documentation
+    (stays lenient), but an INDENTED `## Risk` is a malformed/ambiguous hide that
+    must fail STRICT (offered → block) — so the presence scan must NOT treat an
+    indented heading as skippable code the way extract_risk's fail-closed reader
+    (which correctly ignores it as a value) does.
+
+    This is the shared engine for `_iter_nonfenced` (fail closed) and
+    `_closed_fence_line_indices` (fail open).
+    """
+    n = len(lines)
+    flags = [False] * n
     fence_char = ""
     fence_len = 0
+    open_i = -1
+    prev_blank = True                           # start-of-doc counts as a blank
+    in_indented_code = False
     for i, line in enumerate(lines):
-        raw = line.lstrip("﻿")                 # keep indentation, drop BOM
+        # keep indentation, drop BOM, and drop the trailing line ending: callers
+        # may pass keepends/newline='' lines (compact preserves a Windows file's
+        # CRLF), so a closer `` ```\r\n `` must still count — the old str.strip()
+        # ate the `\r`; the ASCII-only closer (V6) would otherwise miss it and a
+        # fence would never close on Windows (Windows-only CI regression).
+        raw = line.lstrip("﻿").rstrip("\r\n")
         fm = _FENCE_OPEN_RE.match(raw)
         if fence_char:
             if (fm and fm.group(1)[0] == fence_char
                     and len(fm.group(1)) >= fence_len
-                    and fm.group(2).strip() == ""):
-                fence_char = ""
-                fence_len = 0
-            continue                            # inside fence (incl. unclosed→EOF)
-        if fm:
+                    and _ASCII_WS_ONLY_RE.match(fm.group(2))):
+                for j in range(open_i, i + 1):
+                    flags[j] = True            # opener..closer inclusive
+                fence_char, fence_len, open_i = "", 0, -1
+            prev_blank = False                  # fence content is non-blank context
+            continue                            # interior (marked at close / EOF)
+        if fm:                                  # <=3-space fence opener wins
+            in_indented_code = False
+            prev_blank = False
             if fm.group(1)[0] == "`" and "`" in fm.group(2):
-                yield i, raw.strip()
-                continue
+                continue                        # inline-code opener stays live
             fence_char = fm.group(1)[0]
             fence_len = len(fm.group(1))
+            open_i = i
             continue
-        yield i, raw.strip()
+        stripped = raw.strip()
+        if stripped == "":                      # blank line: never a heading
+            prev_blank = True                   # keeps an indented run alive
+            continue
+        if track_indented_code:
+            if in_indented_code:
+                if _indent_columns(raw) >= 4:
+                    flags[i] = True             # still inside the indented block
+                    prev_blank = False
+                    continue
+                in_indented_code = False        # de-indented → block ended
+            if prev_blank and _indent_columns(raw) >= 4:
+                in_indented_code = True          # starts after a blank (not a para)
+                flags[i] = True
+        prev_blank = False
+    if fence_char and not unclosed_is_live:     # unclosed opener, fail CLOSED
+        for j in range(open_i, n):
+            flags[j] = True
+    return flags
+
+
+def _indent_columns(raw: str) -> int:
+    """Leading-whitespace width in COLUMNS, a tab expanding to the next multiple
+    of 4 (CommonMark's tab stop for indented code blocks). `raw` is already
+    BOM-stripped. Counts space/tab only, stopping at the first other character."""
+    col = 0
+    for ch in raw:
+        if ch == " ":
+            col += 1
+        elif ch == "\t":
+            col += 4 - (col % 4)
+        else:
+            break
+    return col
+
+
+def _has_unclosed_fence(lines: "list[str]") -> bool:
+    """True when a code-fence opener is never closed before EOF — i.e. the fence
+    parse is UNCERTAIN. The two fail directions disagree exactly here: the
+    fail-closed pass fences the opener's remainder through EOF, the fail-open pass
+    does not, so any divergence between them is an unclosed fence. Used by the
+    risk close-gate (V2) to fail toward STRICT on a malformed task.md rather than
+    letting a buried `## Risk` masquerade as a pre-1.5.0 legacy task."""
+    closed = _iter_fenced_flags(lines, unclosed_is_live=True)
+    strict = _iter_fenced_flags(lines, unclosed_is_live=False)
+    return closed != strict
+
+
+def _unclosed_fence_hides_risk(lines: "list[str]") -> bool:
+    """True when an UNCLOSED fence's hidden remainder contains a `## Risk`-shaped
+    heading (V10, round-3 opus F1). This is the PRECISE condition under which
+    extract_risk must not trust a classification: a higher class hidden after a
+    malformed opener could be shadowed by a lower one read clean above it
+    (codex-terra's round-2 Critical). A STRAY unbalanced fence with NO `## Risk`
+    inside it (e.g. an unclosed snippet in a receipt/notes section below the risk
+    field) does NOT hide the classification, so it must not force `unclassified`
+    and over-block an otherwise-clean reversible close.
+
+    The hidden region is exactly the lines the fail-CLOSED scanner fences but the
+    fail-OPEN scanner leaves live (the unclosed opener through EOF)."""
+    closed = _iter_fenced_flags(lines, unclosed_is_live=True)   # fail open
+    strict = _iter_fenced_flags(lines, unclosed_is_live=False)  # fail closed
+    for i in range(len(lines)):
+        if strict[i] and not closed[i]:        # inside the unclosed-fence remainder
+            s = _ATX_CLOSING_HASHES_RE.sub("", lines[i].lstrip("﻿").strip())
+            if _RISK_HEADING_RE.match(s):
+                return True
+    return False
+
+
+def _iter_nonfenced(lines: "list[str]", *, unclosed_is_live: bool = False):
+    """Yield ``(index, stripped_line)`` for every line OUTSIDE a code fence, so
+    section writers/readers never treat a heading quoted inside a fenced example
+    as a live section — the #09 hazard, re-raised for the handoff/blocked writers
+    by the C1/P1 impl panels (a fenced `## Handoff`/`## Blocked`/`## Verification
+    Receipt` must not corrupt the file or fake bootstrap/handoff state).
+
+    Thin wrapper over the shared strict scanner `_iter_fenced_flags`. The default
+    ``unclosed_is_live=False`` (fail CLOSED) is for the section-locating
+    DELETE/replace WRITERS and the risk reader: an UNCLOSED opener fences
+    everything through EOF, so a malformed fence never lets a delete run past it
+    (panel round-3: codex found the fail-open delegation let set_task_blocked
+    delete a decoy after an unclosed fence).
+
+    ``unclosed_is_live=True`` (fail OPEN) is for the PURE bootstrap/handoff READERS
+    (`_extract_block_reason`, `_latest_receipt_line`, `find_unconsumed_handoff` via
+    the first) — V3: a reader can't corrupt the file, and hiding a real
+    `## Blocked`/`## Handoff`/receipt under a malformed unclosed fence silently
+    loses a real handoff at bootstrap. A properly CLOSED fenced decoy is still
+    skipped in both directions (only the UNCLOSED case differs)."""
+    flags = _iter_fenced_flags(lines, unclosed_is_live=unclosed_is_live)
+    for i, line in enumerate(lines):
+        if not flags[i]:
+            yield i, line.lstrip("﻿").strip()
+
+
+_ATX_H2_RE = re.compile(r"^ {0,3}##[ \t]+(.*?)[ \t]*$")
+
+
+def _atx_h2_text(raw: str) -> "str | None":
+    """The strict ATX level-2 heading matcher shared by every task.md section
+    WRITER and READER (V5, P-D). Returns the NORMALIZED heading `"## <title>"`
+    (separator collapsed to one space, trailing whitespace trimmed) when `raw` is
+    a valid H2, else None. `raw` is BOM-tolerant.
+
+    CommonMark rules the old `startswith("## ")`/`== title` tests got wrong:
+      * at most 3 leading spaces — a >=4-column indent is code/text, NOT a heading
+        (so a `>=4-space ## X` decoy no longer over-matches as a section boundary);
+      * the `##` may be followed by a TAB, not only a space (`##\\tX` IS a heading —
+        `startswith("## ")` missed it, so a tab-titled section was invisible to the
+        writer and could be duplicated or mis-spliced);
+      * `###…` is level-3, never an H2 (the required `[ \\t]+` after `##` excludes
+        `###`, whose next char is `#`);
+      * a CommonMark CLOSING-HASH sequence (whitespace + a run of `#` at EOL, e.g.
+        `## Blocked ##`) is not title text — it is stripped, so `## Blocked ##`
+        normalizes to `## Blocked` and is found by every section writer/reader (V9,
+        round-2 panel: it was previously normalized only on the risk path, so a
+        valid `## Blocked ##`/`## Handoff ##` was invisible to the block/handoff
+        writers and readers). `## Blocked##` (no space before the run) is content,
+        per CommonMark, and is left intact."""
+    m = _ATX_H2_RE.match(raw.lstrip("﻿").rstrip("\r\n"))
+    if not m:
+        return None
+    return f"## {_ATX_CLOSING_HASHES_RE.sub('', m.group(1))}"
 
 
 def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
@@ -987,13 +1187,13 @@ def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | Non
     WRITER on the task.md path must be fence-aware so a fenced `## Blocked` /
     `## Handoff` example (documentation of the ritual) can never be treated as the
     live section and delete or mis-splice the real record (the #09 hazard; P1
-    parked by the 1.5.39 panel)."""
-    nf = list(_iter_nonfenced(lines))
-    start = next((i for i, s in nf if s == title), None)
+    parked by the 1.5.39 panel). Boundary detection uses the strict ATX matcher on
+    the RAW line (V5) so `##\\tX` is a boundary and a >=4-space `## X` is not."""
+    nf = [i for i, _s in _iter_nonfenced(lines)]
+    start = next((i for i in nf if _atx_h2_text(lines[i]) == title), None)
     if start is None:
         return None
-    end = next((i for i, s in nf
-                if i > start and s.startswith("## ") and not s.startswith("### ")),
+    end = next((i for i in nf if i > start and _atx_h2_text(lines[i]) is not None),
                len(lines))
     return (start, end)
 
@@ -1005,6 +1205,16 @@ def extract_risk(task_file) -> str:
     try:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
+        return DEFAULT_RISK
+    # V9 (round-2 codex-terra CRITICAL) + V10 (round-3 opus F1): an unclosed fence
+    # that HIDES a `## Risk`-shaped heading makes the parse untrustworthy — a higher
+    # class hidden after the opener could be shadowed by a lower one read clean
+    # above it. Degrade to unclassified ONLY in that precise case (not on any stray
+    # unbalanced fence, which V9 over-did — that punished a clean reversible whose
+    # long task.md merely had a stray ``` below the risk field). has_risk_section
+    # still returns True (presence), so present + unclassified = BLOCK (recoverable
+    # by fixing the fence / --force --reason). Value-side twin of V2's presence rule.
+    if _unclosed_fence_hides_risk(lines):
         return DEFAULT_RISK
     headings = _risk_heading_lines(lines)
     if len(headings) != 1:
@@ -1049,7 +1259,17 @@ def has_risk_section(task_file) -> bool:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    return bool(_risk_heading_lines(lines))
+    # V2 + V8 (task 039, impl panel): fail toward STRICT on an uncertain parse.
+    # `_any_risk_heading_offered` is the LIBERAL presence test — a `## Risk` hidden
+    # by a >=4-col indent, a NBSP, a closing-hash, an UNCLOSED fence, or simply
+    # live all count as "the gate was OFFERED" (only a properly CLOSED fenced
+    # example is excluded as documentation). extract_risk still fails closed on the
+    # VALUE (returns unclassified for anything not a genuine live ATX heading), so
+    # present + unclassified = BLOCK: a malformed task.md is held to the
+    # high-consequence bar, recoverable by fixing the markdown, classifying,
+    # supplying review evidence, or `--force --reason`. The `_has_unclosed_fence`
+    # term also covers an unclosed fence with NO `## Risk`-shape at all (V2).
+    return _any_risk_heading_offered(lines) or _has_unclosed_fence(lines)
 
 
 # Per-file ceiling for hashing UNTRACKED content in the freshness fingerprint
@@ -2431,14 +2651,19 @@ def extract_parked_items(task_md_text: str) -> "list[str]":
     agent (or a receipt upsert reordering the file) can easily produce a second
     one — and a first-match read makes every later section invisible. Found live
     by the 1.5.3 gauntlet; the multi-heading hazard, same family as #09."""
+    # Fence-aware (task 039): a fenced `## Parked` example must not mint phantom
+    # debt items. Pure reader → fail OPEN (unclosed_is_live=True): a real ## Parked
+    # under an unclosed fence must still surface. H2 via the strict ATX matcher.
+    lines = task_md_text.splitlines()
     in_section = False
     body: "list[str]" = []
-    for line in task_md_text.splitlines():
-        if line.strip() == "## Parked":
+    for i, _s in _iter_nonfenced(lines, unclosed_is_live=True):
+        line = lines[i]
+        if _atx_h2_text(line) == "## Parked":
             in_section = True
             continue
         if in_section:
-            if line.startswith("## "):
+            if _atx_h2_text(line) is not None:
                 in_section = False  # keep scanning — there may be another section
                 continue
             body.append(line)
@@ -2759,17 +2984,20 @@ def _extract_problem(task_file: Path) -> str:
     """Extract first line of Problem/Intent section from task file."""
     try:
         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        # Fence-aware (task 039): a fenced `## Intent`/`## Problem` example must
+        # not be read as the live summary. Pure reader → fail OPEN.
         in_section = False
-        for line in lines:
-            if line.strip() in ("## Problem", "## Intent"):
+        for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
+            h2 = _atx_h2_text(lines[i])
+            if h2 in ("## Problem", "## Intent"):
                 in_section = True
                 continue
             if in_section:
-                if not line.strip():
+                if not s:
                     continue
-                if line.startswith("##"):
+                if h2 is not None or s.startswith("##"):
                     break
-                text = line.strip()
+                text = s
                 if text.startswith("(") and text.endswith(")"):
                     text = text[1:-1]
                 return text
@@ -2837,37 +3065,15 @@ _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 def _closed_fence_line_indices(lines: "list[str]") -> set:
-    """Line indices inside a properly CLOSED CommonMark code fence — the ONE
-    scanner shared by the receipt WRITER (upsert_task_section) and the audit
-    READER (verify-contract drift sweep) so they can never disagree on what a
-    fence is (panel rounds 8-10). Rules: opener = <=3 leading spaces + a run of
-    >=3 backticks/tildes, and a BACKTICK opener's info string may not contain a
-    backtick (else it is not a fence). Closer = <=3 spaces + a run of the SAME
-    char at least as long, followed by WHITESPACE ONLY. An UNCLOSED fence
-    contributes nothing (fail closed for the reader: a malformed fence never
-    hides a receipt; fail open for the writer: it never treats a live heading as
-    fenced)."""
-    skip: set = set()
-    fence_char = ""
-    fence_len = 0
-    open_i = -1
-    for i, ln in enumerate(lines):
-        s = ln.lstrip("﻿")
-        m = _FENCE_OPEN_RE.match(s)
-        if fence_char:
-            if (m and m.group(1)[0] == fence_char
-                    and len(m.group(1)) >= fence_len
-                    and m.group(2).strip() == ""):
-                skip.update(range(open_i, i + 1))
-                fence_char, fence_len, open_i = "", 0, -1
-            continue
-        if m:
-            char = m.group(1)[0]
-            info = m.group(2)
-            if char == "`" and "`" in info:
-                continue
-            fence_char, fence_len, open_i = char, len(m.group(1)), i
-    return skip
+    """Line indices inside a properly CLOSED CommonMark code fence — used by the
+    receipt WRITER (upsert_task_section) and the audit READER (verify-contract
+    drift sweep) so they can never disagree on what a fence is (panel rounds
+    8-10). Thin wrapper over the shared strict scanner `_iter_fenced_flags` with
+    ``unclosed_is_live=True``: an UNCLOSED fence contributes nothing (fail closed
+    for the reader — a malformed fence never hides a receipt; fail open for the
+    writer — it never treats a live heading as fenced)."""
+    flags = _iter_fenced_flags(lines, unclosed_is_live=True)
+    return {i for i, fenced in enumerate(flags) if fenced}
 
 
 def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
@@ -2889,10 +3095,12 @@ def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
     # must agree on what counts as a real heading (panel round-9 grok/codex).
     fenced = _closed_fence_line_indices(lines)
     for i, ln in enumerate(lines):
-        # strip + lstrip BOM exactly like the audit reader (str.strip does NOT
-        # remove a BOM), so writer and reader normalize a heading identically
-        # and cannot disagree on which line is the section (panel round-12 opus).
-        if i not in fenced and ln.strip().lstrip("\ufeff") == marker:
+        # Match the heading through the strict shared ATX matcher (V10, round-3
+        # opus F2 + codex-terra), exactly like the readers (_latest_receipt_line,
+        # the audit drift sweep): so a valid `## {heading} ##` / `##\t{heading}` is
+        # found by the WRITER too and not appended as a duplicate the reader then
+        # reads stale \u2014 writer and reader must agree on what a real heading is.
+        if i not in fenced and _atx_h2_text(ln) == marker:
             new = lines[:i + 1] + ["", *entry.rstrip("\n").splitlines()] + lines[i + 1:]
             _atomic_write(p, "\n".join(new) + "\n")
             return
@@ -2994,12 +3202,14 @@ def _latest_receipt_line(task_file: Path) -> "str | None":
     except OSError:
         return None
     in_receipt = False
-    for _i, s in _iter_nonfenced(lines):   # fence-aware (impl-panel C1)
-        if s == "## Verification Receipt":
+    # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real receipt.
+    # H2 detection via the strict ATX matcher (V5).
+    for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
+        if _atx_h2_text(lines[i]) == "## Verification Receipt":
             in_receipt = True
             continue
         if in_receipt:
-            if s.startswith("## ") and not s.startswith("### "):
+            if _atx_h2_text(lines[i]) is not None:
                 break
             if s.startswith("### "):
                 return s[4:].strip()
@@ -3087,13 +3297,14 @@ def write_handoff(task_file: Path, section: str) -> None:
     def _section_span(title: str) -> "tuple[int, int] | None":
         # [start, end) of a non-fenced level-2 section, or None. `end` is the
         # first non-fenced H2 strictly after start (a fenced heading, or the
-        # section's own H3s, never end it).
-        nf = list(_iter_nonfenced(lines))
-        start = next((i for i, s in nf if s == title), None)
+        # section's own H3s, never end it). Strict ATX matcher on the raw line
+        # (V5): `##\tX` is a boundary, a >=4-space `## X` is not — writer and
+        # reader must agree so no splice runs into the wrong heading.
+        nf = [i for i, _s in _iter_nonfenced(lines)]
+        start = next((i for i in nf if _atx_h2_text(lines[i]) == title), None)
         if start is None:
             return None
-        end = next((i for i, s in nf
-                    if i > start and s.startswith("## ") and not s.startswith("### ")),
+        end = next((i for i in nf if i > start and _atx_h2_text(lines[i]) is not None),
                    len(lines))
         return (start, end)
 
@@ -3139,12 +3350,15 @@ def _extract_block_reason(task_file: Path) -> "str | None":
     except OSError:
         return None
     in_blocked = False
-    for _i, s in _iter_nonfenced(lines):
-        if s == "## Blocked":
+    # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real
+    # `## Blocked` (find_unconsumed_handoff → bootstrap depends on this).
+    # H2 detection via the strict ATX matcher (V5): `##\tBlocked` is the section.
+    for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
+        if _atx_h2_text(lines[i]) == "## Blocked":
             in_blocked = True
             continue
         if in_blocked:
-            if s.startswith("## ") and not s.startswith("### "):
+            if _atx_h2_text(lines[i]) is not None:
                 break
             if s.startswith(">"):
                 body = s.lstrip(">").strip()

@@ -690,21 +690,27 @@ def _recorded_verify_commands(project_path) -> "tuple[dict, str | None]":
         # receipt (fail closed, panel round-8). Treat EVERY
         # `## Verification Receipt` section in the file (not just the first),
         # attributing each `### … · risk …` entry's command lines to its risk.
-        from tasks.core import _closed_fence_line_indices
+        from tasks.core import _atx_h2_text, _closed_fence_line_indices
         skip = _closed_fence_line_indices(lines)   # ONE shared CommonMark scanner
         in_receipt = False
         cur_risk = None
         for i, ln in enumerate(lines):
             if i in skip:
                 continue
-            # Match on the STRIPPED line everywhere (heading, entry, and command
-            # bullet), so a legally 1-3-space-indented `### \u2026 \u00b7 risk \u2026` entry is
-            # not orphaned from its command bullets (panel round-10 grok).
-            s = ln.strip().lstrip("\ufeff")
-            if s.startswith("## "):
-                in_receipt = (s == "## Verification Receipt")
+            # H2 boundary via the strict shared ATX matcher (V10, round-3 codex-terra):
+            # a valid `## Verification Receipt ##` / `##\tVerification Receipt` must be
+            # recognized here exactly as the receipt writer and reader do, else a
+            # closing-hash/tab-separated receipt heading is missed and its entries
+            # are attributed to the wrong (or no) section \u2014 defeating the drift baseline.
+            h2 = _atx_h2_text(ln)
+            if h2 is not None:
+                in_receipt = (h2 == "## Verification Receipt")
                 cur_risk = None
                 continue
+            # Match entries/command bullets on the STRIPPED line, so a legally
+            # 1-3-space-indented `### \u2026 \u00b7 risk \u2026` entry is not orphaned from its
+            # command bullets (panel round-10 grok).
+            s = ln.strip().lstrip("\ufeff")
             if not in_receipt:
                 continue
             em = _VC_ENTRY_RE.match(s)

@@ -1,7 +1,7 @@
 {
   "$schema": "guarantee-ledger.schema.json",
   "schema_version": 1,
-  "ledger_version": "2026-08-28",
+  "ledger_version": "2026-09-02",
   "guarantees": [
     {
       "id": "PB-TASK-ACTIVATE",
@@ -327,13 +327,14 @@
       ],
       "status": "partially_evidenced",
       "missing_evidence_or_limitation": [
-        "Fence-safety scope: the new proofs cover the section-rewriting WRITERS on the blocked/handoff path (set_task_blocked, resume_blocked_task) and their fence-aware readers — the fence-aware clause is scoped to the `## Blocked`/`## Handoff` SECTION, not the whole task record. Still fence-blind, deliberately out of this guarantee's scope and parked (task 032): (a) the STATUS pair _set_status/_extract_status + the reopen writer lifecycle.py::cmd_work, which set_task_blocked/resume call FIRST on the same invocation — a fenced `## Status` example is written/read at the last (fenced) heading, clobbering the example line while the real status stays stale; fixing it requires lockstep changes to the bash/awk `## Status` reader in the stop-hook (parity test test_blocked_state.py::BlockedEndToEnd.test_duplicate_status_headings_hook_agrees_with_python), a cross-language enforcement-path change; (b) the non-corrupting READERS extract_parked_items/_extract_problem/retro._extract_section, which can misread (never rewrite) a fenced example.",
-        "Fence-scanner unification (task 032): `_iter_nonfenced` and `_risk_heading_lines` (which reuses it) share ONE strict CommonMark opener/closer implementation, matching `_closed_fence_line_indices` on every axis EXCEPT one deliberate direction: `_iter_nonfenced` fences an UNCLOSED opener through EOF (fail CLOSED), because its consumers DELETE/replace sections and must never delete content after a malformed unclosed fence; `_closed_fence_line_indices` fails OPEN there for the receipt writer, which only ever INSERTS. So the destructive path is the stricter of the two on every axis and never the more destructive. The prior parallel hand-rolled scanners drifted on indentation, closer-content, and unclosed-fence handling and reopened the #09 corruption through those gaps (panel rounds 1-3). Residuals (disclosed, best-effort — same posture as PB-CLOSE-VERIFY-CONTRACT's raw-content-crafting bound): (a) the H2 SECTION-BOUNDARY match in `_live_section_span` and write_handoff's `_section_span` uses `startswith('## ')` on the indentation-stripped line, so a tab-after-hash heading (`##\\tX`) is not recognized as a boundary and a >=4-space-indented `## X` IS — but writer and reader on each path use the same rule so they agree (no splice-disagreement, at most an over/under-long span on hand-crafted input); (b) an INDENTED CODE BLOCK (>=4-space, no fence) is not tracked by any scanner, so a `## Risk`/`## Blocked` inside one reads as live (the SIMPLE case fails closed to unclassified via the duplicate rule; only a contrived structure that also hides the real field defeats it); (c) on a genuinely unclosed fence, set_task_blocked appends the fresh block at EOF inside that fence, so the record is written but the fence-aware reader cannot see it — non-deletion is preserved, readability is not. A strict shared ATX-boundary matcher and indented-code-block tracking are parked. Adversarially-malformed committed task.md remains a best-effort bound contained by diff review + the OS sandbox.",
+        "Fence-safety scope: the new proofs cover the section-rewriting WRITERS on the blocked/handoff path (set_task_blocked, resume_blocked_task) and their fence-aware readers — the fence-aware clause is scoped to the `## Blocked`/`## Handoff` SECTION, not the whole task record. Still fence-blind, deliberately out of this guarantee's scope: (a) the STATUS pair _set_status/_extract_status + the reopen writer lifecycle.py::cmd_work, which set_task_blocked/resume call FIRST on the same invocation — a fenced `## Status` example is written/read at the last (fenced) heading, clobbering the example line while the real status stays stale; fixing it requires lockstep changes to the bash/awk `## Status` reader in the stop-hook (parity test test_blocked_state.py::BlockedEndToEnd.test_duplicate_status_headings_hook_agrees_with_python), a cross-language enforcement-path change — SPLIT OUT of task 039 as the dedicated V7 follow-up task (the only cross-language lockstep vector); (b) the non-corrupting display READERS: extract_parked_items and _extract_problem were made fence-aware in task 039 (route through the shared scanner, fail open); retro._extract_section/retro._extract_status remain fence-blind (advisory retrospective only, never rewrite), and retro._extract_status belongs with the V7 `## Status` work.",
+        "Fence-scanner unification (task 032, consolidated task 039): ONE strict CommonMark engine `_iter_fenced_flags(lines, *, unclosed_is_live)` backs every task.md scanner — `_iter_nonfenced` (fail CLOSED: an UNCLOSED opener fences through EOF, so the DELETE/replace writers and the risk reader never treat post-fence content as live) and `_closed_fence_line_indices` (fail OPEN: an unclosed opener contributes nothing, so the receipt writer only ever INSERTS). The pure bootstrap/handoff READERS (_extract_block_reason, _latest_receipt_line, find_unconsumed_handoff) call `_iter_nonfenced(unclosed_is_live=True)` so a malformed unclosed fence never HIDES a real `## Blocked`/`## Handoff`/receipt (V3). So the destructive path is the stricter of the two on every axis and never the more destructive. Task-039 tightenings that CLOSED the prior residuals: (a) FIXED — a strict shared ATX-H2 matcher `_atx_h2_text` (<=3 leading spaces, space-OR-tab separator, not `###`) applied on the RAW line by `_live_section_span`, write_handoff._section_span, and the readers, so `##\\tX` is a boundary and a >=4-space `## X` is not, and writer+reader agree (V5); (b) FIXED — INDENTED CODE BLOCKS (>=4 columns, space or tab, after a blank line) are now tracked in the shared engine, so a `## Risk`/`## Blocked` inside one is content, not live (V4); the NBSP false-closer (P-A) is closed by the ASCII-only closer `_ASCII_WS_ONLY_RE` (V6); and the risk close-gate fails STRICT on an unclosed fence via `_has_unclosed_fence` (V2, see PB-RISK-CLASSIFY). Residual STILL open (disclosed, best-effort — same posture as PB-CLOSE-VERIFY-CONTRACT's raw-content-crafting bound): (c) on a genuinely unclosed fence, set_task_blocked appends the fresh block at EOF inside that fence, so the record is written but the fence-aware reader cannot see it — non-deletion is preserved, readability is not; this is part of the SPLIT-OUT V7 follow-up (block-landed-non-fenced check, lockstep with the `## Status` fix). Adversarially-malformed committed task.md remains a best-effort bound contained by diff review + the OS sandbox.",
         "The `minting a heading` clause is not asserted by any bound proof. Both SetBlockedPure proofs compare only tasks/core.py::_gate_counts, which counts line-anchored gate markers and not headings, so they establish gate-count preservation and not heading containment. Reproduced by mutation: a /tmp copy of plugins/playbook/tasks/core.py with the one-line reason collapse removed from set_task_blocked writes a real `## Fake Heading` at line start, and BOTH bound proofs stay green.",
         "The no-heading guarantee is retained because current production behavior is correct: set_task_blocked collapses the reason to one line and renders it as a blockquote, which is what prevents the forged heading. The gap is in the evidence, not in the product; no runtime change is made or needed here.",
         "An exact regression proof - assert that no new Markdown heading appears at line start after a hostile reason, alongside the existing gate-count assertion - is scheduled for Phase 3; adding it is a product-test change and is deliberately NOT performed in Phase 1.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
-        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."
+        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
+        "Closing-hash normalization (task 039 V9, round-2 panel): the shared ATX matcher `_atx_h2_text` now strips a CommonMark closing-hash sequence (`## Blocked ##` -> `## Blocked`) centrally, so `_live_section_span`, write_handoff._section_span, `_extract_block_reason` and `_latest_receipt_line` all find a valid `## Blocked ##`/`## Handoff ##` heading — previously normalization was on the risk path only, so such a heading was invisible to the block/handoff writers (duplicate/no-op) and readers (lost handoff). `## Blocked##` (no space before the run) stays content per CommonMark. The reader-fail-open / writer-fail-closed asymmetry on a section under an UNCLOSED fence is a deliberate, now test-pinned bound (test_fence_scanner.py::ReadersFailOpen.test_reader_open_writer_closed_asymmetry_under_unclosed_fence): the reader surfaces the handoff for bootstrap, the destructive writer never deletes past the malformed fence."
       ],
       "follow_up_phases": [
         3
@@ -713,7 +714,9 @@
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
-        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."
+        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
+        "Fence-scanner consolidation (task 039): the receipt reader/writer's fence-awareness now routes through the single strict engine `_iter_fenced_flags` shared by every task.md scanner (via `_closed_fence_line_indices`), which additionally tracks >=4-column indented code blocks (V4) and rejects a NBSP false-closer (ASCII-only closer, V6). A real receipt heading is written at column 0 by upsert_task_section, so indented-code tracking cannot hide it; the fenced/indented/unclosed receipt-masking proofs (test_fenced_receipt_heading_is_ignored, test_indented_fence_marker_does_not_hide_the_receipt, test_unclosed_fence_does_not_hide_the_receipt) stay green on the consolidated engine. The adversarially-malformed-committed-task.md residual is unchanged (best-effort; diff review + OS sandbox are the containment).",
+        "Receipt writer/reader/audit heading agreement (task 039 V10, round-3 opus F2 + codex-terra): upsert_task_section (the receipt writer) and the verify-contract drift-sweep boundary in audit.py now match a `## Verification Receipt` heading through the strict shared `_atx_h2_text` (closing-hash normalized, tab-separator, <=3-space, BOM/CRLF-tolerant) — the same matcher the readers (_latest_receipt_line) use. Previously the writer/audit used raw exact/startswith matching, so a valid `## Verification Receipt ##` or `##\\tVerification Receipt` was found by the reader but NOT the writer (a duplicate section was appended and the stale first entry read) — a writer/reader disagreement the fence-consolidation invariant forbids. Receipt headings are machine-written plain today, so practical impact was low; the fix upholds the invariant. Pinned by test_fence_scanner.py::StrictAtxH2Matcher.test_receipt_writer_agrees_with_reader_on_closing_hash_heading."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
@@ -744,6 +747,22 @@
         {
           "path": "plugins/playbook/tasks/core.py",
           "reference": "symbol:_risk_heading_lines"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:_has_unclosed_fence"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:_atx_h2_text"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:_any_risk_heading_offered"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:_unclosed_fence_hides_risk"
         }
       ],
       "failure_consequence": "High",
@@ -808,14 +827,118 @@
         {
           "type": "executable unit",
           "path": "tests/test_unclassified_fails_closed.py",
-          "reference": "RiskSectionDetection.test_unclosed_fence_hides_a_risk_decoy_fail_closed",
+          "reference": "RiskSectionDetection.test_unclosed_fence_value_fails_closed_never_leaks_a_decoy",
           "boundary": "unit",
           "negative_control": {
             "path": "tests/test_unclassified_fails_closed.py",
             "reference": "RiskSectionDetection.test_bom_tabs_case_crlf_and_trailing_space_are_real_headings"
           },
           "limitations": [
-            "Proves the risk classifier fails CLOSED on an unclosed fence: a `## Risk` quoted after an unclosed opener is fenced-through-EOF, so it cannot become the classification (returns unclassified). The negative control confirms genuine non-fenced headings are still recognized."
+            "Proves the risk VALUE fails CLOSED on an unclosed fence: a `## Risk` quoted after an unclosed opener is fenced-through-EOF, so it can never BECOME the classification (extract_risk returns unclassified). The negative control confirms genuine non-fenced headings are still recognized. Section-PRESENCE on the same input is the opposite direction (fail strict) — see the V2 proof below."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_unclosed_fence_counts_as_offered_and_is_strict",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_fenced_risk_example_does_not_block_a_legacy_close"
+          },
+          "limitations": [
+            "V2 (task 039, codex-sol #1 Critical): has_risk_section fails toward STRICT on an UNCERTAIN parse — an unclosed fence anywhere in the file counts as an offered (present) Risk gate (True), so a `## Risk` buried under an unclosed fence can no longer read as ABSENT and buy the pre-1.5.0 lenient legacy close (the P-C bypass). Combined with the fail-closed VALUE (unclassified), present+unclassified = BLOCK. The negative control proves a properly CLOSED fenced `## Risk` example does NOT over-block a legacy close (only an UNCLOSED fence is uncertain). Detection is `_has_unclosed_fence` (the two scanner fail-directions diverge exactly on an unclosed opener); it does not attempt to distinguish a malformed-but-benign unclosed fence from an adversarial one — both are held to the high-consequence bar, recoverable by fixing the fence / classifying / review evidence / `--force --reason`."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "CloseEndToEnd.test_unclosed_fence_hiding_the_real_risk_blocks_the_close",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_fenced_risk_example_does_not_block_a_legacy_close"
+          },
+          "limitations": [
+            "End-to-end through the real CLI: a task.md whose real `## Risk` is buried under an unclosed fence is BLOCKED at close (was a lenient legacy close before V2), and is recoverable with `--force --reason`. Best-effort bound (unchanged posture): the guard is against a self-authored/committed malformed task.md; human diff review + the OS sandbox remain the containment for adversarial raw-content crafting."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_indented_sole_risk_after_blank_still_counts_as_offered",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_fenced_risk_example_does_not_block_a_legacy_close"
+          },
+          "limitations": [
+            "V8/opus CRITICAL: a sole `## Risk` indented >=4 after a blank still counts as OFFERED (has_risk_section True) and reads unclassified as a value -> BLOCK, closing the V4-introduced lenient regression."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_nbsp_led_risk_is_not_read_as_live_but_counts_as_offered",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_fenced_risk_example_does_not_block_a_legacy_close"
+          },
+          "limitations": [
+            "V8/codex-sol #2: a NBSP-led `## Risk` is not read as a live value (extract_risk unclassified) but counts as offered (presence True) -> BLOCK."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_closing_hash_risk_heading_is_recognized",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_fenced_risk_example_does_not_block_a_legacy_close"
+          },
+          "limitations": [
+            "V8/codex-sol #3: `## Risk ##` (CommonMark closing-hash) is recognized so an assertive task is not legacy-lenient-closed."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_unclosed_fence_forces_unclassified_even_with_a_read_value",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "CloseEndToEnd.test_classified_reversible_is_unaffected"
+          },
+          "limitations": [
+            "V9/codex-terra CRITICAL: an unclosed fence anywhere degrades extract_risk to unclassified so a higher class hidden after the malformed opener cannot be shadowed by a lower one read clean above it; present+unclassified blocks."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_stray_unclosed_fence_below_a_classified_risk_does_not_over_block",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "RiskSectionDetection.test_unclosed_fence_forces_unclassified_even_with_a_read_value"
+          },
+          "limitations": [
+            "V10/opus F1: a stray unclosed fence with no `## Risk` in its hidden remainder no longer forces unclassified — a clean reversible still reads its class (the degradation is scoped to `_unclosed_fence_hides_risk`)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_unclassified_fails_closed.py",
+          "reference": "RiskSectionDetection.test_balanced_fences_classified_risk_reads_its_class",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_unclassified_fails_closed.py",
+            "reference": "RiskSectionDetection.test_unclosed_fence_forces_unclassified_even_with_a_read_value"
+          },
+          "limitations": [
+            "opus F3: a normal classified task with balanced fences reads its declared class and closes review-free."
           ]
         }
       ],
@@ -830,7 +953,8 @@
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
-        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."
+        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
+        "V2 + V8 + V9 tightening (task 039, impl panel rounds 1-2): the risk path fails toward STRICT on an uncertain/malformed parse. PRESENCE (has_risk_section) uses `_any_risk_heading_offered` — a `## Risk` hidden by a >=4-column indent, a leading NBSP, a CommonMark closing-hash sequence (`## Risk ##`), or an UNCLOSED fence all count as an OFFERED gate (only a properly CLOSED fenced example is excluded as documentation), so a malformed hide can no longer read as a pre-1.5.0 legacy-absent task and buy a lenient close (opus CRITICAL: V4 indented-code marking had reopened exactly this on the risk path; codex-sol #1/#2/#3). VALUE (extract_risk via `_risk_heading_lines`) is read ONLY from a genuine live ATX H2 through the strict shared `_atx_h2_text` (<=3 leading spaces, ASCII whitespace, `## `/`##\\t`, not `###`, closing-hash normalized), so an indented/NBSP `## Risk` decoy is never read as a classification. V9 (round-2 codex-terra CRITICAL) + V10 (round-3 opus F1) add the value-side twin of V2: extract_risk degrades to unclassified when an unclosed fence's hidden remainder CONTAINS a `## Risk`-shaped heading (`_unclosed_fence_hides_risk`) — an uncertain parse must not yield a TRUSTED classification, because a higher class (`## Risk\\nassertive`) hidden after the malformed opener would otherwise be shadowed by a lower one (`## Risk\\nreversible`) read clean above it. V10 narrowed this from V9's blunt any-unclosed-fence test, which over-blocked a clean `reversible` whose long task.md merely had a stray unbalanced fence below the risk field (a stray fence hiding no `## Risk` no longer forces unclassified). present + unclassified = BLOCK. Both scanners route through the single strict engine `_iter_fenced_flags` (V1); the presence test uses its fence-only view (track_indented_code=False) so a closed fenced example stays lenient while an indented heading blocks. Residual (disclosed, unchanged posture): best-effort against a self-authored/committed malformed task.md; adversarial raw-content crafting is contained by human diff review + the OS sandbox. V4's indented-code detection uses a prev_blank approximation of CommonMark's paragraph-context rule (an indented block starting immediately after a heading/fence without a blank is treated as live), but this has no risk/section-detection consequence because both paths independently gate on `_atx_h2_text`'s <=3-space rule."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
@@ -2958,7 +3082,7 @@
     {
       "id": "PB-JUDGE-TAMPER",
       "category": "judges-and-reviews",
-      "statement": "Review paths compare Git porcelain state (new AND removed entries), per-dirty-file content hashes keyed off `--porcelain -z` byte paths (symlinks hashed by link text), and the task hash before/after — so newly written non-ignored files, reverted or deleted files (including task.md in the non-git fallback), a symlink retargeted to same-content, a git↔non-git transition (e.g. .git deleted), and content-only edits to an already-dirty regular file of any on-disk name are caught; detected tamper adds a loud banner, refuses ingestion, and exits nonzero.",
+      "statement": "Review paths compare Git porcelain state (new AND removed entries), per-dirty-file content hashes keyed off `--porcelain -z` byte paths (symlinks hashed by link text), and the task hash before/after — so newly written non-ignored files, reverted or deleted files (including task.md in the non-git fallback), a symlink retargeted to same-content, a git<->non-git transition (e.g. .git deleted), and content-only edits to an already-dirty regular file of any on-disk name are caught; detected tamper adds a loud banner, refuses ingestion, and exits nonzero.",
       "owner": [
         {
           "path": "plugins/playbook/tasks/review.py",

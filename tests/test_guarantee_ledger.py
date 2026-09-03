@@ -6,8 +6,10 @@ import copy
 import datetime
 import importlib.util
 import json
+import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -322,6 +324,28 @@ class GuaranteeLedgerValidation(_LedgerFixture):
                 ])
             self.assertEqual(1, rc)
             self.assertIn("canonical YYYY-MM-DD date", stderr.getvalue())
+
+    def test_summary_does_not_crash_under_cp1252_stdout(self):
+        # Portability regression (task 039): a non-ASCII limitation must not crash
+        # `--summary` on a Windows-style cp1252 stdout. U+2192 ('->') in a ledger
+        # limitation raised UnicodeEncodeError and failed the whole verify lane on
+        # Windows (a break no Linux/macOS run surfaces). main() reconfigures stdout
+        # to UTF-8. Reproduced via PYTHONIOENCODING=cp1252 in a SUBPROCESS — the
+        # in-process StringIO path cannot exercise a real stdout codec.
+        ledger = self.mutated()
+        ledger["guarantees"][0]["missing_evidence_or_limitation"].append(
+            "cp1252 canary: an arrow → and a bidir ↔ must not crash --summary")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arrow-ledger.json"
+            path.write_text(json.dumps(ledger), encoding="utf-8")
+            env = dict(os.environ, PYTHONIOENCODING="cp1252")
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "guarantee_ledger.py"),
+                 "--summary", "--ledger", str(path),
+                 "--schema", str(ROOT / "docs" / "guarantee-ledger.schema.json")],
+                capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0,
+                         f"--summary crashed under cp1252 stdout:\n{proc.stderr}")
 
     def test_ledger_version_must_be_a_real_canonical_date(self):
         for bad in ("soon", "2026-8-18", "2026-02-30", "2026-08-18T00:00:00"):
