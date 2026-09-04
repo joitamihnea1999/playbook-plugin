@@ -105,6 +105,30 @@ class LockTests(unittest.TestCase):
                 with records.RunLock(rd):
                     pass
 
+    def test_reclaim_is_atomic_and_release_is_ownership_checked(self):
+        # r4 opus F1 / sol #1: two racers seeing one dead-pid lock must not both win, and
+        # __exit__ must never delete a lock it does not own.
+        with tempfile.TemporaryDirectory() as td:
+            rd = Path(td) / "run"; rd.mkdir()
+            dead = subprocess.Popen([sys.executable, "-c", "pass"]); dead.wait()
+            (rd / ".lock").write_text(str(dead.pid), encoding="utf-8")
+            a = records.RunLock(rd)
+            a.__enter__()                                          # reclaims
+            self.assertEqual((rd / ".lock").read_text(), str(os.getpid()))
+            b = records.RunLock(rd)
+            with self.assertRaises(records.RunLocked):             # holder alive → refused, lock intact
+                b.__enter__()
+            self.assertEqual((rd / ".lock").read_text(), str(os.getpid()))
+            # a foreign lock appearing under us is NOT removed by our release
+            (rd / ".lock").write_text("31337", encoding="utf-8")
+            a.__exit__(None, None, None)
+            self.assertEqual((rd / ".lock").read_text(), "31337")
+            (rd / ".lock").unlink()
+            # the reclaim primitive itself: the second claimant of one stale file fails
+            (rd / ".lock").write_text(str(dead.pid), encoding="utf-8")
+            self.assertTrue(records._claim_stale(rd / ".lock"))
+            self.assertFalse(records._claim_stale(rd / ".lock"))   # already taken away
+
     def test_exclusive_and_released(self):
         with tempfile.TemporaryDirectory() as td:
             rd = Path(td) / "run"
@@ -153,6 +177,11 @@ class ManifestTests(unittest.TestCase):
             probs = records.check_manifest(dict(m, playbook_repo_sha="deadbeef"), selected_cases=corpus.cases,
                                            packages=pk, candidates=cands)
             self.assertTrue(any("playbook" in p for p in probs), probs)
+            # r4 sol #3: an alias whose RESOLUTION changed is a different seat under the same label
+            same_spec = [runner.Candidate(label=c.label, spec=c.spec, backend=c.backend,
+                                          variant=(c.variant or "") + "-other") for c in cands]
+            probs = records.check_manifest(m, selected_cases=corpus.cases, packages=pk, candidates=same_spec)
+            self.assertTrue(any("resolves to" in p for p in probs), probs)
             probs = records.check_manifest(m, selected_cases=corpus.cases, packages=pk,
                                            candidates=runner.parse_candidates("a=sonnet,z=opus"))
             self.assertTrue(any("candidate a: spec" in p for p in probs), probs)
@@ -364,6 +393,37 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(len(raws), 2, "each attempt keeps its own raw file")
         self.assertTrue(all((rd / p).is_file() for p in raws))
         self.assertIn("attempts", recs[0])
+
+    def test_denied_context_artifact_is_exit_2_not_traceback(self):
+        # r4 terra #2: a LeakageError at package build is unusable input, not a crash.
+        (self.corpus_dir / "cases" / "c-a" / "context").mkdir()
+        (self.corpus_dir / "cases" / "c-a" / "context" / "judge.md").write_text("leak", encoding="utf-8")
+        p = self._run("--fake")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertIn("judge.md", p.stderr)
+        self.assertFalse((self.runs / "r1" / "manifest.json").exists())
+
+    def test_persist_writes_a_raw_file_per_automatic_attempt(self):
+        # r4 sol #4: an automatic retry's first attempt keeps its FULL raw output on disk.
+        sys.path.insert(0, str(_ROOT / "bench"))
+        import judgebench
+        from bench.lib import runner as _r, package as _p
+        with tempfile.TemporaryDirectory() as td:
+            corpus = _mk_corpus(Path(td) / "corpus"); case = corpus.cases[0]
+            pkg = _p.build_package(case); cand = _r.parse_candidates("a=opus")[0]
+            rd = Path(td) / "runs" / "r"; rd.mkdir(parents=True)
+            inv = _r.Invocation(status="ok", raw="final", duration_ms=5, retries=1,
+                                attempts=[{"status": "dnf", "usage": {"status": "unknown"},
+                                           "raw": "(error: first attempt full text " + "x" * 500 + ")",
+                                           "duration_ms": 9}])
+            judgebench._persist(rd, "r", case, cand, inv, pkg, records)
+            rec = records.read_results(rd, "a")[0][0]
+            self.assertTrue((rd / rec["raw_path"]).read_text(encoding="utf-8") == "final")
+            att = rec["attempts"][0]
+            self.assertIn("raw_path", att)
+            self.assertIn("x" * 500, (rd / att["raw_path"]).read_text(encoding="utf-8"))
+            self.assertNotIn("raw", att)                            # full text lives on disk, not in JSONL
 
     def test_bad_candidate_or_case_is_exit_2(self):
         p = self._run("--fake", cands="nosuch:x")

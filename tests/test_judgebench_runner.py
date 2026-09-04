@@ -127,6 +127,15 @@ class CandidateTests(unittest.TestCase):
                 with self.assertRaises(runner.CandidateError):
                     runner.parse_candidates(bad)
 
+    def test_labels_are_portable_path_segments(self):
+        # r4 sol #5: Windows folds case and forbids device names / trailing dots.
+        with self.assertRaises(runner.CandidateError):
+            runner.parse_candidates("A=opus,a=sonnet")
+        for bad in ("CON=opus", "nul=opus", "com1=opus", "trail.=opus"):
+            with self.subTest(label=bad):
+                with self.assertRaises(runner.CandidateError):
+                    runner.parse_candidates(bad)
+
     def test_bad_spec_duplicate_label_and_empty(self):
         with self.assertRaises(runner.CandidateError):
             runner.parse_candidates("nosuchprovider:x")
@@ -152,6 +161,12 @@ class ClassifyTests(unittest.TestCase):
             with self.subTest(raw=raw[:30]):
                 self.assertEqual(runner.classify(raw), want)
         self.assertEqual(runner.classify("anything", timed_out=True), ("timeout", False))
+        # r4 grok #2: the adapters' own size-cap envelopes are DETERMINISTIC — never retried.
+        for raw in ("(error: grok judge prompt+context is ~40000 chars on argv; Windows caps the command "
+                    "line at 32,767 chars and grok reads its prompt from argv — shrink the context)",
+                    "(error: grok judge context is 200,000 bytes in a single argv element; this platform "
+                    "caps one element at 131,072 bytes (MAX_ARG_STRLEN = 32 * PAGE_SIZE) and grok reads …)"):
+            self.assertEqual(runner.classify(raw), ("dnf", False), raw[:40])
 
     def test_finish_distinguishes_ok_empty_malformed(self):
         ok = runner.finish("FINDINGS:\n1. FILE: a.py\n   SEVERITY: Minor\n   WHY: w\nEND FINDINGS\n",
@@ -302,6 +317,37 @@ class LiveRunnerTests(unittest.TestCase):
             self.assertEqual(calls, [], "no candidate may run when the case is excluded")
             # Within budget → nothing excluded.
             self.assertEqual(lr.preflight(cands, pkg, repo), {})
+
+    def test_preflight_applies_the_windows_command_line_cap_for_argv_backends(self):
+        # r4 grok #2: argv_byte_error is a no-op on Windows; the real cap there is the
+        # adapters' ~30k whole-command-line check — preflight must apply it too.
+        with tempfile.TemporaryDirectory() as td:
+            repo, case, pkg = self._case(td)
+            lr = runner.LiveRunner(repo, invoke=lambda *a: "x", adapter_factory=_StubAdapter, budget_usd=1,
+                                   platform_nt=True)
+            big = package.Package(case_id=case.id, spec="", diff="", prompt="x" * 31_000)
+            errs = lr.preflight(runner.parse_candidates("g=grok:grok-4.6:high,c=codex:m"), big, repo)
+            self.assertIn("g", errs); self.assertIn("32,767", errs["g"])
+            self.assertNotIn("32,767", errs.get("c", ""))          # stdin transport: no cmdline cap
+            small = package.Package(case_id=case.id, spec="", diff="", prompt="x" * 1_000)
+            self.assertEqual(lr.preflight(runner.parse_candidates("g=grok:grok-4.6:high"), small, repo), {})
+
+    def test_on_result_callback_fires_inside_the_snapshot_per_candidate(self):
+        # r4 grok #3: persist each candidate as it completes, while the snapshot still exists.
+        with tempfile.TemporaryDirectory() as td:
+            repo, case, pkg = self._case(td)
+            seen = []
+            lr = runner.LiveRunner(repo, invoke=lambda *a: "FINDINGS:\nNONE\nEND FINDINGS\n",
+                                   adapter_factory=_StubAdapter, budget_usd=1)
+            trees = []
+            def cb(cand, inv, tree):
+                seen.append(cand.label)
+                trees.append(Path(tree).exists())
+            out = runner.run_case(case, runner.parse_candidates("a=opus,b=sonnet"), lr, pkg, source_repo=repo,
+                                  on_result=cb)
+            self.assertEqual(sorted(seen), ["a", "b"])
+            self.assertEqual(trees, [True, True])                  # snapshot alive at callback time
+            self.assertEqual(len(out), 2)
 
     @unittest.skipIf(os.name == "nt", "POSIX argv cap only")
     def test_preflight_uses_adapter_transport_not_a_guess(self):

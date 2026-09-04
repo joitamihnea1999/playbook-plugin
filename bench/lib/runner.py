@@ -66,6 +66,10 @@ class Candidate:
 
 # Bench-local presets so the plan's literal commands (§14/§24: `sol-med,sol-high`)
 # resolve to the Test A/B seats (impl-panel sol #5). `label=spec` always wins.
+_WINDOWS_DEVICE_NAMES = frozenset({"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)}
+                                  | {f"LPT{i}" for i in range(1, 10)})
+_WINDOWS_CMDLINE_CAP = 30_000       # the adapters' whole-command-line guard (grok.py / agy / pi)
+
 RESERVED_LABELS = frozenset({"journal", "manifest.json", "adjudication.json", "report.md", ".lock", "raw"})
 
 PRESETS = {
@@ -100,9 +104,13 @@ def parse_candidates(csv: str) -> list:
         # control path, never dot-prefixed, never longer than a portable filename.
         if label.startswith(".") or len(label) > 64 or label.lower() in RESERVED_LABELS:
             raise CandidateError(f"candidate label {label!r} is reserved/unsafe as a directory name")
-        if label in seen:
-            raise CandidateError(f"duplicate candidate label {label!r}")
-        seen.add(label)
+        # Portable path segment (r4 sol #5): Windows folds case, forbids device names and
+        # trailing dots — enforce those rules on every platform so a run dir is portable.
+        if label.endswith(".") or label.split(".")[0].upper() in _WINDOWS_DEVICE_NAMES:
+            raise CandidateError(f"candidate label {label!r} is not a portable directory name")
+        if label.casefold() in seen:
+            raise CandidateError(f"duplicate candidate label {label!r} (labels are case-insensitive)")
+        seen.add(label.casefold())
         out.append(Candidate(label=label, spec=spec, backend=backend, variant=variant))
     if not out:
         raise CandidateError("no candidates given")
@@ -143,6 +151,10 @@ def classify(raw: str, timed_out: bool = False) -> tuple:
         if "timed out" in low:
             return "timeout", False
         if "not found on path" in low:
+            return "dnf", False
+        # The adapters' own size-cap envelopes are deterministic (r4 grok #2): retrying
+        # the same oversized prompt can only fail again.
+        if "caps the command line" in low or "argv element" in low:
             return "dnf", False
         return "dnf", True
     if t.startswith("(FAILED"):
@@ -239,11 +251,14 @@ class LiveRunner:
     """Real providers. `invoke` and `adapter_factory` are injectable for tests."""
     needs_tree = True
 
-    def __init__(self, repo_root: Path, *, invoke=None, adapter_factory=None, budget_usd=None):
+    def __init__(self, repo_root: Path, *, invoke=None, adapter_factory=None, budget_usd=None,
+                 platform_nt=None):
+        import os as _os
         self.repo_root = Path(repo_root)
         self._invoke = invoke or _adapter_invoke
         self._adapter_factory = adapter_factory
         self.budget_usd = budget_usd
+        self.platform_nt = (_os.name == "nt") if platform_nt is None else bool(platform_nt)
         self.calls = []
         self._lock = threading.Lock()
 
@@ -276,10 +291,17 @@ class LiveRunner:
                 continue
             argv_transport = getattr(inv, "stdin", None) is None
             if argv_transport:
-                err = argv_byte_error(list(getattr(inv, "argv", [])), cand.backend)
+                argv = list(getattr(inv, "argv", []))
+                err = argv_byte_error(argv, cand.backend)
                 if err:
                     errors[cand.label] = err
                     continue
+                if self.platform_nt:            # argv_byte_error is a no-op there (r4 grok #2)
+                    payload = sum(len(a) + 1 for a in argv)
+                    if payload > _WINDOWS_CMDLINE_CAP:
+                        errors[cand.label] = (f"(excluded: {cand.backend} prompt is ~{payload:,} chars on "
+                                              f"argv; Windows caps the command line at 32,767 chars)")
+                        continue
             try:
                 budget = resolve_review_context_chars(Path(repo_root), stdin=not argv_transport)
             except Exception:
@@ -304,7 +326,7 @@ class LiveRunner:
             # even though its output looked like a transport failure.
             from tasks.review import _parse_judge_usage
             attempts.append({"status": status, "usage": _parse_judge_usage(raw) or {"status": "unknown"},
-                             "raw_head": (raw or "")[:300],
+                             "raw_head": (raw or "")[:300], "raw": raw or "",
                              "duration_ms": int((time.monotonic() - t0) * 1000)})
             retries = 1
             t0 = time.monotonic()                      # latency = the FINAL attempt only (r3 opus F4)
@@ -319,24 +341,34 @@ class LiveRunner:
 # ── one case × N candidates ──────────────────────────────────────────────────
 
 def run_case(case, candidates, runner, package, *, source_repo=None, soft_timeout=900,
-             hard_timeout=1200, concurrency=2, skip=frozenset(), snapshot_parent=None):
+             hard_timeout=1200, concurrency=2, skip=frozenset(), snapshot_parent=None,
+             on_result=None):
     """Invoke every candidate not in `skip` against one case. Builds ONE snapshot
     (live runners only), runs candidates with at most `concurrency` in flight,
-    and tears the snapshot down after the last finishes. Returns
-    [(candidate, Invocation)] in candidate order. Never raises for a provider
-    failure — that is a `dnf` result."""
+    and tears the snapshot down after the last finishes. `on_result(cand, inv, tree)`
+    fires for each candidate AS IT COMPLETES, inside the snapshot (r4 grok #3: the
+    caller persists immediately, so a crash loses at most the candidates still in
+    flight, never a whole case). Returns [(candidate, Invocation)] in candidate
+    order. Never raises for a provider failure — that is a `dnf` result."""
     todo = [c for c in candidates if c.label not in skip]
     if not todo:
         return []
     try:
         pre = runner.preflight(todo, package, source_repo or REPO_ROOT) or {}
     except Exception as exc:                       # r3 sonnet #2: contain a raising preflight
-        return [(c, Invocation(status="dnf", raw=f"(error: preflight raised {type(exc).__name__}: {exc})",
-                               note="preflight raised")) for c in todo]
+        out = [(c, Invocation(status="dnf", raw=f"(error: preflight raised {type(exc).__name__}: {exc})",
+                              note="preflight raised")) for c in todo]
+        if on_result is not None:
+            for c, inv in out:
+                on_result(c, inv, None)
+        return out
     if pre:
         why = "; ".join(f"{k}: {v}" for k, v in sorted(pre.items()))
-        return [(c, Invocation(status="excluded", note=f"transport preflight — {why}"))
-                for c in todo]
+        out = [(c, Invocation(status="excluded", note=f"transport preflight — {why}")) for c in todo]
+        if on_result is not None:
+            for c, inv in out:
+                on_result(c, inv, None)
+        return out
 
     def _one(cand, tree):
         try:
@@ -347,9 +379,20 @@ def run_case(case, candidates, runner, package, *, source_repo=None, soft_timeou
                               note="runner exception")
 
     def _all(tree):
+        from concurrent.futures import as_completed
+        results = {}
         with ThreadPoolExecutor(max_workers=max(1, min(concurrency, len(todo)))) as ex:
-            futs = [ex.submit(_one, c, tree) for c in todo]
-            return [(c, f.result()) for c, f in zip(todo, futs)]
+            futs = {ex.submit(_one, c, tree): c for c in todo}
+            for f in as_completed(futs):
+                c = futs[f]
+                inv = f.result()
+                results[c.label] = inv
+                if on_result is not None:
+                    try:
+                        on_result(c, inv, tree)
+                    except Exception as exc:               # persistence bug must not kill the run
+                        inv.note = (inv.note + "; " if inv.note else "") + f"on_result raised {exc}"
+        return [(c, results[c.label]) for c in todo]
 
     if getattr(runner, "needs_tree", False):
         repo = Path(source_repo) if source_repo else REPO_ROOT
@@ -357,6 +400,10 @@ def run_case(case, candidates, runner, package, *, source_repo=None, soft_timeou
             with snapshot_tree(repo, case.repo_base_sha, parent_dir=snapshot_parent) as tree:
                 return _all(tree)
         except Exception as exc:                   # snapshot failure → every candidate dnf
-            return [(c, Invocation(status="dnf", raw=f"(error: snapshot failed: {exc})",
-                                   note="snapshot")) for c in todo]
+            out = [(c, Invocation(status="dnf", raw=f"(error: snapshot failed: {exc})",
+                                  note="snapshot")) for c in todo]
+            if on_result is not None:
+                for c, inv in out:
+                    on_result(c, inv, None)
+            return out
     return _all(None)

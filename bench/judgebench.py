@@ -194,9 +194,13 @@ def cmd_run(args) -> int:
         print(f"judgebench: {exc}", file=sys.stderr)
         return EXIT_UNUSABLE
     try:
-        packages = {c.id: _package.build_package(c, soft_timeout_secs=args.soft_timeout,
-                                                 hard_timeout_secs=args.timeout)
-                    for c in selected}
+        try:
+            packages = {c.id: _package.build_package(c, soft_timeout_secs=args.soft_timeout,
+                                                     hard_timeout_secs=args.timeout)
+                        for c in selected}
+        except (_package.LeakageError, ValueError, OSError) as exc:       # r4 terra #2
+            print(f"judgebench: cannot build the frozen package: {exc}", file=sys.stderr)
+            return EXIT_UNUSABLE
         tpl_v, tpl_sha = next(iter(packages.values())).template_version, \
             next(iter(packages.values())).template_sha256
         has_results = any(_records.result_path(run_dir, lb).exists() for lb in labels) or \
@@ -259,16 +263,18 @@ def cmd_run(args) -> int:
                     invocations += 1
                     print(f"  {case.id:<28} {cand.label:<20} {inv.status}")
                 continue
+            def _on_result(cand, inv, _tree, case=case):
+                # Persist AS EACH CANDIDATE COMPLETES (r4 grok #3) — a crash loses at most
+                # the invocations still in flight, never a finished one.
+                _persist(run_dir, args.run_id, case, cand, inv, packages[case.id], _records)
+                counts[inv.status] = counts.get(inv.status, 0) + 1
+                print(f"  {case.id:<28} {cand.label:<20} {inv.status}"
+                      + (f"  ({inv.note})" if inv.note else ""), flush=True)
             results = _runner.run_case(case, candidates, runner, packages[case.id],
                                        source_repo=source_repo, soft_timeout=args.soft_timeout,
                                        hard_timeout=args.timeout, concurrency=args.concurrency,
-                                       skip=skip)
-            for cand, inv in results:
-                _persist(run_dir, args.run_id, case, cand, inv, packages[case.id], _records)
-                counts[inv.status] = counts.get(inv.status, 0) + 1
-                invocations += 1
-                print(f"  {case.id:<28} {cand.label:<20} {inv.status}"
-                      + (f"  ({inv.note})" if inv.note else ""))
+                                       skip=skip, on_result=_on_result)
+            invocations += len(results)
         summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         print(f"done: {invocations} invocations" + (f" ({summary})" if summary else "")
               + f" → {run_dir}")
@@ -279,6 +285,11 @@ def cmd_run(args) -> int:
 
 
 def _persist(run_dir, run_id, case, cand, inv, package, _records) -> None:
+    # Every retried attempt keeps its FULL raw output on disk too (r4 sol #4); the JSONL
+    # line carries the path, not the text.
+    for att in getattr(inv, "attempts", []) or []:
+        if "raw" in att:
+            att["raw_path"] = _records.write_raw(run_dir, cand.label, case.id, att.pop("raw"))
     raw_rel = _records.write_raw(run_dir, cand.label, case.id, inv.raw)
     rec = _records.make_result_record(run_id, case, cand, inv, raw_rel, package)
     _records.append_result(run_dir, cand.label, rec)

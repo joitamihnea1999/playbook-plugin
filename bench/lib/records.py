@@ -76,10 +76,28 @@ def _pid_alive(pid: int):
         return None
 
 
+def _claim_stale(path: Path) -> bool:
+    """Atomically take a stale lock file away: rename it to a unique name (only ONE
+    racer's rename can succeed on a given source — the loser gets FileNotFoundError)
+    and remove the renamed file. True iff this caller won (r4 opus F1 / sol #1)."""
+    tmp = path.with_name(f"{path.name}.stale.{os.getpid()}.{int(time.time() * 1000)}")
+    try:
+        os.rename(str(path), str(tmp))
+    except OSError:
+        return False
+    try:
+        os.unlink(str(tmp))
+    except OSError:
+        pass
+    return True
+
+
 class RunLock:
     """`with RunLock(dir):` — O_CREAT|O_EXCL so two launchers can never both hold
     it. The file carries the holder's pid. A lock whose holder is provably DEAD
-    (hard crash) is reclaimed (r3 opus F3) — an unreadable/unknown holder is not."""
+    (hard crash) is reclaimed ATOMICALLY (r3 opus F3, r4 opus F1) — an unreadable
+    or unknown holder is not. Release removes the file only if it still carries
+    OUR pid (never a peer's)."""
 
     def __init__(self, run_dir: Path):
         self.path = Path(run_dir) / LOCK_NAME
@@ -101,14 +119,9 @@ class RunLock:
             except OSError:
                 pass
             alive = _pid_alive(holder) if holder.isdigit() else None
-            if alive is False:
-                try:
-                    self.path.unlink()
-                except OSError:
-                    pass
-                if self._try_acquire():
-                    os.write(self._fd, str(os.getpid()).encode("ascii"))
-                    return self
+            if alive is False and _claim_stale(self.path) and self._try_acquire():
+                os.write(self._fd, str(os.getpid()).encode("ascii"))
+                return self
             raise RunLocked(f"locked by another launcher (pid {holder or '?'}"
                             f"{', still running' if alive else ''}): {self.path} — wait for it, "
                             f"or delete the lock if you are sure that process is gone") from None
@@ -119,11 +132,17 @@ class RunLock:
         try:
             if self._fd is not None:
                 os.close(self._fd)
+                self._fd = None
         finally:
             try:
-                self.path.unlink()
+                mine = self.path.read_text(encoding="utf-8", errors="replace").strip() == str(os.getpid())
             except OSError:
-                pass
+                mine = False
+            if mine:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
         return False
 
 
@@ -399,6 +418,10 @@ def check_manifest(manifest: dict, *, selected_cases, packages, candidates, mode
             problems.append(f"candidate {cand.label}: not in the run manifest")
         elif was.get("spec") != cand.spec:
             problems.append(f"candidate {cand.label}: spec {was.get('spec')!r} → {cand.spec!r}")
+        elif (was.get("backend"), was.get("variant")) != (cand.backend, cand.variant):
+            # r4 sol #3: an alias (models.json) may re-resolve between segments
+            problems.append(f"candidate {cand.label}: spec {cand.spec!r} now resolves to "
+                            f"{cand.backend}:{cand.variant} (was {was.get('backend')}:{was.get('variant')})")
     return problems
 
 

@@ -524,7 +524,7 @@ def _adjudicate_locked(run_dir, corpus, results, *, stdin, stdout, auto_only) ->
 SCORABLE_STATUSES = ("ok", "malformed", "fail")     # the judge RAN and had its chance
 
 
-def resolve_validity(results: dict, adj: dict) -> dict:
+def resolve_validity(results: dict, adj: dict, expected_labels=None) -> dict:
     """Per (case_id, label): {'valid': {truth_id: Finding}, 'fp': [Finding],
     'pending': [Finding], 'unique': {truth_id}, 'unique_undetermined': bool} —
     unique = held by exactly one candidate within the case, and DETERMINED only
@@ -532,7 +532,8 @@ def resolve_validity(results: dict, adj: dict) -> dict:
     #5: a peer that DNF'd never had its chance, so nothing is 'unique' against it)."""
     per = {}
     dec = adj.get("decisions", {})
-    labels_all = set(results)
+    # r4 (all judges): a manifest seat with NO result lines at all is still a peer.
+    labels_all = set(expected_labels) if expected_labels else set(results)
     scored = {}                                     # case_id → labels with a scorable result
     for label, recs in results.items():
         for rec in recs:
@@ -555,7 +556,7 @@ def resolve_validity(results: dict, adj: dict) -> dict:
         for tid in slot["valid"]:
             by_case.setdefault(cid, {}).setdefault(tid, set()).add(label)
     for (cid, label), slot in per.items():
-        if scored.get(cid, set()) != labels_all:
+        if not labels_all <= scored.get(cid, set()):
             slot["unique"] = set()
             slot["unique_undetermined"] = True
         else:

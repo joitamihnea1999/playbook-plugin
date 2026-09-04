@@ -160,6 +160,12 @@ class AggregateTests(unittest.TestCase):
             self.assertEqual([r.label for r in rep.rows], ["a", "b", "c", "d"])
             self.assertEqual(rep.rows[3].invocations, 0)
             self.assertEqual(rep.matrix["c-c"]["a"], "missing")
+            # r4: uniqueness is undetermined while manifest seat d has no result → rendered n/a, not 0
+            self.assertTrue(all(r.unique_undetermined for r in rep.rows if r.label in ("a", "b")))
+            cols = list(report.COLUMNS)
+            txt0 = report.render_text(rep)
+            row_a0 = [ln for ln in txt0.splitlines() if ln.startswith("a ")][0].split()
+            self.assertEqual(row_a0[cols.index("unique")], "n/a")
             self.assertEqual(rep.matrix["c-a"]["d"], "missing")
             self.assertEqual(rep.missing_pairs, 3 + 3)              # d × 3 cases + c-c × a,b,c
             txt = report.render_text(rep)

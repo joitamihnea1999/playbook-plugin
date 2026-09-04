@@ -65,6 +65,7 @@ class Row:
     p95_ms: "int | None" = None
     usd: "float | None" = None
     usd_partial: bool = False
+    unique_undetermined: bool = False       # some peer never scored a case → unique is n/a
 
     @property
     def invocations(self) -> int:
@@ -117,7 +118,7 @@ def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 
         specs[c.get("label")] = (c.get("spec", ""), c.get("backend", ""), c.get("variant"))
     labels = sorted(set(results) | set(specs))
     case_ids = list((manifest or {}).get("corpus", {}).get("cases", []))
-    validity = scoring.resolve_validity(results, adj)
+    validity = scoring.resolve_validity(results, adj, expected_labels=set(labels))
     rows = {}
     matrix = {}
     for label in labels:
@@ -170,6 +171,8 @@ def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 
                     cell += f" ?={len(slot['pending'])}"
                 row.valid += len(tids)
                 row.unique_valid += len(slot["unique"])
+                if slot.get("unique_undetermined"):
+                    row.unique_undetermined = True
                 row.fp += len(slot["fp"])
                 row.pending += len(slot["pending"])
             matrix.setdefault(cid, {})[label] = cell
@@ -198,6 +201,9 @@ def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 
     if pending_total:
         notes.append(f"{pending_total} finding(s) still await adjudication — run `judgebench adjudicate`; "
                      "pending findings count as neither valid nor false positive")
+    if any(r.unique_undetermined for r in rows.values()):
+        notes.append("unique = n/a where some candidate has no scorable result for a case — uniqueness "
+                     "is only defined against peers that ran")
     if missing:
         notes.append(f"{missing} (case, candidate) pair(s) have no result — the run is INCOMPLETE; "
                      "resume it before comparing candidates")
@@ -229,7 +235,8 @@ def _row_cells(r: Row) -> list:
     w1k = r.weighted_per_1k_out
     return [r.label, str(r.invocations), str(r.counts.get("ok", 0)), str(r.counts.get("malformed", 0)),
             str(r.counts.get("fail", 0)), str(r.counts.get("timeout", 0)), str(r.counts.get("dnf", 0)),
-            str(r.counts.get("excluded", 0)), str(r.valid), str(r.unique_valid),
+            str(r.counts.get("excluded", 0)), str(r.valid),
+            ("n/a" if r.unique_undetermined else str(r.unique_valid)),
             str(r.by_severity["Critical"]), str(r.by_severity["Important"]), str(r.by_severity["Minor"]),
             str(r.severity_mismatch), str(r.fp), _fmt_rate(r.fp_rate), str(r.pending), f"{r.weighted:g}",
             f"{r.tokens_known}/{r.invocations}", str(r.tokens_out) if r.tokens_known else "n/a",

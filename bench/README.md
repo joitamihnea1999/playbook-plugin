@@ -41,7 +41,8 @@ bench/runs/<run-id>/
 - **Candidates** are `provider:model:effort` specs (or a models.json alias), optionally
   labeled: `--candidates sol-med=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high`.
   Presets `sol-med`, `sol-high`, `grok-med`, `grok-high` name the Test A/B seats. Labels are
-  directory names: `[A-Za-z0-9._-]`, no leading dot, not `journal`/`raw`/`manifest.json`.
+  portable directory names: `[A-Za-z0-9._-]`, ≤64 chars, no leading/trailing dot, unique
+  case-insensitively, not a Windows device name, not `journal`/`raw`/`manifest.json`.
 - **Snapshots, not worktrees.** A live run reviews a `git archive <repo_base_sha>` snapshot
   in a temp dir — no `.git`, so a judge cannot `git log --all` its way into the future
   (fix commits). One snapshot per case, shared by all candidates. Pass the checkout for
@@ -139,13 +140,20 @@ weights and "point estimates only" (no bootstrap CIs in v1). Nothing derived is 
   tail-cert raw runner, not an import of it (that function reads `default_judge` from
   config). Status/usage extraction IS imported from `tasks.review`.
 - **A crash between a provider call succeeding and its result line being appended
-  re-runs that pair on `--resume`** (one extra paid invocation per crash). v1 has no
-  per-pair in-flight marker; if a live run died mid-flight, check the provider's usage
-  page before resuming. (Parked for v2.) A retried transport failure keeps its first
-  attempt's envelope in the result line's `attempts` list AND emits one spend-journal
-  line per actual invocation — nothing billed is dropped. Each attempt keeps its own
-  raw file (`<case>.<seq>.txt`). Latency (p50/p95) is the final attempt's wall-clock
-  and includes timed-out invocations.
+  re-runs that pair on `--resume`.** Results are persisted per candidate as each one
+  completes, so a crash loses at most the invocations still in flight for one case
+  (≤ `--concurrency`), never a finished one. v1 has no per-pair in-flight marker; if a
+  live run died mid-flight, check the provider's usage page before resuming. (Parked
+  for v2.) A retried transport failure keeps its first attempt in the result line's
+  `attempts` list (status, usage, duration, its own raw file) AND emits one
+  spend-journal line per actual invocation — nothing billed is dropped. Every attempt
+  keeps its own raw file (`<case>.<seq>.txt`). Latency (p50/p95) is the final attempt's
+  wall-clock and includes timed-out invocations.
+- **Unique-valid is `n/a`, not 0, whenever some candidate in the manifest has no
+  scorable result for a case** — uniqueness is only defined against peers that ran.
+- On Windows the argv-transport preflight applies the adapters' ~30k whole-command-line
+  cap (the POSIX per-argument cap does not exist there); an adapter's own size-cap
+  envelope is deterministic and is never retried.
 - A lock whose holder process is provably dead (hard crash) is reclaimed automatically;
   an unreadable holder is not — delete the `.lock` by hand only when you are sure.
 - **Corpus-builder duty the filter cannot do for you:** `## Design Phase` answers are

@@ -192,6 +192,23 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaisesRegex(cases.CorpusError, "truth_version"):
             cases.load_corpus(self.root)
 
+    def test_truth_version_pending_is_cross_checked(self):
+        # r4 sonnet #1: after adjudicate drops `truth_version`, `truth_version_pending` keeps the
+        # desync guard alive: it may equal case.json (done) or exceed it by one (recoverable
+        # crash) — anything else is a hand-edit desync and must fail loud.
+        for pending, case_v, ok in ((2, 2, True), (3, 2, True), (4, 2, False), (1, 2, False)):
+            with self.subTest(pending=pending, case_v=case_v):
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    t = _truth(); t.pop("truth_version", None); t["truth_version_pending"] = pending
+                    _write_case(root, "pb-001-demo", case=_case_json(truth_version=case_v), truth=t)
+                    _write_corpus(root, ["pb-001-demo"])
+                    if ok:
+                        cases.load_corpus(root)
+                    else:
+                        with self.assertRaisesRegex(cases.CorpusError, "truth_version"):
+                            cases.load_corpus(root)
+
     def test_select_cases_all_and_list(self):
         _write_case(self.root, "a-1"); _write_case(self.root, "b-2")
         _write_corpus(self.root, ["a-1", "b-2"])

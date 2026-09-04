@@ -319,6 +319,22 @@ class ValidityTests(unittest.TestCase):
             self.assertNotIn(("c-a", "d"), per)            # empty result → no findings to resolve
             self.assertEqual(a["pending"], [])
 
+    def test_unique_valid_needs_every_manifest_peer_even_with_no_results_at_all(self):
+        # r4 opus F2 / sol #2 / terra #1 / grok #1: a seat that never produced a result line
+        # is still a peer; uniqueness against it is undetermined.
+        with tempfile.TemporaryDirectory() as td:
+            corpus = _mk_corpus(Path(td) / "corpus")
+            rd = Path(td) / "runs" / "r"
+            _mk_run(rd, {"a": [{"file": "plugins/playbook/tasks/lifecycle.py", "symbol": "close_task"}]})
+            results = records.all_results(rd)
+            adj = scoring.load_adjudication(rd)
+            scoring.auto_adjudicate(results, corpus, adj)
+            per = scoring.resolve_validity(results, adj, expected_labels={"a", "b"})
+            self.assertEqual(per[("c-a", "a")]["unique"], set())
+            self.assertTrue(per[("c-a", "a")]["unique_undetermined"])
+            per = scoring.resolve_validity(results, adj, expected_labels={"a"})
+            self.assertEqual(per[("c-a", "a")]["unique"], {"T3"})
+
     def test_unique_valid_needs_every_peer_to_have_scored(self):
         # r3 grok #5: a peer that DNF'd never had the chance — its finisher's hits are not "unique".
         with tempfile.TemporaryDirectory() as td:

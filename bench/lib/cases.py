@@ -205,6 +205,14 @@ def validate_truth(truth: dict, where: str, expected_version=None) -> None:
         if truth["truth_version"] != expected_version:
             raise CorpusError(f"{where}: truth.json truth_version {truth['truth_version']!r} "
                               f"!= case.json truth_version {expected_version!r}")
+    # After `adjudicate` touches a case, truth.json carries `truth_version_pending` instead
+    # (case.json is the authority): equal = consistent; one AHEAD of case.json = a crash
+    # between the two writes (recoverable, tolerated); anything else is a hand-edit desync.
+    pending = truth.get("truth_version_pending")
+    if pending is not None and expected_version is not None:
+        if not isinstance(pending, int) or pending not in (expected_version, expected_version + 1):
+            raise CorpusError(f"{where}: truth.json truth_version_pending {pending!r} is inconsistent "
+                              f"with case.json truth_version {expected_version!r}")
 
 
 def load_case(case_dir: Path, case_id: str) -> Case:
