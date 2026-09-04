@@ -272,10 +272,24 @@ def read_manifest(run_dir: Path) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def check_manifest(manifest: dict, *, selected_cases, packages, candidates) -> list:
-    """Mismatches between a stored manifest and the corpus/candidates now — a
-    resume must refuse on any (panel F9: same run id, same inputs, or nothing)."""
+def check_manifest(manifest: dict, *, selected_cases, packages, candidates, mode=None,
+                   soft_timeout=None, hard_timeout=None) -> list:
+    """Mismatches between a stored manifest and the run's inputs NOW — a resume
+    must refuse on any (plan-review F9; impl-panel opus F1 / sol #1 / terra #1 /
+    grok F4): same run id ⇒ same mode, same candidate SET, same timeouts, same
+    corpus content. Cases may be a SUBSET (resume only skips), never new ones."""
     problems = []
+    if mode is not None and manifest.get("mode") != mode:
+        problems.append(f"mode {manifest.get('mode')!r} → {mode!r} (a run never mixes fake and live)")
+    t = manifest.get("timeouts", {})
+    if soft_timeout is not None and t.get("soft_secs") != soft_timeout:
+        problems.append(f"soft timeout {t.get('soft_secs')} → {soft_timeout}")
+    if hard_timeout is not None and t.get("hard_secs") != hard_timeout:
+        problems.append(f"hard timeout {t.get('hard_secs')} → {hard_timeout}")
+    stored_labels = {c.get("label") for c in manifest.get("candidates", [])}
+    now_labels = {c.label for c in candidates}
+    if stored_labels != now_labels:
+        problems.append(f"candidate set changed: manifest {sorted(stored_labels)} → now {sorted(now_labels)}")
     stored = manifest.get("corpus", {}).get("hashes", {})
     for c in selected_cases:
         now = case_hashes(c, packages[c.id])

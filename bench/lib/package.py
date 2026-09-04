@@ -60,7 +60,7 @@ DENIED_CONTEXT_FILES = ("judge.md", "judge-archive.md", "judge-*.log", "judge*.p
                         "task-archive.md", "vetting-ledger.json", "truth.json", "case.json",
                         "MIND_MAP*.md", "chat_log*.md", "enforcement.jsonl")
 
-_H2_RE = re.compile(r"^##(?!#)\s*(.*?)\s*(?:#+\s*)?$")
+_H2_RE = re.compile(r"^ {0,3}##(?!#)\s*(.*?)\s*(?:#+\s*)?$")   # CommonMark: ≤3 leading spaces
 _FINDINGS_OPEN_RE = re.compile(r"<!--\s*playbook:[a-z-]*review-findings\s*-->")
 _FINDINGS_CLOSE_RE = re.compile(r"<!--\s*/playbook:[a-z-]*review-findings\s*-->")
 _CHECKED_GATE_RE = re.compile(r"^(\s*[-*]\s*)\[[xX]\](\s*)(.*)$")
@@ -142,16 +142,32 @@ def reconstruct_spec(task_md: str) -> str:
     dropping = False
     strip_outcomes = False
     in_status = False
+    in_stripped_gate = False        # inside a CHECKED gate's wrapped note (drop continuations)
     for line in text.splitlines(keepends=True):
         title = _h2_title(line)
         if title is not None:
             dropping = title not in KEPT_SECTIONS
             strip_outcomes = title in OUTCOME_STRIPPED_SECTIONS
             in_status = title == "status"
+            in_stripped_gate = False
             if not dropping:
                 out.append(line)
             continue
         if dropping:
+            continue
+        if strip_outcomes:
+            # A checked gate's outcome note may wrap onto INDENTED continuation lines
+            # (impl-panel grok F2): drop them until the next list item, blank line or
+            # heading. An OPEN gate's wrapped text is spec and is kept.
+            if _CHECKED_GATE_RE.match(line.rstrip("\n")):
+                in_stripped_gate = True
+                out.append(strip_outcome(line))
+                continue
+            if in_stripped_gate:
+                if line.strip() and line[:1] in (" ", "\t") and not line.lstrip().startswith(("-", "*")):
+                    continue
+                in_stripped_gate = False
+            out.append(line)
             continue
         if in_status:
             # Normalize the first non-blank body line (the status value) to `pending`.
@@ -161,16 +177,15 @@ def reconstruct_spec(task_md: str) -> str:
                 continue
             out.append(line)
             continue
-        if strip_outcomes:
-            out.append(strip_outcome(line))
-            continue
         out.append(line)
     return "".join(out)
 
 
 def is_denied_context_file(name: str) -> bool:
-    base = Path(name).name
-    return any(fnmatch.fnmatch(base, pat) for pat in DENIED_CONTEXT_FILES)
+    """Case-INSENSITIVE on every platform: `fnmatch.fnmatch` is case-sensitive on
+    POSIX, so `Truth.json` would slip past a naive match (impl-panel sonnet #2)."""
+    base = Path(name).name.lower()
+    return any(fnmatch.fnmatchcase(base, pat.lower()) for pat in DENIED_CONTEXT_FILES)
 
 
 def load_context(case) -> list:

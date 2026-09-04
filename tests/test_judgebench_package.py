@@ -166,6 +166,32 @@ class ReconstructSpecTests(unittest.TestCase):
         self.assertNotIn("LEAK_TAIL", out)
         self.assertNotIn("LEAK_AFTER", out)
 
+    def test_indented_atx_headings_are_section_boundaries(self):
+        # CommonMark allows up to 3 leading spaces before `##` (impl-panel sonnet #1).
+        for indent in (" ", "  ", "   "):
+            out = package.reconstruct_spec(f"## Intent\nKEEP\n{indent}## Plan Review\nLEAK_INDENTED\n## Work Plan\n- [ ] w\n")
+            self.assertNotIn("LEAK_INDENTED", out, repr(indent))
+            self.assertIn("KEEP", out)
+        # 4 spaces is an indented code block, not a heading — stays in the kept section.
+        out = package.reconstruct_spec("## Intent\nKEEP\n    ## not a heading\n")
+        self.assertIn("## not a heading", out)
+
+    def test_wrapped_outcome_continuation_lines_are_dropped(self):
+        # A checked gate's note may wrap onto indented continuation lines (impl-panel grok F2).
+        text = ("## Work Plan\n"
+                "- [x] **W1 — thing.** Do it. Check: x. — DONE. first line of note\n"
+                "  LEAK_WRAPPED_NOTE the panel found extract_risk shadowing\n"
+                "  LEAK_WRAPPED_TWO\n"
+                "- [ ] **W2 — open.** KEEP_W2\n"
+                "  KEEP_W2_CONTINUATION (an open gate's own wrapped text)\n"
+                "\n"
+                "KEEP_PROSE_AFTER_BLANK\n")
+        out = package.reconstruct_spec(text)
+        self.assertNotIn("LEAK_WRAPPED", out)
+        self.assertIn("- [ ] **W1 — thing.** Do it. Check: x.", out)
+        self.assertIn("KEEP_W2_CONTINUATION", out)
+        self.assertIn("KEEP_PROSE_AFTER_BLANK", out)
+
     def test_idempotent(self):
         self.assertEqual(package.reconstruct_spec(self.spec), self.spec)
 
@@ -294,6 +320,12 @@ class BuildPackageTests(unittest.TestCase):
                     case = _mk_case(Path(td), context={name: "LEAK_CONTEXT"})
                     with self.assertRaises(package.LeakageError):
                         package.build_package(case)
+
+    def test_denied_names_are_case_insensitive_on_every_platform(self):
+        # fnmatch is case-sensitive on POSIX (impl-panel sonnet #2) — the guard must not be.
+        for name in ("Truth.json", "JUDGE.MD", "Judge-Archive.md", "mind_map.md", "Task-Archive.MD",
+                     "Vetting-Ledger.json", "CASE.json", "Enforcement.JSONL"):
+            self.assertTrue(package.is_denied_context_file(name), name)
 
     def test_allowed_context_names(self):
         for name in ("test-output.txt", "notes.md", "verify.log"):

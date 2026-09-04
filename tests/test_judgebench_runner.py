@@ -111,6 +111,15 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(cs[2].backend, "claude")
         self.assertEqual(runner.parse_candidates("grok:grok-4.6:high")[0].variant, "grok-4.6:high")
 
+    def test_presets_make_the_plan_literal_commands_work(self):
+        # plan §14/§24 write `--candidates sol-med,sol-high` (impl-panel sol #5): bench-local
+        # presets resolve those labels to the Test A/B seats; explicit `label=spec` still wins.
+        cs = runner.parse_candidates("sol-med,sol-high,grok-med,grok-high")
+        self.assertEqual([c.label for c in cs], ["sol-med", "sol-high", "grok-med", "grok-high"])
+        self.assertEqual([c.spec for c in cs], ["codex:gpt-5.6-sol:medium", "codex:gpt-5.6-sol:high",
+                                                "grok:grok-4.6:medium", "grok:grok-4.6:high"])
+        self.assertEqual(runner.parse_candidates("sol-med=opus")[0].spec, "opus")
+
     def test_bad_spec_duplicate_label_and_empty(self):
         with self.assertRaises(runner.CandidateError):
             runner.parse_candidates("nosuchprovider:x")

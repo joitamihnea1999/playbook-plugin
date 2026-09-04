@@ -195,7 +195,9 @@ def cmd_run(args) -> int:
                 return EXIT_UNUSABLE
             manifest = _records.read_manifest(run_dir)
             problems = _records.check_manifest(manifest, selected_cases=selected, packages=packages,
-                                               candidates=candidates)
+                                               candidates=candidates,
+                                               mode="live" if args.live else "fake",
+                                               soft_timeout=args.soft_timeout, hard_timeout=args.timeout)
             if problems:
                 print("judgebench: cannot resume — inputs changed since the run started:",
                       file=sys.stderr)
@@ -283,7 +285,11 @@ def cmd_adjudicate(args) -> int:
     if not results:
         print(f"judgebench: run {args.run_id!r} has no result lines yet", file=sys.stderr)
         return EXIT_UNUSABLE
-    counts = _scoring.adjudicate(run_dir, corpus, results, auto_only=args.auto)
+    try:
+        counts = _scoring.adjudicate(run_dir, corpus, results, auto_only=args.auto)
+    except _records.RunLocked as exc:
+        print(f"judgebench: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
     adj = _scoring.load_adjudication(run_dir)
     pending = sum(1 for rec, f in _scoring.iter_findings(results)
                   if (adj["decisions"].get(_scoring.decision_key(rec["case_id"], rec["label"], f.n))
@@ -322,6 +328,14 @@ def cmd_report(args) -> int:
 
 
 def main(argv=None) -> int:
+    # Force utf-8 stdio: the Windows console defaults to cp1252 and chokes on
+    # the → / × glyphs in our summaries (same guard as tasks/cli.py::main).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     ap = build_parser()
     args = ap.parse_args(argv)
     if args.cmd is None:

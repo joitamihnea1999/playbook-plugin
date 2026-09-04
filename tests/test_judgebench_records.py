@@ -213,6 +213,25 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertIn("diff_patch changed", p.stderr)
 
+    def test_resume_refuses_mode_candidate_set_or_timeout_changes(self):
+        # impl-panel opus F1 / sol #1 / terra #1 / grok F4: a run continues only under identical conditions.
+        self.assertEqual(self._run("--fake").returncode, 0)
+        p = self._run("--live", "--resume")
+        self.assertEqual(p.returncode, 2); self.assertIn("mode", p.stderr)
+        p = self._run("--fake", "--resume", cands="a=opus")                 # candidate dropped
+        self.assertEqual(p.returncode, 2); self.assertIn("candidate", p.stderr)
+        p = self._run("--fake", "--resume", "--timeout", "1300")
+        self.assertEqual(p.returncode, 2); self.assertIn("timeout", p.stderr)
+        p = self._run("--fake", "--resume", "--soft-timeout", "800")
+        self.assertEqual(p.returncode, 2); self.assertIn("timeout", p.stderr)
+        p = self._run("--fake", "--resume")                                  # identical → fine
+        self.assertEqual(p.returncode, 0, p.stderr)
+        # a case SUBSET is allowed (it only skips); a case not in the manifest is not
+        p = _cli("run", "--cases", "c-a", "--candidates", "a=opus,b=codex:gpt-5.6-sol:medium",
+                 "--run-id", "r1", "--fake", "--resume", "--corpus", str(self.corpus_dir),
+                 "--runs-dir", str(self.runs), cwd=self.cwd)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
     def test_lock_held_refuses_and_writes_nothing(self):
         rd = self.runs / "r1"
         rd.mkdir(parents=True)

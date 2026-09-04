@@ -202,6 +202,11 @@ def _parse(text) -> ParsedFindings:
                                 claimed_severity=sev, severity_known=known, text=why))
     if dup:
         errors.append(f"{dup} exact duplicate entries collapsed")
+    # Stable ordinals BY POSITION (impl-panel sol #2): a judge that numbers two distinct
+    # entries "1." must not make them share one adjudication key.
+    findings = [Finding(n=i, file=f.file, symbol=f.symbol, line=f.line,
+                        claimed_severity=f.claimed_severity, severity_known=f.severity_known,
+                        text=f.text) for i, f in enumerate(findings, 1)]
     if not findings:
         errors.append("FINDINGS block present but no parseable entry (and not NONE)")
         return ParsedFindings("malformed", [], errors)
@@ -272,13 +277,12 @@ def _key(file, symbol):
 
 
 def _hits(finding, entries):
-    """Entries on the same file; narrowed to the same symbol when the finding
-    names one (entries without a `file` key never hit)."""
-    f_file, f_sym = _key(finding.file, finding.symbol)
-    same_file = [e for e in entries if e.get("file") and normalize_path(e["file"]) == f_file]
-    if f_sym is None:
-        return same_file
-    return [e for e in same_file if normalize_symbol(e.get("symbol")) == f_sym]
+    """Entries whose normalized (file, symbol) key EQUALS the finding's — a
+    symbol-less finding only hits symbol-less entries and vice-versa (impl-panel
+    grok F1: a vague file-only hit must never auto-credit a truth that names a
+    symbol). Entries without a `file` key never hit."""
+    key = _key(finding.file, finding.symbol)
+    return [e for e in entries if e.get("file") and _key(e["file"], e.get("symbol")) == key]
 
 
 def match_finding(finding, truth: dict) -> dict:
@@ -345,10 +349,20 @@ def find_equivalent_truth(truth: dict, file, symbol, failure_mode):
     return None
 
 
-def append_valid_new(case, finding, failure_mode: str, severity: str) -> str:
-    """Append a `valid-new` truth finding (deduped) and bump truth_version in
-    truth.json AND case.json atomically. Returns the truth id used."""
+def _atomic_write(path, text) -> None:
     from tasks.atomic import atomic_write
+    atomic_write(path, text)
+
+
+def append_valid_new(case, finding, failure_mode: str, severity: str) -> str:
+    """Append a `valid-new` truth finding (deduped) and bump `truth_version`.
+
+    `case.json` is the SOLE authority for `truth_version` (impl-panel opus F2,
+    sol #3, terra #2, grok F3): truth.json is written FIRST with the new finding
+    and WITHOUT a `truth_version` key, then case.json is bumped. A crash between
+    the two writes therefore leaves a corpus that still LOADS (finding present,
+    version one behind — the next append completes the bump) instead of a
+    version pair the loader refuses. Returns the truth id used."""
     truth = _json.loads(case.truth_path.read_text(encoding="utf-8"))
     truth.setdefault("findings", []); truth.setdefault("known_rejects", [])
     existing = find_equivalent_truth(truth, finding.file, finding.symbol, failure_mode)
@@ -360,12 +374,12 @@ def append_valid_new(case, finding, failure_mode: str, severity: str) -> str:
         "failure_mode": failure_mode.strip(), "severity": severity,
         "historical_outcome": "valid-new", "added_by": "adjudicate", "added_at": _now()})
     new_version = int(case.meta.get("truth_version", 1)) + 1
-    truth["truth_version"] = new_version
+    truth.pop("truth_version", None)              # case.json is the only authority from now on
     meta = _json.loads((case.path / "case.json").read_text(encoding="utf-8"))
     meta["truth_version"] = new_version
-    atomic_write(case.truth_path, _json.dumps(truth, indent=2, ensure_ascii=False) + "\n")
-    atomic_write(case.path / "case.json", _json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+    _atomic_write(case.truth_path, _json.dumps(truth, indent=2, ensure_ascii=False) + "\n")
     case.truth = truth
+    _atomic_write(case.path / "case.json", _json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
     case.meta["truth_version"] = new_version
     return tid
 
@@ -414,7 +428,17 @@ def _describe(rec, f, case) -> str:
 
 def adjudicate(run_dir, corpus, results: dict, *, stdin=None, stdout=None, auto_only=False) -> dict:
     """Deterministic matches first, then a terminal loop for the remainder.
-    Returns summary counts. Saves after EVERY decision (crash-safe)."""
+    Returns summary counts. Saves after EVERY decision (crash-safe). Holds the
+    run's exclusive lock for the whole session so two adjudicators cannot
+    interleave read-modify-write updates (impl-panel sol #3 / terra #3); a held
+    lock raises `records.RunLocked`."""
+    from bench.lib.records import RunLock
+    with RunLock(run_dir):
+        return _adjudicate_locked(run_dir, corpus, results, stdin=stdin, stdout=stdout,
+                                  auto_only=auto_only)
+
+
+def _adjudicate_locked(run_dir, corpus, results, *, stdin, stdout, auto_only) -> dict:
     stdin = stdin or _sys.stdin
     stdout = stdout or _sys.stdout
     adj = load_adjudication(run_dir)

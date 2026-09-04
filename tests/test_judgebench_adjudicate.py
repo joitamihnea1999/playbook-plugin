@@ -97,11 +97,17 @@ class MatchTests(unittest.TestCase):
         # two truths in one symbol → collision (never auto-credited)
         m = scoring.match_finding(_finding("plugins/playbook/tasks/core.py", "extract_risk"), t)
         self.assertEqual((m["kind"], sorted(m["ids"])), ("collision", ["T1", "T2"]))
-        # symbol-less finding on a file with ONE truth entry → truth
+        # symbol-less finding on a file whose ONE truth entry is also symbol-less → truth
         self.assertEqual(scoring.match_finding(_finding("plugins/playbook/tasks/audit.py"), t),
                          {"kind": "truth", "id": "T4"})
-        # symbol-less finding on a file with several → collision
-        self.assertEqual(scoring.match_finding(_finding("plugins/playbook/tasks/core.py"), t)["kind"], "collision")
+        # symbol-less finding vs a truth that NAMES a symbol → unmatched, never auto-credited
+        # (impl-panel grok F1: a vague file-only hit must go to the human)
+        self.assertEqual(scoring.match_finding(_finding("plugins/playbook/tasks/lifecycle.py"), t)["kind"],
+                         "unmatched")
+        self.assertEqual(scoring.match_finding(_finding("plugins/playbook/tasks/core.py"), t)["kind"], "unmatched")
+        # a symbol-carrying finding vs a symbol-less truth → unmatched too (asymmetric keys)
+        self.assertEqual(scoring.match_finding(_finding("plugins/playbook/tasks/audit.py", "helper"), t)["kind"],
+                         "unmatched")
         # wrong symbol on a known file → unmatched (not a same-file guess)
         self.assertEqual(scoring.match_finding(_finding("plugins/playbook/tasks/lifecycle.py", "other"), t)["kind"],
                          "unmatched")
@@ -181,7 +187,7 @@ class InteractiveTests(unittest.TestCase):
             self.assertNotIn("c-a|b|1", d)
             # truth.json appended + version bumped in BOTH files; corpus reloads clean
             truth = json.loads(case.truth_path.read_text(encoding="utf-8"))
-            self.assertEqual(truth["truth_version"], 2)
+            self.assertNotIn("truth_version", truth)          # case.json is the sole authority
             added = truth["findings"][-1]
             self.assertEqual((added["id"], added["file"], added["symbol"], added["failure_mode"],
                               added["severity"], added["historical_outcome"]),
@@ -201,7 +207,54 @@ class InteractiveTests(unittest.TestCase):
             # c|1 auto-matches T5 already (same key) — force the dedup path directly:
             tid = scoring.append_valid_new(corpus2.get("c-a"), _finding("novel.py", "f"), "KEY  leak", "Minor")
             self.assertEqual(tid, "T5")
-            self.assertEqual(json.loads(case.truth_path.read_text(encoding="utf-8"))["truth_version"], 2)
+            self.assertEqual(json.loads((case.path / "case.json").read_text(encoding="utf-8"))["truth_version"], 2)
+
+    def test_crash_between_truth_and_case_writes_leaves_corpus_loadable(self):
+        # impl-panel opus F2 / sol #3 / terra #2 / grok F3: case.json is the SOLE authority for
+        # truth_version; truth.json never carries it after adjudicate touches it, so a crash
+        # after the first write cannot desync the pair.
+        with tempfile.TemporaryDirectory() as td:
+            corpus = _mk_corpus(Path(td) / "corpus")
+            case = corpus.get("c-a")
+            # corpus builder wrote a truth_version into truth.json (allowed while consistent)
+            t = json.loads(case.truth_path.read_text()); t["truth_version"] = 1
+            case.truth_path.write_text(json.dumps(t), encoding="utf-8")
+            calls = {"n": 0}
+            real = scoring._atomic_write
+            def flaky(path, text):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise OSError("simulated crash before the second write")
+                real(path, text)
+            scoring._atomic_write = flaky
+            try:
+                with self.assertRaises(OSError):
+                    scoring.append_valid_new(case, _finding("novel.py", "f"), "key leak", "Minor")
+            finally:
+                scoring._atomic_write = real
+            corpus2 = cases.load_corpus(Path(td) / "corpus")            # still loads
+            c2 = corpus2.get("c-a")
+            self.assertEqual(c2.truth_version, 1)                       # version not bumped …
+            self.assertEqual(c2.truth["findings"][-1]["file"], "novel.py")   # … finding present
+            self.assertNotIn("truth_version", json.loads(c2.truth_path.read_text()))
+            # the next append completes the bump
+            tid = scoring.append_valid_new(c2, _finding("other.py", "g"), "x", "Minor")
+            self.assertEqual(tid, "T6")
+            self.assertEqual(cases.load_corpus(Path(td) / "corpus").get("c-a").truth_version, 2)
+
+    def test_adjudicate_holds_the_run_lock(self):
+        # impl-panel sol #3 / terra #3: two adjudicators on one run are refused, not interleaved.
+        with tempfile.TemporaryDirectory() as td:
+            corpus = _mk_corpus(Path(td) / "corpus")
+            rd = Path(td) / "runs" / "r"
+            _mk_run(rd, {"a": [{"file": "novel.py", "symbol": "f"}]})
+            (rd / ".lock").write_text("999", encoding="utf-8")
+            with self.assertRaises(records.RunLocked):
+                scoring.adjudicate(rd, corpus, records.all_results(rd), stdin=io.StringIO(""),
+                                   stdout=io.StringIO())
+            (rd / ".lock").unlink()
+            scoring.adjudicate(rd, corpus, records.all_results(rd), stdin=io.StringIO(""), stdout=io.StringIO())
+            self.assertFalse((rd / ".lock").exists())
 
     def test_eof_saves_and_stops(self):
         with tempfile.TemporaryDirectory() as td:
@@ -246,6 +299,23 @@ class ValidityTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_cli_output_survives_a_cp1252_console(self):
+        # The Windows lane runs a cp1252 console; every judgebench print carries
+        # non-cp1252 glyphs (→, ×). Reproduce that console on every platform via
+        # PYTHONIOENCODING and require the CLI to reconfigure stdio like tasks.cli does.
+        import os
+        with tempfile.TemporaryDirectory() as td:
+            _mk_corpus(Path(td) / "corpus")
+            rd = Path(td) / "runs" / "r"
+            _mk_run(rd, {"a": [{"file": "plugins/playbook/tasks/lifecycle.py", "symbol": "close_task"}]})
+            env = dict(os.environ, PYTHONIOENCODING="cp1252")
+            common = ["--corpus", str(Path(td) / "corpus"), "--runs-dir", str(Path(td) / "runs")]
+            for argv in (["adjudicate", "r", "--auto"], ["report", "r"]):
+                p = subprocess.run([sys.executable, str(ENTRY), *argv, *common], capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace", timeout=120, env=env)
+                self.assertEqual(p.returncode, 0, f"{argv}: {p.stderr}")
+                self.assertNotIn("UnicodeEncodeError", p.stderr)
+
     def test_adjudicate_auto_via_cli(self):
         with tempfile.TemporaryDirectory() as td:
             _mk_corpus(Path(td) / "corpus")

@@ -64,9 +64,20 @@ class Candidate:
                 "variant": self.variant}
 
 
+# Bench-local presets so the plan's literal commands (§14/§24: `sol-med,sol-high`)
+# resolve to the Test A/B seats (impl-panel sol #5). `label=spec` always wins.
+PRESETS = {
+    "sol-med": "codex:gpt-5.6-sol:medium",
+    "sol-high": "codex:gpt-5.6-sol:high",
+    "grok-med": "grok:grok-4.6:medium",
+    "grok-high": "grok:grok-4.6:high",
+}
+
+
 def parse_candidates(csv: str) -> list:
-    """`label=provider:model:effort,…` or bare specs (label = spec with ':'→'-').
-    Validated through production's `resolve_judge_spec` grammar; labels unique."""
+    """`label=provider:model:effort,…`, a bench preset (`sol-med`), or a bare spec
+    (label = spec with ':'→'-'). Validated through production's
+    `resolve_judge_spec` grammar; labels unique."""
     from provider.sandbox import resolve_judge_spec
     out, seen = [], set()
     for item in (s.strip() for s in (csv or "").split(",")):
@@ -74,6 +85,8 @@ def parse_candidates(csv: str) -> list:
             continue
         label, _, spec = item.rpartition("=") if "=" in item else ("", "", item)
         spec = spec.strip()
+        if not label and spec in PRESETS:
+            label, spec = spec, PRESETS[spec]
         try:
             backend, variant = resolve_judge_spec(spec)
         except ValueError as exc:

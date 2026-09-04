@@ -152,6 +152,15 @@ class AdversarialTests(unittest.TestCase):
                 f, ln = scoring.normalize_file_ref(raw)
                 self.assertEqual((f, ln), (want_file, want_line))
 
+    def test_duplicate_judge_numbers_get_distinct_ordinals(self):
+        # Two distinct findings both labeled "1." must not share a decision key (impl-panel sol #2).
+        text = ("FINDINGS:\n1. FILE: a.py\n   SEVERITY: Minor\n   WHY: first\n"
+                "1. FILE: b.py\n   SEVERITY: Minor\n   WHY: second\n"
+                "7. FILE: c.py\n   SEVERITY: Minor\n   WHY: third\nEND FINDINGS\n")
+        r = scoring.parse_findings(text)
+        self.assertEqual([f.n for f in r.findings], [1, 2, 3])
+        self.assertEqual([f.file for f in r.findings], ["a.py", "b.py", "c.py"])
+
     def test_to_dict_roundtrip(self):
         r = scoring.parse_findings(WELL_FORMED)
         d = r.findings[0].to_dict()
