@@ -40,6 +40,8 @@ bench/runs/<run-id>/
 
 - **Candidates** are `provider:model:effort` specs (or a models.json alias), optionally
   labeled: `--candidates sol-med=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high`.
+  Presets `sol-med`, `sol-high`, `grok-med`, `grok-high` name the Test A/B seats. Labels are
+  directory names: `[A-Za-z0-9._-]`, no leading dot, not `journal`/`raw`/`manifest.json`.
 - **Snapshots, not worktrees.** A live run reviews a `git archive <repo_base_sha>` snapshot
   in a temp dir — no `.git`, so a judge cannot `git log --all` its way into the future
   (fix commits). One snapshot per case, shared by all candidates. Pass the checkout for
@@ -61,7 +63,8 @@ bench/runs/<run-id>/
   either timeout, `--concurrency`, the fake script's content, or the corpus content
   (spec/diff/context/prompt hashes) changed since the manifest; cases may be a subset;
   `truth_version` is deliberately NOT a resume key (adjudicating an interrupted run must
-  not block resuming it). A run id with results cannot be re-launched without `--resume`.
+  not block resuming it). The playbook checkout SHA and, for live runs, the provider CLI
+  versions must also match — the harness is part of the instrument. A run id with results cannot be re-launched without `--resume`.
   Two launchers on one run id: the second is refused by the lock. Run ids are one safe
   path segment (`[A-Za-z0-9._-]`, no leading dot).
 
@@ -139,7 +142,17 @@ weights and "point estimates only" (no bootstrap CIs in v1). Nothing derived is 
   re-runs that pair on `--resume`** (one extra paid invocation per crash). v1 has no
   per-pair in-flight marker; if a live run died mid-flight, check the provider's usage
   page before resuming. (Parked for v2.) A retried transport failure keeps its first
-  attempt's envelope in the record's `attempts` list — nothing billed is dropped.
+  attempt's envelope in the result line's `attempts` list AND emits one spend-journal
+  line per actual invocation — nothing billed is dropped. Each attempt keeps its own
+  raw file (`<case>.<seq>.txt`). Latency (p50/p95) is the final attempt's wall-clock
+  and includes timed-out invocations.
+- A lock whose holder process is provably dead (hard crash) is reclaimed automatically;
+  an unreadable holder is not — delete the `.lock` by hand only when you are sure.
+- **Corpus-builder duty the filter cannot do for you:** `## Design Phase` answers are
+  kept verbatim because the gate discipline writes them before the plan review. If a
+  Design answer was revised AFTER a review (plain wording, no verdict token), only a
+  manual audit catches it — diff `task.md` against the plan-review-time commit named in
+  the task's receipts when freezing a case, and record deviations in `case.json.notes`.
 - A reconstructed spec that still carries review tokens (`PANEL VERDICT`, `impl-panel`,
   `judge.md`, a `CAP:` line, an H3 review/triage heading inside a kept section) makes
   `build_package` fail loud with `LeakageError` — clean `spec.md` by hand and record why

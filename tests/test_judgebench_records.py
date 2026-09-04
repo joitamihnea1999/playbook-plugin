@@ -65,14 +65,46 @@ class ResultFileTests(unittest.TestCase):
             self.assertEqual(records.read_results(rd, "nolab"), ([], 0))
             self.assertEqual(set(records.all_results(rd)), {"lab"})
 
-    def test_raw_written_under_candidate_dir(self):
+    def test_raw_written_per_attempt_never_overwritten(self):
+        # r3 grok #2: a resumed pair must not destroy the earlier attempt's raw output.
         with tempfile.TemporaryDirectory() as td:
-            rel = records.write_raw(Path(td), "lab", "c-a", "hello ünïcode")
-            self.assertEqual(rel, "lab/raw/c-a.txt")
-            self.assertEqual((Path(td) / rel).read_text(encoding="utf-8"), "hello ünïcode")
+            rel1 = records.write_raw(Path(td), "lab", "c-a", "first")
+            rel2 = records.write_raw(Path(td), "lab", "c-a", "second ünïcode")
+            self.assertNotEqual(rel1, rel2)
+            self.assertTrue(rel1.startswith("lab/raw/c-a.") and rel1.endswith(".txt"))
+            self.assertEqual((Path(td) / rel1).read_text(encoding="utf-8"), "first")
+            self.assertEqual((Path(td) / rel2).read_text(encoding="utf-8"), "second ünïcode")
+
+    def test_result_record_carries_attempts(self):
+        # r3 ALL judges: the in-memory `attempts` must reach result.jsonl.
+        from bench.lib import runner as _r, package as _p
+        with tempfile.TemporaryDirectory() as td:
+            corpus = _mk_corpus(Path(td) / "corpus")
+            case = corpus.cases[0]
+            pkg = _p.build_package(case)
+            cand = _r.parse_candidates("a=opus")[0]
+            inv = _r.Invocation(status="ok", raw="x", duration_ms=5, retries=1,
+                                attempts=[{"status": "dnf", "usage": {"status": "unknown"},
+                                           "raw_head": "(error: x)", "duration_ms": 9}])
+            rec = records.make_result_record("r", case, cand, inv, "a/raw/c-a.1.txt", pkg)
+            self.assertEqual(rec["attempts"][0]["status"], "dnf")
+            self.assertEqual(rec["retries"], 1)
 
 
 class LockTests(unittest.TestCase):
+    def test_stale_lock_from_a_dead_process_is_reclaimed(self):
+        # r3 opus F3: a hard crash leaves .lock behind; --resume must not need hand surgery.
+        with tempfile.TemporaryDirectory() as td:
+            rd = Path(td) / "run"; rd.mkdir()
+            dead = subprocess.Popen([sys.executable, "-c", "pass"]); dead.wait()
+            (rd / ".lock").write_text(str(dead.pid), encoding="utf-8")
+            with records.RunLock(rd):                      # reclaimed, no exception
+                self.assertEqual((rd / ".lock").read_text(), str(os.getpid()))
+            (rd / ".lock").write_text("not-a-pid", encoding="utf-8")
+            with self.assertRaises(records.RunLocked):      # unknown holder → conservative refuse
+                with records.RunLock(rd):
+                    pass
+
     def test_exclusive_and_released(self):
         with tempfile.TemporaryDirectory() as td:
             rd = Path(td) / "run"
@@ -117,6 +149,10 @@ class ManifestTests(unittest.TestCase):
             probs = records.check_manifest(m, selected_cases=corpus.cases, packages=pk2, candidates=cands)
             self.assertTrue(any("c-a: diff_patch changed" in p for p in probs), probs)
             self.assertTrue(any("c-a: prompt changed" in p for p in probs), probs)
+            # r3 sol #4: the harness version is pinned too (results are incomparable across it)
+            probs = records.check_manifest(dict(m, playbook_repo_sha="deadbeef"), selected_cases=corpus.cases,
+                                           packages=pk, candidates=cands)
+            self.assertTrue(any("playbook" in p for p in probs), probs)
             probs = records.check_manifest(m, selected_cases=corpus.cases, packages=pk,
                                            candidates=runner.parse_candidates("a=sonnet,z=opus"))
             self.assertTrue(any("candidate a: spec" in p for p in probs), probs)
@@ -287,10 +323,10 @@ class RunCommandTests(unittest.TestCase):
     def test_lock_held_refuses_and_writes_nothing(self):
         rd = self.runs / "r1"
         rd.mkdir(parents=True)
-        (rd / ".lock").write_text("424242", encoding="utf-8")
+        (rd / ".lock").write_text(str(os.getpid()), encoding="utf-8")   # this test process: alive
         p = self._run("--fake")
         self.assertEqual(p.returncode, 2)
-        self.assertIn("424242", p.stderr)
+        self.assertIn(str(os.getpid()), p.stderr)
         self.assertFalse((rd / "manifest.json").exists())
         self.assertFalse((rd / "a").exists())
         self.assertTrue((rd / ".lock").exists(), "a foreign lock is never removed")
@@ -309,6 +345,25 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(b, {"c-a": "malformed", "c-b": "ok"})
         for word in ("dnf", "timeout", "malformed"):
             self.assertIn(word, p.stdout)
+
+    def test_retry_attempts_reach_result_jsonl_and_journal(self):
+        # r3 all judges: end-to-end through the CLI with a FakeRunner scripted to need a retry
+        # — the fake cannot retry, so exercise the persistence path with a run whose fake
+        # script marks one pair `dnf` then resume it: the journal has one line per invocation
+        # and the second attempt's line is distinct.
+        script = self.root / "script.json"
+        script.write_text(json.dumps({"c-a|a": {"status": "dnf"}, "default": {"status": "ok"}}), encoding="utf-8")
+        self.assertEqual(self._run("--fake", "--fake-script", str(script)).returncode, 1)
+        self.assertEqual(self._run("--fake", "--fake-script", str(script), "--resume").returncode, 1)
+        rd = self.runs / "r1"
+        jl = [json.loads(x) for x in (rd / "journal" / "enforcement.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+        self.assertEqual(len(jl), 5)                                  # 4 + 1 re-run
+        recs, _ = records.read_results(rd, "a")
+        self.assertEqual(len(recs), 3)
+        raws = {r["raw_path"] for r in recs if r["case_id"] == "c-a"}
+        self.assertEqual(len(raws), 2, "each attempt keeps its own raw file")
+        self.assertTrue(all((rd / p).is_file() for p in raws))
+        self.assertIn("attempts", recs[0])
 
     def test_bad_candidate_or_case_is_exit_2(self):
         p = self._run("--fake", cands="nosuch:x")

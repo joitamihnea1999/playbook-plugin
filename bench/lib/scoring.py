@@ -365,6 +365,17 @@ def append_valid_new(case, finding, failure_mode: str, severity: str) -> str:
     version pair the loader refuses. Returns the truth id used."""
     truth = _json.loads(case.truth_path.read_text(encoding="utf-8"))
     truth.setdefault("findings", []); truth.setdefault("known_rejects", [])
+    # Recoverable transaction marker (r3 sol #2): truth.json records the version its
+    # content EXPECTS (`truth_version_pending`); if case.json is behind — a crash landed
+    # between the two writes — complete the bump FIRST, even on the dedup path, so an
+    # identical retry of the interrupted operation converges instead of returning early.
+    pending = truth.get("truth_version_pending")
+    current = int(case.meta.get("truth_version", 1))
+    if isinstance(pending, int) and pending > current:
+        meta = _json.loads((case.path / "case.json").read_text(encoding="utf-8"))
+        meta["truth_version"] = pending
+        _atomic_write(case.path / "case.json", _json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+        case.meta["truth_version"] = pending
     existing = find_equivalent_truth(truth, finding.file, finding.symbol, failure_mode)
     if existing:
         return existing
@@ -375,6 +386,7 @@ def append_valid_new(case, finding, failure_mode: str, severity: str) -> str:
         "historical_outcome": "valid-new", "added_by": "adjudicate", "added_at": _now()})
     new_version = int(case.meta.get("truth_version", 1)) + 1
     truth.pop("truth_version", None)              # case.json is the only authority from now on
+    truth["truth_version_pending"] = new_version  # …and this is the recovery marker
     meta = _json.loads((case.path / "case.json").read_text(encoding="utf-8"))
     meta["truth_version"] = new_version
     _atomic_write(case.truth_path, _json.dumps(truth, indent=2, ensure_ascii=False) + "\n")
@@ -509,15 +521,27 @@ def _adjudicate_locked(run_dir, corpus, results, *, stdin, stdout, auto_only) ->
     return counts
 
 
+SCORABLE_STATUSES = ("ok", "malformed", "fail")     # the judge RAN and had its chance
+
+
 def resolve_validity(results: dict, adj: dict) -> dict:
     """Per (case_id, label): {'valid': {truth_id: Finding}, 'fp': [Finding],
-    'pending': [Finding], 'unique': {truth_id}} — unique = held by exactly one
-    candidate within the case."""
+    'pending': [Finding], 'unique': {truth_id}, 'unique_undetermined': bool} —
+    unique = held by exactly one candidate within the case, and DETERMINED only
+    when every candidate in the run has a scorable result for that case (r3 grok
+    #5: a peer that DNF'd never had its chance, so nothing is 'unique' against it)."""
     per = {}
     dec = adj.get("decisions", {})
+    labels_all = set(results)
+    scored = {}                                     # case_id → labels with a scorable result
+    for label, recs in results.items():
+        for rec in recs:
+            if rec.get("status") in SCORABLE_STATUSES:
+                scored.setdefault(rec["case_id"], set()).add(label)
     for rec, f in iter_findings(results):
         slot = per.setdefault((rec["case_id"], rec["label"]),
-                              {"valid": {}, "fp": [], "pending": [], "unique": set()})
+                              {"valid": {}, "fp": [], "pending": [], "unique": set(),
+                               "unique_undetermined": False})
         d = dec.get(decision_key(rec["case_id"], rec["label"], f.n))
         v = d.get("verdict") if d else None
         if v in VALID_VERDICTS:
@@ -531,5 +555,9 @@ def resolve_validity(results: dict, adj: dict) -> dict:
         for tid in slot["valid"]:
             by_case.setdefault(cid, {}).setdefault(tid, set()).add(label)
     for (cid, label), slot in per.items():
-        slot["unique"] = {tid for tid in slot["valid"] if len(by_case[cid][tid]) == 1}
+        if scored.get(cid, set()) != labels_all:
+            slot["unique"] = set()
+            slot["unique_undetermined"] = True
+        else:
+            slot["unique"] = {tid for tid in slot["valid"] if len(by_case[cid][tid]) == 1}
     return per

@@ -139,6 +139,11 @@ def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 
                 row.tokens_known += 1
                 row.tokens_in += int(usage.get("in", 0))
                 row.tokens_out += int(usage.get("out", 0))
+            for att in rec.get("attempts") or []:          # retried attempts' tokens count too
+                au = att.get("usage") or {}
+                if au.get("status") == "known":
+                    row.tokens_in += int(au.get("in", 0))
+                    row.tokens_out += int(au.get("out", 0))
             est = _rates.estimate_usd(rec.get("backend", specs.get(label, ("", "", None))[1]),
                                       rec.get("variant"), usage) if st in RAN else None
             if st in RAN:
@@ -186,6 +191,8 @@ def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 
     notes = [f"severity weights Critical={wC:g} Important={wI:g} Minor={wM:g} — report-time "
              "parameters, not stored; placeholders pending calibration (plan §27.6)",
              "point estimates only — no bootstrap CIs in v1 (plan §27.4)",
+             "latency (p50/p95) is the FINAL attempt's wall-clock and INCLUDES timed-out invocations "
+             "(a timeout is latency data for the seat); retried attempts' durations sit in `attempts`",
              f"USD = API-equivalent from bench/lib/rates.py (as of {_rates.AS_OF}, non-authoritative); "
              "n/a where tokens are unknown or no rate is on file — never estimated"]
     if pending_total:

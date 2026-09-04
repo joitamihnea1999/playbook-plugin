@@ -55,27 +55,63 @@ def sha256_file(p: Path) -> str:
 
 # ── lock ─────────────────────────────────────────────────────────────────────
 
+def _pid_alive(pid: int):
+    """True/False when determinable, None when unknown (then stay conservative)."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            k32 = ctypes.windll.kernel32                       # type: ignore[attr-defined]
+            h = k32.OpenProcess(0x1000, False, int(pid))       # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return False
+            k32.CloseHandle(h)
+            return True
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return None
+
+
 class RunLock:
-    """`with RunLock(run_dir):` — O_CREAT|O_EXCL so two launchers can never both
-    hold it. The file carries the holder's pid for the refusal message."""
+    """`with RunLock(dir):` — O_CREAT|O_EXCL so two launchers can never both hold
+    it. The file carries the holder's pid. A lock whose holder is provably DEAD
+    (hard crash) is reclaimed (r3 opus F3) — an unreadable/unknown holder is not."""
 
     def __init__(self, run_dir: Path):
         self.path = Path(run_dir) / LOCK_NAME
         self._fd = None
 
-    def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def _try_acquire(self) -> bool:
         try:
             self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            return True
         except FileExistsError:
+            return False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._try_acquire():
             holder = ""
             try:
                 holder = self.path.read_text(encoding="utf-8", errors="replace").strip()
             except OSError:
                 pass
-            raise RunLocked(f"run is locked by another launcher (pid {holder or '?'}): "
-                            f"{self.path} — wait for it, or delete the lock if that "
-                            f"process is gone") from None
+            alive = _pid_alive(holder) if holder.isdigit() else None
+            if alive is False:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
+                if self._try_acquire():
+                    os.write(self._fd, str(os.getpid()).encode("ascii"))
+                    return self
+            raise RunLocked(f"locked by another launcher (pid {holder or '?'}"
+                            f"{', still running' if alive else ''}): {self.path} — wait for it, "
+                            f"or delete the lock if you are sure that process is gone") from None
         os.write(self._fd, str(os.getpid()).encode("ascii"))
         return self
 
@@ -113,9 +149,14 @@ def append_result(run_dir: Path, label: str, record: dict) -> None:
 
 
 def write_raw(run_dir: Path, label: str, case_id: str, raw: str) -> str:
+    """One raw file PER ATTEMPT (`<case>.<seq>.txt`) — a resumed pair never
+    overwrites the earlier attempt's output (r3 grok #2)."""
     d = candidate_dir(run_dir, label) / "raw"
     d.mkdir(parents=True, exist_ok=True)
-    p = d / f"{case_id}.txt"
+    seq = 1
+    while (d / f"{case_id}.{seq}.txt").exists():
+        seq += 1
+    p = d / f"{case_id}.{seq}.txt"
     p.write_text(raw or "", encoding="utf-8", errors="replace")
     return p.relative_to(run_dir).as_posix()
 
@@ -201,6 +242,7 @@ def make_result_record(run_id: str, case, candidate, invocation, raw_rel: str, p
         "findings": invocation.findings.to_dict() if invocation.findings else None,
         "raw_path": raw_rel,
         "note": invocation.note,
+        "attempts": list(getattr(invocation, "attempts", []) or []),   # earlier retried attempts
         "template_version": package.template_version,
         "template_sha256": package.template_sha256,
         "prompt_sha256": sha256_text(package.prompt),
@@ -301,12 +343,25 @@ def read_manifest(run_dir: Path) -> dict:
 
 
 def check_manifest(manifest: dict, *, selected_cases, packages, candidates, mode=None,
-                   soft_timeout=None, hard_timeout=None, concurrency=None, fake_script=None) -> list:
+                   soft_timeout=None, hard_timeout=None, concurrency=None, fake_script=None,
+                   playbook_sha=None, cli_versions=None) -> list:
     """Mismatches between a stored manifest and the run's inputs NOW — a resume
     must refuse on any (plan-review F9; impl-panel opus F1 / sol #1 / terra #1 /
     grok F4): same run id ⇒ same mode, same candidate SET, same timeouts, same
     corpus content. Cases may be a SUBSET (resume only skips), never new ones."""
     problems = []
+    # The harness itself is part of the instrument (r3 sol #4): a resumed segment must
+    # run the same playbook checkout; for live runs, the same provider CLI versions.
+    sha_now = playbook_sha if playbook_sha is not None else git_head(REPO_ROOT)
+    if manifest.get("playbook_repo_sha") not in (None, "unknown") and sha_now not in (None, "unknown") \
+            and manifest.get("playbook_repo_sha") != sha_now:
+        problems.append(f"playbook repo sha {manifest.get('playbook_repo_sha')[:12]} → {sha_now[:12]} "
+                        "(the harness changed; start a new run id)")
+    if cli_versions:
+        for c in manifest.get("candidates", []):
+            now = cli_versions.get(c.get("backend"))
+            if now is not None and c.get("cli_version") not in (None, "fake") and c.get("cli_version") != now:
+                problems.append(f"{c.get('backend')} CLI version {c.get('cli_version')!r} → {now!r}")
     if mode is not None and manifest.get("mode") != mode:
         problems.append(f"mode {manifest.get('mode')!r} → {mode!r} (a run never mixes fake and live)")
     t = manifest.get("timeouts", {})

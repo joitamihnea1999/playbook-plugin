@@ -184,15 +184,19 @@ def reconstruct_spec(task_md: str) -> str:
 # Final fail-loud scan over the RENDERED spec (impl-panel r2 opus F2): kept sections
 # pass through verbatim, so a review-informed edit inside Intent/Why/References/Design
 # — or an H3 review note there — must be caught here, not silently frozen.
+# Scoped to OUTCOME evidence (r3 opus F2): a pre-review Work Plan legitimately PLANS the
+# panel ("run the impl panel; triage when judge.md lands; check judge.md has a PANEL
+# VERDICT") — that is design text. What leaks is a verdict VALUE, a finding reference,
+# a findings marker, a CAP line, a triage decision, or a review/triage heading.
 _LEAK_TOKENS = (
-    re.compile(r"panel verdict", re.IGNORECASE),
+    re.compile(r"panel verdict\s*:\s*(pass|fail)", re.IGNORECASE),
     re.compile(r"playbook:[a-z-]*review-findings", re.IGNORECASE),
-    re.compile(r"^\s{0,3}#{2,6}\s.*\b(triage|implementation review|impl review|plan review|panel)\b",
+    re.compile(r"^\s{0,3}#{2,6}\s.*\b(triage|implementation review|impl review|plan review)\b",
                re.IGNORECASE | re.MULTILINE),
-    re.compile(r"\b(impl|plan)[- ]panel\b", re.IGNORECASE),
-    re.compile(r"\bjudge(-archive)?\.md\b", re.IGNORECASE),
+    re.compile(r"\b(impl|plan)[- ]panel\b[^\n]*?(#\d+|\bF\d+\b|\bround \d+|\bfound\b|\bsaid\b|"
+               r"\bflagged\b|\bcaught\b)", re.IGNORECASE),
     re.compile(r"^\s*CAP:\s*\d+/\d+", re.MULTILINE),
-    re.compile(r"\btriage\b.*\b(round|accept|reject|park)", re.IGNORECASE),
+    re.compile(r"\btriage\b[^\n]*\b(accept|reject|park)(ed)?\b", re.IGNORECASE),
 )
 
 
@@ -268,10 +272,10 @@ def render_prompt(spec: str, diff: str, context: list, template_text: str,
         if token not in template_text:
             raise ValueError(f"template missing placeholder {token}")
     tb = ("\n" + time_budget.strip() + "\n") if time_budget.strip() else ""
-    return (template_text.replace("{{SPEC}}", spec.rstrip("\n"))
-            .replace("{{DIFF}}", diff.rstrip("\n"))
-            .replace("{{CONTEXT}}", ctx)
-            .replace("{{TIME_BUDGET}}", tb))
+    values = {"SPEC": spec.rstrip("\n"), "DIFF": diff.rstrip("\n"), "CONTEXT": ctx, "TIME_BUDGET": tb}
+    # SINGLE pass over the TEMPLATE (r3 grok #4): a body that itself contains
+    # `{{DIFF}}` must stay literal, never be substituted in turn.
+    return re.sub(r"\{\{(SPEC|DIFF|CONTEXT|TIME_BUDGET)\}\}", lambda m: values[m.group(1)], template_text)
 
 
 def build_package(case, template_path: Path = DEFAULT_TEMPLATE, *,

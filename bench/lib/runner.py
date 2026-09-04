@@ -66,6 +66,8 @@ class Candidate:
 
 # Bench-local presets so the plan's literal commands (§14/§24: `sol-med,sol-high`)
 # resolve to the Test A/B seats (impl-panel sol #5). `label=spec` always wins.
+RESERVED_LABELS = frozenset({"journal", "manifest.json", "adjudication.json", "report.md", ".lock", "raw"})
+
 PRESETS = {
     "sol-med": "codex:gpt-5.6-sol:medium",
     "sol-high": "codex:gpt-5.6-sol:high",
@@ -94,6 +96,10 @@ def parse_candidates(csv: str) -> list:
         label = (label.strip() or spec.replace(":", "-").replace("/", "_"))
         if not label.replace("-", "").replace("_", "").replace(".", "").isalnum():
             raise CandidateError(f"candidate label {label!r} must be [A-Za-z0-9._-]")
+        # Labels become directories under the run dir (r3 sol #3 / grok #3): never a
+        # control path, never dot-prefixed, never longer than a portable filename.
+        if label.startswith(".") or len(label) > 64 or label.lower() in RESERVED_LABELS:
+            raise CandidateError(f"candidate label {label!r} is reserved/unsafe as a directory name")
         if label in seen:
             raise CandidateError(f"duplicate candidate label {label!r}")
         seen.add(label)
@@ -301,6 +307,7 @@ class LiveRunner:
                              "raw_head": (raw or "")[:300],
                              "duration_ms": int((time.monotonic() - t0) * 1000)})
             retries = 1
+            t0 = time.monotonic()                      # latency = the FINAL attempt only (r3 opus F4)
             raw = self._invoke(candidate.backend, candidate.variant, package.prompt, tree,
                                hard_timeout, self._budget())
         duration_ms = int((time.monotonic() - t0) * 1000)
@@ -321,7 +328,11 @@ def run_case(case, candidates, runner, package, *, source_repo=None, soft_timeou
     todo = [c for c in candidates if c.label not in skip]
     if not todo:
         return []
-    pre = runner.preflight(todo, package, source_repo or REPO_ROOT) or {}
+    try:
+        pre = runner.preflight(todo, package, source_repo or REPO_ROOT) or {}
+    except Exception as exc:                       # r3 sonnet #2: contain a raising preflight
+        return [(c, Invocation(status="dnf", raw=f"(error: preflight raised {type(exc).__name__}: {exc})",
+                               note="preflight raised")) for c in todo]
     if pre:
         why = "; ".join(f"{k}: {v}" for k, v in sorted(pre.items()))
         return [(c, Invocation(status="excluded", note=f"transport preflight — {why}"))

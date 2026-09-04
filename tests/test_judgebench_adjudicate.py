@@ -9,6 +9,7 @@ truth_version in both truth.json and case.json; the corpus must reload clean.
 """
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -237,10 +238,15 @@ class InteractiveTests(unittest.TestCase):
             self.assertEqual(c2.truth_version, 1)                       # version not bumped …
             self.assertEqual(c2.truth["findings"][-1]["file"], "novel.py")   # … finding present
             self.assertNotIn("truth_version", json.loads(c2.truth_path.read_text()))
-            # the next append completes the bump
-            tid = scoring.append_valid_new(c2, _finding("other.py", "g"), "x", "Minor")
-            self.assertEqual(tid, "T6")
+            # r3 sol #2: retrying the IDENTICAL operation (the lost-response sequence) must
+            # complete the interrupted bump, not return early on the dedup path.
+            tid = scoring.append_valid_new(c2, _finding("novel.py", "f"), "key leak", "Minor")
+            self.assertEqual(tid, "T5")
             self.assertEqual(cases.load_corpus(Path(td) / "corpus").get("c-a").truth_version, 2)
+            # and a genuinely new append bumps again
+            c3 = cases.load_corpus(Path(td) / "corpus").get("c-a")
+            self.assertEqual(scoring.append_valid_new(c3, _finding("other.py", "g"), "x", "Minor"), "T6")
+            self.assertEqual(cases.load_corpus(Path(td) / "corpus").get("c-a").truth_version, 3)
 
     def test_adjudicate_holds_the_run_lock(self):
         # impl-panel sol #3 / terra #3: two adjudicators on one run are refused, not interleaved.
@@ -248,7 +254,7 @@ class InteractiveTests(unittest.TestCase):
             corpus = _mk_corpus(Path(td) / "corpus")
             rd = Path(td) / "runs" / "r"
             _mk_run(rd, {"a": [{"file": "novel.py", "symbol": "f"}]})
-            (rd / ".lock").write_text("999", encoding="utf-8")
+            (rd / ".lock").write_text(str(os.getpid()), encoding="utf-8")   # a LIVE holder
             with self.assertRaises(records.RunLocked):
                 scoring.adjudicate(rd, corpus, records.all_results(rd), stdin=io.StringIO(""),
                                    stdout=io.StringIO())
@@ -263,8 +269,8 @@ class InteractiveTests(unittest.TestCase):
             corpus = _mk_corpus(Path(td) / "corpus")
             rd = Path(td) / "runs" / "r"
             _mk_run(rd, {"a": [{"file": "novel.py", "symbol": "f"}]})
-            (corpus.root / ".lock").write_text("777", encoding="utf-8")
-            with self.assertRaisesRegex(records.RunLocked, "777"):
+            (corpus.root / ".lock").write_text(str(os.getpid()), encoding="utf-8")   # a LIVE holder
+            with self.assertRaisesRegex(records.RunLocked, str(os.getpid())):
                 scoring.adjudicate(rd, corpus, records.all_results(rd), stdin=io.StringIO(""),
                                    stdout=io.StringIO())
             (corpus.root / ".lock").unlink()
@@ -312,6 +318,28 @@ class ValidityTests(unittest.TestCase):
             self.assertEqual(len(c["valid"]), 1, "two findings on one truth id = one credit")
             self.assertNotIn(("c-a", "d"), per)            # empty result → no findings to resolve
             self.assertEqual(a["pending"], [])
+
+    def test_unique_valid_needs_every_peer_to_have_scored(self):
+        # r3 grok #5: a peer that DNF'd never had the chance — its finisher's hits are not "unique".
+        with tempfile.TemporaryDirectory() as td:
+            corpus = _mk_corpus(Path(td) / "corpus")
+            rd = Path(td) / "runs" / "r"
+            _mk_run(rd, {"a": [{"file": "plugins/playbook/tasks/lifecycle.py", "symbol": "close_task"}]})
+            records.append_result(rd, "b", {"case_id": "c-a", "label": "b", "spec": "b", "status": "dnf",
+                                            "findings": None})
+            results = records.all_results(rd)
+            adj = scoring.load_adjudication(rd)
+            scoring.auto_adjudicate(results, corpus, adj)
+            per = scoring.resolve_validity(results, adj)
+            self.assertEqual(set(per[("c-a", "a")]["valid"]), {"T3"})
+            self.assertEqual(per[("c-a", "a")]["unique"], set())         # peer b never scored
+            self.assertTrue(per[("c-a", "a")]["unique_undetermined"])
+            # once b scores (malformed counts: it ran) uniqueness is determined
+            records.append_result(rd, "b", {"case_id": "c-a", "label": "b", "spec": "b", "status": "malformed",
+                                            "findings": {"status": "malformed", "findings": [], "errors": []}})
+            per = scoring.resolve_validity(records.all_results(rd), adj)
+            self.assertEqual(per[("c-a", "a")]["unique"], {"T3"})
+            self.assertFalse(per[("c-a", "a")]["unique_undetermined"])
 
 
 class CliTests(unittest.TestCase):

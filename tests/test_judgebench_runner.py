@@ -120,6 +120,13 @@ class CandidateTests(unittest.TestCase):
                                                 "grok:grok-4.6:medium", "grok:grok-4.6:high"])
         self.assertEqual(runner.parse_candidates("sol-med=opus")[0].spec, "opus")
 
+    def test_reserved_and_unsafe_labels_are_rejected(self):
+        # r3 sol #3 / grok #3: labels become directories under the run dir.
+        for bad in ("journal=opus", "manifest.json=opus", ".lock=opus", ".hidden=opus", "x" * 65 + "=opus"):
+            with self.subTest(label=bad.split("=")[0][:12]):
+                with self.assertRaises(runner.CandidateError):
+                    runner.parse_candidates(bad)
+
     def test_bad_spec_duplicate_label_and_empty(self):
         with self.assertRaises(runner.CandidateError):
             runner.parse_candidates("nosuchprovider:x")
@@ -308,6 +315,33 @@ class LiveRunnerTests(unittest.TestCase):
             self.assertIn("g", errs)                     # argv transport: physical cap applies
             # the stdin candidate may still trip the CHAR budget; either way it is not the argv error
             self.assertNotIn("argv element", errs.get("c", ""))
+
+    def test_preflight_exception_is_contained_per_case(self):
+        # r3 sonnet #2: a raising preflight must not abort the whole run.
+        with tempfile.TemporaryDirectory() as td:
+            repo, case, pkg = self._case(td)
+            class Boom(runner.FakeRunner):
+                def preflight(self, candidates, package, repo_root):
+                    raise RuntimeError("preflight exploded")
+            out = runner.run_case(case, runner.parse_candidates("a=opus,b=sonnet"), Boom(), pkg)
+            self.assertEqual([inv.status for _, inv in out], ["dnf", "dnf"])
+            self.assertTrue(all("preflight" in inv.note for _, inv in out))
+
+    def test_retry_latency_is_the_final_attempt_only(self):
+        # r3 opus F4: p50/p95 must not charge a seat for wasted transport retries.
+        import time as _t
+        with tempfile.TemporaryDirectory() as td:
+            repo, case, pkg = self._case(td)
+            outs = iter(["(error: bench judge spawn failed: x)", "FINDINGS:\nNONE\nEND FINDINGS\n"])
+            def slow_first(*a):
+                r = next(outs)
+                if r.startswith("(error"):
+                    _t.sleep(0.25)
+                return r
+            lr = runner.LiveRunner(repo, invoke=slow_first, adapter_factory=_StubAdapter, budget_usd=1)
+            inv = runner.run_case(case, runner.parse_candidates("a=opus"), lr, pkg, source_repo=repo)[0][1]
+            self.assertLess(inv.duration_ms, 200)                     # final attempt only
+            self.assertGreaterEqual(inv.attempts[0]["duration_ms"], 200)
 
     def test_runner_exception_becomes_dnf_not_abort(self):
         with tempfile.TemporaryDirectory() as td:

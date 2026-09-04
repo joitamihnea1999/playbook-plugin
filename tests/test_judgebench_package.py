@@ -218,7 +218,7 @@ class LeakScanTests(unittest.TestCase):
         for body in ("Intent text — revised per PANEL VERDICT: PASS",
                      "### Implementation Review notes\nthe impl panel said X",
                      "kept per impl-panel grok #3",
-                     "see judge.md for the verdict",
+                     "fixed per impl-panel F2",
                      "CAP: 5/5 reported, exhausted",
                      "triage: accept F1, reject F2"):
             with self.subTest(body=body[:30]):
@@ -232,6 +232,15 @@ class LeakScanTests(unittest.TestCase):
     def test_scan_is_quiet_on_a_clean_spec(self):
         self.assertEqual(package.leak_scan(package.reconstruct_spec(FIXTURE_TASK_MD)), [])
         self.assertEqual(package.leak_scan("## Intent\nBuild a plan for the review of PRs.\n"), [])
+
+    def test_scan_tolerates_legitimate_pre_review_plan_text(self):
+        # r3 opus F2: real Work Plans PLAN the panel — that is design text, not a leak.
+        for body in ("- [ ] W0: run the impl panel in the background; triage when judge.md lands. "
+                     "Check: judge.md has a PANEL VERDICT.",
+                     "- [ ] Plan-review panel launched; fix findings before W1.",
+                     "The judge reads judge.md; the panel verdict gates the close."):
+            with self.subTest(body=body[:30]):
+                self.assertEqual(package.leak_scan(body), [], body)
 
     def test_build_package_fails_loud_on_a_leaky_kept_section(self):
         with tempfile.TemporaryDirectory() as td:
@@ -304,6 +313,16 @@ class TemplateTests(unittest.TestCase):
         text, _, _ = package.load_template()
         out = package.render_prompt("S", "D", [], text, time_budget=clause)
         self.assertIn(clause, out)
+
+    def test_render_is_single_pass_over_the_template(self):
+        # r3 grok #4: a spec/diff that CONTAINS a placeholder token must stay literal.
+        text, _, _ = package.load_template()
+        out = package.render_prompt("spec mentions {{DIFF}} and {{CONTEXT}}", "diff has {{SPEC}} {{TIME_BUDGET}}",
+                                    [("c.txt", "ctx {{SPEC}}")], text, time_budget="tb {{DIFF}}")
+        self.assertEqual(out.count("spec mentions {{DIFF}} and {{CONTEXT}}"), 1)
+        self.assertEqual(out.count("diff has {{SPEC}} {{TIME_BUDGET}}"), 1)
+        self.assertEqual(out.count("ctx {{SPEC}}"), 1)
+        self.assertEqual(out.count("tb {{DIFF}}"), 1)
 
     def test_render_rejects_template_missing_placeholder(self):
         with self.assertRaises(ValueError):

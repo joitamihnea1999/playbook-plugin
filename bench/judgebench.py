@@ -211,7 +211,9 @@ def cmd_run(args) -> int:
                                                candidates=candidates,
                                                mode="live" if args.live else "fake",
                                                soft_timeout=args.soft_timeout, hard_timeout=args.timeout,
-                                               concurrency=args.concurrency, fake_script=args.fake_script)
+                                               concurrency=args.concurrency, fake_script=args.fake_script,
+                                               cli_versions=({c.backend: _records.cli_version(c.backend)
+                                                              for c in candidates} if args.live else None))
             if problems:
                 print("judgebench: cannot resume — inputs changed since the run started:",
                       file=sys.stderr)
@@ -280,6 +282,12 @@ def _persist(run_dir, run_id, case, cand, inv, package, _records) -> None:
     raw_rel = _records.write_raw(run_dir, cand.label, case.id, inv.raw)
     rec = _records.make_result_record(run_id, case, cand, inv, raw_rel, package)
     _records.append_result(run_dir, cand.label, rec)
+    # One spend line per ACTUAL provider invocation (r3, all judges): every retried
+    # attempt first, then the final one.
+    for att in getattr(inv, "attempts", []) or []:
+        _records.journal_spend(run_dir, seat=cand.spec, case_id=case.id,
+                               duration_ms=int(att.get("duration_ms", 0) or 0),
+                               status=att.get("status", "dnf"), usage=att.get("usage"))
     _records.journal_spend(run_dir, seat=cand.spec, case_id=case.id, duration_ms=inv.duration_ms,
                            status=inv.status, usage=inv.usage)
 
