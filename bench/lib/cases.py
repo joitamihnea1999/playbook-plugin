@@ -26,7 +26,8 @@ KINDS = ("feature", "bugfix", "refactor", "docs", "perf")
 AREAS = ("enforcement", "server", "ui", "tests", "docs")
 DIFFICULTIES = ("easy", "medium", "hard")
 SEVERITIES = ("Critical", "Important", "Minor")           # the existing 3-level vocabulary (§5)
-OUTCOMES = ("accepted+fixed", "accepted+parked")           # what counts as a valid finding (§10)
+OUTCOMES = ("accepted+fixed", "accepted+parked",           # historical triage (§10)
+            "valid-new")                                    # appended by `adjudicate` (§10)
 
 _REQUIRED_CASE_KEYS = ("id", "source", "repo_base_sha", "diff_of", "kind", "area",
                        "difficulty", "truth_version")
@@ -195,6 +196,11 @@ def validate_truth(truth: dict, where: str, expected_version=None) -> None:
         if r["id"] in rseen or r["id"] in seen:
             raise CorpusError(f"{where}: truth.json duplicate id {r['id']!r}")
         rseen.add(r["id"])
+        # Optional deterministic key (panel F2): a reject with `file` (+`symbol`)
+        # can be auto-matched; one with only prose never is.
+        for k in ("file", "symbol"):
+            if k in r and r[k] is not None and not isinstance(r[k], str):
+                raise CorpusError(f"{where}: truth.json known_rejects {r['id']} {k} must be a string")
     if "truth_version" in truth and expected_version is not None:
         if truth["truth_version"] != expected_version:
             raise CorpusError(f"{where}: truth.json truth_version {truth['truth_version']!r} "

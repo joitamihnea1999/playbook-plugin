@@ -88,6 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     adj = sub.add_parser("adjudicate", parents=[common], help="human verdicts for unmatched findings")
     adj.add_argument("run_id")
+    adj.add_argument("--auto", action="store_true",
+                     help="record deterministic matches only; no terminal prompts")
 
     rep = sub.add_parser("report", parents=[common], help="comparison table for a run")
     rep.add_argument("run_id")
@@ -272,7 +274,29 @@ def _persist(run_dir, run_id, case, cand, inv, package, _records) -> None:
 
 
 def cmd_adjudicate(args) -> int:
-    return _not_yet("adjudicate")
+    from bench.lib import cases as _cases, records as _records, scoring as _scoring
+    run_dir = Path(args.runs_dir) / args.run_id
+    if not (run_dir / _records.MANIFEST_NAME).is_file():
+        print(f"judgebench: no run {args.run_id!r} under {args.runs_dir}", file=sys.stderr)
+        return EXIT_UNUSABLE
+    try:
+        corpus = _cases.load_corpus(args.corpus)
+    except _cases.CorpusError as exc:
+        print(f"judgebench: corpus invalid: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
+    results = _records.all_results(run_dir)
+    if not results:
+        print(f"judgebench: run {args.run_id!r} has no result lines yet", file=sys.stderr)
+        return EXIT_UNUSABLE
+    counts = _scoring.adjudicate(run_dir, corpus, results, auto_only=args.auto)
+    adj = _scoring.load_adjudication(run_dir)
+    pending = sum(1 for rec, f in _scoring.iter_findings(results)
+                  if (adj["decisions"].get(_scoring.decision_key(rec["case_id"], rec["label"], f.n))
+                      or {}).get("verdict") in _scoring.PENDING_VERDICTS)
+    print(f"adjudication {args.run_id}: auto truth={counts['auto_truth']} auto reject="
+          f"{counts['auto_reject']} human={counts.get('human', 0)} valid-new added="
+          f"{counts.get('valid_new_added', 0)} pending={pending} → {run_dir / _scoring.ADJUDICATION_NAME}")
+    return EXIT_OK
 
 
 def cmd_report(args) -> int:
