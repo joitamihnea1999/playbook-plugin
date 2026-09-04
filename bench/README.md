@@ -25,6 +25,41 @@ python3 bench/judgebench.py report <run-id> [--md out.md] [--weights 8,3,1]
 
 Exit codes: `0` ok · `1` completed-with-DNFs · `2` unusable (bad corpus/args).
 
+## Run layout and semantics
+
+```
+bench/runs/<run-id>/
+  manifest.json              corpus version + per-case sha256 (spec/diff/context/prompt),
+                             template version+sha, playbook SHA, candidates (+CLI versions),
+                             timeouts, sandbox mode, retry policy, host, manual_quota_notes
+  .lock                      exclusive run lock (pid) while a `run` is in flight
+  <label>/result.jsonl       one line per case for that candidate (status, findings, usage, timing)
+  <label>/raw/<case>.txt     the judge's raw output
+  journal/enforcement.jsonl  spend records (production envelope, kind="bench")
+```
+
+- **Candidates** are `provider:model:effort` specs (or a models.json alias), optionally
+  labeled: `--candidates sol-med=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high`.
+- **Snapshots, not worktrees.** A live run reviews a `git archive <repo_base_sha>` snapshot
+  in a temp dir — no `.git`, so a judge cannot `git log --all` its way into the future
+  (fix commits). One snapshot per case, shared by all candidates. Pass the checkout for
+  each case's `source.repo` with `--source-repo NAME=PATH` (`playbook-plugin` defaults to
+  this repo); a missing mapping is a `dnf`, never a guess.
+- **Transport preflight.** If ANY candidate's transport cannot carry the rendered prompt
+  (grok reads it from argv; the POSIX per-argument cap and production's context budget
+  apply), the case is `excluded` for ALL candidates in that run — paired inputs are never
+  trimmed per candidate.
+- **Statuses:** `ok` (parsed, may be zero findings) · `malformed` (ran, no parseable
+  FINDINGS block — a result, not an error) · `fail` (judge exited non-zero with output) ·
+  `timeout` · `dnf` (did not finish: CLI missing, spawn error, snapshot failure) ·
+  `excluded` (preflight). One automatic retry only on transport-class failures.
+  Exit code 1 when any `dnf`/`timeout`/`excluded` occurred.
+- **Resume:** `--resume` re-runs only the (case, candidate) pairs with no parseable result
+  line; a torn line (crash mid-append) counts as absent. It refuses if the corpus content
+  or candidate specs no longer match the manifest. A run id with results cannot be
+  re-launched without `--resume`. Two launchers on one run id: the second is refused by
+  the lock.
+
 ## Safety notes (read before `--live`)
 
 - **Real providers are opt-in.** `run` refuses unless exactly one of `--fake`
@@ -53,6 +88,16 @@ Exit codes: `0` ok · `1` completed-with-DNFs · `2` unusable (bad corpus/args).
   (dated, non-authoritative), never a measurement.
 - Runs are auditable and comparable, not deterministic: `manifest.json` is what
   makes two runs interpretable.
+- **Read isolation is the OS sandbox's, not the bench's.** The provider sandbox mounts
+  the host filesystem read-only; a judge that deliberately reads outside its snapshot
+  could reach historical `.agent/tasks/*/judge.md` on this machine. The bench mitigates
+  (snapshot in a temp dir, the prompt tells the judge to stay inside its repository) but
+  cannot enforce it without a `provider/` change — out of scope for v1, disclosed here.
+- Snapshots carry no git history, so judges cannot `git blame`/`git log` inside them
+  (production judges can). Acceptable for reviewing a diff; a known difference.
+- The bench's `LiveRunner` is a thin bench-local copy of the shape of production's
+  tail-cert raw runner, not an import of it (that function reads `default_judge` from
+  config). Status/usage extraction IS imported from `tasks.review`.
 
 ## Layout
 
