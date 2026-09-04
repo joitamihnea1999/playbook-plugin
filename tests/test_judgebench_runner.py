@@ -156,7 +156,8 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual((mal.status, mal.findings.status), ("malformed", "malformed"))
         self.assertEqual(mal.usage, {"status": "unknown"})
         d = ok.to_dict()
-        self.assertEqual(set(d), {"status", "raw", "usage", "duration_ms", "retries", "findings", "note"})
+        self.assertEqual(set(d), {"status", "raw", "usage", "duration_ms", "retries", "findings", "note",
+                                  "attempts"})
 
 
 class FakeRunnerTests(unittest.TestCase):
@@ -261,6 +262,21 @@ class LiveRunnerTests(unittest.TestCase):
             self.assertEqual((inv.status, n), ("fail", 1))                       # data: no retry
             inv, n = run_with(["I think it is fine, no block"])
             self.assertEqual((inv.status, n), ("malformed", 1))                  # content: no retry
+
+    def test_retry_keeps_the_first_attempt_on_record(self):
+        # impl-panel r2 sonnet #2: a retried call's first attempt may have been billed —
+        # its envelope is kept in `attempts`, never silently dropped.
+        with tempfile.TemporaryDirectory() as td:
+            repo, case, pkg = self._case(td)
+            outs = iter(["(error: bench judge spawn failed: x)", "FINDINGS:\nNONE\nEND FINDINGS\n"])
+            lr = runner.LiveRunner(repo, invoke=lambda *a: next(outs), adapter_factory=_StubAdapter, budget_usd=1)
+            inv = runner.run_case(case, runner.parse_candidates("a=opus"), lr, pkg, source_repo=repo)[0][1]
+            self.assertEqual((inv.status, inv.retries), ("ok", 1))
+            self.assertEqual(len(inv.attempts), 1)
+            self.assertEqual(inv.attempts[0]["status"], "dnf")
+            self.assertIn("spawn failed", inv.attempts[0]["raw_head"])
+            self.assertEqual(inv.attempts[0]["usage"], {"status": "unknown"})
+            self.assertIn("attempts", inv.to_dict())
 
     def test_transport_preflight_excludes_whole_case_for_all_candidates(self):
         with tempfile.TemporaryDirectory() as td:

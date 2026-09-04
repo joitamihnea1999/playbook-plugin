@@ -256,6 +256,22 @@ class InteractiveTests(unittest.TestCase):
             scoring.adjudicate(rd, corpus, records.all_results(rd), stdin=io.StringIO(""), stdout=io.StringIO())
             self.assertFalse((rd / ".lock").exists())
 
+    def test_adjudicate_holds_a_corpus_lock_too(self):
+        # impl-panel r2 sonnet #1 / terra #2: two runs adjudicated concurrently against
+        # ONE corpus would race on truth.json — the corpus dir is locked as well.
+        with tempfile.TemporaryDirectory() as td:
+            corpus = _mk_corpus(Path(td) / "corpus")
+            rd = Path(td) / "runs" / "r"
+            _mk_run(rd, {"a": [{"file": "novel.py", "symbol": "f"}]})
+            (corpus.root / ".lock").write_text("777", encoding="utf-8")
+            with self.assertRaisesRegex(records.RunLocked, "777"):
+                scoring.adjudicate(rd, corpus, records.all_results(rd), stdin=io.StringIO(""),
+                                   stdout=io.StringIO())
+            (corpus.root / ".lock").unlink()
+            scoring.adjudicate(rd, corpus, records.all_results(rd), stdin=io.StringIO(""), stdout=io.StringIO())
+            self.assertFalse((corpus.root / ".lock").exists())
+            self.assertFalse((rd / ".lock").exists())
+
     def test_eof_saves_and_stops(self):
         with tempfile.TemporaryDirectory() as td:
             corpus = _mk_corpus(Path(td) / "corpus")

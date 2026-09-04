@@ -148,6 +148,28 @@ class AggregateTests(unittest.TestCase):
             self.assertEqual(row_c[cols.index("malformed")], "1")
             self.assertEqual(row_c[cols.index("excluded")], "1")
 
+    def test_manifest_candidates_and_missing_pairs_are_visible(self):
+        # impl-panel r2 sol #1: an interrupted run must not present a seat with no results
+        # as absent, nor a half-run seat as complete. opus F3: sev-mismatch is rendered.
+        with tempfile.TemporaryDirectory() as td:
+            corpus, rd, results, adj = self._build(td)
+            manifest = {"run_id": "r", "corpus": {"cases": ["c-a", "c-b", "c-c"]},
+                        "candidates": [{"label": "a", "spec": "codex:m"}, {"label": "b", "spec": "codex:m"},
+                                       {"label": "c", "spec": "codex:m"}, {"label": "d", "spec": "grok:x"}]}
+            rep = report.aggregate("r", results, adj, corpus, weights=(8, 3, 1), manifest=manifest)
+            self.assertEqual([r.label for r in rep.rows], ["a", "b", "c", "d"])
+            self.assertEqual(rep.rows[3].invocations, 0)
+            self.assertEqual(rep.matrix["c-c"]["a"], "missing")
+            self.assertEqual(rep.matrix["c-a"]["d"], "missing")
+            self.assertEqual(rep.missing_pairs, 3 + 3)              # d × 3 cases + c-c × a,b,c
+            txt = report.render_text(rep)
+            self.assertIn("missing", txt)
+            self.assertIn("6 (case, candidate) pair(s) have no result", txt)
+            self.assertIn("sev-mis", txt)
+            cols = list(report.COLUMNS)
+            row_a = [ln for ln in txt.splitlines() if ln.startswith("a ")][0].split()
+            self.assertEqual(row_a[cols.index("sev-mis")], "1")
+
     def test_weights_and_percentile_helpers(self):
         self.assertEqual(report.parse_weights("8,3,1"), (8.0, 3.0, 1.0))
         for bad in ("8,3", "a,b,c", "-1,0,0"):

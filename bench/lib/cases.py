@@ -270,9 +270,13 @@ def select_cases(corpus: Corpus, spec: str) -> list:
                               "(plan step 9) or point --corpus at one that has")
         return list(corpus.cases)
     out = []
+    seen = set()
     for cid in (s.strip() for s in spec.split(",")):
         if not cid:
             continue
+        if cid in seen:
+            raise CorpusError(f"duplicate case id {cid!r} in --cases (a pair must never run twice)")
+        seen.add(cid)
         c = corpus.get(cid)
         if c is None:
             raise CorpusError(f"unknown case id {cid!r} (known: {corpus.ids()})")

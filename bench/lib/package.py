@@ -181,6 +181,31 @@ def reconstruct_spec(task_md: str) -> str:
     return "".join(out)
 
 
+# Final fail-loud scan over the RENDERED spec (impl-panel r2 opus F2): kept sections
+# pass through verbatim, so a review-informed edit inside Intent/Why/References/Design
+# — or an H3 review note there — must be caught here, not silently frozen.
+_LEAK_TOKENS = (
+    re.compile(r"panel verdict", re.IGNORECASE),
+    re.compile(r"playbook:[a-z-]*review-findings", re.IGNORECASE),
+    re.compile(r"^\s{0,3}#{2,6}\s.*\b(triage|implementation review|impl review|plan review|panel)\b",
+               re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\b(impl|plan)[- ]panel\b", re.IGNORECASE),
+    re.compile(r"\bjudge(-archive)?\.md\b", re.IGNORECASE),
+    re.compile(r"^\s*CAP:\s*\d+/\d+", re.MULTILINE),
+    re.compile(r"\btriage\b.*\b(round|accept|reject|park)", re.IGNORECASE),
+)
+
+
+def leak_scan(spec: str) -> list:
+    """Review-verdict tokens still present in a reconstructed spec ([] = clean)."""
+    hits = []
+    for rx in _LEAK_TOKENS:
+        m = rx.search(spec or "")
+        if m:
+            hits.append(m.group(0).strip()[:80])
+    return hits
+
+
 def is_denied_context_file(name: str) -> bool:
     """Case-INSENSITIVE on every platform: `fnmatch.fnmatch` is case-sensitive on
     POSIX, so `Truth.json` would slip past a naive match (impl-panel sonnet #2)."""
@@ -192,8 +217,18 @@ def load_context(case) -> list:
     """[(relative name, text)] for every file under `context/`; a denied name
     raises LeakageError (corpus-builder mistake → fail loud)."""
     files = []
+    ctx_root = case.context_dir.resolve()
     for p in case.context_files():
         rel = p.relative_to(case.path).as_posix()
+        # A symlink (impl-panel r2 terra #4) could alias a denied artifact under an
+        # innocent basename, or point outside context/ — refuse both, fail loud.
+        if p.is_symlink() or any(q.is_symlink() for q in p.relative_to(case.context_dir).parents
+                                 for q in [case.context_dir / q]):
+            raise LeakageError(f"case {case.id}: symlink in context/ is not allowed: {rel}")
+        try:
+            p.resolve().relative_to(ctx_root)
+        except ValueError:
+            raise LeakageError(f"case {case.id}: context file resolves outside context/: {rel}") from None
         if is_denied_context_file(p.name):
             raise LeakageError(f"case {case.id}: denied artifact in context/: {rel}")
         files.append((rel, p.read_text(encoding="utf-8", errors="replace")))
@@ -245,6 +280,10 @@ def build_package(case, template_path: Path = DEFAULT_TEMPLATE, *,
     (the corpus builder ran `reconstruct_spec` when freezing; running it again
     here is idempotent and guards a hand-edited spec.md against leaks)."""
     spec = reconstruct_spec(case.spec_path.read_text(encoding="utf-8", errors="replace"))
+    leaks = leak_scan(spec)
+    if leaks:
+        raise LeakageError(f"case {case.id}: spec.md still carries review tokens after "
+                           f"reconstruction — clean it by hand (record why in case.json notes): {leaks}")
     diff = case.diff_path.read_text(encoding="utf-8", errors="replace")
     context = load_context(case)
     tpl, version, sha = load_template(template_path)

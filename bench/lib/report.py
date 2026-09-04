@@ -94,6 +94,7 @@ class Report:
     labels: list
     pending_total: int
     notes: list = field(default_factory=list)
+    missing_pairs: int = 0
 
 
 def _truth_severity(corpus, case_id, truth_id):
@@ -109,19 +110,21 @@ def _truth_severity(corpus, case_id, truth_id):
 def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 1.0),
               manifest=None) -> Report:
     wC, wI, wM = weights
-    labels = sorted(results)
-    validity = scoring.resolve_validity(results, adj)
-    rows = {}
-    matrix = {}
-    case_ids = []
+    # Candidates and cases come from the MANIFEST when present (r2 sol #1): a seat with
+    # no result yet must show as missing, never vanish from the comparison.
     specs = {}
     for c in (manifest or {}).get("candidates", []):
         specs[c.get("label")] = (c.get("spec", ""), c.get("backend", ""), c.get("variant"))
+    labels = sorted(set(results) | set(specs))
+    case_ids = list((manifest or {}).get("corpus", {}).get("cases", []))
+    validity = scoring.resolve_validity(results, adj)
+    rows = {}
+    matrix = {}
     for label in labels:
         row = Row(label=label, spec=specs.get(label, ("", "", None))[0])
         latencies = []
         usd_total, usd_missing = 0.0, False
-        for rec in results[label]:
+        for rec in results.get(label, []):
             cid = rec["case_id"]
             if cid not in case_ids:
                 case_ids.append(cid)
@@ -173,6 +176,12 @@ def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 
         row.usd = usd_total if (ran and not usd_missing) else (usd_total if usd_total else None)
         row.usd_partial = bool(usd_total) and usd_missing
         rows[label] = row
+    missing = 0
+    for cid in case_ids:
+        for label in labels:
+            if label not in matrix.get(cid, {}):
+                matrix.setdefault(cid, {})[label] = "missing"
+                missing += 1
     pending_total = sum(r.pending for r in rows.values())
     notes = [f"severity weights Critical={wC:g} Important={wI:g} Minor={wM:g} — report-time "
              "parameters, not stored; placeholders pending calibration (plan §27.6)",
@@ -182,8 +191,12 @@ def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 
     if pending_total:
         notes.append(f"{pending_total} finding(s) still await adjudication — run `judgebench adjudicate`; "
                      "pending findings count as neither valid nor false positive")
+    if missing:
+        notes.append(f"{missing} (case, candidate) pair(s) have no result — the run is INCOMPLETE; "
+                     "resume it before comparing candidates")
     return Report(run_id=run_id, weights=weights, rows=[rows[lb] for lb in labels], matrix=matrix,
-                  cases=case_ids, labels=labels, pending_total=pending_total, notes=notes)
+                  cases=case_ids, labels=labels, pending_total=pending_total, notes=notes,
+                  missing_pairs=missing)
 
 
 def _fmt_rate(x) -> str:
@@ -201,8 +214,8 @@ def _fmt_usd(row: Row) -> str:
 
 
 COLUMNS = ("candidate", "inv", "ok", "malformed", "fail", "timeout", "dnf", "excluded", "valid",
-           "unique", "Crit", "Imp", "Min", "fp", "fp-rate", "pending", "weighted", "tok-known",
-           "tok-out", "w/1k-out", "p50", "p95", "timeout-rate", "dnf-rate", "usd")
+           "unique", "Crit", "Imp", "Min", "sev-mis", "fp", "fp-rate", "pending", "weighted",
+           "tok-known", "tok-out", "w/1k-out", "p50", "p95", "timeout-rate", "dnf-rate", "usd")
 
 
 def _row_cells(r: Row) -> list:
@@ -211,7 +224,7 @@ def _row_cells(r: Row) -> list:
             str(r.counts.get("fail", 0)), str(r.counts.get("timeout", 0)), str(r.counts.get("dnf", 0)),
             str(r.counts.get("excluded", 0)), str(r.valid), str(r.unique_valid),
             str(r.by_severity["Critical"]), str(r.by_severity["Important"]), str(r.by_severity["Minor"]),
-            str(r.fp), _fmt_rate(r.fp_rate), str(r.pending), f"{r.weighted:g}",
+            str(r.severity_mismatch), str(r.fp), _fmt_rate(r.fp_rate), str(r.pending), f"{r.weighted:g}",
             f"{r.tokens_known}/{r.invocations}", str(r.tokens_out) if r.tokens_known else "n/a",
             ("n/a" if w1k is None else f"{w1k:.2f}"), _fmt_ms(r.p50_ms), _fmt_ms(r.p95_ms),
             _fmt_rate(r.rate("timeout")), _fmt_rate(r.rate("dnf")), _fmt_usd(r)]

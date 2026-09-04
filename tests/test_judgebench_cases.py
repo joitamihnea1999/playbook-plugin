@@ -201,6 +201,13 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaisesRegex(cases.CorpusError, "zzz"):
             cases.select_cases(c, "a-1,zzz")
 
+    def test_select_rejects_duplicate_ids(self):
+        # impl-panel r2 sol #4 / terra #3: `--cases c-a,c-a` would pay twice and double-count.
+        _write_case(self.root, "a-1"); _write_corpus(self.root, ["a-1"])
+        c = cases.load_corpus(self.root)
+        with self.assertRaisesRegex(cases.CorpusError, "duplicate"):
+            cases.select_cases(c, "a-1,a-1")
+
     def test_select_all_on_empty_corpus_is_an_error(self):
         # A run over zero cases is unusable (exit 2), never a crash or an empty run dir.
         c = cases.load_corpus(self.root)

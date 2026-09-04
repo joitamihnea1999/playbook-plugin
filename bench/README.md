@@ -54,11 +54,16 @@ bench/runs/<run-id>/
   `timeout` · `dnf` (did not finish: CLI missing, spawn error, snapshot failure) ·
   `excluded` (preflight). One automatic retry only on transport-class failures.
   Exit code 1 when any `dnf`/`timeout`/`excluded` occurred.
-- **Resume:** `--resume` re-runs only the (case, candidate) pairs with no parseable result
-  line; a torn line (crash mid-append) counts as absent. It refuses if the corpus content
-  or candidate specs no longer match the manifest. A run id with results cannot be
-  re-launched without `--resume`. Two launchers on one run id: the second is refused by
-  the lock.
+- **Resume:** `--resume` re-runs the (case, candidate) pairs whose LAST result line is
+  missing, torn (crash mid-append), `dnf` or `timeout` (transient); `ok`/`malformed`/`fail`/
+  `excluded` pairs are done. History is kept in `result.jsonl`; the last line per pair is
+  the current result. Resume refuses (exit 2) if mode (fake/live), the candidate set,
+  either timeout, `--concurrency`, the fake script's content, or the corpus content
+  (spec/diff/context/prompt hashes) changed since the manifest; cases may be a subset;
+  `truth_version` is deliberately NOT a resume key (adjudicating an interrupted run must
+  not block resuming it). A run id with results cannot be re-launched without `--resume`.
+  Two launchers on one run id: the second is refused by the lock. Run ids are one safe
+  path segment (`[A-Za-z0-9._-]`, no leading dot).
 
 ## Adjudication and report
 
@@ -78,7 +83,10 @@ i / u / s / q  invalid (false positive) / unclear (stays pending) / skip / quit-
 ```
 
 `--auto` records only the deterministic pass (what the offline smoke uses).
-Decisions are saved after every answer in `adjudication.json`.
+Decisions are saved after every answer in `adjudication.json`. Adjudication holds
+both the run lock and a corpus lock (`<corpus>/.lock`) — Test A and Test B share one
+corpus, so they are adjudicated one at a time. `case.json` is the sole authority for
+`truth_version`.
 
 `report <run-id> [--md out.md] [--weights 8,3,1]` renders per candidate: invocations by
 status (`ok` / `malformed` / `fail` / `timeout` / `dnf` / `excluded` — each its own column,
@@ -127,6 +135,15 @@ weights and "point estimates only" (no bootstrap CIs in v1). Nothing derived is 
 - The bench's `LiveRunner` is a thin bench-local copy of the shape of production's
   tail-cert raw runner, not an import of it (that function reads `default_judge` from
   config). Status/usage extraction IS imported from `tasks.review`.
+- **A crash between a provider call succeeding and its result line being appended
+  re-runs that pair on `--resume`** (one extra paid invocation per crash). v1 has no
+  per-pair in-flight marker; if a live run died mid-flight, check the provider's usage
+  page before resuming. (Parked for v2.) A retried transport failure keeps its first
+  attempt's envelope in the record's `attempts` list — nothing billed is dropped.
+- A reconstructed spec that still carries review tokens (`PANEL VERDICT`, `impl-panel`,
+  `judge.md`, a `CAP:` line, an H3 review/triage heading inside a kept section) makes
+  `build_package` fail loud with `LeakageError` — clean `spec.md` by hand and record why
+  in `case.json.notes`.
 
 ## Layout
 

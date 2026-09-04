@@ -60,7 +60,7 @@ class ResultFileTests(unittest.TestCase):
             self.assertEqual([r["case_id"] for r in recs], ["c-a", "c-b"])
             self.assertEqual(torn, 1)
             done, torn_total = records.completed_pairs(rd, ["lab", "nolab"])
-            self.assertEqual(done, {("c-a", "lab"), ("c-b", "lab")})
+            self.assertEqual(done, {("c-a", "lab")})               # the dnf pair is NOT done (retryable)
             self.assertEqual(torn_total, 1)
             self.assertEqual(records.read_results(rd, "nolab"), ([], 0))
             self.assertEqual(set(records.all_results(rd)), {"lab"})
@@ -231,6 +231,58 @@ class RunCommandTests(unittest.TestCase):
                  "--run-id", "r1", "--fake", "--resume", "--corpus", str(self.corpus_dir),
                  "--runs-dir", str(self.runs), cwd=self.cwd)
         self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_resume_retries_dnf_and_timeout_but_not_excluded(self):
+        # impl-panel r2 opus F1: a transient provider failure must be recoverable by --resume.
+        script = self.root / "script.json"
+        script.write_text(json.dumps({"c-a|a": {"status": "dnf"}, "c-b|a": {"status": "timeout"},
+                                      "default": {"status": "ok"}}), encoding="utf-8")
+        self.assertEqual(self._run("--fake", "--fake-script", str(script)).returncode, 1)
+        rd = self.runs / "r1"
+        done, _ = records.completed_pairs(rd, ["a", "b"])
+        self.assertEqual(done, {("c-a", "b"), ("c-b", "b")})            # dnf/timeout are NOT done
+        # an excluded pair IS done (deterministic; re-running would re-exclude)
+        records.append_result(rd, "b", {"case_id": "c-z", "label": "b", "status": "excluded"})
+        done, _ = records.completed_pairs(rd, ["a", "b"])
+        self.assertIn(("c-z", "b"), done)
+        # resume (same script — its content is pinned) → exactly the 2 failed pairs re-run,
+        # history is kept, the LAST line is the pair's current status
+        p = self._run("--fake", "--fake-script", str(script), "--resume")
+        self.assertEqual(p.returncode, 1, p.stderr)                      # still dnf/timeout → 1
+        self.assertIn("2 invocations", p.stdout)
+        recs, _ = records.read_results(rd, "a")
+        self.assertEqual(len(recs), 4)                                   # 2 failed + 2 re-run lines
+        self.assertEqual(records.latest_results(rd)["a"]["c-a"]["status"], "dnf")
+        self.assertEqual(len(records.all_results(rd)["a"]), 2)           # latest-per-pair for report
+
+    def test_resume_survives_adjudication_truth_version_bump_and_pins_script_and_concurrency(self):
+        # impl-panel r2 sol #2 (truth_version must NOT be a resume key — it is not a judge
+        # input), sol #3 (fake-script CONTENT pinned), sol #5 (concurrency pinned).
+        script = self.root / "script.json"
+        script.write_text(json.dumps({"c-b|b": {"status": "dnf"}, "default": {"status": "ok"}}), encoding="utf-8")
+        self.assertEqual(self._run("--fake", "--fake-script", str(script)).returncode, 1)
+        cj = self.corpus_dir / "cases" / "c-a" / "case.json"
+        meta = json.loads(cj.read_text()); meta["truth_version"] = 2; cj.write_text(json.dumps(meta))
+        p = self._run("--fake", "--fake-script", str(script), "--resume")
+        self.assertNotEqual(p.returncode, 2, p.stderr)                   # bumped truth → still resumable
+        self.assertNotIn("cannot resume", p.stderr)                      # (exit 1: the dnf pair re-ran)
+        script.write_text(json.dumps({"default": {"status": "ok"}}), encoding="utf-8")
+        p = self._run("--fake", "--fake-script", str(script), "--resume")
+        self.assertEqual(p.returncode, 2); self.assertIn("fake script", p.stderr)
+        script.write_text(json.dumps({"c-b|b": {"status": "dnf"}, "default": {"status": "ok"}}), encoding="utf-8")
+        p = self._run("--fake", "--fake-script", str(script), "--resume", "--concurrency", "1")
+        self.assertEqual(p.returncode, 2); self.assertIn("concurrency", p.stderr)
+
+    def test_run_id_traversal_is_refused(self):
+        # impl-panel r2 terra #1: `--run-id ../../.agent/<lane>` would write the bench
+        # journal into a production lane.
+        for bad in ("../evil", "a/b", "..", ".hidden", "with space", "a\\b"):
+            with self.subTest(run_id=bad):
+                p = self._run("--fake", run_id=bad)
+                self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+                self.assertIn("run-id", p.stderr)
+        self.assertFalse((self.root / ".agent" / "journal" / "enforcement.jsonl").exists())
+        self.assertFalse((self.root / "evil").exists())
 
     def test_lock_held_refuses_and_writes_nothing(self):
         rd = self.runs / "r1"

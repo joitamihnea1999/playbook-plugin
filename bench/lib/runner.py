@@ -112,12 +112,13 @@ class Invocation:
     retries: int = 0
     findings: "scoring.ParsedFindings | None" = None
     note: str = ""
+    attempts: list = field(default_factory=list)      # earlier (retried) attempts, never dropped
 
     def to_dict(self) -> dict:
         return {"status": self.status, "raw": self.raw, "usage": self.usage,
                 "duration_ms": self.duration_ms, "retries": self.retries,
                 "findings": self.findings.to_dict() if self.findings else None,
-                "note": self.note}
+                "note": self.note, "attempts": list(self.attempts)}
 
 
 # ── classification ───────────────────────────────────────────────────────────
@@ -291,12 +292,20 @@ class LiveRunner:
         raw = self._invoke(candidate.backend, candidate.variant, package.prompt, tree,
                            hard_timeout, self._budget())
         status, retry_ok = classify(raw)
+        attempts = []
         if retry_ok:
+            # Keep the first attempt on record (r2 sonnet #2): it may have been billed
+            # even though its output looked like a transport failure.
+            from tasks.review import _parse_judge_usage
+            attempts.append({"status": status, "usage": _parse_judge_usage(raw) or {"status": "unknown"},
+                             "raw_head": (raw or "")[:300],
+                             "duration_ms": int((time.monotonic() - t0) * 1000)})
             retries = 1
             raw = self._invoke(candidate.backend, candidate.variant, package.prompt, tree,
                                hard_timeout, self._budget())
         duration_ms = int((time.monotonic() - t0) * 1000)
         inv = finish(raw, timed_out=False, duration_ms=duration_ms, retries=retries)
+        inv.attempts = attempts
         return inv
 
 

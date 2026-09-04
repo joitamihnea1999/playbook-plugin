@@ -433,7 +433,9 @@ def adjudicate(run_dir, corpus, results: dict, *, stdin=None, stdout=None, auto_
     interleave read-modify-write updates (impl-panel sol #3 / terra #3); a held
     lock raises `records.RunLocked`."""
     from bench.lib.records import RunLock
-    with RunLock(run_dir):
+    # Corpus lock too (impl-panel r2 sonnet #1 / terra #2): `valid-new` mutates the SHARED
+    # corpus, and Test A / Test B may be adjudicated from two terminals.
+    with RunLock(corpus.root), RunLock(run_dir):
         return _adjudicate_locked(run_dir, corpus, results, stdin=stdin, stdout=stdout,
                                   auto_only=auto_only)
 

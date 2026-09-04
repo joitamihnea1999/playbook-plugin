@@ -6,6 +6,7 @@ unique sentinel so one assertion per class proves it is absent from the
 reconstructed spec. Over-stripping is acceptable; leaking is not.
 """
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -207,6 +208,39 @@ class ReconstructSpecTests(unittest.TestCase):
                 self.assertNotIn("LEAK_X", out)
 
 
+class LeakScanTests(unittest.TestCase):
+    """impl-panel r2 opus F2: kept sections pass through verbatim, so a review-informed
+    edit inside Intent/Why/References/Design (or an H3 review note there) must be caught
+    by a final fail-loud scan over the rendered spec, not silently frozen."""
+
+    def test_scan_flags_review_tokens_in_kept_sections(self):
+        # These survive reconstruction (they sit inside a KEPT section) and must be flagged.
+        for body in ("Intent text — revised per PANEL VERDICT: PASS",
+                     "### Implementation Review notes\nthe impl panel said X",
+                     "kept per impl-panel grok #3",
+                     "see judge.md for the verdict",
+                     "CAP: 5/5 reported, exhausted",
+                     "triage: accept F1, reject F2"):
+            with self.subTest(body=body[:30]):
+                spec = package.reconstruct_spec(f"## Intent\n{body}\n")
+                self.assertIn(body.split("\n")[0][:20], spec)          # really kept …
+                self.assertTrue(package.leak_scan(spec), body)          # … and really flagged
+        # The scan itself also knows the structural tokens the filter normally removes.
+        for raw in ("<!-- playbook:impl-review-findings -->", "## Triage — round 2"):
+            self.assertTrue(package.leak_scan(raw), raw)
+
+    def test_scan_is_quiet_on_a_clean_spec(self):
+        self.assertEqual(package.leak_scan(package.reconstruct_spec(FIXTURE_TASK_MD)), [])
+        self.assertEqual(package.leak_scan("## Intent\nBuild a plan for the review of PRs.\n"), [])
+
+    def test_build_package_fails_loud_on_a_leaky_kept_section(self):
+        with tempfile.TemporaryDirectory() as td:
+            case = _mk_case(Path(td))
+            case.spec_path.write_text("## Intent\nfixed per PANEL VERDICT: PASS 5/5\n", encoding="utf-8")
+            with self.assertRaisesRegex(package.LeakageError, "PANEL VERDICT"):
+                package.build_package(case)
+
+
 class StripOutcomeTests(unittest.TestCase):
     def test_bold_title_keeps_its_own_dash(self):
         self.assertEqual(package.strip_outcome("- [x] **W1 — title.** body. — DONE. note\n"),
@@ -326,6 +360,20 @@ class BuildPackageTests(unittest.TestCase):
         for name in ("Truth.json", "JUDGE.MD", "Judge-Archive.md", "mind_map.md", "Task-Archive.MD",
                      "Vetting-Ledger.json", "CASE.json", "Enforcement.JSONL"):
             self.assertTrue(package.is_denied_context_file(name), name)
+
+    @unittest.skipIf(not hasattr(os, "symlink"), "no symlinks here")
+    def test_symlinked_context_files_are_refused(self):
+        # impl-panel r2 terra #4: `context/reference.txt -> ../truth.json` would carry a
+        # denied artifact under an innocent basename.
+        with tempfile.TemporaryDirectory() as td:
+            case = _mk_case(Path(td), context={"notes.md": "ok"})
+            link = case.context_dir / "reference.txt"
+            try:
+                os.symlink(case.truth_path, link)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink not permitted on this host")
+            with self.assertRaisesRegex(package.LeakageError, "symlink"):
+                package.build_package(case)
 
     def test_allowed_context_names(self):
         for name in ("test-output.txt", "notes.md", "verify.log"):

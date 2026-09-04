@@ -142,19 +142,13 @@ def read_results(run_dir: Path, label: str) -> tuple:
     return recs, torn
 
 
-def completed_pairs(run_dir: Path, labels) -> tuple:
-    """({(case_id, label)}, torn_total) over every candidate's result file."""
-    done, torn_total = set(), 0
-    for label in labels:
-        recs, torn = read_results(run_dir, label)
-        torn_total += torn
-        for r in recs:
-            done.add((r["case_id"], r["label"]))
-    return done, torn_total
+RETRYABLE_ON_RESUME = ("dnf", "timeout")       # transient — --resume re-runs them (r2 opus F1)
 
 
-def all_results(run_dir: Path) -> dict:
-    """label → [records] for every candidate dir present (report/adjudicate input)."""
+def latest_results(run_dir: Path) -> dict:
+    """label → {case_id: LAST record}. A pair may have several lines (a dnf then a
+    retry on resume); the last one is the pair's current result, earlier lines are
+    history. Also collapses accidental duplicates (r2 sol #4)."""
     out = {}
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
@@ -162,8 +156,33 @@ def all_results(run_dir: Path) -> dict:
     for d in sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name != "journal"):
         recs, _ = read_results(run_dir, d.name)
         if recs:
-            out[d.name] = recs
+            per = {}
+            for r in recs:
+                per[r["case_id"]] = r
+            out[d.name] = per
     return out
+
+
+def completed_pairs(run_dir: Path, labels) -> tuple:
+    """({(case_id, label)} DONE, torn_total). A pair is done iff its LAST parseable
+    line has a non-retryable status — dnf/timeout are transient and re-run on
+    resume; excluded is deterministic and stays done."""
+    done, torn_total = set(), 0
+    for label in labels:
+        recs, torn = read_results(run_dir, label)
+        torn_total += torn
+        last = {}
+        for r in recs:
+            last[r["case_id"]] = r
+        for cid, r in last.items():
+            if r.get("status") not in RETRYABLE_ON_RESUME:
+                done.add((cid, label))
+    return done, torn_total
+
+
+def all_results(run_dir: Path) -> dict:
+    """label → [latest record per case] (report/adjudicate input)."""
+    return {label: [per[cid] for cid in sorted(per)] for label, per in latest_results(run_dir).items()}
 
 
 def make_result_record(run_id: str, case, candidate, invocation, raw_rel: str, package) -> dict:
@@ -232,6 +251,14 @@ def sandbox_mode() -> str:
         return "unknown"
 
 
+def fake_script_sha256(fake_script) -> str:
+    """Content hash of the FakeRunner script ('default' when none) — pinned on resume
+    (r2 sol #3) so two segments of one fake run cannot use different scripts."""
+    if not fake_script:
+        return "default"
+    return sha256_file(Path(fake_script))
+
+
 def build_manifest(*, run_id, mode, corpus, selected_cases, packages, candidates, soft_timeout,
                    hard_timeout, concurrency, source_repos, template_version, template_sha256,
                    fake_script=None) -> dict:
@@ -257,6 +284,7 @@ def build_manifest(*, run_id, mode, corpus, selected_cases, packages, candidates
                          "(not 'not found on PATH'), or '(FAILED — exit N)' with no output; "
                          "never on content"),
         "fake_script": str(fake_script) if fake_script else None,
+        "fake_script_sha256": fake_script_sha256(fake_script) if mode == "fake" else None,
         "manual_quota_notes": "",
     }
 
@@ -273,7 +301,7 @@ def read_manifest(run_dir: Path) -> dict:
 
 
 def check_manifest(manifest: dict, *, selected_cases, packages, candidates, mode=None,
-                   soft_timeout=None, hard_timeout=None) -> list:
+                   soft_timeout=None, hard_timeout=None, concurrency=None, fake_script=None) -> list:
     """Mismatches between a stored manifest and the run's inputs NOW — a resume
     must refuse on any (plan-review F9; impl-panel opus F1 / sol #1 / terra #1 /
     grok F4): same run id ⇒ same mode, same candidate SET, same timeouts, same
@@ -286,6 +314,13 @@ def check_manifest(manifest: dict, *, selected_cases, packages, candidates, mode
         problems.append(f"soft timeout {t.get('soft_secs')} → {soft_timeout}")
     if hard_timeout is not None and t.get("hard_secs") != hard_timeout:
         problems.append(f"hard timeout {t.get('hard_secs')} → {hard_timeout}")
+    if concurrency is not None and manifest.get("concurrency") != concurrency:
+        problems.append(f"concurrency {manifest.get('concurrency')} → {concurrency} "
+                        "(latency percentiles would mix contention levels)")
+    if mode == "fake" and manifest.get("fake_script_sha256") is not None:
+        now = fake_script_sha256(fake_script)
+        if manifest.get("fake_script_sha256") != now:
+            problems.append("fake script content changed since the run started")
     stored_labels = {c.get("label") for c in manifest.get("candidates", [])}
     now_labels = {c.label for c in candidates}
     if stored_labels != now_labels:
@@ -297,7 +332,9 @@ def check_manifest(manifest: dict, *, selected_cases, packages, candidates, mode
         if was is None:
             problems.append(f"case {c.id}: not in the run manifest (was the case list changed?)")
             continue
-        for k in ("spec_md", "diff_patch", "context", "prompt", "truth_version"):
+        # truth_version is recorded but NOT a resume key: adjudicating an interrupted
+        # run bumps it, and truth is never a judge input (r2 sol #2).
+        for k in ("spec_md", "diff_patch", "context", "prompt"):
             if was.get(k) != now.get(k):
                 problems.append(f"case {c.id}: {k} changed since the run started")
     stored_c = {c["label"]: c for c in manifest.get("candidates", [])}

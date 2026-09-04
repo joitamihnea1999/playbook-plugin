@@ -143,6 +143,18 @@ def make_runner(*, fake: bool, live: bool, fake_script, source_repos):
                      "(REAL providers, spends quota)")
 
 
+_RUN_ID_RE = __import__("re").compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def validate_run_id(run_id: str) -> str:
+    """A run id is a single safe path segment (r2 terra #1: `../../.agent/<lane>` would
+    write the bench journal into a production lane)."""
+    if not isinstance(run_id, str) or not _RUN_ID_RE.match(run_id) or ".." in run_id:
+        raise ValueError(f"invalid --run-id {run_id!r}: use letters, digits, '.', '_' or '-' "
+                         "(one path segment, no leading dot, max 64 chars)")
+    return run_id
+
+
 def _parse_source_repos(items) -> dict:
     from bench.lib import REPO_ROOT
     repos = {"playbook-plugin": REPO_ROOT}
@@ -163,6 +175,7 @@ def cmd_run(args) -> int:
               "--live (REAL providers, spends quota)", file=sys.stderr)
         return EXIT_UNUSABLE
     try:
+        validate_run_id(args.run_id)
         source_repos = _parse_source_repos(args.source_repo)
         corpus = _cases.load_corpus(args.corpus)
         selected = _cases.select_cases(corpus, args.cases)
@@ -197,7 +210,8 @@ def cmd_run(args) -> int:
             problems = _records.check_manifest(manifest, selected_cases=selected, packages=packages,
                                                candidates=candidates,
                                                mode="live" if args.live else "fake",
-                                               soft_timeout=args.soft_timeout, hard_timeout=args.timeout)
+                                               soft_timeout=args.soft_timeout, hard_timeout=args.timeout,
+                                               concurrency=args.concurrency, fake_script=args.fake_script)
             if problems:
                 print("judgebench: cannot resume — inputs changed since the run started:",
                       file=sys.stderr)
@@ -271,6 +285,11 @@ def _persist(run_dir, run_id, case, cand, inv, package, _records) -> None:
 
 
 def cmd_adjudicate(args) -> int:
+    try:
+        validate_run_id(args.run_id)
+    except ValueError as exc:
+        print(f"judgebench: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
     from bench.lib import cases as _cases, records as _records, scoring as _scoring
     run_dir = Path(args.runs_dir) / args.run_id
     if not (run_dir / _records.MANIFEST_NAME).is_file():
@@ -301,6 +320,11 @@ def cmd_adjudicate(args) -> int:
 
 
 def cmd_report(args) -> int:
+    try:
+        validate_run_id(args.run_id)
+    except ValueError as exc:
+        print(f"judgebench: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
     from bench.lib import cases as _cases, records as _records, report as _report, scoring as _scoring
     run_dir = Path(args.runs_dir) / args.run_id
     if not (run_dir / _records.MANIFEST_NAME).is_file():
