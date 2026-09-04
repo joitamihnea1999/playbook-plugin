@@ -10,3 +10,6 @@ __pycache__/
 
 # final-acceptance panel audit scratch (evidence kept locally, not shipped)
 reviews/
+
+# judge benchmark harness runs (dev-only; each run dir is local evidence)
+bench/runs/
