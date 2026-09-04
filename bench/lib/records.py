@@ -60,12 +60,21 @@ def _pid_alive(pid: int):
     try:
         if os.name == "nt":
             import ctypes
+            from ctypes import wintypes
             k32 = ctypes.windll.kernel32                       # type: ignore[attr-defined]
             h = k32.OpenProcess(0x1000, False, int(pid))       # PROCESS_QUERY_LIMITED_INFORMATION
             if not h:
                 return False
-            k32.CloseHandle(h)
-            return True
+            try:
+                # OpenProcess SUCCEEDS for an exited process whose object is still held
+                # (e.g. by a parent's Popen handle) — CI Windows lane, task 046. Only
+                # STILL_ACTIVE (259) means the process is really running.
+                code = wintypes.DWORD()
+                if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return None
+                return code.value == 259
+            finally:
+                k32.CloseHandle(h)
         os.kill(int(pid), 0)
         return True
     except ProcessLookupError:
