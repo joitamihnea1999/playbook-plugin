@@ -265,6 +265,9 @@ def load_corpus(root: Path) -> Corpus:
 def select_cases(corpus: Corpus, spec: str) -> list:
     """`all` or a comma-separated id list (order preserved). Unknown id → error."""
     if spec.strip() == "all":
+        if not corpus.cases:
+            raise CorpusError(f"corpus at {corpus.root} has no cases — build the corpus first "
+                              "(plan step 9) or point --corpus at one that has")
         return list(corpus.cases)
     out = []
     for cid in (s.strip() for s in spec.split(",")):

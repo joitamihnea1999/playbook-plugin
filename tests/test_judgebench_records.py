@@ -246,6 +246,15 @@ class RunCommandTests(unittest.TestCase):
                  "--corpus", str(self.corpus_dir), "--runs-dir", str(self.runs), cwd=self.cwd)
         self.assertEqual(p.returncode, 2)
 
+    def test_run_on_empty_corpus_is_exit_2_and_leaves_no_run_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _cli("run", "--cases", "all", "--candidates", "opus", "--run-id", "e", "--fake",
+                     "--corpus", td, "--runs-dir", str(self.runs), cwd=self.cwd)
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("no cases", p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+            self.assertFalse((self.runs / "e").exists())
+
     def test_live_boundary_make_runner(self):
         # --fake → FakeRunner; --live → LiveRunner; neither → refusal. In-process
         # so we can assert the TYPE (the CLI test above proves the exit code).

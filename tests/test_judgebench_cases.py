@@ -201,6 +201,12 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaisesRegex(cases.CorpusError, "zzz"):
             cases.select_cases(c, "a-1,zzz")
 
+    def test_select_all_on_empty_corpus_is_an_error(self):
+        # A run over zero cases is unusable (exit 2), never a crash or an empty run dir.
+        c = cases.load_corpus(self.root)
+        with self.assertRaisesRegex(cases.CorpusError, "no cases"):
+            cases.select_cases(c, "all")
+
 
 class CliTests(unittest.TestCase):
     def _run(self, *args):
