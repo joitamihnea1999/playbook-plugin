@@ -99,11 +99,6 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _not_yet(what: str) -> int:
-    print(f"judgebench: {what} is not implemented in this step", file=sys.stderr)
-    return EXIT_UNUSABLE
-
-
 def cmd_corpus(args) -> int:
     from bench.lib import cases as _cases
     if args.corpus_cmd not in ("validate", "show"):
@@ -300,7 +295,30 @@ def cmd_adjudicate(args) -> int:
 
 
 def cmd_report(args) -> int:
-    return _not_yet("report")
+    from bench.lib import cases as _cases, records as _records, report as _report, scoring as _scoring
+    run_dir = Path(args.runs_dir) / args.run_id
+    if not (run_dir / _records.MANIFEST_NAME).is_file():
+        print(f"judgebench: no run {args.run_id!r} under {args.runs_dir}", file=sys.stderr)
+        return EXIT_UNUSABLE
+    try:
+        weights = _report.parse_weights(args.weights)
+        corpus = _cases.load_corpus(args.corpus)
+    except (ValueError, _cases.CorpusError) as exc:
+        print(f"judgebench: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
+    results = _records.all_results(run_dir)
+    if not results:
+        print(f"judgebench: run {args.run_id!r} has no result lines yet", file=sys.stderr)
+        return EXIT_UNUSABLE
+    adj = _scoring.load_adjudication(run_dir)
+    manifest = _records.read_manifest(run_dir)
+    rep = _report.aggregate(args.run_id, results, adj, corpus, weights=weights, manifest=manifest)
+    print(_report.render_text(rep), end="")
+    if args.md:
+        from tasks.atomic import atomic_write
+        atomic_write(Path(args.md), _report.render_markdown(rep))
+        print(f"markdown written: {args.md}")
+    return EXIT_OK
 
 
 def main(argv=None) -> int:

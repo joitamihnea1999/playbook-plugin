@@ -60,6 +60,35 @@ bench/runs/<run-id>/
   re-launched without `--resume`. Two launchers on one run id: the second is refused by
   the lock.
 
+## Adjudication and report
+
+`adjudicate <run-id>` first records every DETERMINISTIC match — a finding whose
+normalized `(file, symbol)` hits exactly one `truth.findings` entry (→ valid) or
+one keyed `known_rejects` entry (→ false positive). Collisions (two truth entries
+in one symbol) and novel findings go to you, one at a time:
+
+```
+m <truth-id>   same defect as that truth entry (this is how equivalence classes are assigned —
+               two candidates phrasing one defect differently both map to one id)
+v              valid-new: appended to the case's truth.json (deduped by file+symbol+failure mode),
+               truth_version bumped in truth.json AND case.json — historical silence is never
+               proof of invalidity
+r <reject-id>  matches a known reject (false positive)
+i / u / s / q  invalid (false positive) / unclear (stays pending) / skip / quit-and-save
+```
+
+`--auto` records only the deterministic pass (what the offline smoke uses).
+Decisions are saved after every answer in `adjudication.json`.
+
+`report <run-id> [--md out.md] [--weights 8,3,1]` renders per candidate: invocations by
+status (`ok` / `malformed` / `fail` / `timeout` / `dnf` / `excluded` — each its own column,
+so a DNF never looks like a bad score), valid, unique-valid (held by exactly one candidate
+in the case), valid by TRUTH severity, false positives + FP rate, pending, severity-weighted
+valid, tokens known/out, weighted per 1,000 known output tokens (the plan §25 decision rule),
+p50/p95 wall-clock, timeout/DNF rates, and a USD estimate only where both usage and a rate
+exist; then a per-case matrix of who caught what. The composite line is labeled with its
+weights and "point estimates only" (no bootstrap CIs in v1). Nothing derived is stored.
+
 ## Safety notes (read before `--live`)
 
 - **Real providers are opt-in.** `run` refuses unless exactly one of `--fake`
