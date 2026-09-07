@@ -289,7 +289,10 @@ def cmd_run(args) -> int:
               + (f", resuming ({len(done)} done, {torn} torn line(s) ignored → those pairs re-run)" if args.resume else ""))
         invocations = 0
         counts = {}
+        halted = None
         for case in selected:
+            if halted:
+                break
             skip = {lb for lb in labels if (case.id, lb) in done}
             repo_name = case.source.get("repo", "")
             source_repo = source_repos.get(repo_name)
@@ -317,9 +320,20 @@ def cmd_run(args) -> int:
                                        hard_timeout=args.timeout, concurrency=args.concurrency,
                                        skip=skip, on_result=_on_result)
             invocations += len(results)
+            # task 050 W0: a provider quota/credit refusal is deterministic until the
+            # provider's reset — launching the next case would only burn calls into the
+            # same wall. Finish this case's in-flight peers (run_case already did), then stop.
+            quota_seats = sorted({c.spec for c, inv in results
+                                  if inv.status == "dnf" and inv.note == _runner.QUOTA_NOTE})
+            if quota_seats:
+                halted = quota_seats
         summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         print(f"done: {invocations} invocations" + (f" ({summary})" if summary else "")
               + f" → {run_dir}")
+        if halted:
+            print(f"HALT: quota exhausted for {', '.join(halted)} — the remaining pairs were NOT "
+                  f"launched; re-run this exact command with --resume after the provider's reset "
+                  f"(the quota pairs are recorded as dnf and will be re-run).", flush=True)
         bad = sum(v for k, v in counts.items() if k in ("dnf", "timeout", "excluded"))
         return EXIT_DNF if bad else EXIT_OK
     finally:

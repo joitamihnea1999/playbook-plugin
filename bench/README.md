@@ -150,6 +150,16 @@ weights and "point estimates only" (no bootstrap CIs in v1). Nothing derived is 
   spend-journal line per actual invocation — nothing billed is dropped. Every attempt
   keeps its own raw file (`<case>.<seq>.txt`). Latency (p50/p95) is the final attempt's
   wall-clock and includes timed-out invocations.
+- **A provider quota/credit refusal is `dnf`, and it HALTS the run** (task 050). codex's
+  "You've hit your usage limit…" and an HTTP 402 "Payment Required" (grok Build) mean the judge
+  never reviewed; recording them as `fail` would make `--resume` treat the pair as finished and
+  silently lose it. `runner.is_quota_exhausted` matches a short signature list INSIDE a failure
+  envelope only (a review that discusses a "usage limit" is a review), the pair is written as
+  `dnf` with note `quota exhausted — halt; --resume after the reset`, no retry is attempted
+  (deterministic until the provider resets), the in-flight peers of the current case finish, no
+  further case is launched, and the run prints a `HALT:` line and exits 1. Re-run the exact same
+  command with `--resume` after the reset. A refusal worded outside the signature list degrades
+  to `fail` — extend `QUOTA_SIGNATURES` and re-classify by hand if a provider changes its text.
 - **Unique-valid is `n/a`, not 0, whenever some candidate in the manifest has no
   scorable result for a case** — uniqueness is only defined against peers that ran.
 - On Windows the argv-transport preflight applies the adapters' ~30k whole-command-line

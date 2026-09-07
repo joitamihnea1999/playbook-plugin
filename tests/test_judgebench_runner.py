@@ -168,6 +168,37 @@ class ClassifyTests(unittest.TestCase):
                     "caps one element at 131,072 bytes (MAX_ARG_STRLEN = 32 * PAGE_SIZE) and grok reads …)"):
             self.assertEqual(runner.classify(raw), ("dnf", False), raw[:40])
 
+    def test_quota_exhaustion_is_dnf_not_fail_and_never_retried(self):
+        # task 050 W0: a provider quota/credit refusal means the judge NEVER reviewed —
+        # recording it as `fail` would let --resume treat it as a finished (bad) review
+        # and lose the pair. It is `dnf`, deterministic (no retry until the reset).
+        codex = ("(FAILED — exit 1)\n[stderr tail]\nYou've hit your usage limit. Visit "
+                 "https://chatgpt.com/codex/settings/usage to purchase more credits")
+        codex_model = "(FAILED — exit 1)\n[stdout tail]\n You've hit your usage limit for gpt-5.6-sol. Upgrade to Pro"
+        grok_402 = "(FAILED — exit 1)\n[stderr tail]\nHTTP 402 Payment Required"
+        grok_credits = "(error: bench judge spawn failed: insufficient credits on this account)"
+        for raw in (codex, codex_model, grok_402, grok_credits):
+            with self.subTest(raw=raw[:40]):
+                self.assertTrue(runner.is_quota_exhausted(raw))
+                self.assertEqual(runner.classify(raw), ("dnf", False))
+                inv = runner.finish(raw, timed_out=False, duration_ms=7, retries=0)
+                self.assertEqual((inv.status, inv.note), ("dnf", runner.QUOTA_NOTE))
+        # Controls: the words inside a REVIEW or an unrelated failure never trigger it.
+        review = ("Free text mentions the usage limit check.\n\nFINDINGS:\n1. FILE: a.py\n   SYMBOL: f\n"
+                  "   SEVERITY: Minor\n   WHY: the payment required flag is never reset\nEND FINDINGS\n")
+        self.assertFalse(runner.is_quota_exhausted(review))
+        self.assertEqual(runner.classify(review), ("ok", False))
+        self.assertEqual(runner.finish(review, timed_out=False, duration_ms=1, retries=0).note, "")
+        other_fail = "(FAILED — exit 1)\n[stderr tail]\nthe file exceeds the size limit"
+        self.assertFalse(runner.is_quota_exhausted(other_fail))
+        self.assertEqual(runner.classify(other_fail), ("fail", False))
+        # A timeout that happens to mention credits is still a timeout.
+        self.assertEqual(runner.classify("(error: bench judge timed out; credits fine)"), ("timeout", False))
+        # The fake runner can script it, so the CLI halt is testable offline.
+        raw, timed_out = runner.FakeRunner.render({"status": "quota"})
+        self.assertFalse(timed_out)
+        self.assertTrue(runner.is_quota_exhausted(raw))
+
     def test_finish_distinguishes_ok_empty_malformed(self):
         ok = runner.finish("FINDINGS:\n1. FILE: a.py\n   SEVERITY: Minor\n   WHY: w\nEND FINDINGS\n",
                            timed_out=False, duration_ms=5, retries=0)

@@ -320,6 +320,42 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(records.latest_results(rd)["a"]["c-a"]["status"], "dnf")
         self.assertEqual(len(records.all_results(rd)["a"]), 2)           # latest-per-pair for report
 
+    def test_quota_exhaustion_halts_the_run_and_resume_retries_only_those_pairs(self):
+        # task 050 W0: the owner's brief — "if codex quota runs out mid-run, stop that run
+        # cleanly so I can resume it after the reset". A quota refusal on case c-a must
+        # (1) be recorded as dnf (not fail), (2) stop the run BEFORE case c-b spends any
+        # call, (3) say so, exit 1, and (4) leave exactly the halted pairs for --resume.
+        script = self.root / "script.json"
+        script.write_text(json.dumps({"c-a|a": {"status": "quota"}, "default": {"status": "ok"}}),
+                          encoding="utf-8")
+        p = self._run("--fake", "--fake-script", str(script))
+        self.assertEqual(p.returncode, 1, p.stderr + p.stdout)
+        self.assertIn("HALT", p.stdout)
+        self.assertIn("quota", p.stdout.lower())
+        self.assertIn("--resume", p.stdout)
+        rd = self.runs / "r1"
+        latest = records.latest_results(rd)
+        self.assertEqual(latest["a"]["c-a"]["status"], "dnf")
+        self.assertEqual(latest["a"]["c-a"]["note"], runner.QUOTA_NOTE)
+        self.assertEqual(latest["b"]["c-a"]["status"], "ok")            # the in-flight peer finished
+        self.assertNotIn("c-b", latest["a"]); self.assertNotIn("c-b", latest.get("b", {}))
+        self.assertIn("2 invocations", p.stdout)                          # c-b was never launched
+        done, _ = records.completed_pairs(rd, ["a", "b"])
+        self.assertEqual(done, {("c-a", "b")})
+        self.assertFalse((rd / ".lock").exists(), "lock released on halt")
+        # The spend journal has exactly the two invocations that happened — no phantom lines.
+        jl = rd / "journal" / "enforcement.jsonl"
+        self.assertEqual(len([x for x in jl.read_text(encoding="utf-8").splitlines() if x.strip()]), 2)
+        # --resume re-runs the quota pair first (same script → quota again → halts again
+        # before c-b): exactly ONE invocation, still exit 1. A real reset would let it through.
+        p = self._run("--fake", "--fake-script", str(script), "--resume")
+        self.assertEqual(p.returncode, 1, p.stderr + p.stdout)
+        self.assertIn("1 invocations", p.stdout)
+        self.assertIn("HALT", p.stdout)
+        recs, _ = records.read_results(rd, "a")
+        self.assertEqual([r["status"] for r in recs], ["dnf", "dnf"])   # history kept
+        self.assertNotIn("c-b", records.latest_results(rd)["a"])
+
     def test_resume_survives_adjudication_truth_version_bump_and_pins_script_and_concurrency(self):
         # impl-panel r2 sol #2 (truth_version must NOT be a resume key — it is not a judge
         # input), sol #3 (fake-script CONTENT pinned), sol #5 (concurrency pinned).

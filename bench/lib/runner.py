@@ -18,6 +18,9 @@ Classification over the REAL adapter envelope (`provider.sandbox.format_judge_ou
     "(error: …)" other                      → dnf, ONE retry (transport class)
     "(FAILED — exit N)" + "(no output captured)" → dnf, ONE retry (transport class)
     "(FAILED — exit N)" with output         → fail (data: the judge ran and broke)
+    either envelope + a QUOTA/CREDIT refusal → dnf, NO retry (task 050: the judge never
+                                              reviewed; deterministic until the provider's
+                                              reset — the run HALTS, `--resume` re-runs it)
     parseable output                        → ok (findings) | ok-empty | malformed
 
 `FakeRunner` scripts any of these per (case, candidate) and never touches an
@@ -137,6 +140,36 @@ class Invocation:
 
 # ── classification ───────────────────────────────────────────────────────────
 
+# Provider quota / credit refusals, matched case-insensitively INSIDE a failure envelope only
+# (`(FAILED …)` / `(error: …)`) — a review that merely discusses a "usage limit" is a review.
+# codex-cli 0.151.0 prints "You've hit your usage limit." (+ " for <model>", "Upgrade to
+# Plus/Pro", "purchase more credits"); grok Build answered HTTP 402 "Payment Required" in
+# 2026-08. Extend here when a provider changes its wording — a miss degrades to `fail`.
+QUOTA_SIGNATURES = (
+    "you've hit your usage limit",
+    "you have hit your usage limit",
+    "usage limit reached",
+    "usage_limit_reached",
+    "payment required",
+    "insufficient credits",
+    "insufficient balance",
+    "insufficient_quota",
+    "out of credits",
+    "credits depleted",
+    "spend control reached",
+)
+QUOTA_NOTE = "quota exhausted — halt; --resume after the reset"
+
+
+def is_quota_exhausted(raw: str) -> bool:
+    """True when a FAILURE envelope carries a provider quota/credit refusal."""
+    t = (raw or "").lstrip()
+    if not (t.startswith("(error:") or t.startswith("(FAILED")):
+        return False
+    low = t.lower()
+    return any(sig in low for sig in QUOTA_SIGNATURES)
+
+
 def classify(raw: str, timed_out: bool = False) -> tuple:
     """(status, retry_ok) over the real adapter envelope. Status is the spend
     enum from `tasks.review._judge_status` refined for the bench: a `(FAILED`
@@ -156,8 +189,12 @@ def classify(raw: str, timed_out: bool = False) -> tuple:
         # the same oversized prompt can only fail again.
         if "caps the command line" in low or "argv element" in low:
             return "dnf", False
+        if is_quota_exhausted(t):
+            return "dnf", False
         return "dnf", True
     if t.startswith("(FAILED"):
+        if is_quota_exhausted(t):
+            return "dnf", False
         if "(no output captured)" in t:
             return "dnf", True
         return "fail", False
@@ -176,15 +213,16 @@ def finish(raw: str, *, timed_out: bool, duration_ms: int, retries: int) -> Invo
         parsed = scoring.parse_findings(raw)
         if parsed.status == "malformed":
             status = "malformed"
+    note = QUOTA_NOTE if (status == "dnf" and is_quota_exhausted(raw)) else ""
     return Invocation(status=status, raw=raw or "", usage=usage, duration_ms=duration_ms,
-                      retries=retries, findings=parsed)
+                      retries=retries, findings=parsed, note=note)
 
 
 # ── runners ──────────────────────────────────────────────────────────────────
 
 class FakeRunner:
     """Scripted outputs; never touches an adapter. `script` maps
-    `"<case-id>|<label>"` (or `"default"`) → {"status": ok|empty|malformed|timeout|dnf|fail,
+    `"<case-id>|<label>"` (or `"default"`) → {"status": ok|empty|malformed|timeout|dnf|fail|quota,
     "findings": [{file, symbol, severity, why}], "raw": "...", "duration_ms": N}."""
     needs_tree = False
 
@@ -219,6 +257,9 @@ class FakeRunner:
             return "(error: fakecli not found on PATH)", False
         if status == "fail":
             return "(FAILED — exit 1)\n[stderr tail]\nboom", False
+        if status == "quota":
+            return ("(FAILED — exit 1)\n[stderr tail]\nYou've hit your usage limit. Visit "
+                    "https://chatgpt.com/codex/settings/usage to purchase more credits"), False
         raise ValueError(f"unknown fake status {status!r}")
 
     def invoke(self, case, candidate, package, tree, *, soft_timeout, hard_timeout) -> Invocation:
