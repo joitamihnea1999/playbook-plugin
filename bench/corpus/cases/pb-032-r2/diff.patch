@@ -1,0 +1,299 @@
+diff --git a/docs/guarantee-ledger.json b/docs/guarantee-ledger.json
+index 520e0e0..69d967f 100644
+--- a/docs/guarantee-ledger.json
++++ b/docs/guarantee-ledger.json
+@@ -40,15 +40,15 @@
+     {
+       "id": "PB-TASK-BLOCKED",
+       "category": "task-lifecycle",
+-      "statement": "tasks blocked refuses an empty reason, records the reason without touching gates or minting a heading, and tasks work on the blocked task restores in_progress.",
+-      "owner": [{"path": "plugins/playbook/tasks/lifecycle.py", "reference": "symbol:cmd_blocked"}, {"path": "plugins/playbook/tasks/core.py", "reference": "symbol:set_task_blocked"}, {"path": "plugins/playbook/tasks/core.py", "reference": "symbol:resume_blocked_task"}],
++      "statement": "tasks blocked refuses an empty reason, records the reason without touching gates or minting a heading, locates the `## Blocked` section fence-aware so a fenced `## Blocked`/`## Handoff` example in task.md cannot delete or mis-splice the `## Blocked`/`## Handoff` section, and tasks work on the blocked task restores in_progress.",
++      "owner": [{"path": "plugins/playbook/tasks/lifecycle.py", "reference": "symbol:cmd_blocked"}, {"path": "plugins/playbook/tasks/core.py", "reference": "symbol:set_task_blocked"}, {"path": "plugins/playbook/tasks/core.py", "reference": "symbol:resume_blocked_task"}, {"path": "plugins/playbook/tasks/core.py", "reference": "symbol:_live_section_span"}],
+       "failure_consequence": "Medium",
+       "claim_kind": "mechanical",
+-      "proofs": [{"type": "executable integration", "path": "tests/test_blocked_state.py", "reference": "BlockedEndToEnd.test_full_lifecycle", "boundary": "subprocess", "negative_control": {"path": "tests/test_blocked_state.py", "reference": "BlockedEndToEnd.test_blocked_requires_a_reason"}, "limitations": []}, {"type": "executable unit", "path": "tests/test_blocked_state.py", "reference": "SetBlockedPure.test_blocking_does_not_touch_gates", "boundary": "unit", "negative_control": null, "limitations": []}, {"type": "executable unit", "path": "tests/test_blocked_state.py", "reference": "SetBlockedPure.test_hostile_reason_cannot_forge_a_gate_or_heading", "boundary": "unit", "negative_control": null, "limitations": ["Despite its name this proof asserts only the GATE half: it compares tasks/core.py::_gate_counts before and after, which counts gate markers and not headings, then asserts the reason text round-trips. No assertion establishes that a hostile reason cannot create a Markdown heading."]}, {"type": "executable unit", "path": "tests/test_blocked_state.py", "reference": "SetBlockedPure.test_resume_flips_status_and_stamps", "boundary": "unit", "negative_control": null, "limitations": []}],
++      "proofs": [{"type": "executable integration", "path": "tests/test_blocked_state.py", "reference": "BlockedEndToEnd.test_full_lifecycle", "boundary": "subprocess", "negative_control": {"path": "tests/test_blocked_state.py", "reference": "BlockedEndToEnd.test_blocked_requires_a_reason"}, "limitations": []}, {"type": "executable unit", "path": "tests/test_blocked_state.py", "reference": "SetBlockedPure.test_blocking_does_not_touch_gates", "boundary": "unit", "negative_control": null, "limitations": []}, {"type": "executable unit", "path": "tests/test_blocked_state.py", "reference": "SetBlockedPure.test_hostile_reason_cannot_forge_a_gate_or_heading", "boundary": "unit", "negative_control": null, "limitations": ["Despite its name this proof asserts only the GATE half: it compares tasks/core.py::_gate_counts before and after, which counts gate markers and not headings, then asserts the reason text round-trips. No assertion establishes that a hostile reason cannot create a Markdown heading."]}, {"type": "executable unit", "path": "tests/test_blocked_state.py", "reference": "SetBlockedPure.test_resume_flips_status_and_stamps", "boundary": "unit", "negative_control": null, "limitations": []}, {"type": "executable unit", "path": "tests/test_blocked_state.py", "reference": "SetBlockedFenceAware.test_set_blocked_ignores_fenced_decoy", "boundary": "unit", "negative_control": {"path": "tests/test_blocked_state.py", "reference": "SetBlockedFenceAware.test_normal_block_and_resume_byte_identical"}, "limitations": ["Asserts the fence-safety of set_task_blocked (a fenced `## Blocked` decoy is neither deleted nor stranded, and the fence-aware reader finds the live reason); the negative control asserts the ordinary no-fence block/resume output is byte-identical to the pre-fix shape. resume_blocked_task's fence-safety is covered by SetBlockedFenceAware.test_resume_ignores_fenced_decoy."]}, {"type": "executable integration", "path": "tests/test_handoff.py", "reference": "FenceAndContainment.test_handoff_e2e_ignores_fenced_blocked_decoy", "boundary": "subprocess", "negative_control": {"path": "tests/test_handoff.py", "reference": "HandoffSection.test_blocks_with_reason_handoff_no_gate_touched"}, "limitations": ["End-to-end proof that the real `tasks handoff` command (write_handoff + set_task_blocked) leaves a fenced `## Blocked` example and the surrounding record byte-intact; the negative control is the ordinary no-fence handoff-block flow."]}, {"type": "executable unit", "path": "tests/test_blocked_state.py", "reference": "SetBlockedFenceAware.test_set_blocked_ignores_trailing_content_fence_closer", "boundary": "unit", "negative_control": {"path": "tests/test_blocked_state.py", "reference": "SetBlockedFenceAware.test_normal_block_and_resume_byte_identical"}, "limitations": ["Proves `_iter_nonfenced` applies the CommonMark closer rule (a ```lang line inside a fence is content, not a closer) so a nested-fence example does not close early and expose an interior `## Blocked` as live — the two task.md fence scanners now share opener/closer rules."]}],
+       "applicable_platforms": ["linux", "macos", "windows-git-bash"],
+       "applicable_providers": ["claude"],
+       "status": "partially_evidenced",
+-      "missing_evidence_or_limitation": ["The `minting a heading` clause is not asserted by any bound proof. Both SetBlockedPure proofs compare only tasks/core.py::_gate_counts, which counts line-anchored gate markers and not headings, so they establish gate-count preservation and not heading containment. Reproduced by mutation: a /tmp copy of plugins/playbook/tasks/core.py with the one-line reason collapse removed from set_task_blocked writes a real `## Fake Heading` at line start, and BOTH bound proofs stay green.", "The no-heading guarantee is retained because current production behavior is correct: set_task_blocked collapses the reason to one line and renders it as a blockquote, which is what prevents the forged heading. The gap is in the evidence, not in the product; no runtime change is made or needed here.", "An exact regression proof - assert that no new Markdown heading appears at line start after a hostile reason, alongside the existing gate-count assertion - is scheduled for Phase 3; adding it is a product-test change and is deliberately NOT performed in Phase 1.", "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.", "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."],
++      "missing_evidence_or_limitation": ["Fence-safety scope: the new proofs cover the section-rewriting WRITERS on the blocked/handoff path (set_task_blocked, resume_blocked_task) and their fence-aware readers — the fence-aware clause is scoped to the `## Blocked`/`## Handoff` SECTION, not the whole task record. Still fence-blind, deliberately out of this guarantee's scope and parked (task 032): (a) the STATUS pair _set_status/_extract_status + the reopen writer lifecycle.py::cmd_work, which set_task_blocked/resume call FIRST on the same invocation — a fenced `## Status` example is written/read at the last (fenced) heading, clobbering the example line while the real status stays stale; fixing it requires lockstep changes to the bash/awk `## Status` reader in the stop-hook (parity test test_blocked_state.py::BlockedEndToEnd.test_duplicate_status_headings_hook_agrees_with_python), a cross-language enforcement-path change; (b) the non-corrupting READERS extract_parked_items/_extract_problem/retro._extract_section, which can misread (never rewrite) a fenced example.", "Fence-scanner residual (disclosed, best-effort — same posture as PB-CLOSE-VERIFY-CONTRACT's raw-content-crafting bound): `_iter_nonfenced` and `_closed_fence_line_indices` now apply the SAME CommonMark opener (backtick-info rejected) and closer (whitespace-only) rules, but remain two implementations and still diverge on (a) a 4-space-INDENTED ATX heading, which both `_live_section_span` and write_handoff's `_section_span` treat as an H2 boundary after stripping indentation (codex-terra #2), and (b) an UNCLOSED fence, where `_iter_nonfenced` skips to EOF while `_closed_fence_line_indices` treats the remainder as live. Adversarially-malformed committed task.md can still desync the parser; human review of the diff + the OS sandbox are the containment. Converging the two scanners onto one strict implementation and handling indented ATX headings is parked as a dedicated follow-up.", "The `minting a heading` clause is not asserted by any bound proof. Both SetBlockedPure proofs compare only tasks/core.py::_gate_counts, which counts line-anchored gate markers and not headings, so they establish gate-count preservation and not heading containment. Reproduced by mutation: a /tmp copy of plugins/playbook/tasks/core.py with the one-line reason collapse removed from set_task_blocked writes a real `## Fake Heading` at line start, and BOTH bound proofs stay green.", "The no-heading guarantee is retained because current production behavior is correct: set_task_blocked collapses the reason to one line and renders it as a blockquote, which is what prevents the forged heading. The gap is in the evidence, not in the product; no runtime change is made or needed here.", "An exact regression proof - assert that no new Markdown heading appears at line start after a hostile reason, alongside the existing gate-count assertion - is scheduled for Phase 3; adding it is a product-test change and is deliberately NOT performed in Phase 1.", "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.", "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."],
+       "follow_up_phases": [3],
+       "required_live_evidence": [],
+       "semantic_protocol": null,
+diff --git a/plugins/playbook/tasks/core.py b/plugins/playbook/tasks/core.py
+index 62c0560..59529f0 100644
+--- a/plugins/playbook/tasks/core.py
++++ b/plugins/playbook/tasks/core.py
+@@ -955,20 +955,51 @@ def _iter_nonfenced(lines: "list[str]"):
+     fence_len = 0
+     for i, line in enumerate(lines):
+         stripped = line.strip().lstrip("﻿")
+-        fm = re.match(r"^(`{3,}|~{3,})", stripped)
++        fm = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
+         if fence_char:
++            # Closer (CommonMark): same char, length >= opener, and NOTHING but
++            # whitespace after the run — a ```lang line inside a fence is content,
++            # not a closer. Matches `_closed_fence_line_indices` so the two
++            # task.md fence scanners agree on where a fence ends (panel: codex).
+             if (fm and fm.group(1)[0] == fence_char
+-                    and len(fm.group(1)) >= fence_len):
++                    and len(fm.group(1)) >= fence_len
++                    and fm.group(2).strip() == ""):
+                 fence_char = ""
+                 fence_len = 0
+             continue
+         if fm:
++            # Opener (CommonMark): a BACKTICK fence whose info string contains a
++            # backtick is not a fence — same rule as `_closed_fence_line_indices`.
++            if fm.group(1)[0] == "`" and "`" in fm.group(2):
++                yield i, stripped
++                continue
+             fence_char = fm.group(1)[0]
+             fence_len = len(fm.group(1))
+             continue
+         yield i, stripped
+ 
+ 
++def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
++    """[start, end) of the first NON-FENCED level-2 `## {title}` section, or None.
++    `title` includes the `## ` prefix. `end` is the first non-fenced H2 strictly
++    after start (a fenced heading, or the section's own H3s, never end it).
++
++    Shared by the block-state writers (set_task_blocked / resume_blocked_task) and
++    mirrors the local `_section_span` inside write_handoff — every section-locating
++    WRITER on the task.md path must be fence-aware so a fenced `## Blocked` /
++    `## Handoff` example (documentation of the ritual) can never be treated as the
++    live section and delete or mis-splice the real record (the #09 hazard; P1
++    parked by the 1.5.39 panel)."""
++    nf = list(_iter_nonfenced(lines))
++    start = next((i for i, s in nf if s == title), None)
++    if start is None:
++        return None
++    end = next((i for i, s in nf
++                if i > start and s.startswith("## ") and not s.startswith("### ")),
++               len(lines))
++    return (start, end)
++
++
+ def extract_risk(task_file) -> str:
+     """Read the `## Risk` classification from a task.md — the token on the line
+     after the heading. Returns one of RISK_CLASSES, or 'unclassified' if the
+@@ -2199,19 +2230,16 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
+     clean = " ".join(reason.split()) or "(no reason given)"
+     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
+     _set_status(task_file, "blocked")
+-    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+-    # Drop any prior ## Blocked section (idempotent re-block), then append fresh.
+-    out, skip = [], False
+-    for line in lines:
+-        if line.strip() == "## Blocked":
+-            skip = True
+-            continue
+-        if skip:
+-            if line.startswith("## "):
+-                skip = False
+-                out.append(line)
+-            continue
+-        out.append(line)
++    out = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
++    # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
++    # fresh. Fence-aware (P1): a `## Blocked` quoted inside a fenced example is not
++    # the section, so the delete can never strand an unclosed fence or swallow the
++    # real record. Loop because a re-block may find more than one live section.
++    while True:
++        span = _live_section_span(out, "## Blocked")
++        if span is None:
++            break
++        out = out[:span[0]] + out[span[1]:]
+     while out and out[-1].strip() == "":
+         out.pop()
+     out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
+@@ -2224,20 +2252,14 @@ def resume_blocked_task(task_file: Path) -> None:
+     _set_status(task_file, "in_progress")
+     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
+     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+-    out, i, n, stamped = [], 0, len(lines), False
+-    while i < n:
+-        out.append(lines[i])
+-        if lines[i].strip() == "## Blocked":
+-            i += 1
+-            while i < n and not lines[i].startswith("## "):
+-                out.append(lines[i])
+-                i += 1
+-            out.append(f"> Resumed {ts}")
+-            stamped = True
+-            continue
+-        i += 1
+-    if stamped:
+-        _atomic_write(task_file, "\n".join(out) + "\n")
++    # Fence-aware (P1): stamp only the LIVE ## Blocked section, never a fenced
++    # `## Blocked` example. The stamp lands at the end of the section's body (right
++    # before the next live H2 / EOF), byte-identical to the pre-fix placement.
++    span = _live_section_span(lines, "## Blocked")
++    if span is None:
++        return
++    out = lines[:span[1]] + [f"> Resumed {ts}"] + lines[span[1]:]
++    _atomic_write(task_file, "\n".join(out) + "\n")
+ 
+ 
+ # ── Session handoff (C1) ─────────────────────────────────────────────────────
+diff --git a/tests/test_blocked_state.py b/tests/test_blocked_state.py
+index 50eb67e..c7405cc 100644
+--- a/tests/test_blocked_state.py
++++ b/tests/test_blocked_state.py
+@@ -109,6 +109,111 @@ class SetBlockedPure(unittest.TestCase):
+         self.assertIsNone(_find_active_task(proj), "a blocked task must not be active")
+ 
+ 
++class SetBlockedFenceAware(unittest.TestCase):
++    """P1 (parked by the 1.5.39 panel): the block-state WRITERS must locate the
++    `## Blocked` section fence-aware, exactly as the handoff writer/readers already
++    do (core._iter_nonfenced). A task.md that quotes a fenced `## Blocked` example
++    (documentation of the ritual) must not have that example — or the real record —
++    deleted or mis-spliced. write_handoff was made fence-safe in Session C; this
++    covers the writers it CALLS (set_task_blocked / resume_blocked_task)."""
++
++    def _core(self):
++        import tasks.core as core
++        return core
++
++    def _task(self, body):
++        d = Path(tempfile.mkdtemp())
++        tf = d / "task.md"
++        tf.write_text(body, encoding="utf-8")
++        return tf
++
++    # A fenced `## Blocked` example sits BEFORE the real content it must not eat.
++    DECOY = (
++        "# T\n\n## Status\npending\n\n"
++        "## Docs\nFor reference, the blocked format looks like:\n"
++        "```\n## Blocked\n> example reason  (since 2000-01-01T00:00)\n```\n\n"
++        "## Work Plan\n- [x] G1: done\n- [ ] G2: real gate\n"
++    )
++
++    def test_set_blocked_ignores_fenced_decoy(self):
++        core = self._core()
++        tf = self._task(self.DECOY)
++        core.set_task_blocked(tf, "REALPAUSE waiting on owner")
++        text = tf.read_text(encoding="utf-8")
++        # The fenced example is untouched: both fences survive (balanced), and its
++        # body is byte-intact — the writer never reached into the fence.
++        self.assertEqual(text.count("```"), 2,
++                         "fence-blind delete stranded an unclosed fence")
++        self.assertIn("> example reason  (since 2000-01-01T00:00)", text,
++                      "the fenced example body was deleted")
++        # The real block reason is live and readable by the fence-aware reader —
++        # on the buggy writer the fresh section lands inside the broken fence and
++        # the reader (correctly) sees nothing live.
++        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE waiting on owner")
++        # The real Work Plan H2 and its gate survive.
++        self.assertIn("## Work Plan", text)
++        self.assertIn("- [ ] G2: real gate", text)
++
++    def test_resume_ignores_fenced_decoy(self):
++        core = self._core()
++        tf = self._task(
++            "# T\n\n## Status\nblocked\n\n"
++            "## Docs\n```\n## Blocked\n> example\n```\n\n"
++            "## Blocked\n> real reason  (since 2000-01-01T00:00)\n")
++        core.resume_blocked_task(tf)
++        text = tf.read_text(encoding="utf-8")
++        # Exactly ONE resume stamp — on the LIVE blocked section, never the fenced
++        # example (the fence-blind writer stamps both).
++        self.assertEqual(text.count("> Resumed"), 1,
++                         "resume stamped the fenced example too")
++        self.assertEqual(core._extract_status(tf), "in_progress")
++        # The fenced example is byte-intact.
++        self.assertIn("```\n## Blocked\n> example\n```", text)
++
++    def test_set_blocked_ignores_trailing_content_fence_closer(self):
++        # Panel (codex-sol/#1, codex-terra/#1): `_iter_nonfenced` must apply the
++        # CommonMark closer rule — a ```lang line inside a fence is CONTENT, not a
++        # closer (only a whitespace-only run closes). Otherwise the fence "closes"
++        # early and the `## Blocked` after it reads as live → mis-splice. This
++        # aligns the block path with the stricter `_closed_fence_line_indices`.
++        core = self._core()
++        tf = self._task(
++            "# T\n\n## Status\npending\n\n"
++            "## Docs\n```\nexample code\n```text\n## Blocked\n> decoy reason\n```\n\n"
++            "## Work Plan\n- [ ] G1: real gate\n")
++        core.set_task_blocked(tf, "REALPAUSE")
++        text = tf.read_text(encoding="utf-8")
++        # The whole fenced example is preserved and balanced (2 opener/closer runs).
++        self.assertEqual(text.count("```"), 3)
++        self.assertIn("> decoy reason", text)
++        self.assertIn("- [ ] G1: real gate", text)
++        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
++
++    def test_normal_block_and_resume_byte_identical(self):
++        # Negative control: with NO fenced heading, output must be byte-identical
++        # to the pre-fix shape (captured from current behavior; only the ISO
++        # timestamps vary). This is what proves the fence-aware rewrite did not
++        # perturb the ordinary block/resume path.
++        import re
++        core = self._core()
++        tf = self._task(
++            "# T\n\n## Status\npending\n\n## Work Plan\n- [ ] G1\n")
++
++        def norm(s):
++            return re.sub(r"20\d\d-\d\d-\d\dT[0-9:+\-]+", "TS", s)
++
++        core.set_task_blocked(tf, "pause here")
++        self.assertEqual(
++            norm(tf.read_text(encoding="utf-8")),
++            "# T\n\n## Status\nblocked\n\n## Work Plan\n- [ ] G1\n\n"
++            "## Blocked\n> pause here  (since TS)\n\n")
++        core.resume_blocked_task(tf)
++        self.assertEqual(
++            norm(tf.read_text(encoding="utf-8")),
++            "# T\n\n## Status\nin_progress\n\n## Work Plan\n- [ ] G1\n\n"
++            "## Blocked\n> pause here  (since TS)\n\n> Resumed TS\n")
++
++
+ class BlockedEndToEnd(unittest.TestCase):
+     def setUp(self):
+         self._tmp = tempfile.TemporaryDirectory()
+diff --git a/tests/test_handoff.py b/tests/test_handoff.py
+index ef7f2ef..beb3b5e 100644
+--- a/tests/test_handoff.py
++++ b/tests/test_handoff.py
+@@ -255,6 +255,37 @@ class FenceAndContainment(_Base):
+         self.assertEqual(out3.count("### Archived handoff"), 2,
+                          "both prior handoffs must be archived")
+ 
++    def test_handoff_e2e_ignores_fenced_blocked_decoy(self):
++        # P1 (parked by the 1.5.39 panel): `tasks handoff` → set_task_blocked must
++        # NOT corrupt a task.md that quotes a fenced `## Blocked` example. This is
++        # the end-to-end proof: write_handoff was already fence-safe, but the
++        # blocked-state writer it calls was not, so the whole command inherited the
++        # corruption. Run the real subprocess CLI.
++        core = self._core()
++        d, td = self._project()
++        (td / "task.md").write_text(
++            "# 001 - Demo\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n"
++            "## Work Plan\n- [x] G1\n- [ ] G2\n\n"
++            "## Docs\nFor reference, the blocked format:\n"
++            "```\n## Blocked\n> example  (since 2000-01-01T00:00)\n```\n\n"
++            "## Keepers\n- [ ] must survive\n",
++            encoding="utf-8")
++        r = _cli(d, "handoff")
++        self.assertEqual(r.returncode, 0, r.stderr)
++        text = (td / "task.md").read_text(encoding="utf-8")
++        # Fences stay balanced — no stranded, unclosed fence.
++        self.assertEqual(text.count("```"), 2,
++                         "handoff's blocked-writer stranded an unclosed fence")
++        # The fenced example body survives byte-intact.
++        self.assertIn("> example  (since 2000-01-01T00:00)", text)
++        # The real later section survives.
++        self.assertIn("## Keepers", text)
++        self.assertIn("must survive", text)
++        # The live block reason is the handoff (fence-aware reader finds it); the
++        # handoff section is present.
++        self.assertEqual(core._extract_block_reason(td / "task.md"), "handoff")
++        self.assertIn("## Handoff", text)
++
+     def test_block_reason_ignores_fenced_decoy(self):
+         # A fenced `## Blocked` / `> handoff` example must not fake the reason;
+         # the REAL block reason wins.

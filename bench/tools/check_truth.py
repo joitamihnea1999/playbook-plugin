@@ -135,9 +135,9 @@ def check_spec_regenerates(case, workspaces: dict) -> tuple:
     recorded = case.meta.get("spec_source_sha256")
     if recorded and hashlib.sha256(raw).hexdigest() != recorded:
         return "drift", "source task.md drifted since the case was frozen (digest differs) — regeneration not judged"
-    deletions = [e["delete"] for e in case.meta.get("spec_edits", []) if isinstance(e, dict) and "delete" in e]
+    edits = [e for e in case.meta.get("spec_edits", []) if isinstance(e, dict)]
     try:
-        regen = apply_spec_edits(package.reconstruct_spec(raw.decode("utf-8", errors="replace")), deletions)
+        regen = apply_spec_edits(package.reconstruct_spec(raw.decode("utf-8", errors="replace")), edits)
     except ToolError as exc:
         return "fail", f"spec.md does not regenerate: {exc}"
     if regen != case.spec_path.read_text(encoding="utf-8", errors="replace"):

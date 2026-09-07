@@ -1,0 +1,59 @@
+{
+  "findings": [
+    {
+      "id": "C1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "write_handoff",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "write_handoff and the section readers treat a `## Handoff`/`## Blocked`/`## Verification Receipt` quoted inside a FENCED code block as a live section, so the writer can delete through the next real heading (codex:sol#1, codex:terra#3).",
+      "fix_commit": "eefadee",
+      "fix_evidence": "def _iter_nonfenced(lines"
+    },
+    {
+      "id": "I1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_git_repo_summary",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The code_root git summary does not enforce own-toplevel/containment like C2's strict fingerprint: a plain subdirectory reports the ANCESTOR repo and a symlink escapes (codex:sol#4, codex:terra#4).",
+      "fix_commit": "eefadee",
+      "fix_evidence": "require_own_toplevel"
+    },
+    {
+      "id": "I2",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_git_repo_summary",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "_git_repo_summary reports 'clean' when `git status` FAILS (returncode != 0), masking a degraded repo (opus, sonnet#1).",
+      "fix_commit": "eefadee",
+      "fix_evidence": "`dirty` is None when HEAD read but"
+    },
+    {
+      "id": "P1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "write_handoff",
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "A handoff is three separate durable writes (section, status, block reason); a crash between them leaves an inconsistent record (codex:sol#2, codex:terra#1; parked, same multi-write class as blocked)."
+    },
+    {
+      "id": "P2",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "A stale concurrent session could resurrect a closed task: cmd_handoff trusts its session pointer and writes blocked unconditionally (codex:terra#2; parked, identical to cmd_blocked's model)."
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "M1",
+      "claim": "the dirty-file count does not use `git status -uall` (5 files in one untracked dir count as 1)",
+      "why_rejected": "The count is a human-readable orientation hint, not a fingerprint; a rough count is fine.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_git_repo_summary"
+    }
+  ]
+}

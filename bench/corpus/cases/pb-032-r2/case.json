@@ -1,0 +1,30 @@
+{
+  "id": "pb-032-r2",
+  "source": {
+    "workspace": "playbook-plugin-dev",
+    "task": "032",
+    "repo": "playbook-plugin"
+  },
+  "repo_base_sha": "0168ecd88219c4bb000449f1197c06ccb8d7e6ef",
+  "diff_of": "d552031b8ca54d74132da9815891c2bff7924b1f..0168ecd88219c4bb000449f1197c06ccb8d7e6ef",
+  "diff_excludes": [],
+  "spec_source_sha256": "eff8956ebcddfd69ca2ba2929f7b57a1c0e84e7a0f6f063f8343f794ca8d8ee6",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "bugfix",
+  "area": "enforcement",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "Round 2 of 4; the reviewed tree is the tree after the round-1 fix. A residual-defect case: the panel found the SAME loose-closer bug in the risk classifier (a gate bypass, Critical) that round 1 fixed only in the blocked writers. Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 2,
+    "rounds_total": 4,
+    "fix_commits": [
+      "ab1649c"
+    ],
+    "evidence": "Round 2 re-ran the panel on the post-round-1-fix tree (task.md 'Round 2 (re-ran panel on the post-fix tree …)'), i.e. 0168ecd (15:42); its accepts (the _risk_heading_lines Critical + the indentation consolidation + the mid-file byte-identical test) are exactly the content of ab1649c 'unify task.md fence parsing on one scanner; close risk-gate bypass' (16:12). Accumulated diff from the task's base 24fcc91^."
+  }
+}

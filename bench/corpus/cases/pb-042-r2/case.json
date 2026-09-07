@@ -1,0 +1,30 @@
+{
+  "id": "pb-042-r2",
+  "source": {
+    "workspace": "playbook-plugin-dev",
+    "task": "042",
+    "repo": "playbook-plugin"
+  },
+  "repo_base_sha": "36dda9f31f768d9e24b0e9b3ff605a33bfbe9a16",
+  "diff_of": "fdc1cd8b6612f9cf0e6dfc5b07b8090818f9becd..36dda9f31f768d9e24b0e9b3ff605a33bfbe9a16",
+  "diff_excludes": [],
+  "spec_source_sha256": "6ff1101dfd7e96886348c45d2bb9105694f4bdf2cf324b39060b5c77521b8233",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Never born checked:** write each gate BEFORE you do its step, then check it — a gate may never be born checked. To record work you already finished, add the gate unchecked, then check it in a SEPARATE edit with its outcome note.\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "feature",
+  "area": "enforcement",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "Plan §4.2 treated 36dda9f as round 1; the snapshot + commit contents show it is the post-round-1 tree, so this case reproduces round 2. Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 2,
+    "rounds_total": 4,
+    "fix_commits": [
+      "104bc98"
+    ],
+    "evidence": "Snapshots: the oldest judge.md round names playbook-plugin=fdc1cd8* (dirty, pre-commit) — round 1 ran on the uncommitted feature; 36dda9f (22:58) then committed feature + round-1 fixes F1-F8 (the round-1 triage's fixes — self-quote guard, judge-archive rounds, PIPE_BUF caps — are in 36dda9f, and 104bc98's diff is _cap_int + _seat_with_effort + the timeout tests = R2-F1/F2/F3). So the tree at 36dda9f is what the round-2 panel (snapshot playbook-plugin=36dda9f) reviewed; fixes 104bc98 (23:14)."
+  }
+}

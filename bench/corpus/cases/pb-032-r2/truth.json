@@ -1,0 +1,51 @@
+{
+  "findings": [
+    {
+      "id": "C1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_risk_heading_lines",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The risk classifier has the same loose fence closer: a fenced `## Risk\\nreversible` example mis-closed by a ```lang or ≥4-space marker is read as live and shadows the real `## Risk\\nassertive`, so an assertive task closes on the reversible bar with no panel (codex:sol; gate bypass, violates PB-RISK-CLASSIFY).",
+      "fix_commit": "ab1649c",
+      "fix_evidence": "Sharing the scanner closes that gate bypass."
+    },
+    {
+      "id": "I1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_iter_nonfenced",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "_iter_nonfenced still strips ALL indentation, recognizing ≥4-space fence markers unlike _closed_fence_line_indices (≤3), so the two scanners still disagree and the 'share the same rules' claim overreaches (opus, sonnet, codex:sol, codex:terra converged).",
+      "fix_commit": "ab1649c",
+      "fix_evidence": "A second hand-rolled scanner drifted on"
+    },
+    {
+      "id": "O1",
+      "file": "tests/test_blocked_state.py",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The byte-identical control only covers the EOF resume case, not a `## Blocked` placed before a later live H2 mid-file; coverage gap, no behavior change needed (opus).",
+      "fix_commit": "ab1649c",
+      "fix_evidence": "test_resume_stamp_byte_identical_mid_file"
+    },
+    {
+      "id": "T1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_live_section_span",
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "Indented / `##\\t` ATX heading treated as a section boundary in _live_section_span (codex:terra; parked — writer and reader share the rule)."
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "S2",
+      "claim": "handoff + blocked-status are two separate atomic writes (crash-between)",
+      "why_rejected": "Already parked as P2 (task 030); unchanged from round 1.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "set_task_blocked"
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "findings": [
+    {
+      "id": "R2-1",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "_tail_cert_review_diff",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "A tracked doc dirty at F0 then reverted to HEAD still exists, yields no diff hunk and is not in the reverted list, so the tail-cert judge is shown nothing for it and certifies blind (opus#1, codex:sol#3, grok#3).",
+      "fix_commit": "e032d92",
+      "fix_evidence": "def _tail_cert_review_diff(project_path, snapshot, non_behavioral)"
+    },
+    {
+      "id": "R2-3",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "_tail_cert_review_diff",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Materializing untracked certifiable paths with raw read_bytes() follows symlinks (exfiltrates e.g. /tmp/secret into the judge prompt) and blocks forever on a FIFO before the timeout is armed (codex:sol#1, grok#1).",
+      "fix_commit": "e032d92",
+      "fix_evidence": "_safe_read_regular"
+    },
+    {
+      "id": "R2-4",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "parse_tail_cert_verdict",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Verdict token injection: a reviewed doc containing a literal 'TAIL-CERT: PASS' line, echoed by the judge, self-certifies because the verdict token is predictable (grok#2).",
+      "fix_commit": "e032d92",
+      "fix_evidence": "def _tail_cert_verdict_re(nonce"
+    },
+    {
+      "id": "R2-5",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "parse_tail_cert_verdict",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "CRLF: a judge emitting 'TAIL-CERT: PASS\\r\\n' never matches the verdict regex, so a Windows judge always blocks (grok#4).",
+      "fix_commit": "e032d92",
+      "fix_evidence": "[ \\t]*\\r?$"
+    },
+    {
+      "id": "R2-6",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "_tail_cert_review_diff",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The git diff subprocess calls use text=True with no encoding and no returncode check, so a non-locale byte or a failing git crashes `tasks work done` instead of degrading (grok#5, codex:sol#5).",
+      "fix_commit": "e032d92",
+      "fix_evidence": "A best-effort unified diff (encoding-safe, rc-checked"
+    },
+    {
+      "id": "R2-2",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "run_tail_cert_judge",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The tail-cert judge spawn lacks the _snapshot_repo_state/_detect_tamper backstop the panel and single-judge paths have; a repo mutated during certification still yields a verdict (opus#2).",
+      "fix_commit": "e032d92",
+      "fix_evidence": "_detect_tamper_safe(project_path, None, _tb)"
+    },
+    {
+      "id": "R2-S1",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "run_tail_cert_judge",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "budget_usd is hardcoded to \"10\", bypassing the project's judge_budget_usd config (sonnet#1).",
+      "fix_commit": "e032d92",
+      "fix_evidence": "budget_usd=resolve_judge_budget(project_path)"
+    },
+    {
+      "id": "R2-STUB",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "_run_tail_cert_judge_raw",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The PLAYBOOK_TAIL_CERT_JUDGE_CMD env seam guarded by default_judge == '__test_stub__' is still a production force-PASS path because .agent/models.json is gitignored and per-install (codex:sol#2; rejected in round 2, conceded and removed in round 3).",
+      "fix_commit": "2064484",
+      "fix_evidence": "There is NO ambient production seam"
+    },
+    {
+      "id": "R2-P1",
+      "file": "plugins/playbook/tasks/lifecycle.py",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "Close-time TOCTOU between the freshness CAS and the receipt/status write: a concurrent writer racing `tasks work done` can ship code the CAS did not see (codex:sol#4; pre-existing F4 scenario, parked)."
+    },
+    {
+      "id": "R2-P2",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "_tail_cert_review_diff",
+      "severity": "Minor",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "No aggregate size cap across many untracked docs in the certification prompt; a huge combined prompt only fails closed via the judge timeout (sonnet#2; parked)."
+    }
+  ],
+  "known_rejects": []
+}

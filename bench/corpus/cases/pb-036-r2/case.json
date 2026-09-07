@@ -1,0 +1,46 @@
+{
+  "id": "pb-036-r2",
+  "source": {
+    "workspace": "playbook-plugin-dev",
+    "task": "036",
+    "repo": "playbook-plugin"
+  },
+  "repo_base_sha": "0714585b8f71f1f1eb1fbddd0dbaf21dac6180d8",
+  "diff_of": "726f177b0b08af23c561350a6da6bff25bb5a60a..0714585b8f71f1f1eb1fbddd0dbaf21dac6180d8",
+  "diff_excludes": [
+    "docs/guarantee-ledger.json",
+    "tests/test_tail_certification.py"
+  ],
+  "spec_source_sha256": "57927d4f53a2c98c14524e6ac221aead09f4adf9177d97a314c86bb4a5436838",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    },
+    {
+      "replace": [
+        "after a quorum-PASS impl panel at tree F0",
+        "after a quorum-PASS implementation panel at tree F0"
+      ]
+    },
+    {
+      "replace": [
+        "> **⚠ READ FIRST — the Plan Review triage (findings A–H, above) SUPERSEDES/HARDENS these W-gates.** The plan panel reshaped the design materially. Apply, per gate: ",
+        "> **Design amendments, per gate:** "
+      ]
+    }
+  ],
+  "kind": "feature",
+  "area": "enforcement",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "Plan §3.1 said feature 0714585 -> round-1 A-H -> fix e032d92; the repository shows 0714585 is the POST-round-1 tree, so this case reproduces round 2. Excluded from diff.patch for the 90k budget: docs/guarantee-ledger.json (36 KB for 8 changed entries) and the NEW test file tests/test_tail_certification.py (31 KB) — both are present in the snapshot tree the judge can read; every truth finding is in core.py/review.py. Spec edits: the task.md template preamble blockquote deleted (agent instructions; trips leak_scan on 'triage narrative'); 'impl panel' -> 'implementation panel' once in Intent (domain text about tail certification, trips the impl-panel regex); the Work Plan's 'READ FIRST — the Plan Review triage (findings A–H) …' lead-in replaced by 'Design amendments, per gate:' (written after the PLAN review, before implementation — legitimately pre-impl-review spec, but it names dropped plan-review findings). Judge text for rounds 1-6 is trimmed from judge.md (pointer at judge.md:497); truth wording comes from the triage in task-archive.md:22-34. Severity labels are the triage's.",
+  "mapping": {
+    "round": 2,
+    "rounds_total": 11,
+    "fix_commits": [
+      "e032d92",
+      "2064484"
+    ],
+    "evidence": "0714585 (08-27 16:57) ALREADY contains the round-1 fixes I1-I8 (__test_stub__, is_outer_scope, --name-status present at 0714585, absent at 0714585^); round 1 ran on the dirty pre-commit tree (audit receipt 16:37:13). So the tree at 0714585 is what ROUND 2 reviewed (task-archive.md 'ROUND 2 (tree 723769546254, after the I1-I8 fixes)'); its accepts were fixed in e032d92 'round-2 hardening' (17:15). sol#2 (__test_stub__ seam) was REJECTED in round 2, but the round-3 triage concedes that defense was factually wrong and 2064484 removed the seam — recorded as truth because the defect existed in the reviewed tree."
+  }
+}

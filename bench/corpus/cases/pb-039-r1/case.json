@@ -1,0 +1,30 @@
+{
+  "id": "pb-039-r1",
+  "source": {
+    "workspace": "playbook-plugin-dev",
+    "task": "039",
+    "repo": "playbook-plugin"
+  },
+  "repo_base_sha": "74f42be746da8d7613be838878854121d5d2a146",
+  "diff_of": "861b400ecf31e76b2cc909b285e035f234d81f6a..74f42be746da8d7613be838878854121d5d2a146",
+  "diff_excludes": [],
+  "spec_source_sha256": "7a8c3c5fadcd717180c8b95f8cb3020ecf7691a61ddbeb9eaf3a7f7cebe52917",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "refactor",
+  "area": "enforcement",
+  "difficulty": "medium",
+  "truth_version": 1,
+  "notes": "Plan §4.2 named V1 34d3ce2 as the reviewed commit; the snapshot proves round 1 reviewed 74f42be (V7 + CRLF fix). Accumulated diff from 34d3ce2^ (the pre-task base). codex:terra's 'MIND_MAP node [6] stale' accept is about the OUTER workspace's MIND_MAP.md (not in this repo) and is omitted; codex:sol #4 'V7 parked, not a real task' is a process accept (task 043 created), omitted. Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 1,
+    "rounds_total": 4,
+    "fix_commits": [
+      "a0f86a3"
+    ],
+    "evidence": "Deterministic: the oldest judge.md round's Panel-snapshot names playbook-plugin=74f42be (clean); V1-V7 + the CRLF fix 74f42be were all committed BEFORE the first panel (audit receipt 22:40:07 vs V1 22:05 … 74f42be 00:58 → the audit dates the plan-review, the impl panel ran after 74f42be). Round-1 triage ('### Triage (panel PASS 4/5; grok = 402 infra)') accepts → V8 a0f86a3 (01:25), whose diff is the strict risk-path routing + the 5 red-first tests the triage names."
+  }
+}

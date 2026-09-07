@@ -1,0 +1,30 @@
+{
+  "id": "pb-020-r1",
+  "source": {
+    "workspace": "playbook-plugin-dev",
+    "task": "020",
+    "repo": "playbook-plugin"
+  },
+  "repo_base_sha": "3c261ef21176fd0ff268b600a9dba0ec2cfb543a",
+  "diff_of": "a07726426fbe7610f324c2378caf7c88e92158c7..3c261ef21176fd0ff268b600a9dba0ec2cfb543a",
+  "diff_excludes": [],
+  "spec_source_sha256": "22f2b989295704b22eff380ee4d7c6d16dc9f3b190e0efd7a3b4b9c20847c9c0",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "feature",
+  "area": "enforcement",
+  "difficulty": "easy",
+  "truth_version": 1,
+  "notes": "Single-round task; the plan listed 020 as possible bait but the panel accepted three behavioral fixes, so it is a truth case. Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 1,
+    "rounds_total": 1,
+    "fix_commits": [
+      "eefadee"
+    ],
+    "evidence": "Audit receipt 01:40:05 → commit 3c261ef 01:40:33 (28 s) → one impl panel; its triage accepts (fenced-heading writers, code_root containment, status-failure clean) are exactly eefadee 'harden `tasks handoff` per impl panel (C1)' (01:53) — its 5 new tests match the three accepts."
+  }
+}

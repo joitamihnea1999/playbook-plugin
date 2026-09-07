@@ -1,0 +1,30 @@
+{
+  "id": "pb-039-r2",
+  "source": {
+    "workspace": "playbook-plugin-dev",
+    "task": "039",
+    "repo": "playbook-plugin"
+  },
+  "repo_base_sha": "a0f86a3b6bb6a77eab2eedd9cdec13322b8e1f60",
+  "diff_of": "861b400ecf31e76b2cc909b285e035f234d81f6a..a0f86a3b6bb6a77eab2eedd9cdec13322b8e1f60",
+  "diff_excludes": [],
+  "spec_source_sha256": "7a8c3c5fadcd717180c8b95f8cb3020ecf7691a61ddbeb9eaf3a7f7cebe52917",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "refactor",
+  "area": "enforcement",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "Round 2 of 4; reviewed tree = after the V8 fixes; residual defects. Accumulated diff from 34d3ce2^. opus #3 (P-F fenced-Status stays live, already disclosed) and the RESOLVED 'stale evidence' items are process notes, omitted. Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 2,
+    "rounds_total": 4,
+    "fix_commits": [
+      "f0f559c"
+    ],
+    "evidence": "Deterministic: judge.md round with Panel-snapshot playbook-plugin=a0f86a3 (V8, clean). Round-2 triage ('### Re-panel (round 2) triage') accepts → V9 f0f559c (01:47) 'round-2 panel fixes — unclosed-fence value + central closing-hash', whose tests match the triage items."
+  }
+}

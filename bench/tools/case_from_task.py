@@ -83,20 +83,26 @@ def prompt_size(spec: str, diff: str) -> tuple:
     return len(prompt), len(prompt.encode("utf-8"))
 
 
-def apply_spec_edits(spec: str, deletions: list) -> str:
+def apply_spec_edits(spec: str, edits: list) -> str:
     """Hand edits as an EXECUTABLE transformation (plan-panel codex:sol #3): each entry
-    is an exact substring deleted once, in order; a missing substring is an error so a
-    stale edit list can never silently do nothing."""
-    for text in deletions or []:
-        if text not in spec:
-            raise ToolError(f"--delete text not found in the reconstructed spec: {text[:60]!r}")
-        spec = spec.replace(text, "", 1)
+    is `{"delete": text}` or `{"replace": [old, new]}`, applied once, in order; a
+    missing substring is an error so a stale edit list can never silently do nothing."""
+    for e in edits or []:
+        if "delete" in e:
+            old, new = e["delete"], ""
+        elif "replace" in e:
+            old, new = e["replace"]
+        else:
+            raise ToolError(f"unknown spec edit {e!r}")
+        if old not in spec:
+            raise ToolError(f"spec edit text not found in the reconstructed spec: {old[:60]!r}")
+        spec = spec.replace(old, new, 1)
     return spec
 
 
 def build_case(*, workspace: Path, task: str, repo: Path, reviewed: str, case_id: str, kind: str,
                area: str, difficulty: str, repo_name: str, excludes: list, notes: str, out_dir: Path,
-               base: str = None, deletions: list = None, mapping: dict = None) -> dict:
+               base: str = None, edits: list = None, mapping: dict = None) -> dict:
     tdir = find_task_dir(workspace, task)
     reviewed_sha = resolve_commit(repo, reviewed)
     if base:
@@ -112,7 +118,7 @@ def build_case(*, workspace: Path, task: str, repo: Path, reviewed: str, case_id
         raise ToolError(f"case dir already exists: {case_dir} (cases are frozen; never overwrite)")
     task_md_bytes = (tdir / "task.md").read_bytes()
     task_md = task_md_bytes.decode("utf-8", errors="replace")
-    spec = apply_spec_edits(package.reconstruct_spec(task_md), deletions)
+    spec = apply_spec_edits(package.reconstruct_spec(task_md), edits)
     leaks = package.leak_scan(spec)
     paths = changed_paths(repo, base_sha, reviewed_sha)
     excl = compute_excludes(paths, excludes)
@@ -125,7 +131,7 @@ def build_case(*, workspace: Path, task: str, repo: Path, reviewed: str, case_id
         "diff_of": f"{base_sha}..{reviewed_sha}",
         "diff_excludes": excl,
         "spec_source_sha256": hashlib.sha256(task_md_bytes).hexdigest(),
-        "spec_edits": [{"delete": d} for d in (deletions or [])],
+        "spec_edits": list(edits or []),
         "kind": kind, "area": area, "difficulty": difficulty,
         "truth_version": 1,
         "notes": notes or f"round↔commit mapping: TODO (built from {tdir.name}; reviewed {reviewed_sha[:10]})",
@@ -162,6 +168,8 @@ def main(argv=None) -> int:
                     help="pre-feature commit for a later-round case: diff = base..reviewed (default: reviewed^)")
     ap.add_argument("--delete", action="append", default=[], metavar="TEXT",
                     help="exact text to delete from the reconstructed spec (recorded in spec_edits)")
+    ap.add_argument("--replace", action="append", default=[], metavar="OLD=NEW",
+                    help="exact text to replace once in the reconstructed spec (recorded in spec_edits)")
     ap.add_argument("--round", type=int, default=None, help="which historical panel round this case reproduces")
     ap.add_argument("--rounds-total", type=int, default=None)
     ap.add_argument("--fix-commit", action="append", default=[], help="commit(s) carrying that round's fixes")
@@ -171,11 +179,18 @@ def main(argv=None) -> int:
     if a.round is not None or a.fix_commit or a.evidence or a.rounds_total is not None:
         mapping = {"round": a.round, "rounds_total": a.rounds_total, "fix_commits": list(a.fix_commit),
                    "evidence": a.evidence}
+    edits = [{"delete": d} for d in a.delete]
+    for spec in a.replace:
+        old, sep, new = spec.partition("=")
+        if not sep:
+            print("error: --replace expects OLD=NEW")
+            return 2
+        edits.append({"replace": [old, new]})
     try:
         res = build_case(workspace=a.workspace, task=a.task, repo=a.repo, reviewed=a.reviewed,
                          case_id=a.case_id, kind=a.kind, area=a.area, difficulty=a.difficulty,
                          repo_name=a.repo_name or Path(a.repo).resolve().name, excludes=a.exclude,
-                         notes=a.notes, out_dir=a.out, base=a.base, deletions=a.delete, mapping=mapping)
+                         notes=a.notes, out_dir=a.out, base=a.base, edits=edits, mapping=mapping)
     except ToolError as exc:
         print(f"error: {exc}")
         return 2

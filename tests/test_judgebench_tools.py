@@ -614,6 +614,19 @@ class PanelHardeningTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("spec.md", out)
 
+    def test_replace_edit_is_applied_recorded_and_regenerable(self):
+        rc, out = self._build("r1", self.fx.c1, "--replace", "Callers need it.=Downstream callers need it.")
+        self.assertEqual(rc, 0, out)
+        cdir = self.fx.out / "cases" / "r1"
+        spec = (cdir / "spec.md").read_text(encoding="utf-8")
+        self.assertIn("Downstream callers need it.", spec)
+        meta = json.loads((cdir / "case.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["spec_edits"], [{"replace": ["Callers need it.", "Downstream callers need it."]}])
+        self._index("r1"); self._truth("r1", self._good())
+        rc, out = self._check("--workspace", f"ws={self.fx.ws}")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("spec regenerates", out)
+
     def test_delete_text_that_is_absent_is_an_error(self):
         rc, out = self._build("r1", self.fx.c1, "--delete", "this sentence is not in the spec")
         self.assertEqual(rc, 2)

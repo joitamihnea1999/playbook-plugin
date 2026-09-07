@@ -1,0 +1,43 @@
+{
+  "findings": [
+    {
+      "id": "T1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "extract_risk",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "An UNCLOSED fence hiding a second `## Risk\\nassertive` below a visible `## Risk\\nreversible` still yields reversible, so a classified-but-ambiguous risk closes on the lenient bar (codex:terra).",
+      "fix_commit": "f0f559c",
+      "fix_evidence": "if _has_unclosed_fence(lines):\n        return DEFAULT_RISK"
+    },
+    {
+      "id": "C1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_atx_h2_text",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Closing-hash normalization exists only on the risk path: `## Blocked ##` / `## Handoff ##` (valid ATX) make _live_section_span and _extract_block_reason return None, so writers append duplicates and readers miss the section (sonnet, codex:sol, codex:terra convergent).",
+      "fix_commit": "f0f559c",
+      "fix_evidence": "return f\"## {_ATX_CLOSING_HASHES_RE.sub('', m.group(1))}\""
+    },
+    {
+      "id": "O2",
+      "file": "tests/test_fence_scanner.py",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The reader-fail-open / writer-fail-closed asymmetry on a handoff under an unclosed fence is disclosed by design but unpinned by any test (opus#2; test-only accept).",
+      "fix_commit": "f0f559c",
+      "fix_evidence": "test_reader_open_writer_closed_asymmetry_under_unclosed_fence"
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "SB",
+      "claim": "a bare empty `##` heading returns None from _atx_h2_text",
+      "why_rejected": "A bare `##` never matches any real section title, so it has no consequence; not applicable.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_atx_h2_text"
+    }
+  ]
+}

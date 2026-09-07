@@ -1,0 +1,58 @@
+{
+  "findings": [
+    {
+      "id": "R2-F1",
+      "file": "plugins/playbook/scripts/pb_journal.py",
+      "symbol": "append_review",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "round / duration_ms / usage in,out are magnitude-uncapped, so a pathological caller (1000-digit int) writes a ~4 KB line, contradicting the assertive 'every field is bounded' claim (opus, codex:sol#2, codex:terra).",
+      "fix_commit": "104bc98",
+      "fix_evidence": "def _cap_int(v: int) -> int:"
+    },
+    {
+      "id": "R2-F2",
+      "file": "tests/test_review_spend_journal.py",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The single-judge TIMEOUT emit path (the 'or timeout' clause, _to_changes gating, late-bound seat/round) has no test (opus).",
+      "fix_commit": "104bc98",
+      "fix_evidence": "test_timeout_records_timeout_status"
+    },
+    {
+      "id": "R2-F3",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "cmd_single_review",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Seat attribution records `claude:opus` although claude always runs `--effort high`; the owner's literal model:effort seat spec is not honored for claude (codex:sol#5, codex:terra; re-raised from round-1 F8).",
+      "fix_commit": "104bc98",
+      "fix_evidence": "def _seat_with_effort(provider_name, variant):"
+    },
+    {
+      "id": "R2-F4",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": null,
+      "severity": "Minor",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "Single-judge duration_ms includes the prompt build (_spend_t0 starts before prompt_fn); negligible, parked (codex:terra)."
+    },
+    {
+      "id": "R2-F5",
+      "file": "plugins/playbook/tasks/review.py",
+      "symbol": "_tail_cert_seat",
+      "severity": "Minor",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "The tail-cert seat re-resolves default_judge after completion, so a concurrent models.json edit could mislabel the seat; sub-second window, parked (codex:sol#3)."
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "R2-F6",
+      "claim": "'tamper records nothing' narrows 'every judge invocation'; emit the spend record before the tamper hard-stop",
+      "why_rejected": "A journal write before the banner can hang on a hostile FIFO lane and suppress the banner — the exact class earlier rounds fixed; kept as-is pending owner ratification.",
+      "file": "plugins/playbook/tasks/review.py"
+    }
+  ]
+}

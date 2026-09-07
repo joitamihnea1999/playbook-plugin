@@ -1,0 +1,56 @@
+{
+  "findings": [
+    {
+      "id": "O1",
+      "file": "docs/guarantee-ledger.json",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The PB-TASK-BLOCKED ledger statement overreaches: set_task_blocked calls the fence-blind _set_status first, so a fenced `## Status` example is clobbered while the real status stays stale; the guarantee text must scope the hazard to the Blocked/Handoff splice (opus).",
+      "fix_commit": "0168ecd",
+      "fix_evidence": "mis-splice the `## Blocked`/`## Handoff` section"
+    },
+    {
+      "id": "S1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_iter_nonfenced",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Loose fence closer: a ```lang line inside a fence is treated as the closer (CommonMark requires a whitespace-only closer, and a backtick info string is not an opener), so the fence-aware section locator mis-splices task.md (codex:sol#1, codex:terra#1).",
+      "fix_commit": "0168ecd",
+      "fix_evidence": "and fm.group(2).strip() == \"\"):"
+    },
+    {
+      "id": "O2",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_iter_nonfenced",
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "Two divergent fence scanners (_iter_nonfenced vs _closed_fence_line_indices) disagree on fence rules; opener/closer rules unified here, full convergence parked (opus, self-flagged low-confidence)."
+    },
+    {
+      "id": "T2",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_live_section_span",
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "A 4-space-indented `## ` line (indented code, not a heading) ends a real section in the span locator (codex:terra#2; parked, writer and reader agree)."
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "S2",
+      "claim": "handoff + blocked-status are two separate atomic writes; a crash between them leaves an inconsistent state",
+      "why_rejected": "Verbatim the P2 finding already parked by the 1.5.39 panel (task 030); out of P1 scope.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "set_task_blocked"
+    },
+    {
+      "id": "SN",
+      "claim": "`not s.startswith(\"### \")` is unreachable dead code in _live_section_span",
+      "why_rejected": "Harmless; kept deliberately for byte-parity with write_handoff._section_span; sonnet raised no finding.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_live_section_span"
+    }
+  ]
+}

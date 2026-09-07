@@ -1,0 +1,53 @@
+{
+  "findings": [
+    {
+      "id": "O1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "has_risk_section",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "V4 reopened P-C on the risk path: a sole `## Risk\\nassertive` indented ≥4 columns after a blank line makes has_risk_section False and extract_risk unclassified → the lenient legacy close applies to a task whose gate WAS offered (opus).",
+      "fix_commit": "a0f86a3",
+      "fix_evidence": "def _any_risk_heading_offered(lines"
+    },
+    {
+      "id": "S1",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "extract_risk",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "An indented `## Risk` with no preceding blank line (CommonMark: ≥4-indent is code) is read as a live classification, e.g. `## Docs\\n    ## Risk\\n    reversible` → reversible (codex:sol#1).",
+      "fix_commit": "a0f86a3",
+      "fix_evidence": "norm = _normalize_atx_title(_atx_h2_text(lines[i]))"
+    },
+    {
+      "id": "S2",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_risk_heading_lines",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "A NBSP-led ` ## Risk` line (not an ATX heading) is read as a live risk value (codex:sol#2).",
+      "fix_commit": "a0f86a3",
+      "fix_evidence": "a NBSP-led line is not a heading"
+    },
+    {
+      "id": "S3",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_risk_heading_lines",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "A CommonMark closing-hash heading `## Risk ##` is not recognized, so has_risk_section is False and the close goes legacy-lenient (codex:sol#3).",
+      "fix_commit": "a0f86a3",
+      "fix_evidence": "_ATX_CLOSING_HASHES_RE = re.compile"
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "S1b",
+      "claim": "track paragraph context (prev_blank) in the V4 indented-code scanner as a separate fix",
+      "why_rejected": "The concrete exploit is closed by routing the risk/section paths through _atx_h2_text (≤3-space rejects ≥4-indent regardless of prev_blank); no separate change.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_iter_fenced_flags"
+    }
+  ]
+}

@@ -1,0 +1,1177 @@
+diff --git a/docs/enforcement-journal.md b/docs/enforcement-journal.md
+new file mode 100644
+index 0000000..7504047
+--- /dev/null
++++ b/docs/enforcement-journal.md
+@@ -0,0 +1,110 @@
++# Enforcement journal — record shapes
++
++Playbook appends a best-effort, **log-only** journal of what its enforcement and
++review machinery did, one JSON object per line, to the lane-resolved
++`.agent/<lane>/journal/enforcement.jsonl` (root lane:
++`.agent/journal/enforcement.jsonl`). It exists so an external reader — e.g.
++**playbook-lens** (a separate repo) — can attribute enforcement decisions and
++review spend after the fact.
++
++**Hard contract (every writer):** a journal write failure NEVER changes or
++breaks any decision or review. Each record is a single `O_APPEND` write of one
++line, with no `fsync` and no locking; POSIX makes an append of at most
++`PIPE_BUF` bytes atomic against concurrent appenders, so lines from separate
++processes (parallel panel seats, multi-lane) do not interleave while a record
++stays under that bound (≥512 bytes everywhere; 4096 on Linux). String fields are
++byte-capped so real records stay well under 512 bytes. The journal is only ever
++created inside an already-existing playbook-managed lane — `.agent` itself is
++never minted as a side effect.
++
++Writers live in `scripts/pb_journal.py` (`append`, `append_review`) and its bash
++twin `scripts/gate-echo-lib.sh::journal_enforcement`. Guarantees:
++`PB-ENFORCEMENT-JOURNAL` (enforcement decisions) and `PB-REVIEW-SPEND-JOURNAL`
++(review spend).
++
++## Common envelope
++
++Every record carries these keys:
++
++| key          | type   | meaning                                                        |
++|--------------|--------|---------------------------------------------------------------|
++| `ts`         | string | UTC timestamp, `YYYY-MM-DDTHH:MM:SSZ`                          |
++| `session_id` | string | emitting session id (may be empty)                            |
++| `hook`       | string | which surface emitted it (see below)                          |
++| `decision`   | string | one of `allow` \| `block` \| `record`                         |
++| `reason`     | string | short fixed reason string                                     |
++
++A reader MUST tolerate unknown future keys and unknown `hook`/`decision` values
++rather than erroring — this is a log, and the repo's format is the source of
++truth.
++
++## Family 1 — enforcement decisions (`decision` = `allow` / `block` / `record`)
++
++Emitted by the gate/guard/stop/batch hooks and by the close path. `hook` is one
++of `task-gate`, `command-guard`, `stop`, `gate-batch-check`, or `close`.
++`task-gate` writes `allow` or `block`; `command-guard`/`stop`/`gate-batch-check`
++write `block`; the **close** path writes a `record` (`hook="close"`,
++`reason="verify contract"`) logging the verify bar a close ran. Optional fields:
++`tool`, `path`, `command` (the command head, capped). See
++`PB-ENFORCEMENT-JOURNAL`.
++
++## Family 2 — review spend (`hook` = `review`, `decision` = `record`)
++
++Emitted by the review runner (`tasks/review.py`) for **every judge invocation** —
++each panel seat, the single judge, and the tail-cert judge — via
++`pb_journal.append_review`, on its completion or timeout. The one exception is a
++**tamper hard-stop**: if a read-only judge mutated the working tree, the review
++emits its tamper banner and stops, recording **no** spend — the journal write
++must never precede that banner (a hostile-tree hang inside it could suppress the
++banner, the "operation-before-banner" class the tamper guard is built around),
++so every path emits only past the tamper check. `reason` is `"review spend"`.
++Additional fields:
++
++| key           | type          | meaning                                                            |
++|---------------|---------------|--------------------------------------------------------------------|
++| `kind`        | string        | `panel` \| `single` \| `tail-cert`                                 |
++| `seat`        | string        | the judge spec, `model` or `model:effort` (e.g. `claude:opus`)     |
++| `task`        | string        | task number (`"042"`) or `"-"` for a taskless / `--prompt` review  |
++| `round`       | int           | review iteration (see the round note below); `0` = unknown         |
++| `duration_ms` | int, optional | wall time of the judge subprocess in milliseconds (absent if unknown) |
++| `status`      | string        | `ok` \| `fail` \| `timeout` \| `dnf` (did-not-finish / spawn error)|
++| `usage`       | object        | token usage — see the usage note below                            |
++
++On a **panel**, one record lands per seat, all sharing the same `round`.
++
++Example:
++
++```json
++{"ts":"2026-09-01T16:41:19Z","session_id":"pid-123","hook":"review","decision":"record","reason":"review spend","kind":"panel","seat":"claude:opus","task":"042","round":3,"duration_ms":48210,"status":"ok","usage":{"status":"unknown"}}
++```
++
++### The `usage` field — honest bounds
++
++`usage` is always present and always exactly one of two shapes: the explicit
++marker `{"status":"unknown"}`, or `{"status":"known","in":<int>,"out":<int>}`.
++`append_review` **normalizes** it to that fixed schema — an arbitrary caller dict
++is never copied verbatim (that would blow the PIPE_BUF bound), and a non-int
++token count degrades to `unknown`. **Numbers are never fabricated.**
++
++In practice `usage` is `unknown` almost always: the claude judge runs in
++plain-text mode (no `--output-format json`), and codex/grok do not surface
++per-call tokens on this path. The parser is **anchored to a structured
++envelope** — it recognizes claude's real JSON usage shape
++(`{"usage":{"input_tokens":…,"output_tokens":…}}`) only when the judge's ENTIRE
++output parses as that one JSON object. This is deliberate: a bare substring
++search would let a judge that merely *quotes* a usage-shaped string in its prose
++poison the field with a fabricated number. Free-form review prose never parses as
++a single JSON object, so it can never trip it. Populating real token counts would
++require a future switch to structured judge output — a reader should treat
++`unknown` as the common case and `known` as a bonus, never assume tokens are
++present.
++
++### The `round` field — best-effort
++
++`round` counts existing panel rounds + 1, summed across BOTH `judge.md` and its
++overflow sibling `judge-archive.md` (judge.md retains only the newest 5 rounds
++and archives the rest, so counting judge.md alone would cap the round at 6). For
++a **panel** it is the iteration this panel becomes; for **single** and
++**tail-cert** it is an approximate spend-correlation hint (those do not add a
++`judge.md` round), not an exact iteration index. `0` means it could not be
++determined.
+diff --git a/docs/guarantee-ledger.json b/docs/guarantee-ledger.json
+index 7681522..7b6c820 100644
+--- a/docs/guarantee-ledger.json
++++ b/docs/guarantee-ledger.json
+@@ -9572,7 +9572,133 @@
+         "Atomicity bound (documented honestly): each record is one O_APPEND write (bash: a single `printf >>`; python: one os.write) with no fsync and no locking. Concurrent appenders from separate hook processes do not interleave only while a record stays under PIPE_BUF (>=512 bytes; 4096 on Linux); the command/path fields are capped so real records stay well under that, and the write is best-effort — it never affects a decision.",
+         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here; the grok/codex command-guard journal path is retained in code but EXPERIMENTAL (no support claim, no live evidence).",
+         "windows-git-bash is not live-tested for this feature; the bash emitter uses only portable builtins plus `date`, and the python emitter uses stdlib os.open with O_APPEND.",
+-        "Owner-ratified decision (M173, R5 2026-08-26): the `decision` contract is {allow, block, record} and the close path emits `record` (was the out-of-contract `verify-contract`). External consumers of this journal (e.g. playbook-lens) that do not yet know `record` will flag it as an unexpected decision until they add it — expected, one-time skew, theirs to update; this repo's format is the source of truth."
++        "Owner-ratified decision (M173, R5 2026-08-26): the `decision` contract is {allow, block, record} and the close path emits `record` (was the out-of-contract `verify-contract`). External consumers of this journal (e.g. playbook-lens) that do not yet know `record` will flag it as an unexpected decision until they add it — expected, one-time skew, theirs to update; this repo's format is the source of truth.",
++        "Sibling surface (task 042, owner decision 2026-09-01): the review runner also appends `record` lines with hook=\"review\" (reason=\"review spend\") for every judge invocation — a separate observability guarantee, PB-REVIEW-SPEND-JOURNAL, owns that shape and its evidence. This entry stays scoped to the ENFORCEMENT-decision emitters (hook != \"review\")."
++      ],
++      "follow_up_phases": [],
++      "required_live_evidence": [],
++      "semantic_protocol": null,
++      "violation_reproduction": null
++    },
++    {
++      "id": "PB-REVIEW-SPEND-JOURNAL",
++      "category": "judges-and-reviews",
++      "statement": "Every judge invocation the review runner makes — each panel seat, the single judge, and the tail-cert judge — appends, on its completion or timeout, one best-effort, log-only spend record to the lane-resolved .agent/<lane>/journal/enforcement.jsonl via pb_journal.append_review, sharing the enforcement envelope (hook=\"review\", decision=\"record\", reason=\"review spend\") plus the fields kind (panel|single|tail-cert), seat, task, round, duration_ms, status (ok|fail|timeout|dnf), and usage. The one exception is a tamper hard-stop, which records nothing so the journal write can never precede and suppress the tamper banner. Token usage is recorded only WHERE the CLI reports it as a structured JSON envelope, else the explicit marker {\"status\":\"unknown\"}, and append_review normalizes usage to the fixed {status[,in,out]} schema — numbers are never fabricated and free-form judge prose can never poison the field. A journal write failure never changes or breaks a review or any decision, every field is bounded so the record is one O_APPEND line under PIPE_BUF, and the journal is never created outside an existing playbook-managed lane.",
++      "owner": [
++        {
++          "path": "plugins/playbook/scripts/pb_journal.py",
++          "reference": "symbol:append_review"
++        },
++        {
++          "path": "plugins/playbook/scripts/pb_journal.py",
++          "reference": "symbol:_write_record"
++        },
++        {
++          "path": "plugins/playbook/scripts/pb_journal.py",
++          "reference": "symbol:_normalize_usage"
++        },
++        {
++          "path": "plugins/playbook/tasks/review.py",
++          "reference": "symbol:_journal_review_spend"
++        },
++        {
++          "path": "plugins/playbook/tasks/review.py",
++          "reference": "symbol:_parse_judge_usage"
++        },
++        {
++          "path": "plugins/playbook/tasks/review.py",
++          "reference": "symbol:cmd_panel_review"
++        },
++        {
++          "path": "plugins/playbook/tasks/review.py",
++          "reference": "symbol:cmd_single_review"
++        },
++        {
++          "path": "plugins/playbook/tasks/review.py",
++          "reference": "symbol:run_tail_cert_judge"
++        }
++      ],
++      "failure_consequence": "Low",
++      "claim_kind": "mechanical",
++      "proofs": [
++        {
++          "type": "executable unit",
++          "path": "tests/test_review_spend_journal.py",
++          "reference": "AppendReviewFormat.test_envelope_and_fields_pinned",
++          "boundary": "unit",
++          "negative_control": {
++            "path": "tests/test_review_spend_journal.py",
++            "reference": "AppendReviewFormat.test_unwritable_lane_is_silent_noop"
++          },
++          "limitations": []
++        },
++        {
++          "type": "executable unit",
++          "path": "tests/test_review_spend_journal.py",
++          "reference": "PanelSpendE2E.test_one_record_per_seat",
++          "boundary": "unit",
++          "negative_control": null,
++          "limitations": [
++            "Drives cmd_panel_review in-process with a faked run_headless_judge and two claude seats; asserts one record per seat sharing the panel round."
++          ]
++        },
++        {
++          "type": "executable unit",
++          "path": "tests/test_review_spend_journal.py",
++          "reference": "SingleSpendE2E.test_one_single_record",
++          "boundary": "unit",
++          "negative_control": {
++            "path": "tests/test_review_spend_journal.py",
++            "reference": "SingleSpendE2E.test_unwritable_journal_changes_nothing"
++          },
++          "limitations": [
++            "Decision-independence is proved by making the journal dir a regular file so the append hard-fails; the review's exit code and judge.log are byte-for-byte identical to the writable-journal run."
++          ]
++        },
++        {
++          "type": "executable unit",
++          "path": "tests/test_review_spend_journal.py",
++          "reference": "TailCertSpendE2E.test_tail_cert_records_one",
++          "boundary": "unit",
++          "negative_control": {
++            "path": "tests/test_review_spend_journal.py",
++            "reference": "TailCertSpendE2E.test_tail_cert_tamper_records_nothing"
++          },
++          "limitations": [
++            "Drives run_tail_cert_judge in-process with a faked raw judge; the negative control asserts a tamper hard-stop records nothing, and TamperRecordsNothing.test_panel_tamper_no_records pins the same rule for the panel."
++          ]
++        },
++        {
++          "type": "executable unit",
++          "path": "tests/test_review_spend_journal.py",
++          "reference": "SpendHelpers.test_parse_usage_prose_quote_is_never_fabricated",
++          "boundary": "unit",
++          "negative_control": {
++            "path": "tests/test_review_spend_journal.py",
++            "reference": "SpendHelpers.test_parse_usage_unknown_and_known"
++          },
++          "limitations": [
++            "Pins the anti-fabrication anchor: a judge that merely quotes a usage-shaped string in prose is NOT recorded as real usage (only a whole-output JSON envelope is); AppendReviewFormat.test_usage_normalized_not_copied_verbatim pins the fixed-schema normalization + PIPE_BUF bound."
++          ]
++        }
++      ],
++      "applicable_platforms": [
++        "linux",
++        "macos",
++        "windows-git-bash"
++      ],
++      "applicable_providers": [
++        "claude"
++      ],
++      "status": "verified_by_current_executable_evidence",
++      "missing_evidence_or_limitation": [
++        "Owner-ratified observability addition (decision 2026-09-01): review-spend records, same class and hard contract as the enforcement journal (PB-ENFORCEMENT-JOURNAL). Log-only; the reader/analytics (playbook-lens) is a SEPARATE repo and consumes this shape — no reader tooling ships here.",
++        "Token usage is honestly `unknown` in practice: the claude judge runs in plain-text mode (no --output-format json) and codex/grok do not surface per-call tokens on this path, so the usage parser (anchored to a whole-output JSON envelope, so free-form prose can never poison it) records {\"status\":\"unknown\"} unless a real structured usage envelope appears; it never fabricates numbers. Populating real token counts would require a future switch to structured judge output.",
++        "The `round` field is best-effort: it sums panel rounds across judge.md + judge-archive.md + 1, so for single/tail-cert it is an approximate spend-correlation hint rather than an exact iteration index.",
++        "Evidence exercises the provider-agnostic Python emit path via claude seats (panel + single + tail-cert). codex/grok/experimental seats traverse the identical emit (usage always unknown for them), so applicable_providers is scoped to claude where there is executable evidence.",
++        "A tamper hard-stop on any review path records NO spend by design — the journal write must never precede the tamper banner (a hostile-tree hang inside it could suppress the banner). Pinned by TailCertSpendE2E.test_tail_cert_tamper_records_nothing + TamperRecordsNothing.test_panel_tamper_no_records.",
++        "Atomicity bound (same as PB-ENFORCEMENT-JOURNAL): one O_APPEND os.write with no fsync/locking; concurrent appenders (parallel panel seats, multi-lane) do not interleave only while a record stays under PIPE_BUF (>=512 bytes; 4096 on Linux). Every field — session_id, seat, kind, task, status, and the normalized usage — is bounded so real records stay well under that.",
++        "windows-git-bash / macos are not separately live-tested for this feature; the emitter is stdlib os.open with O_APPEND, identical to the enforcement journal's python path."
+       ],
+       "follow_up_phases": [],
+       "required_live_evidence": [],
+diff --git a/plugins/playbook/scripts/pb_journal.py b/plugins/playbook/scripts/pb_journal.py
+index ac38a89..bd46522 100644
+--- a/plugins/playbook/scripts/pb_journal.py
++++ b/plugins/playbook/scripts/pb_journal.py
+@@ -92,16 +92,6 @@ def append(agent_dir, hook, decision, reason, session_id="",
+     inside it; `.agent` is never minted here.
+     """
+     try:
+-        if not agent_dir:
+-            return
+-        agent_dir = Path(agent_dir)
+-        if not agent_dir.is_dir():          # playbook-managed lane only
+-            return
+-        jdir = agent_dir / "journal"
+-        try:
+-            jdir.mkdir(exist_ok=True)       # inside an existing lane; not `.agent`
+-        except OSError:
+-            pass                            # e.g. path is a file — the open below fails, swallowed
+         rec = {
+             "ts": _utcnow(),
+             "session_id": session_id or "",
+@@ -115,17 +105,117 @@ def append(agent_dir, hook, decision, reason, session_id="",
+             rec["path"] = path
+         if command:
+             rec["command"] = _head(command)
+-        data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+-        fd = os.open(str(jdir / "enforcement.jsonl"),
+-                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+-        try:
+-            os.write(fd, data)              # single append; atomic under PIPE_BUF
+-        finally:
+-            os.close(fd)
++        _write_record(agent_dir, rec)
+     except Exception as exc:                # defence in depth: never propagate
+         _warn(exc)
+ 
+ 
++def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
++                  kind="", duration_ms=None, status="", usage=None) -> None:
++    """Append one REVIEW-SPEND record and return None. Never raises.
++
++    Same HARD CONTRACT as `append`: a write failure must NEVER change or break a
++    review or any decision, one O_APPEND write of a single line kept under
++    PIPE_BUF, and the write is skipped unless the resolved lane dir already
++    exists. This records what a judge invocation COST — nothing it decides.
++
++    The record shares the enforcement envelope (`hook="review"`,
++    `decision="record"`, `reason="review spend"`) so a journal reader sees it as
++    one more `record` line, plus review-specific fields:
++      * `kind`        — "panel" | "single" | "tail-cert"
++      * `seat`        — the judge spec, e.g. "claude:opus" / "codex:gpt-5.6:medium"
++      * `task`        — task number ("042") or "-" for a taskless/--prompt review
++      * `round`       — the review iteration this spend belongs to (int; 0 = unknown)
++      * `duration_ms` — wall time of the judge subprocess, milliseconds (omitted if unknown)
++      * `status`      — "ok" | "fail" | "timeout" | "dnf" (did-not-finish/spawn error)
++      * `usage`       — token usage WHERE the CLI reports it, else the explicit
++                        marker `{"status":"unknown"}`. Numbers are NEVER fabricated:
++                        the claude judge runs in plain-text mode and codex/grok do
++                        not surface per-call tokens here, so `unknown` is the norm.
++
++    EVERY field is bounded so the record stays well under the 512-byte
++    atomic-write floor — the same bound `append` documents. `session_id` is
++    byte-capped and `usage` is normalized to the fixed `{status[,in,out]}` schema
++    (arbitrary caller dicts are NOT copied verbatim), because an unbounded
++    session id or a large usage dict would blow the PIPE_BUF concurrent-append
++    bound (impl-panel codex, task 042).
++    """
++    try:
++        rec = {
++            "ts": _utcnow(),
++            "session_id": _head(session_id or "", 80),
++            "hook": "review",
++            "decision": "record",
++            "reason": "review spend",
++            "kind": _head(kind, 24),
++            "seat": _head(seat, 80),
++            "task": _head(str(task), 16),
++            "round": int(round_no) if _is_int(round_no) else 0,
++        }
++        if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
++            rec["duration_ms"] = int(duration_ms)
++        if status:
++            rec["status"] = _head(status, 16)
++        rec["usage"] = _normalize_usage(usage)
++        _write_record(agent_dir, rec)
++    except Exception as exc:                # defence in depth: never propagate
++        _warn(exc)
++
++
++def _normalize_usage(usage) -> dict:
++    """Coerce any caller `usage` into the fixed, bounded shape the record shape
++    doc pins — never a verbatim copy of an arbitrary dict (which could blow the
++    PIPE_BUF bound). Returns `{"status":"known","in":<int>,"out":<int>}` only
++    when both token counts are real ints; otherwise `{"status":"unknown"}`.
++    Numbers are never fabricated — a non-int in/out degrades to unknown."""
++    if isinstance(usage, dict) and usage.get("status") == "known":
++        _in, _out = usage.get("in"), usage.get("out")
++        if isinstance(_in, int) and not isinstance(_in, bool) \
++                and isinstance(_out, int) and not isinstance(_out, bool):
++            return {"status": "known", "in": _in, "out": _out}
++    return {"status": "unknown"}
++
++
++def _is_int(v) -> bool:
++    if isinstance(v, bool):
++        return False
++    if isinstance(v, int):
++        return True
++    try:
++        return str(v).strip().lstrip("-").isdigit()
++    except Exception:
++        return False
++
++
++def _write_record(agent_dir, rec) -> None:
++    """Write ONE record dict as a single O_APPEND line into the lane's journal.
++
++    Shared by `append` and `append_review`. Skips silently unless the resolved
++    lane dir already exists (playbook-managed project); the `journal/` subdir is
++    created inside that existing lane, never `.agent` itself. One `os.write` of
++    one line: POSIX makes an O_APPEND write of at most PIPE_BUF bytes atomic
++    against concurrent appenders, so lines from separate processes (multi-lane,
++    parallel panel seats) do not interleave. The caller is responsible for
++    keeping the record under that bound (the field caps above do)."""
++    if not agent_dir:
++        return
++    agent_dir = Path(agent_dir)
++    if not agent_dir.is_dir():              # playbook-managed lane only
++        return
++    jdir = agent_dir / "journal"
++    try:
++        jdir.mkdir(exist_ok=True)           # inside an existing lane; not `.agent`
++    except OSError:
++        pass                                # e.g. path is a file — the open below fails, swallowed
++    data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
++    fd = os.open(str(jdir / "enforcement.jsonl"),
++                 os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
++    try:
++        os.write(fd, data)                  # single append; atomic under PIPE_BUF
++    finally:
++        os.close(fd)
++
++
+ def _utcnow() -> str:
+     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+ 
+diff --git a/plugins/playbook/tasks/review.py b/plugins/playbook/tasks/review.py
+index e90e2b1..e322bfe 100644
+--- a/plugins/playbook/tasks/review.py
++++ b/plugins/playbook/tasks/review.py
+@@ -17,10 +17,12 @@ command module (design-1.5.9.md §4).
+ """
+ from __future__ import annotations
+ 
++import json
+ import os
+ import re
+ import shutil
+ import sys
++import time
+ from pathlib import Path
+ from tasks.atomic import atomic_write
+ from tasks.core import _safe_hash_regular, resolve_agent_dir
+@@ -33,6 +35,153 @@ from tasks.shared import find_project_root
+ _FOREGROUND_TOOL_CAP_SECS = 600
+ 
+ 
++# ── Review-spend journal (task 042) ──────────────────────────────────────────
++# Every judge invocation appends ONE best-effort spend record to the enforcement
++# journal (hook="review", decision="record") via pb_journal.append_review — seat,
++# task, round, kind, wall duration, exit status, token usage. IDENTICAL hard
++# contract to the enforcement journal: a write failure NEVER changes or breaks a
++# review or any decision. Emitted from the review runner itself where the judge
++# subprocess has ALREADY completed — no new interpreter startup on any hot path.
++
++_PB_JOURNAL_MOD = None
++_PB_JOURNAL_LOADED = False
++
++
++def _load_pb_journal():
++    """Load scripts/pb_journal.py once, in-process, and cache it. Returns the
++    module or None. Loaded like command_guard's helper (by file path) so its
++    absence can never break a review. This is an in-process import, NOT a
++    subprocess — the 'no new interpreter startups on hot paths' constraint."""
++    global _PB_JOURNAL_MOD, _PB_JOURNAL_LOADED
++    if _PB_JOURNAL_LOADED:
++        return _PB_JOURNAL_MOD
++    _PB_JOURNAL_LOADED = True
++    try:
++        import importlib.util as _ilu
++        _p = Path(__file__).resolve().parent.parent / "scripts" / "pb_journal.py"
++        _spec = _ilu.spec_from_file_location("_pb_journal_review", _p)
++        if _spec is not None and _spec.loader is not None:
++            _mod = _ilu.module_from_spec(_spec)
++            _spec.loader.exec_module(_mod)
++            _PB_JOURNAL_MOD = _mod
++    except Exception:
++        _PB_JOURNAL_MOD = None
++    return _PB_JOURNAL_MOD
++
++
++def _journal_review_spend(project_path, *, kind, seat, task, round_no,
++                          duration_ms, status, usage=None, session_id=""):
++    """Best-effort review-spend record. NEVER raises; a failure is swallowed so a
++    review is unaffected. `usage=None` → the explicit `{"status":"unknown"}`
++    marker (numbers are never fabricated)."""
++    try:
++        pbj = _load_pb_journal()
++        if pbj is None:
++            return
++        agent_dir = pbj.resolve_lane_dir(project_path)
++        sid = session_id or os.environ.get("PLAYBOOK_SESSION_ID", "") or ""
++        pbj.append_review(
++            agent_dir, session_id=sid, seat=seat or "",
++            task=(str(task) if task else "-"), round_no=round_no,
++            kind=kind, duration_ms=duration_ms, status=status, usage=usage)
++    except Exception:
++        pass
++
++
++def _judge_status(output, timed_out=False):
++    """Map a judge result to the spend status enum: ok | fail | timeout | dnf.
++
++    dnf = did-not-finish: a spawn/resolution error ("(error: …)" — CLI missing,
++    adapter raised) that never produced a review. A budget/failure-marked output
++    is `fail`; a clean review is `ok`. The tail-cert path returns its timeout as
++    an "(error: … timed out)" string rather than raising, so a leading error
++    that says so is classified `timeout`, not `dnf`."""
++    if timed_out:
++        return "timeout"
++    _o = (output or "").lstrip()
++    if _o.startswith("(error:"):
++        return "timeout" if "timed out" in _o.lower() else "dnf"
++    try:
++        from tasks.models_check import judge_failed as _jf
++        if _jf(output):
++            return "fail"
++    except Exception:
++        pass
++    return "ok"
++
++
++def _parse_judge_usage(output_text):
++    """Best-effort token usage IF the judge output carries it — else None (the
++    caller then records `{"status":"unknown"}`). NEVER fabricates numbers.
++
++    The claude judge runs in PLAIN-TEXT mode (no `--output-format json`) and
++    codex/grok do not surface per-call tokens on this path, so this normally
++    returns None. It recognizes claude's REAL JSON usage shape
++    (`"usage":{"input_tokens":N,"output_tokens":N}`) should a future/other path
++    ever emit it — a real format, not an invented one.
++
++    ANCHORED to a structured envelope (impl-panel sonnet, task 042): the output
++    must PARSE AS A SINGLE JSON OBJECT carrying the usage shape. A bare substring
++    search over free-form judge prose was self-poisoning — a judge that merely
++    QUOTES a `"usage":{"input_tokens":…}` string (e.g. citing this task's own
++    test file) would have made us record ITS quote as real token spend,
++    fabricating a number. Free-form judge prose never parses as one JSON object,
++    so it can never trip this now."""
++    if not output_text:
++        return None
++    s = output_text.strip()
++    if not (s.startswith("{") and s.endswith("}")):
++        return None
++    try:
++        obj = json.loads(s)
++    except (ValueError, TypeError):
++        return None
++    if not isinstance(obj, dict):
++        return None
++    usage = obj.get("usage")
++    if not isinstance(usage, dict):
++        return None
++    try:
++        _in = usage.get("input_tokens")
++        _out = usage.get("output_tokens")
++        if isinstance(_in, int) and isinstance(_out, int):
++            return {"status": "known", "in": _in, "out": _out}
++    except Exception:
++        return None
++    return None
++
++
++def _next_review_round(project_path, task_file):
++    """The review iteration this spend belongs to = existing rounds + 1.
++    Best-effort: any failure → 0 (unknown). This is a log field, never a gate
++    input. Uniform across kinds — for single/tail-cert it reflects the panel
++    rounds recorded so far (an approximate spend-correlation hint), documented
++    as such in the record shape doc.
++
++    Counts BOTH judge.md and its overflow sibling judge-archive.md (impl-panel
++    codex:sol, task 042): judge.md retains only the newest JUDGE_MD_MAX_ROUNDS
++    (5) rounds and archives the rest, so counting judge.md alone would cap the
++    round at 6 once archiving begins. The true count = rounds in both files (see
++    MIND_MAP [8])."""
++    try:
++        if not task_file:
++            return 1
++        from tasks.core import parse_judge_rounds
++        total = 0
++        seen = False
++        for name in ("judge.md", "judge-archive.md"):
++            p = Path(task_file).parent / name
++            if p.exists():
++                seen = True
++                total += len(parse_judge_rounds(
++                    p.read_text(encoding="utf-8", errors="replace")))
++        if not seen:
++            return 1
++        return total + 1
++    except Exception:
++        return 0
++
++
+ def _print_background_advisory(hard_timeout_secs: "int | None") -> None:
+     """Print a one-line advisory when a review's hard timeout can exceed the
+     600 s foreground tool-call cap. `None` = unlimited, which also can exceed it.
+@@ -928,6 +1077,9 @@ def cmd_panel_review(cmd_args):
+ 
+         # Single attempt only — never restart a long-running judge. The
+         # hard timeout is hang safety alone (None = no kill at all).
++        # `_t0` wall clock brackets the subprocess for the spend record (task
++        # 042); every return path reports its own elapsed + timed-out flag.
++        _t0 = time.monotonic()
+         try:
+             adapter = adapter_cls(session_id="judge", project_root=project_path)
+             output = adapter.run_headless_judge(
+@@ -938,12 +1090,13 @@ def cmd_panel_review(cmd_args):
+                 timeout_secs=timeout_secs,
+                 budget_usd=panel_budget,
+             )
+-            return label, output
++            return label, output, int((time.monotonic() - _t0) * 1000), False
+         except subprocess.TimeoutExpired as expired:
+             # Keep whatever this seat had written. The marker stays FIRST so
+             # the seat is still classified as failed and no reader mistakes a
+             # truncated block for a finished review — but a seat that spent
+             # the whole budget should still contribute what it found.
++            _dur = int((time.monotonic() - _t0) * 1000)
+             raw = getattr(expired, "stdout", None) or getattr(expired, "output", None) or ""
+             if isinstance(raw, bytes):
+                 raw = raw.decode("utf-8", errors="replace")
+@@ -954,10 +1107,10 @@ def cmd_panel_review(cmd_args):
+                     f"{marker}\n\n**INCOMPLETE** — killed mid-response; the "
+                     f"findings below may be cut off and reached no conclusion:"
+                     f"\n\n{raw}"
+-                )
+-            return label, marker
++                ), _dur, True
++            return label, marker, _dur, True
+         except Exception as e:
+-            return label, f"(error: {e})"
++            return label, f"(error: {e})", int((time.monotonic() - _t0) * 1000), False
+ 
+     # Judge tamper guard (#1): judges are read-only evaluators, so snapshot
+     # the repo before spawning and refuse to trust the run if the working
+@@ -974,12 +1127,25 @@ def cmd_panel_review(cmd_args):
+     # Run all judges in parallel
+     import concurrent.futures
+     results = {}
++    # Spend record (task 042): one line PER SEAT, all sharing this panel's round.
++    # Computed once here (not per seat) so every seat reports the same iteration.
++    # The per-seat spend metadata is COLLECTED in the loop but EMITTED only after
++    # the tamper hard-stop below — the journal write must never precede the tamper
++    # banner, or a hostile-tree hang inside it (e.g. a FIFO-swapped lane path)
++    # would suppress the banner, exactly the operation-before-banner class the
++    # panels hunted down (rounds 1,5,7,8,9,10). A tamper hard-stop therefore
++    # records no spend — consistent with the single/tail-cert paths.
++    _spend_round = _next_review_round(project_path, task_file)
++    _spend_pending = []
+     with concurrent.futures.ThreadPoolExecutor(max_workers=len(judges)) as executor:
+         futures = {executor.submit(run_judge, j): j for j in judges}
+         for future in concurrent.futures.as_completed(futures):
+-            label, output = future.result()
++            label, output, _dur_ms, _timed_out = future.result()
+             results[label] = output
+             print(f"  [{label}] done", flush=True)
++            _spend_pending.append((label, _dur_ms,
++                                   _judge_status(output, timed_out=_timed_out),
++                                   _parse_judge_usage(output)))
+ 
+     _tamper_changes = _detect_tamper_safe(project_path, task_file, _tamper_before)
+     # On tamper the panel, like the single-judge path, does NOTHING but emit the
+@@ -992,6 +1158,15 @@ def cmd_panel_review(cmd_args):
+         print("\n" + _tamper_banner(_tamper_changes), file=sys.stderr, flush=True)
+         sys.exit(1)
+ 
++    # Clean tree: NOW emit the per-seat spend records (best-effort — fully
++    # swallowed inside the helper, so they never affect the review; and past the
++    # tamper banner, so they can never suppress it). One line per seat.
++    for _lbl, _dms, _st, _usg in _spend_pending:
++        _journal_review_spend(
++            project_path, kind="panel", seat=_lbl,
++            task=(task_num if task_file else None), round_no=_spend_round,
++            duration_ms=_dms, status=_st, usage=_usg)
++
+     # Classify each judge as succeeded vs failed — a failed judge must NOT
+     # read as a clean empty review (T139) or a successful one. Shared
+     # predicate (task 012) also catches claude's budget-exhaustion message,
+@@ -1360,6 +1535,33 @@ def _tail_cert_prompt(non_behavioral, panel_summary, diff_text, nonce) -> str:
+     )
+ 
+ 
++def _tail_cert_seat(project_path) -> str:
++    """Resolve the tail-cert judge's seat spec (backend[:variant]) — the same
++    `default_judge` the raw runner spawns — for the spend record. Best-effort:
++    any failure → "default_judge" as an opaque marker (never raises)."""
++    try:
++        from provider.sandbox import load_judge_config, resolve_judge_spec
++        dj = load_judge_config(project_path).get("default_judge") or "claude"
++        try:
++            backend, variant = resolve_judge_spec(dj)
++        except ValueError:
++            backend, variant = dj, None
++        return f"{backend}:{variant}" if variant else backend
++    except Exception:
++        return "default_judge"
++
++
++def _tail_cert_task_num(task_file):
++    """Best-effort task number from a tail-cert task_file path (its parent dir
++    is `<NNN>-<slug>`). Returns the leading digits or None."""
++    try:
++        name = Path(task_file).parent.name
++        num = name.split("-", 1)[0]
++        return num if num.isdigit() else None
++    except Exception:
++        return None
++
++
+ def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
+     """Spawn the tail-cert judge (the configured `default_judge`, a real provider
+     adapter) READ-ONLY under the same sandbox as every other judge, and return its
+@@ -1435,6 +1637,12 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
+         _tb = _snapshot_repo_state(project_path, _tf)
+     except Exception:
+         _tb = None
++    # Spend record (task 042): bracket the raw tail-cert call here in the caller
++    # (it has task_file + timeout in scope, and leaving the raw runner's 3-arg
++    # signature untouched keeps its many test doubles valid). The elapsed spans
++    # the judge subprocess. This caller is monkeypatched wholesale in the verdict
++    # tests, so the emit runs in production, not in those doubles (by design).
++    _tc_t0 = time.monotonic()
+     raw = _run_tail_cert_judge_raw(project_path, prompt, timeout_secs)
+     if _tb is not None:
+         try:
+@@ -1443,6 +1651,17 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
+         except Exception:
+             return None                # tamper check itself failed → fail closed
+                                        # (r4 grok#3: never certify on an errored guard)
++    # Emit the spend record only PAST the tamper check (clean tree) — consistent
++    # with the panel/single paths, and so the journal write can never precede /
++    # hang and suppress a tamper stop. A FAILED/errored judge is still recorded
++    # here (it ran and spent) before the fail-closed return below; only a tamper
++    # hard-stop records nothing.
++    _journal_review_spend(
++        project_path, kind="tail-cert", seat=_tail_cert_seat(project_path),
++        task=(_tail_cert_task_num(task_file) if task_file else None),
++        round_no=_next_review_round(project_path, task_file),
++        duration_ms=int((time.monotonic() - _tc_t0) * 1000),
++        status=_judge_status(raw), usage=_parse_judge_usage(raw))
+     # A FAILED/crashed/errored judge must NEVER certify (impl-panel grok#5):
+     # format_judge_output PREFIXES a nonzero exit with "(FAILED \u2026" and a spawn/
+     # resolution error with "(error: \u2026" \u2014 both at the START of the output. Match
+@@ -1696,6 +1915,19 @@ def cmd_single_review(cmd, cmd_args):
+             + saved_note,
+             file=sys.stderr, flush=True,
+         )
++        # Spend record (task 042): the timeout path exits here, before the common
++        # completion emit below, so record the timed-out seat's spend now — but
++        # ONLY on a clean tree. If the timed-out judge also tampered, the banner
++        # already fired above and we record nothing, keeping the uniform rule "a
++        # tamper hard-stop records no spend" across every review path. The closure
++        # resolves `_spend_t0`/`_spend_seat`/`_spend_round` at call time (all call
++        # sites are after their assignment). Best-effort — swallowed.
++        if not _to_changes:
++            _journal_review_spend(
++                project_path, kind="single", seat=_spend_seat,
++                task=task_num, round_no=_spend_round,
++                duration_ms=int((time.monotonic() - _spend_t0) * 1000),
++                status="timeout", usage=None)
+         sys.exit(1)
+ 
+     # Judge tamper guard (#1), same contract as the panel path: snapshot the
+@@ -1710,6 +1942,13 @@ def cmd_single_review(cmd, cmd_args):
+     # impl-review across every backend (task 038).
+     _print_background_advisory(review_timeout)
+ 
++    # Spend record (task 042): bracket the judge subprocess. Only one backend
++    # branch runs, so a single start stamp here measures whichever dispatch
++    # fires. The seat spec + round are fixed for this single-judge invocation.
++    _spend_t0 = time.monotonic()
++    _spend_seat = f"{backend}:{model}" if model else backend
++    _spend_round = _next_review_round(project_path, task_file)
++
+     if backend == "claude":
+         claude_bin = shutil.which("claude")
+         if not claude_bin:
+@@ -2036,6 +2275,19 @@ def cmd_single_review(cmd, cmd_args):
+ 
+     # Save output — backend-specific log files (tamper already exited above)
+     output = (result.stdout or "").strip()
++    # Spend record (task 042): ONE line for this single-judge invocation, on the
++    # clean-tree completion path. Placed here (before the budget/failure exits
++    # below) so it covers ok, budget-exhausted (`fail`), and failure-marked runs
++    # alike — the tokens were spent regardless of the verdict. The timeout path
++    # already recorded in `_bail_review_timeout`; the tamper hard-stop above
++    # deliberately records nothing (its banner-exit must have no trailing op).
++    # Status is classified on the FORMATTED result (what `judge_failed` expects).
++    _journal_review_spend(
++        project_path, kind="single", seat=_spend_seat,
++        task=task_num, round_no=_spend_round,
++        duration_ms=int((time.monotonic() - _spend_t0) * 1000),
++        status=_judge_status(_sandbox.format_judge_output(result)),
++        usage=_parse_judge_usage(output))
+     # Budget exhaustion arrives as exit-0 stdout (task 012 L3): detect it
+     # BEFORE saving so it never overwrites a prior good review, tell the
+     # user how to raise the cap, and exit nonzero — it's not a review.
+diff --git a/tests/test_review_spend_journal.py b/tests/test_review_spend_journal.py
+new file mode 100644
+index 0000000..48778e1
+--- /dev/null
++++ b/tests/test_review_spend_journal.py
+@@ -0,0 +1,398 @@
++#!/usr/bin/env python3
++"""Review-spend journal (task 042) — every judge invocation appends one
++best-effort spend record to the enforcement journal (`hook="review"`,
++`decision="record"`, `reason="review spend"`) via `pb_journal.append_review`,
++emitted from the review runner where the subprocess already completed.
++
++What this pins:
++  * `append_review` format — the envelope + review fields, byte-cap, round
++    coercion, and the `usage` unknown/known marker (numbers are NEVER
++    fabricated);
++  * the same HARD CONTRACT as the enforcement journal — an UNWRITABLE journal
++    changes nothing (the review's exit code and judge log are byte-for-byte what
++    they are without a journal; the negative control drives the write to a hard
++    failure by making the journal dir a regular file);
++  * end-to-end: a record lands PER SEAT on a panel and ONE on a single judge,
++    all carrying kind/seat/round/duration_ms/status.
++
++The two review helpers `_judge_status` / `_parse_judge_usage` / `_next_review_round`
++are unit-pinned too. Stdlib only. Run: python3 tests/test_review_spend_journal.py
++"""
++from __future__ import annotations
++
++import contextlib
++import importlib.util
++import json
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++_HERE = Path(__file__).resolve().parent
++_PLAYBOOK = _HERE.parent / "plugins" / "playbook"
++sys.path.insert(0, str(_PLAYBOOK))
++
++from tasks import review  # noqa: E402
++
++
++def _load_pb_journal():
++    p = _PLAYBOOK / "scripts" / "pb_journal.py"
++    spec = importlib.util.spec_from_file_location("_pbj_test", p)
++    mod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(mod)
++    return mod
++
++
++pbj = _load_pb_journal()
++
++
++def _read_journal(agent_dir: Path) -> "list[dict]":
++    p = agent_dir / "journal" / "enforcement.jsonl"
++    if not p.exists():
++        return []
++    return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
++
++
++@contextlib.contextmanager
++def _chdir(d: Path):
++    prev = Path.cwd()
++    os.chdir(d)
++    try:
++        yield
++    finally:
++        os.chdir(prev)
++
++
++# ── append_review: format + contract ─────────────────────────────────────────
++class AppendReviewFormat(unittest.TestCase):
++    def setUp(self):
++        self._tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self._tmp.cleanup)
++        self.agent = Path(self._tmp.name) / ".agent"
++        (self.agent / "tasks").mkdir(parents=True)
++
++    def test_envelope_and_fields_pinned(self):
++        pbj.append_review(self.agent, session_id="sid", seat="claude:opus",
++                          task="042", round_no=3, kind="panel",
++                          duration_ms=1234, status="ok", usage=None)
++        recs = _read_journal(self.agent)
++        self.assertEqual(len(recs), 1)
++        r = recs[0]
++        # Envelope shared with every enforcement record.
++        self.assertEqual(r["hook"], "review")
++        self.assertEqual(r["decision"], "record")
++        self.assertEqual(r["reason"], "review spend")
++        self.assertEqual(r["session_id"], "sid")
++        self.assertRegex(r["ts"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
++        # Review-specific fields.
++        self.assertEqual(r["kind"], "panel")
++        self.assertEqual(r["seat"], "claude:opus")
++        self.assertEqual(r["task"], "042")
++        self.assertEqual(r["round"], 3)
++        self.assertEqual(r["duration_ms"], 1234)
++        self.assertEqual(r["status"], "ok")
++        # usage=None → the explicit unknown marker, never a fabricated number.
++        self.assertEqual(r["usage"], {"status": "unknown"})
++        # Exactly the expected key set — a new field must be a deliberate change.
++        self.assertEqual(set(r), {
++            "ts", "session_id", "hook", "decision", "reason",
++            "kind", "seat", "task", "round", "duration_ms", "status", "usage"})
++
++    def test_known_usage_recorded_verbatim(self):
++        pbj.append_review(self.agent, seat="claude:opus", task="1", round_no=1,
++                          kind="single", duration_ms=5, status="ok",
++                          usage={"status": "known", "in": 10, "out": 20})
++        self.assertEqual(_read_journal(self.agent)[0]["usage"],
++                         {"status": "known", "in": 10, "out": 20})
++
++    def test_round_coerced_and_duration_optional(self):
++        # A non-int round → 0 (unknown); a missing duration → field absent.
++        pbj.append_review(self.agent, seat="x", task="1", round_no="bad",
++                          kind="single", duration_ms=None, status="ok")
++        r = _read_journal(self.agent)[0]
++        self.assertEqual(r["round"], 0)
++        self.assertNotIn("duration_ms", r)
++
++    def test_seat_byte_capped_line_stays_single_and_small(self):
++        pbj.append_review(self.agent, seat="claude:" + "z" * 500, task="1",
++                          round_no=1, kind="panel", duration_ms=1, status="ok")
++        raw = (self.agent / "journal" / "enforcement.jsonl").read_bytes()
++        self.assertEqual(raw.count(b"\n"), 1)          # exactly one line
++        self.assertLess(len(raw), 512)                 # under the PIPE_BUF floor
++
++    def test_usage_normalized_not_copied_verbatim(self):
++        # An arbitrary/oversized usage dict must NOT be serialized verbatim
++        # (impl-panel codex: a big dict blew the PIPE_BUF bound). Only the fixed
++        # {status,in,out} schema survives; unknown shapes degrade to unknown.
++        pbj.append_review(self.agent, seat="claude:opus", task="1", round_no=1,
++                          kind="single", duration_ms=1, status="ok",
++                          usage={"status": "known", "in": 10, "out": 20,
++                                 "junk": "z" * 5000, "cost": 1.23})
++        pbj.append_review(self.agent, seat="claude:opus", task="1", round_no=1,
++                          kind="single", duration_ms=1, status="ok",
++                          usage={"weird": "shape"})
++        recs = _read_journal(self.agent)
++        self.assertEqual(recs[0]["usage"], {"status": "known", "in": 10, "out": 20})
++        self.assertEqual(recs[1]["usage"], {"status": "unknown"})
++        # Non-int token counts are never fabricated → unknown.
++        pbj.append_review(self.agent, seat="x", task="1", round_no=1, kind="single",
++                          usage={"status": "known", "in": "lots", "out": 5})
++        self.assertEqual(_read_journal(self.agent)[2]["usage"], {"status": "unknown"})
++
++    def test_oversized_session_id_capped_line_small(self):
++        pbj.append_review(self.agent, session_id="s" * 5000, seat="claude:opus",
++                          task="1", round_no=1, kind="single", duration_ms=1,
++                          status="ok", usage={"status": "known", "in": 1, "out": 2})
++        raw = (self.agent / "journal" / "enforcement.jsonl").read_bytes()
++        self.assertEqual(raw.count(b"\n"), 1)
++        self.assertLess(len(raw), 512)
++
++    def test_unwritable_lane_is_silent_noop(self):
++        # journal PATH is a regular file → mkdir + open both fail. Must not raise.
++        (self.agent / "journal").write_text("i am a file", encoding="utf-8")
++        pbj.append_review(self.agent, seat="x", task="1", round_no=1,
++                          kind="single", duration_ms=1, status="ok")
++        # nonexistent lane dir → also a silent no-op.
++        pbj.append_review(self.agent.parent / "nope", seat="x", task="1",
++                          round_no=1, kind="single")
++
++
++# ── review helpers ───────────────────────────────────────────────────────────
++class SpendHelpers(unittest.TestCase):
++    def test_judge_status_mapping(self):
++        self.assertEqual(review._judge_status("1. **Note** — fine"), "ok")
++        self.assertEqual(review._judge_status("x", timed_out=True), "timeout")
++        self.assertEqual(review._judge_status("(error: boom)"), "dnf")
++        # The tail-cert path reports its timeout as an error string, not a raise.
++        self.assertEqual(
++            review._judge_status("(error: tail-cert judge timed out)"), "timeout")
++        # A FAILED-marked block classifies as fail, not ok.
++        self.assertEqual(review._judge_status("(FAILED — exit 1)\n..."), "fail")
++
++    def test_parse_usage_unknown_and_known(self):
++        self.assertIsNone(review._parse_judge_usage("plain review, no usage line"))
++        self.assertIsNone(review._parse_judge_usage(""))
++        # Known usage is recognized ONLY from a structured JSON envelope, not prose.
++        got = review._parse_judge_usage(
++            '{"usage":{"input_tokens":123,"output_tokens":45}}')
++        self.assertEqual(got, {"status": "known", "in": 123, "out": 45})
++        # A JSON envelope without the usage shape → unknown (None).
++        self.assertIsNone(review._parse_judge_usage('{"result":"ok"}'))
++
++    def test_parse_usage_prose_quote_is_never_fabricated(self):
++        """The self-poison the impl panel (sonnet) caught: a judge that merely
++        QUOTES a usage-shaped string in its free-form review must NOT be recorded
++        as real token spend. Anchoring to a whole-JSON envelope defuses it — prose
++        never parses as one JSON object."""
++        prose = (
++            "The test at line 150 contains the literal "
++            '`"usage":{"input_tokens":123,"output_tokens":45}}` which I am '
++            "citing as a finding, not reporting as my own usage.")
++        self.assertIsNone(review._parse_judge_usage(prose))
++        # Even a leading brace that is not a valid single object stays None.
++        self.assertIsNone(review._parse_judge_usage(
++            '{ blah "usage":{"input_tokens":1,"output_tokens":2} trailing prose'))
++
++    def test_next_review_round(self):
++        with tempfile.TemporaryDirectory() as d:
++            tdir = Path(d) / ".agent" / "tasks" / "042-x"
++            tdir.mkdir(parents=True)
++            tf = tdir / "task.md"
++            tf.write_text("# 042\n", encoding="utf-8")
++            # No judge.md yet → round 1.
++            self.assertEqual(review._next_review_round(d, tf), 1)
++            # One recorded panel round → next is 2.
++            (tdir / "judge.md").write_text(
++                "# Panel Plan Review — a/042-x/task.md\n\nsome findings\n",
++                encoding="utf-8")
++            self.assertEqual(review._next_review_round(d, tf), 2)
++
++    def test_next_review_round_counts_archive(self):
++        """After retention (5) archives older rounds, counting judge.md alone
++        would cap the round at 6 (impl-panel codex). Both files must be summed."""
++        with tempfile.TemporaryDirectory() as d:
++            tdir = Path(d) / ".agent" / "tasks" / "042-x"
++            tdir.mkdir(parents=True)
++            tf = tdir / "task.md"
++            tf.write_text("# 042\n", encoding="utf-8")
++            # 5 retained rounds in judge.md + 4 archived → 9 recorded → next = 10.
++            hdr = "# Panel Impl Review — a/042-x/task.md"
++            (tdir / "judge.md").write_text(
++                "\n\n".join(f"{hdr}\n\nround {i}" for i in range(5)), encoding="utf-8")
++            (tdir / "judge-archive.md").write_text(
++                "\n\n".join(f"{hdr}\n\nround {i}" for i in range(4)), encoding="utf-8")
++            self.assertEqual(review._next_review_round(d, tf), 10)
++
++
++# ── end-to-end: records land per invocation ──────────────────────────────────
++class _E2EBase(unittest.TestCase):
++    def setUp(self):
++        self._tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self._tmp.cleanup)
++        self.project = Path(self._tmp.name)
++        self.agent = self.project / ".agent"
++        tdir = self.agent / "tasks" / "042-demo"
++        tdir.mkdir(parents=True)
++        (tdir / "task.md").write_text(
++            "# 042 - demo\n## Status\npending\n## Intent\nx\n"
++            "## Work Plan\n- [ ] a gate\n", encoding="utf-8")
++        (self.agent / "models.json").write_text(
++            json.dumps({"panel": ["claude:opus", "claude:sonnet"],
++                        "default_judge": "claude:opus"}), encoding="utf-8")
++        # Reset the module-level pb_journal cache so each project resolves fresh.
++        review._PB_JOURNAL_MOD = None
++        review._PB_JOURNAL_LOADED = False
++
++
++class PanelSpendE2E(_E2EBase):
++    def test_one_record_per_seat(self):
++        from provider.adapters.claude import ClaudeAdapter
++        _orig_avail = ClaudeAdapter.is_available
++        _orig_run = ClaudeAdapter.run_headless_judge
++        ClaudeAdapter.is_available = classmethod(lambda cls: True)
++        ClaudeAdapter.run_headless_judge = (
++            lambda self, **kw: "1. **Note** — looks fine.\n")
++        try:
++            with _chdir(self.project):
++                with contextlib.suppress(SystemExit):
++                    review.cmd_panel_review(
++                        ["042", "--models", "claude:opus,claude:sonnet"])
++        finally:
++            ClaudeAdapter.is_available = _orig_avail
++            ClaudeAdapter.run_headless_judge = _orig_run
++
++        recs = [r for r in _read_journal(self.agent) if r["hook"] == "review"]
++        self.assertEqual(len(recs), 2, recs)
++        self.assertEqual({r["seat"] for r in recs},
++                         {"claude:opus", "claude:sonnet"})
++        for r in recs:
++            self.assertEqual(r["kind"], "panel")
++            self.assertEqual(r["task"], "042")
++            self.assertEqual(r["decision"], "record")
++            self.assertIn("duration_ms", r)
++            self.assertEqual(r["status"], "ok")
++        # Both seats share the one panel round.
++        self.assertEqual(len({r["round"] for r in recs}), 1)
++
++
++class SingleSpendE2E(_E2EBase):
++    def _run_single(self):
++        """Run a claude single plan-review with a faked subprocess; return the
++        review's observable outcome (exit code, judge-log text) for the negative
++        control's byte-for-byte compare."""
++        import shutil
++        import types
++        from provider import sandbox
++        _orig_run, _orig_which = sandbox.run, shutil.which
++        sandbox.run = lambda agent, args, **kw: types.SimpleNamespace(
++            returncode=0, stdout="1. **Note** — looks fine.\n", stderr="")
++        shutil.which = lambda name: "/usr/bin/" + name
++        code = None
++        try:
++            with _chdir(self.project):
++                try:
++                    review.cmd_single_review(
++                        "plan-review", ["042", "--backend", "claude", "--model", "opus"])
++                    code = 0
++                except SystemExit as e:
++                    code = e.code
++        finally:
++            sandbox.run, shutil.which = _orig_run, _orig_which
++        log = self.agent / "tasks" / "042-demo" / "judge.log"
++        return code, (log.read_text(encoding="utf-8") if log.exists() else None)
++
++    def test_one_single_record(self):
++        self._run_single()
++        recs = [r for r in _read_journal(self.agent) if r["hook"] == "review"]
++        self.assertEqual(len(recs), 1, recs)
++        r = recs[0]
++        self.assertEqual(r["kind"], "single")
++        self.assertEqual(r["seat"], "claude:opus")
++        self.assertEqual(r["task"], "042")
++        self.assertEqual(r["status"], "ok")
++        self.assertIn("duration_ms", r)
++
++    def test_unwritable_journal_changes_nothing(self):
++        # Baseline: writable journal.
++        base_code, base_log = self._run_single()
++        base_recs = _read_journal(self.agent)
++        self.assertTrue(base_recs)                     # it did record
++        # Now sabotage the journal: make its dir a regular FILE so mkdir+open
++        # both fail on the next run. The review outcome must be identical.
++        for f in (self.agent / "journal").glob("*"):
++            f.unlink()
++        (self.agent / "journal").rmdir()
++        (self.agent / "journal").write_text("not a dir", encoding="utf-8")
++        sab_code, sab_log = self._run_single()
++        self.assertEqual(sab_code, base_code)          # same exit
++        self.assertEqual(sab_log, base_log)            # same judge log, byte-for-byte
++        # And nothing was appended (the file stayed the sabotage content).
++        self.assertEqual((self.agent / "journal").read_text(encoding="utf-8"),
++                         "not a dir")
++
++
++class TailCertSpendE2E(_E2EBase):
++    def _run(self, *, tampered=False, raw="TAIL-CERT deadbeef: PASS"):
++        import unittest.mock as mock
++        tf = self.agent / "tasks" / "042-demo" / "task.md"
++        patches = [
++            mock.patch.object(review, "_tail_cert_review_diff",
++                              lambda pp, snap: "diff --git a b\n+one line\n"),
++            mock.patch.object(review, "_run_tail_cert_judge_raw",
++                              lambda pp, prompt, ts: raw),
++            mock.patch.object(review, "_snapshot_repo_state", lambda pp, t: {}),
++            mock.patch.object(review, "_detect_tamper_safe",
++                              lambda pp, t, b: (["dirty"] if tampered else [])),
++            mock.patch.object(review, "_tail_cert_seat", lambda pp: "claude:opus"),
++        ]
++        for p in patches:
++            p.start()
++            self.addCleanup(p.stop)
++        with _chdir(self.project):
++            return review.run_tail_cert_judge(
++                self.project, {}, ["non-behavioral note"], "panel summary",
++                task_file=tf)
++
++    def test_tail_cert_records_one(self):
++        self._run()
++        recs = [r for r in _read_journal(self.agent)
++                if r["hook"] == "review" and r["kind"] == "tail-cert"]
++        self.assertEqual(len(recs), 1, recs)
++        r = recs[0]
++        self.assertEqual(r["seat"], "claude:opus")
++        self.assertEqual(r["task"], "042")
++        self.assertEqual(r["status"], "ok")
++        self.assertIn("duration_ms", r)
++
++    def test_tail_cert_tamper_records_nothing(self):
++        # A tamper hard-stop returns None (block) and records NO spend — the same
++        # uniform rule the panel/single paths follow (no write before the stop).
++        self.assertIsNone(self._run(tampered=True))
++        self.assertEqual(
++            [r for r in _read_journal(self.agent) if r["hook"] == "review"], [])
++
++
++class TamperRecordsNothing(_E2EBase):
++    def test_panel_tamper_no_records(self):
++        import unittest.mock as mock
++        from provider.adapters.claude import ClaudeAdapter
++        _oa, _or = ClaudeAdapter.is_available, ClaudeAdapter.run_headless_judge
++        ClaudeAdapter.is_available = classmethod(lambda cls: True)
++        ClaudeAdapter.run_headless_judge = lambda self, **kw: "1. **Note** — fine\n"
++        p = mock.patch.object(review, "_detect_tamper_safe", lambda pp, t, b: ["dirty"])
++        p.start()
++        try:
++            with _chdir(self.project):
++                with contextlib.suppress(SystemExit):
++                    review.cmd_panel_review(["042", "--models", "claude:opus"])
++        finally:
++            p.stop()
++            ClaudeAdapter.is_available, ClaudeAdapter.run_headless_judge = _oa, _or
++        self.assertEqual(
++            [r for r in _read_journal(self.agent) if r["hook"] == "review"], [],
++            "a tampered panel must record no spend (write must not precede the banner)")
++
++
++if __name__ == "__main__":
++    unittest.main()
