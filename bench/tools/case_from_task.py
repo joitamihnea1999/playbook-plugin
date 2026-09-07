@@ -83,6 +83,12 @@ def prompt_size(spec: str, diff: str) -> tuple:
     return len(prompt), len(prompt.encode("utf-8"))
 
 
+def _lf(raw: bytes) -> str:
+    """Decode a task.md and normalize CRLF→LF so a case built on Windows (or from a
+    CRLF record) is byte-identical to one built on POSIX (CI Windows lane, task 048)."""
+    return raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+
+
 def apply_spec_edits(spec: str, edits: list) -> str:
     """Hand edits as an EXECUTABLE transformation (plan-panel codex:sol #3): each entry
     is `{"delete": text}` or `{"replace": [old, new]}`, applied once, in order; a
@@ -117,7 +123,7 @@ def build_case(*, workspace: Path, task: str, repo: Path, reviewed: str, case_id
     if case_dir.exists():
         raise ToolError(f"case dir already exists: {case_dir} (cases are frozen; never overwrite)")
     task_md_bytes = (tdir / "task.md").read_bytes()
-    task_md = task_md_bytes.decode("utf-8", errors="replace")
+    task_md = _lf(task_md_bytes)
     spec = apply_spec_edits(package.reconstruct_spec(task_md), edits)
     leaks = package.leak_scan(spec)
     paths = changed_paths(repo, base_sha, reviewed_sha)

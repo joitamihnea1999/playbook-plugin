@@ -30,7 +30,7 @@ if __package__ in (None, ""):
 from bench.tools._common import (DEFAULT_CORPUS_DIR, PROMPT_BUDGET_CHARS, ToolError,  # noqa: E402
                                  find_task_dir, git, git_ok, parse_source_repos, short, utf8_stdio)
 from bench.lib import cases as cases_mod, package  # noqa: E402
-from bench.tools.case_from_task import apply_spec_edits, derive_diff  # noqa: E402
+from bench.tools.case_from_task import _lf, apply_spec_edits, derive_diff  # noqa: E402
 
 PROMPT_BUDGET_BYTES = 120_000      # grok's `-p` element rides argv: 131,072-byte POSIX cap per element
 
@@ -137,10 +137,12 @@ def check_spec_regenerates(case, workspaces: dict) -> tuple:
         return "drift", "source task.md drifted since the case was frozen (digest differs) — regeneration not judged"
     edits = [e for e in case.meta.get("spec_edits", []) if isinstance(e, dict)]
     try:
-        regen = apply_spec_edits(package.reconstruct_spec(raw.decode("utf-8", errors="replace")), edits)
+        regen = apply_spec_edits(package.reconstruct_spec(_lf(raw)), edits)
     except ToolError as exc:
         return "fail", f"spec.md does not regenerate: {exc}"
-    if regen != case.spec_path.read_text(encoding="utf-8", errors="replace"):
+    # Compare bytes decoded WITHOUT newline translation (read_text would fold a CRLF
+    # spec into LF and mask a real difference — or invent one on Windows).
+    if regen != _lf(case.spec_path.read_bytes()):
         return "fail", "spec.md does not regenerate from reconstruct_spec(task.md) + spec_edits (hand-edited)"
     return "ok", "spec regenerates byte-for-byte from its source"
 

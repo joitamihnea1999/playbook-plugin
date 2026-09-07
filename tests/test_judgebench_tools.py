@@ -627,6 +627,21 @@ class PanelHardeningTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("spec regenerates", out)
 
+    def test_crlf_task_record_regenerates(self):
+        """Windows CI lane: a task.md with CRLF line endings must build a LF spec that
+        the regeneration check accepts byte-for-byte."""
+        md = self.fx.taskdir / "task.md"
+        md.write_bytes(md.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8"))
+        self.fx.ws_digest = _tree_digest(self.fx.ws)
+        rc, out = self._build("r1", self.fx.c1, "--delete", "Callers need it.")
+        self.assertEqual(rc, 0, out)
+        spec = (self.fx.out / "cases" / "r1" / "spec.md").read_bytes()
+        self.assertNotIn(b"\r\n", spec)
+        self._index("r1"); self._truth("r1", self._good())
+        rc, out = self._check("--workspace", f"ws={self.fx.ws}")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("spec regenerates", out)
+
     def test_delete_text_that_is_absent_is_an_error(self):
         rc, out = self._build("r1", self.fx.c1, "--delete", "this sentence is not in the spec")
         self.assertEqual(rc, 2)
