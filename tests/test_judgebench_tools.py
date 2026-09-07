@@ -65,7 +65,7 @@ done
 reversible
 
 ## Intent
-Add `foo` to a.py so callers get a total.
+Add `foo` to a.py so callers get a total — naïve résumé ✓.
 
 ## Why
 Callers need it.
@@ -170,6 +170,11 @@ class _Fixture:
         self.c2 = _commit(self.repo, "fix: foo empty list (panel F1)", "2026-08-24T13:24:00+03:00")
         (self.repo / "other.py").write_text("x = 1\n", encoding="utf-8")
         self.c3 = _commit(self.repo, "unrelated", "2026-08-24T14:30:00+03:00")
+        # a SIDE branch from the base that touches a.py but never descends from the review
+        _git(self.repo, "checkout", "-q", "-b", "side", self.c0)
+        (self.repo / "a.py").write_text("def bar():\n    return 2\n", encoding="utf-8")
+        self.c_side = _commit(self.repo, "side: bar returns 2", "2026-08-24T13:30:00+03:00")
+        _git(self.repo, "checkout", "-q", "master") if _git(self.repo, "branch", "--list", "master") else _git(self.repo, "checkout", "-q", "main")
         self.ws = root / "ws"
         self.taskdir = self.ws / ".agent" / "tasks" / "007-demo"
         self.taskdir.mkdir(parents=True)
@@ -177,6 +182,18 @@ class _Fixture:
         (self.taskdir / "judge.md").write_text(JUDGE_MD_TMPL.format(fix=self.c2), encoding="utf-8")
         self.ws_digest = _tree_digest(self.ws)
         self.out = root / "out"
+
+    def add_legacy_artifacts(self):
+        """036-shaped record: a trim pointer in judge.md and compacted triage in task-archive.md."""
+        (self.taskdir / "judge.md").write_text(
+            (self.taskdir / "judge.md").read_text(encoding="utf-8")
+            + "\n[... 6 older round(s) trimmed — the full history is in git ...]\n", encoding="utf-8")
+        (self.taskdir / "task-archive.md").write_text(
+            "# Task 007 — Archived Narrative\n\n## Compacted 2026-08-24 15:00 UTC\n\n"
+            "**Triage — impl panel round (tree abc123). All 2 findings ACCEPTED; fixed in round 2.**\n\n"
+            "- **I1 — foo empty list (codex#1 CRITICAL). ACCEPT.**\n\n"
+            "**Triage — impl panel ROUND 2 (tree def456). PASS 3/3.**\n", encoding="utf-8")
+        self.ws_digest = _tree_digest(self.ws)
 
     def assert_workspace_untouched(self, tc):
         tc.assertEqual(_tree_digest(self.ws), self.ws_digest, "tool wrote into the workspace")
@@ -357,7 +374,8 @@ class CheckTruthTests(unittest.TestCase):
 
     def _good(self):
         return [{"id": "F1", "file": "a.py", "symbol": "foo", "failure_mode": "empty list returns garbage",
-                 "severity": "Critical", "historical_outcome": "accepted+fixed", "fix_commit": self.fx.c2}]
+                 "severity": "Critical", "historical_outcome": "accepted+fixed", "fix_commit": self.fx.c2,
+                 "fix_evidence": "if not xs:"}]
 
     def test_good_case_passes(self):
         self._truth(self._good())
@@ -418,7 +436,7 @@ class CheckTruthTests(unittest.TestCase):
         self._truth(f)
         rc, out = self._run()
         self.assertEqual(rc, 1)
-        self.assertIn("ancestor", out.lower())
+        self.assertIn("descend", out.lower())
 
     def test_diff_patch_must_rederive_from_diff_of_and_excludes(self):
         self._truth(self._good())
@@ -450,6 +468,197 @@ class CheckTruthTests(unittest.TestCase):
                                    "--max-prompt-chars", "100"])
         self.assertEqual(rc, 1)
         self.assertIn("budget", buf.getvalue().lower())
+
+
+class PanelHardeningTests(unittest.TestCase):
+    """Plan-panel round 1 (task 048): --base, fix_evidence, descends-from, byte budget,
+    duplicate logical case, collision warning, spec_edits regeneration, mapping, legacy flags."""
+
+    def setUp(self):
+        self.fx = _Fixture()
+        self.addCleanup(self.fx.close)
+
+    def _build(self, case_id, reviewed, *extra):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = case_from_task.main(["--workspace", str(self.fx.ws), "--task", "007",
+                                      "--repo", str(self.fx.repo), "--reviewed", reviewed,
+                                      "--id", case_id, "--kind", "feature", "--area", "server",
+                                      "--difficulty", "easy", "--repo-name", "app",
+                                      "--out", str(self.fx.out / "cases"), "--exclude", "docs/ledger.json",
+                                      *extra])
+        return rc, buf.getvalue()
+
+    def _index(self, *ids):
+        (self.fx.out / "corpus.json").write_text(json.dumps({"version": 1, "cases": list(ids)}), encoding="utf-8")
+
+    def _truth(self, case_id, findings, rejects=()):
+        (self.fx.out / "cases" / case_id / "truth.json").write_text(
+            json.dumps({"findings": findings, "known_rejects": list(rejects)}, indent=2), encoding="utf-8")
+
+    def _check(self, *extra):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = check_truth.main(["--corpus", str(self.fx.out), "--source-repo", f"app={self.fx.repo}", *extra])
+        return rc, buf.getvalue()
+
+    def _good(self):
+        return [{"id": "F1", "file": "a.py", "symbol": "foo", "failure_mode": "empty list",
+                 "severity": "Critical", "historical_outcome": "accepted+fixed",
+                 "fix_commit": self.fx.c2, "fix_evidence": "if not xs:"}]
+
+    # --- opus #1: accumulated diff for later-round cases -------------------------------
+    def test_base_flag_produces_the_accumulated_diff(self):
+        rc, out = self._build("r2", self.fx.c2, "--base", self.fx.c0)
+        self.assertEqual(rc, 0, out)
+        meta = json.loads((self.fx.out / "cases" / "r2" / "case.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["diff_of"], f"{self.fx.c0}..{self.fx.c2}")
+        self.assertEqual(meta["repo_base_sha"], self.fx.c2)
+        diff = (self.fx.out / "cases" / "r2" / "diff.patch").read_text(encoding="utf-8")
+        self.assertIn("+def foo(xs):", diff)            # the feature (c1)
+        self.assertIn("+    if not xs:", diff)          # AND the round-1 fix (c2)
+
+    def test_base_must_be_an_ancestor_of_reviewed(self):
+        rc, out = self._build("bad", self.fx.c1, "--base", self.fx.c3)
+        self.assertEqual(rc, 2)
+        self.assertIn("ancestor", out.lower())
+
+    # --- opus #2 / sol #1 / terra #1: fix_evidence + descends-from ---------------------
+    def test_fix_evidence_present_at_reviewed_sha_means_already_fixed(self):
+        self._build("r1", self.fx.c1); self._index("r1")
+        f = self._good(); f[0]["fix_evidence"] = "def foo(xs):"      # already in the reviewed tree
+        self._truth("r1", f)
+        rc, out = self._check()
+        self.assertEqual(rc, 1)
+        self.assertIn("already", out.lower())
+
+    def test_fix_evidence_absent_from_fix_commit_fails(self):
+        self._build("r1", self.fx.c1); self._index("r1")
+        f = self._good(); f[0]["fix_evidence"] = "raise ValueError"
+        self._truth("r1", f)
+        rc, out = self._check()
+        self.assertEqual(rc, 1)
+        self.assertIn("fix_evidence", out)
+
+    def test_accepted_fixed_requires_fix_evidence(self):
+        self._build("r1", self.fx.c1); self._index("r1")
+        f = self._good(); del f[0]["fix_evidence"]
+        self._truth("r1", f)
+        rc, out = self._check()
+        self.assertEqual(rc, 1)
+        self.assertIn("fix_evidence", out)
+
+    def test_fix_commit_must_descend_from_the_reviewed_commit(self):
+        self._build("r1", self.fx.c1); self._index("r1")
+        f = self._good(); f[0]["fix_commit"] = self.fx.c_side; f[0]["fix_evidence"] = "return 2"
+        self._truth("r1", f)
+        rc, out = self._check()
+        self.assertEqual(rc, 1)
+        self.assertIn("descend", out.lower())
+
+    def test_good_evidence_passes(self):
+        self._build("r1", self.fx.c1); self._index("r1")
+        self._truth("r1", self._good())
+        rc, out = self._check()
+        self.assertEqual(rc, 0, out)
+
+    # --- terra #3: byte budget ----------------------------------------------------------
+    def test_multibyte_prompt_under_chars_but_over_bytes_fails_on_bytes(self):
+        self._build("r1", self.fx.c1); self._index("r1")
+        self._truth("r1", self._good())
+        rc, out = self._check("--max-prompt-chars", "1000000", "--max-prompt-bytes", "100")
+        self.assertEqual(rc, 1)
+        self.assertIn("bytes", out.lower())
+        # and the byte figure is reported on the OK line too
+        rc, out = self._check()
+        self.assertRegex(out, r"[\d,]+ bytes")
+
+    # --- sol #5: one logical case under two ids ---------------------------------------
+    def test_duplicate_logical_case_fails(self):
+        self._build("r1", self.fx.c1); self._build("r1-again", self.fx.c1); self._index("r1", "r1-again")
+        self._truth("r1", self._good()); self._truth("r1-again", self._good())
+        rc, out = self._check()
+        self.assertEqual(rc, 1)
+        self.assertIn("duplicate", out.lower())
+
+    # --- grok #5: colliding (file, symbol) warns, never fails --------------------------
+    def test_symbol_collision_is_warned_not_failed(self):
+        self._build("r1", self.fx.c1); self._index("r1")
+        f = self._good() + [dict(self._good()[0], id="F2", failure_mode="second defect in foo")]
+        self._truth("r1", f)
+        rc, out = self._check()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("collision", out.lower())
+
+    # --- sol #3: hand edits as an executable transformation ---------------------------
+    def test_delete_edits_are_applied_recorded_and_regenerable(self):
+        rc, out = self._build("r1", self.fx.c1, "--delete", "Callers need it.")
+        self.assertEqual(rc, 0, out)
+        cdir = self.fx.out / "cases" / "r1"
+        spec = (cdir / "spec.md").read_text(encoding="utf-8")
+        self.assertNotIn("Callers need it.", spec)
+        meta = json.loads((cdir / "case.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["spec_edits"], [{"delete": "Callers need it."}])
+        self.assertRegex(meta["spec_source_sha256"], r"^[0-9a-f]{64}$")
+        self._index("r1"); self._truth("r1", self._good())
+        rc, out = self._check("--workspace", f"ws={self.fx.ws}")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("spec regenerates", out)
+        # a hand edit that is NOT recorded breaks regeneration
+        (cdir / "spec.md").write_text(spec.replace("## Intent", "## Intent (edited)"), encoding="utf-8")
+        rc, out = self._check("--workspace", f"ws={self.fx.ws}")
+        self.assertEqual(rc, 1)
+        self.assertIn("spec.md", out)
+
+    def test_delete_text_that_is_absent_is_an_error(self):
+        rc, out = self._build("r1", self.fx.c1, "--delete", "this sentence is not in the spec")
+        self.assertEqual(rc, 2)
+        self.assertIn("not found", out.lower())
+
+    def test_without_workspace_the_regeneration_check_is_skipped_and_says_so(self):
+        self._build("r1", self.fx.c1); self._index("r1"); self._truth("r1", self._good())
+        rc, out = self._check()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("skipped", out.lower())
+
+    def test_source_drift_is_reported_not_failed(self):
+        self._build("r1", self.fx.c1); self._index("r1"); self._truth("r1", self._good())
+        md = self.fx.taskdir / "task.md"
+        md.write_text(md.read_text(encoding="utf-8") + "\n## Debrief\nlater edit\n", encoding="utf-8")
+        rc, out = self._check("--workspace", f"ws={self.fx.ws}")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("drift", out.lower())
+
+    # --- sol #2: the mapping decision is a reviewable object ---------------------------
+    def test_mapping_object_is_recorded(self):
+        rc, out = self._build("r1", self.fx.c1, "--round", "1", "--rounds-total", "2",
+                              "--fix-commit", self.fx.c2,
+                              "--evidence", "audit 13:06:25 follows commit 13:05; triage I1 fixed in round 2")
+        self.assertEqual(rc, 0, out)
+        meta = json.loads((self.fx.out / "cases" / "r1" / "case.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["mapping"]["round"], 1)
+        self.assertEqual(meta["mapping"]["rounds_total"], 2)
+        self.assertEqual(meta["mapping"]["fix_commits"], [self.fx.c2])
+        self.assertIn("triage I1", meta["mapping"]["evidence"])
+
+    # --- grok #1 / sol #2: legacy records are flagged, archive triage is surfaced -----
+    def test_map_rounds_flags_trim_pointer_and_count_mismatch_and_reads_archive(self):
+        self.fx.add_legacy_artifacts()
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = map_rounds.main(["--workspace", str(self.fx.ws), "--task", "7", "--repo", str(self.fx.repo)])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("AMBIGUOUS", out)
+        self.assertIn("trimmed", out)
+        self.assertIn("task-archive.md", out)
+        self.assertIn("ROUND 2", out)          # the compacted triage headers are listed
 
 
 if __name__ == "__main__":

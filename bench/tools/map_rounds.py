@@ -36,6 +36,8 @@ _VERDICT_RE = re.compile(r"\*\*PANEL VERDICT:\s*(PASS|FAIL)\*\*")
 _JUDGES_RE = re.compile(r"\*\*Judges:\*\*\s*(\d+/\d+)")
 _COMMIT_RE = re.compile(r"^\*\*Commit:\*\*\s*([0-9a-f]{7,40})", re.MULTILINE)
 _SNAPSHOT_RE = re.compile(r"^\*\*Panel-snapshot:\*\*\s*(\{.*\})\s*$", re.MULTILINE)
+_TRIM_RE = re.compile(r"\[\.\.\.\s*(\d+) older round\(s\) trimmed[^\]]*\]")
+_ARCHIVE_TRIAGE_RE = re.compile(r"^\*\*Triage — (.*?)\*\*\s*$", re.MULTILINE)
 _RECEIPT_RE = re.compile(r"^### (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?)\s*·\s*(.*?)\s*·\s*commit\s+([0-9a-f]{7,40})",
                          re.MULTILINE)
 
@@ -84,6 +86,18 @@ def parse_receipts(task_text: str) -> list:
     return out
 
 
+def parse_trim_pointers(judge_text: str) -> list:
+    """`[... N older round(s) trimmed — the full history is in git ...]` markers: rounds
+    that are NOT in the file (task 036 keeps 5 of 11). Their judge text is gone; their
+    triage may survive in task-archive.md."""
+    return [int(m.group(1)) for m in _TRIM_RE.finditer(judge_text or "")]
+
+
+def parse_archive_triage(archive_text: str) -> list:
+    """Compacted triage headers (`**Triage — impl panel ROUND N (…)…**`) in file order."""
+    return [m.group(1)[:110] for m in _ARCHIVE_TRIAGE_RE.finditer(archive_text or "")]
+
+
 def _parse_ts(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
@@ -119,15 +133,32 @@ def main(argv=None) -> int:
             if p.is_file():
                 judge_text += read_text(p) + "\n"
         task_text = read_text(tdir / "task.md") if (tdir / "task.md").is_file() else ""
+        archive_text = read_text(tdir / "task-archive.md") if (tdir / "task-archive.md").is_file() else ""
         rounds = parse_rounds(judge_text)
-        receipts = parse_receipts(task_text)
+        receipts = parse_receipts(task_text) + parse_receipts(archive_text)
+        receipts.sort(key=lambda r: _parse_ts(r["ts"]))
         commits = window_commits(a.repo, receipts, a.pad_minutes)
+        trimmed = parse_trim_pointers(judge_text)
+        archive_triage = parse_archive_triage(archive_text)
     except ToolError as exc:
         print(f"error: {exc}")
         return 2
     print(f"TASK {tdir}")
     print(f"REPO {a.repo}")
     print()
+    audits = [r for r in receipts if r["kind"] == "audit"]
+    flags = []
+    if trimmed:
+        flags.append(f"judge.md trim pointer: {sum(trimmed)} older round(s) trimmed — their judge text is gone; "
+                     f"do NOT label the remaining rounds from 1")
+    if rounds and len(audits) != len(rounds) + sum(trimmed):
+        flags.append(f"{len(rounds)} stored round(s) + {sum(trimmed)} trimmed vs {len(audits)} audit receipt(s) — "
+                     f"legacy record; receipts do not date each round")
+    if flags:
+        print("AMBIGUOUS — legacy record; map rounds by the TRIAGE TEXT (task.md / task-archive.md), not by position:")
+        for fl in flags:
+            print(f"   ! {fl}")
+        print()
     print("ROUNDS (judge-archive.md then judge.md, FILE order — playbook prepends, so each file is "
           "NEWEST-FIRST; do not read position as chronology)")
     print(f"{'#':>2}  {'kind':<18} {'verdict':<7} {'judges':<6} {'commit(outer)':<14} snapshot scopes")
@@ -151,6 +182,11 @@ def main(argv=None) -> int:
     if not commits:
         print("   (none in window — widen --pad-minutes or the receipts are missing)")
     print()
+    if archive_triage:
+        print("ARCHIVED TRIAGE headers (task-archive.md, file order) — compacted rounds' accept/reject decisions live here")
+        for h in archive_triage:
+            print(f"   {h}")
+        print()
     print("SUGGESTED PAIRING (deterministic only where a snapshot names a commit that exists in --repo)")
     any_pair = False
     known = {c["sha"] for c in commits}

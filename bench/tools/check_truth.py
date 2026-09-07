@@ -20,15 +20,19 @@ Read-only everywhere.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
+from collections import Counter
 from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from bench.tools._common import (DEFAULT_CORPUS_DIR, PROMPT_BUDGET_CHARS, ToolError,  # noqa: E402
-                                 git, git_ok, parse_source_repos, short, utf8_stdio)
+                                 find_task_dir, git, git_ok, parse_source_repos, short, utf8_stdio)
 from bench.lib import cases as cases_mod, package  # noqa: E402
-from bench.tools.case_from_task import derive_diff  # noqa: E402
+from bench.tools.case_from_task import apply_spec_edits, derive_diff  # noqa: E402
+
+PROMPT_BUDGET_BYTES = 120_000      # grok's `-p` element rides argv: 131,072-byte POSIX cap per element
 
 
 def _blob_exists(repo: Path, sha: str, path: str) -> bool:
@@ -40,15 +44,16 @@ def _touched(repo: Path, sha: str) -> set:
     return {ln.strip() for ln in out.splitlines() if ln.strip()}
 
 
-def check_case(case, repo: Path, max_chars: int) -> list:
-    """Failure strings for one case ([] = OK)."""
-    fails = []
+def check_case(case, repo: Path, max_chars: int, max_bytes: int) -> dict:
+    """{'fails': [...], 'warns': [...], 'chars': n, 'bytes': n} for one case."""
+    fails, warns = [], []
     sha = case.repo_base_sha
     if not git_ok(repo, "cat-file", "-e", f"{sha}^{{commit}}"):
-        return [f"repo_base_sha {short(sha)} does not resolve in {repo}"]
+        return {"fails": [f"repo_base_sha {short(sha)} does not resolve in {repo}"], "warns": [],
+                "chars": None, "bytes": None}
     parent, sep, reviewed = case.meta["diff_of"].partition("..")
     if not sep:
-        fails.append(f"diff_of {case.meta['diff_of']!r} is not '<parent>..<reviewed>' — cannot re-derive")
+        fails.append(f"diff_of {case.meta['diff_of']!r} is not '<base>..<reviewed>' — cannot re-derive")
     else:
         try:
             expected = derive_diff(repo, parent, reviewed, list(case.meta.get("diff_excludes") or []))
@@ -57,43 +62,87 @@ def check_case(case, repo: Path, max_chars: int) -> list:
                 fails.append("diff.patch does not re-derive from diff_of + diff_excludes (hand-edited or stale)")
         except ToolError as exc:
             fails.append(f"diff.patch re-derivation failed: {exc}")
+    keys = Counter((f["file"], f.get("symbol")) for f in case.truth.get("findings", []))
+    collisions = [k for k, n in keys.items() if n > 1]
+    if collisions:
+        # Two real accepted defects in one symbol never auto-match (scoring needs exactly one
+        # truth entry per key) — they route to the human in `adjudicate`. Warn, never drop.
+        warns.append(f"{len(collisions)} (file, symbol) collision(s) → human adjudication: "
+                     + ", ".join(f"{f}:{s}" for f, s in collisions))
     for f in case.truth.get("findings", []):
         fid, path, symbol = f["id"], f["file"], f.get("symbol")
         if not _blob_exists(repo, sha, path):
             fails.append(f"finding {fid}: file {path} does not exist at {short(sha)}")
             continue
-        if symbol:
-            body = git(repo, "show", f"{sha}:{path}")
-            if symbol not in body:
-                fails.append(f"finding {fid}: symbol {symbol!r} not found in {path} at {short(sha)}")
-        fix = f.get("fix_commit")
+        body_at_review = git(repo, "show", f"{sha}:{path}")
+        if symbol and symbol not in body_at_review:
+            fails.append(f"finding {fid}: symbol {symbol!r} not found in {path} at {short(sha)}")
+        fix, evidence = f.get("fix_commit"), f.get("fix_evidence")
         if f["historical_outcome"] == "accepted+fixed":
             if not fix:
                 fails.append(f"finding {fid}: accepted+fixed but no fix_commit named")
                 continue
+            if not evidence or not isinstance(evidence, str):
+                fails.append(f"finding {fid}: accepted+fixed but no fix_evidence (an exact substring absent at "
+                             f"the reviewed sha and present after the fix)")
+                continue
             if not git_ok(repo, "cat-file", "-e", f"{fix}^{{commit}}"):
                 fails.append(f"finding {fid}: fix_commit {fix} does not resolve")
                 continue
-            if git_ok(repo, "merge-base", "--is-ancestor", fix, sha):
-                fails.append(f"finding {fid}: fix_commit {short(fix)} is an ancestor of (or equal to) the "
-                             f"reviewed commit {short(sha)} — the fix would already be in the reviewed tree")
+            fix_full = git(repo, "rev-parse", f"{fix}^{{commit}}").strip()
+            if fix_full == sha or not git_ok(repo, "merge-base", "--is-ancestor", sha, fix_full):
+                fails.append(f"finding {fid}: fix_commit {short(fix)} does not descend from the reviewed commit "
+                             f"{short(sha)} — the fix must be strictly LATER on the same history")
                 continue
-            if path not in _touched(repo, fix):
+            if path not in _touched(repo, fix_full):
                 fails.append(f"finding {fid}: fix_commit {short(fix)} does not touch {path}")
+                continue
+            if evidence in body_at_review:
+                fails.append(f"finding {fid}: fix_evidence {evidence[:50]!r} is ALREADY present in {path} at the "
+                             f"reviewed sha {short(sha)} — the fix is in the reviewed diff, not truth for this case")
+                continue
+            if not _blob_exists(repo, fix_full, path) or evidence not in git(repo, "show", f"{fix_full}:{path}"):
+                fails.append(f"finding {fid}: fix_evidence {evidence[:50]!r} not found in {path} at fix_commit "
+                             f"{short(fix)}")
         elif fix and not git_ok(repo, "cat-file", "-e", f"{fix}^{{commit}}"):
             fails.append(f"finding {fid}: fix_commit {fix} does not resolve")
     for r in case.truth.get("known_rejects", []):
         if r.get("file") and not _blob_exists(repo, sha, r["file"]):
             fails.append(f"reject {r['id']}: file {r['file']} does not exist at {short(sha)}")
+    chars = nbytes = None
     try:
         pkg = package.build_package(case)
-        if pkg.prompt_chars > max_chars:
-            fails.append(f"prompt {pkg.prompt_chars:,} chars exceeds the {max_chars:,} budget")
-        fails_size = pkg.prompt_chars
+        chars, nbytes = pkg.prompt_chars, len(pkg.prompt.encode("utf-8"))
+        if chars > max_chars:
+            fails.append(f"prompt {chars:,} chars exceeds the {max_chars:,}-char budget")
+        if nbytes > max_bytes:
+            fails.append(f"prompt {nbytes:,} bytes exceeds the {max_bytes:,}-byte argv budget")
     except package.LeakageError as exc:
         fails.append(f"package: {exc}")
-        fails_size = None
-    return fails if fails else [f"__size__:{fails_size}"]
+    return {"fails": fails, "warns": warns, "chars": chars, "bytes": nbytes}
+
+
+def check_spec_regenerates(case, workspaces: dict) -> tuple:
+    """(status, message): 'ok' | 'skip' | 'drift' | 'fail'. Needs the source workspace on disk."""
+    ws = workspaces.get(case.source["workspace"])
+    if ws is None:
+        return "skip", f"spec regeneration check skipped (no --workspace mapping for {case.source['workspace']!r})"
+    try:
+        tdir = find_task_dir(ws, case.source["task"])
+    except ToolError as exc:
+        return "skip", f"spec regeneration check skipped: {exc}"
+    raw = (tdir / "task.md").read_bytes()
+    recorded = case.meta.get("spec_source_sha256")
+    if recorded and hashlib.sha256(raw).hexdigest() != recorded:
+        return "drift", "source task.md drifted since the case was frozen (digest differs) — regeneration not judged"
+    deletions = [e["delete"] for e in case.meta.get("spec_edits", []) if isinstance(e, dict) and "delete" in e]
+    try:
+        regen = apply_spec_edits(package.reconstruct_spec(raw.decode("utf-8", errors="replace")), deletions)
+    except ToolError as exc:
+        return "fail", f"spec.md does not regenerate: {exc}"
+    if regen != case.spec_path.read_text(encoding="utf-8", errors="replace"):
+        return "fail", "spec.md does not regenerate from reconstruct_spec(task.md) + spec_edits (hand-edited)"
+    return "ok", "spec regenerates byte-for-byte from its source"
 
 
 def main(argv=None) -> int:
@@ -101,38 +150,60 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="check_truth", description=__doc__.split("\n\n")[0])
     ap.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS_DIR)
     ap.add_argument("--source-repo", action="append", default=[], metavar="NAME=PATH")
+    ap.add_argument("--workspace", action="append", default=[], metavar="NAME=PATH",
+                    help="workspace dir per case.json source.workspace — enables the spec regeneration check")
     ap.add_argument("--cases", default="all")
     ap.add_argument("--max-prompt-chars", type=int, default=PROMPT_BUDGET_CHARS)
+    ap.add_argument("--max-prompt-bytes", type=int, default=PROMPT_BUDGET_BYTES)
     a = ap.parse_args(argv)
     try:
         repos = parse_source_repos(a.source_repo)
+        workspaces = parse_source_repos(a.workspace, default_playbook=False)
         corpus = cases_mod.load_corpus(a.corpus)
         selected = cases_mod.select_cases(corpus, a.cases)
     except (ToolError, cases_mod.CorpusError) as exc:
         print(f"error: {exc}")
         return 2
     bad = 0
+    # One logical case under two ids would be double-weighted (plan-panel codex:sol #5).
+    logical = Counter((c.source["repo"], c.repo_base_sha, c.meta["diff_of"]) for c in selected)
+    dupes = {k for k, n in logical.items() if n > 1}
     for case in selected:
+        key = (case.source["repo"], case.repo_base_sha, case.meta["diff_of"])
+        if key in dupes:
+            others = [c.id for c in selected if c is not case and
+                      (c.source["repo"], c.repo_base_sha, c.meta["diff_of"]) == key]
+            print(f"FAIL {case.id}: duplicate logical case — same repo/reviewed sha/diff_of as {others}")
+            bad += 1
+            continue
         repo = repos.get(case.source["repo"])
         if repo is None:
             print(f"FAIL {case.id}: no --source-repo mapping for {case.source['repo']!r}")
             bad += 1
             continue
-        if not (Path(repo) / ".git").exists() and not git_ok(Path(repo), "rev-parse", "--git-dir"):
+        if not git_ok(Path(repo), "rev-parse", "--git-dir"):
             print(f"FAIL {case.id}: {repo} is not a git checkout")
             bad += 1
             continue
-        result = check_case(case, Path(repo), a.max_prompt_chars)
-        if len(result) == 1 and result[0].startswith("__size__:"):
-            size = int(result[0].split(":", 1)[1])
-            nf, nr = len(case.truth.get("findings", [])), len(case.truth.get("known_rejects", []))
-            print(f"OK   {case.id:<28} prompt {size:>7,} chars  findings {nf:>2}  rejects {nr:>2}  "
-                  f"{case.kind}/{case.area}/{case.difficulty}")
-        else:
+        res = check_case(case, Path(repo), a.max_prompt_chars, a.max_prompt_bytes)
+        status, msg = check_spec_regenerates(case, workspaces)
+        if status == "fail":
+            res["fails"].append(msg)
+        elif status in ("skip", "drift"):
+            res["warns"].append(msg)
+        if res["fails"]:
             bad += 1
             print(f"FAIL {case.id}:")
-            for msg in result:
-                print(f"     - {msg}")
+            for m in res["fails"]:
+                print(f"     - {m}")
+        else:
+            nf, nr = len(case.truth.get("findings", [])), len(case.truth.get("known_rejects", []))
+            print(f"OK   {case.id:<28} prompt {res['chars']:>7,} chars {res['bytes']:>7,} bytes  "
+                  f"findings {nf:>2}  rejects {nr:>2}  {case.kind}/{case.area}/{case.difficulty}")
+            if status == "ok":
+                print(f"     · {msg}")
+        for w in res["warns"]:
+            print(f"     ! {w}")
     print(f"\n{len(selected) - bad}/{len(selected)} cases OK" + ("" if not bad else f", {bad} FAILED"))
     return 1 if bad else 0
 
