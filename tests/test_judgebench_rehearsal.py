@@ -97,11 +97,39 @@ class RehearsalTests(unittest.TestCase):
         for name, root in (("playbook-plugin-dev", ws_plugin), ("HowFarAI-v2", ws_hf)):
             if (root / ".agent" / "tasks").is_dir():
                 args += ["--history", f"{name}={root}"]
+        mapped = {name for name, root in (("playbook-plugin-dev", ws_plugin), ("HowFarAI-v2", ws_hf))
+                  if (root / ".agent" / "tasks").is_dir()}
+        if not mapped:
+            self.skipTest("no history workspace present — the false-positive bound needs the records")
         p = _run(*args)
         self.assertIn(p.returncode, (0, 1), p.stderr)                # 1 = some workspace absent (CI)
         scan = json.loads((self.runs / "rehearsal" / "contamination.json").read_text(encoding="utf-8"))
-        flagged = [(lb, c) for lb, cs in scan["labels"].items() for c, e in cs.items() if (e.get("count") or 0) > 0]
-        self.assertEqual(flagged, [], flagged)                       # scripted raws quote nothing → the FP bound
+        for lb, cs in scan["labels"].items():
+            for c, e in cs.items():
+                ws = self.corpus.get(c).source["workspace"]
+                if ws in mapped and e.get("raw_path"):
+                    self.assertEqual(e["count"], 0, (lb, c, e))         # scanned AND clean — never None (grok #2)
+
+    def test_auto_adjudication_works_on_a_read_only_corpus(self):
+        # impl-panel codex:sol #1 / codex:terra #1: --auto never writes the corpus, so it must not need a lock there
+        if os.name == "nt":
+            self.skipTest("read-only directories do not block file creation on Windows")
+        copy = Path(self.tmp.name) / "corpus-ro"
+        shutil.copytree(DEFAULT_CORPUS_DIR, copy, ignore=shutil.ignore_patterns(".lock"))
+        runs = Path(self.tmp.name) / "runs-ro"
+        p = _run("run", "--fake", "--fake-script", str(SCRIPT), "--cases", self.corpus.cases[0].id, "--candidates",
+                 "sol-med", "--run-id", "ro", "--corpus", str(copy), "--runs-dir", str(runs))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for d in [copy, *copy.rglob("*")]:
+            if d.is_dir():
+                os.chmod(d, 0o555)
+        try:
+            p = _run("adjudicate", "ro", "--auto", "--corpus", str(copy), "--runs-dir", str(runs))
+            self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        finally:
+            for d in [copy, *copy.rglob("*")]:
+                if d.is_dir():
+                    os.chmod(d, 0o755)
 
     def test_interactive_adjudication_runs_on_a_temp_copy_and_never_touches_the_frozen_tree(self):
         copy = Path(self.tmp.name) / "corpus-copy"

@@ -192,17 +192,47 @@ class ScanRunTests(unittest.TestCase):
         self.assertIn("!c", row)
         self.assertEqual(row.count("!c"), 1)                                   # sol-high only
 
-    def test_report_shows_the_contam_column_after_the_scan_and_na_before(self):
+    def test_report_shows_unscanned_pairs_instead_of_a_clean_zero(self):
+        # impl-panel opus #1 / codex:sol #5 / grok #1: an unmapped history must not render as contam? 0
+        _run("contamination", "r1", "--corpus", str(self.corpus_dir), "--runs-dir", str(self.runs), cwd=str(_ROOT))
         p = _run("report", "r1", "--corpus", str(self.corpus_dir), "--runs-dir", str(self.runs), cwd=str(_ROOT))
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("contam?", p.stdout)
-        self.assertIn("n/a", p.stdout)
+        line = [l for l in p.stdout.splitlines() if l.startswith("sol-high")][0]
+        self.assertIn("unscanned", line)
+        self.assertNotRegex(line.split()[-1], r"^0$")
+        self.assertIn("unscanned", p.stdout.lower().split("per-case matrix")[1])   # the notes say it too
+
+    def test_report_marks_stale_when_history_or_prompt_changed_after_the_scan(self):
+        # impl-panel codex:sol #4 / codex:terra #2: staleness must cover the history and the prompt, not only the raw
+        _run("contamination", "r1", "--history", f"hfws={self.hist_root}", "--corpus", str(self.corpus_dir),
+             "--runs-dir", str(self.runs), cwd=str(_ROOT))
+        judge = self.hist_root / ".agent" / "tasks" / "011-selfhost" / "judge.md"
+        judge.write_text(judge.read_text(encoding="utf-8") + "\nlater edit\n", encoding="utf-8")
+        p = _run("report", "r1", "--corpus", str(self.corpus_dir), "--runs-dir", str(self.runs), cwd=str(_ROOT))
+        line = [l for l in p.stdout.splitlines() if l.startswith("sol-high")][0]
+        self.assertIn("stale", line)
+
+    def test_scan_refuses_when_the_rebuilt_prompt_differs_from_the_run_manifest(self):
+        spec = self.corpus_dir / "cases" / "c1" / "spec.md"
+        spec.write_text(spec.read_text(encoding="utf-8") + "\nAn added sentence after the run.\n", encoding="utf-8")
+        p = _run("contamination", "r1", "--history", f"hfws={self.hist_root}", "--corpus", str(self.corpus_dir),
+                 "--runs-dir", str(self.runs), cwd=str(_ROOT))
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("prompt", (p.stdout + p.stderr).lower())
+        self.assertFalse((self.runs / "r1" / "contamination.json").exists())
+
+    def test_report_shows_the_contam_column_after_the_scan_and_na_before(self):
+        p_before = _run("report", "r1", "--corpus", str(self.corpus_dir), "--runs-dir", str(self.runs), cwd=str(_ROOT))
+        self.assertEqual(p_before.returncode, 0, p_before.stderr)
+        self.assertIn("contam?", p_before.stdout)
+        self.assertIn("n/a", p_before.stdout)
         _run("contamination", "r1", "--history", f"hfws={self.hist_root}", "--corpus", str(self.corpus_dir),
              "--runs-dir", str(self.runs), cwd=str(_ROOT))
         p = _run("report", "r1", "--corpus", str(self.corpus_dir), "--runs-dir", str(self.runs), cwd=str(_ROOT))
         self.assertEqual(p.returncode, 0, p.stderr)
         line = [l for l in p.stdout.splitlines() if l.startswith("sol-high")][0]
-        self.assertRegex(line, r"\b1\b")
+        self.assertEqual(line.split()[-1], "1")               # the contam? cell itself (impl-panel grok #3)
+        before = [l for l in p_before.stdout.splitlines() if l.startswith("sol-high")][0]
+        self.assertEqual(before.split()[-1], "n/a")
         self.assertIn("quoting", p.stdout.lower())          # the disclosure note
 
 

@@ -43,9 +43,12 @@ def posix_arg_limit() -> int:
         return 32 * 4096
 
 
-def seat_verdict(candidate, prompt: str, repo_root, *, adapter_factory=None, platform_nt=None) -> dict:
+def seat_verdict(candidate, prompt: str, repo_root, *, adapter_factory=None, platform_nt=None,
+                 budget_root=None) -> dict:
     """{'transport': 'stdin'|'argv'|'?', 'fits': bool, 'reason': str} for one seat, under the
-    SIMULATED platform (`platform_nt`), never the host's `os.name`."""
+    SIMULATED platform (`platform_nt`), never the host's `os.name`. The char budget is resolved
+    against `budget_root` (default `repo_root`) — ONE policy root for the report and the live
+    preflight (impl-panel codex:sol #2 / grok #4), never a case's source repo."""
     from tasks.core import resolve_review_context_chars
     nt = (os.name == "nt") if platform_nt is None else bool(platform_nt)
     try:
@@ -67,10 +70,10 @@ def seat_verdict(candidate, prompt: str, repo_root, *, adapter_factory=None, pla
             payload = sum(len(a) + 1 for a in argv)
             if payload > WINDOWS_CMDLINE_CAP:
                 return {"transport": transport, "fits": False,
-                        "reason": (f"(excluded: {candidate.backend} prompt is ~{payload:,} chars on argv; "
-                                   f"Windows caps the command line at 32,767 chars)")}
+                        "reason": (f"(excluded: {candidate.backend} prompt is ~{payload:,} chars on argv; the adapters "
+                                   f"cap the Windows command line at {WINDOWS_CMDLINE_CAP:,} chars (OS limit 32,767))")}
     try:
-        budget = resolve_review_context_chars(Path(repo_root), stdin=not argv_transport)
+        budget = resolve_review_context_chars(Path(budget_root or repo_root), stdin=not argv_transport)
     except Exception:
         budget = None
     if budget is not None and len(prompt) > budget:
@@ -80,11 +83,13 @@ def seat_verdict(candidate, prompt: str, repo_root, *, adapter_factory=None, pla
     return {"transport": transport, "fits": True, "reason": ""}
 
 
-def preflight_errors(candidates, prompt: str, repo_root, *, adapter_factory=None, platform_nt=None) -> dict:
+def preflight_errors(candidates, prompt: str, repo_root, *, adapter_factory=None, platform_nt=None,
+                     budget_root=None) -> dict:
     """label → reason for every seat that cannot carry the prompt ({} = all fit)."""
     out = {}
     for cand in candidates:
-        v = seat_verdict(cand, prompt, repo_root, adapter_factory=adapter_factory, platform_nt=platform_nt)
+        v = seat_verdict(cand, prompt, repo_root, adapter_factory=adapter_factory, platform_nt=platform_nt,
+                         budget_root=budget_root)
         if not v["fits"]:
             out[cand.label] = v["reason"]
     return out

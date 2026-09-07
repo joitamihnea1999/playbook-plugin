@@ -447,6 +447,11 @@ def adjudicate(run_dir, corpus, results: dict, *, stdin=None, stdout=None, auto_
     from bench.lib.records import RunLock
     # Corpus lock too (impl-panel r2 sonnet #1 / terra #2): `valid-new` mutates the SHARED
     # corpus, and Test A / Test B may be adjudicated from two terminals.
+    if auto_only:
+        # `--auto` never writes the corpus (only `v` does), so it must not need a lock INSIDE the
+        # frozen tree — a read-only checkout must still auto-adjudicate (impl-panel sol #1 / terra #1).
+        with RunLock(run_dir):
+            return _adjudicate_locked(run_dir, corpus, results, stdin=stdin, stdout=stdout, auto_only=True)
     with RunLock(corpus.root), RunLock(run_dir):
         return _adjudicate_locked(run_dir, corpus, results, stdin=stdin, stdout=stdout,
                                   auto_only=auto_only)

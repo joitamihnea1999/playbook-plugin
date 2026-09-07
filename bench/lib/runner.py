@@ -284,7 +284,8 @@ class LiveRunner:
         from bench.lib import transport as _transport
         return _transport.preflight_errors(candidates, package.prompt, repo_root,
                                            adapter_factory=self._adapter_factory,
-                                           platform_nt=self.platform_nt)
+                                           platform_nt=self.platform_nt,
+                                           budget_root=self.repo_root)      # the BENCH repo's policy, not the case's
 
     def invoke(self, case, candidate, package, tree, *, soft_timeout, hard_timeout) -> Invocation:
         with self._lock:

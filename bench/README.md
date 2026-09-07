@@ -190,9 +190,11 @@ weights and "point estimates only" (no bootstrap CIs in v1). Nothing derived is 
   `case.json` `source.workspace`, task dir resolved as `<NNN>-*` exactly once — never guessed;
   only `judge*.md` is read) for shared word 12-grams, EXCLUDING every n-gram present in the
   rendered prompt (spec, diff, template, context) so quoting the inputs is never flagged.
-  Entries carry raw/prompt/history sha256; the scan holds the run lock and writes
+  Entries carry raw/prompt/history sha256; the scan holds the run lock, refuses when the rebuilt
+  prompt no longer matches the run manifest's hash (the corpus moved), and writes
   `contamination.json` atomically; `report` shows `contam?` (flagged pairs; `n/a` before a scan;
-  `stale` when a raw changed after it) and marks flagged cases `!c` in the matrix. **It detects
+  `N stale` when a raw, the prompt or the history changed after it; `N unscanned` for pairs the
+  scan could not check — those are NOT clean) and marks flagged cases `!c` in the matrix. **It detects
   QUOTING, not silent influence** — a judge steered by history without copying twelve words is
   invisible to it; that residual is disclosed in every report note.
 - **Rehearsal** — `bench/fake-scripts/rehearsal.json` drives four fake seats over the real corpus

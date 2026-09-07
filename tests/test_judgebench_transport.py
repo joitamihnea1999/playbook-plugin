@@ -98,6 +98,8 @@ class TransportRowsTests(unittest.TestCase):
         r = rows[0]
         self.assertFalse(r["seats"]["grok-med"]["fits"])
         self.assertIn("Windows", r["seats"]["grok-med"]["reason"])
+        self.assertIn("30,000", r["seats"]["grok-med"]["reason"])          # the ENFORCED cap, not the 32,767 OS max
+        self.assertNotIn("32,767", r["seats"]["grok-med"]["reason"].split("(")[0])
         self.assertTrue(r["seats"]["sol-med"]["fits"])
         rows_posix = transport.transport_rows(corpus.cases, self.cands, repo_root=_ROOT,
                                              adapter_factory=_factory, platform_nt=False)
@@ -171,6 +173,25 @@ class PanelAmendmentTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
             self.assertIn("platform=posix", p.stdout)
             self.assertIn("spec", p.stdout); self.assertIn("diff", p.stdout)
+
+
+class BudgetRootTests(unittest.TestCase):
+    """Impl-panel (task 049) codex:sol #2 / grok #4: the char budget must come from ONE policy root
+    (the bench repo) in both the validate report and the live preflight, never from a case's
+    source repo whose .agent/config.json could differ."""
+
+    def test_live_preflight_uses_the_bench_repo_budget_not_the_source_repo(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src"; (src / ".agent").mkdir(parents=True)
+            (src / ".agent" / "config.json").write_text(json.dumps({"review_context_chars": 10000}), encoding="utf-8")
+            corpus = _mk_corpus(Path(td) / "corpus", diff_chars=20_000)
+            from bench.lib import package
+            pkg = package.build_package(corpus.cases[0])
+            lr = runner.LiveRunner(_ROOT, adapter_factory=_factory, platform_nt=False)
+            cands = runner.parse_candidates("grok-med")
+            self.assertEqual(lr.preflight(cands, pkg, src), {}, "the source repo's 10k budget must not apply")
+            self.assertEqual(transport.transport_rows(corpus.cases, cands, repo_root=_ROOT, adapter_factory=_factory,
+                                                      platform_nt=False)[0]["fits_all"], True)
 
 
 class TransportCliTests(unittest.TestCase):

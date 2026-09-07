@@ -121,6 +121,13 @@ def scan_run(run_dir: Path, corpus, history_roots: dict, *, n: int = DEFAULT_N) 
             hist_bytes = b"".join(Path(f).read_bytes() for f in files)
             pkg = _package.build_package(case, spec_mode=spec_mode, soft_timeout_secs=t.get("soft_secs"),
                                          hard_timeout_secs=t.get("hard_secs"))
+            recorded = (manifest.get("corpus", {}).get("hashes", {}).get(case_id) or {}).get("prompt")
+            now = _records.case_hashes(case, pkg).get("prompt")
+            if recorded and now != recorded:
+                # The corpus changed since the run: the prompt we would exclude is not the prompt the
+                # judge saw — refuse rather than certify the wrong revision (impl-panel codex:sol #4).
+                raise ValueError(f"case {case_id}: the rebuilt prompt differs from the run's manifest hash — the corpus "
+                                 f"changed after run {manifest.get('run_id')!r}; scan the run's own inputs or re-run")
             spans = shared_spans(raw_bytes.decode("utf-8", errors="replace"),
                                  hist_bytes.decode("utf-8", errors="replace"), exclude_text=pkg.prompt, n=n)
             entry.update({"count": len(spans), "longest_span": spans[0] if spans else "",
@@ -148,10 +155,15 @@ def load_scan(run_dir: Path):
         return None
 
 
-def staleness(run_dir: Path, scan: dict) -> set:
-    """(label, case_id) pairs whose LATEST raw no longer matches the scanned raw's sha256."""
+def staleness(run_dir: Path, scan: dict, corpus=None) -> set:
+    """(label, case_id) pairs whose inputs moved since the scan: the LATEST raw, the rendered
+    prompt (corpus/template) or the historical judge files no longer match the recorded sha256
+    (impl-panel codex:sol #4 / codex:terra #2)."""
     stale = set()
     latest = latest_by_pair(run_dir, list(scan.get("labels", {})))
+    manifest = _records.read_manifest(run_dir) if (Path(run_dir) / _records.MANIFEST_NAME).is_file() else {}
+    t = manifest.get("timeouts", {})
+    prompt_now = {}
     for label, cases_ in scan.get("labels", {}).items():
         for case_id, entry in cases_.items():
             rec = latest.get(label, {}).get(case_id)
@@ -159,7 +171,27 @@ def staleness(run_dir: Path, scan: dict) -> set:
                 continue
             p = Path(run_dir) / (rec.get("raw_path") or "")
             if not p.is_file() or _sha(p.read_bytes()) != entry["raw_sha256"]:
-                stale.add((label, case_id))
+                stale.add((label, case_id)); continue
+            if entry.get("history_files") and entry.get("history_sha256"):
+                try:
+                    hist = b"".join(Path(f).read_bytes() for f in entry["history_files"])
+                except OSError:
+                    stale.add((label, case_id)); continue
+                if _sha(hist) != entry["history_sha256"]:
+                    stale.add((label, case_id)); continue
+            if corpus is not None and entry.get("prompt_sha256"):
+                case = corpus.get(case_id)
+                if case is None:
+                    stale.add((label, case_id)); continue
+                if case_id not in prompt_now:
+                    try:
+                        pkg = _package.build_package(case, spec_mode=scan.get("spec_mode", "full"),
+                                                     soft_timeout_secs=t.get("soft_secs"), hard_timeout_secs=t.get("hard_secs"))
+                        prompt_now[case_id] = _sha(pkg.prompt.encode("utf-8"))
+                    except Exception:
+                        prompt_now[case_id] = None
+                if prompt_now[case_id] != entry["prompt_sha256"]:
+                    stale.add((label, case_id))
     return stale
 
 

@@ -367,6 +367,9 @@ def cmd_adjudicate(args) -> int:
         return EXIT_UNUSABLE
     try:
         counts = _scoring.adjudicate(run_dir, corpus, results, auto_only=args.auto)
+    except OSError as exc:
+        print(f"judgebench: cannot lock/write for adjudication: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
     except _records.RunLocked as exc:
         print(f"judgebench: {exc}", file=sys.stderr)
         return EXIT_UNUSABLE
@@ -405,7 +408,7 @@ def cmd_contamination(args) -> int:
         with _records.RunLock(run_dir):                 # never scan a run that is still appending
             scan = _contam.scan_run(run_dir, corpus, roots, n=args.n)
             _contam.write_scan(run_dir, scan)
-    except _records.RunLocked as exc:
+    except (_records.RunLocked, ValueError) as exc:
         print(f"judgebench: {exc}", file=sys.stderr)
         return EXIT_UNUSABLE
     print(_contam.render_scan(scan))
@@ -438,7 +441,7 @@ def cmd_report(args) -> int:
     manifest = _records.read_manifest(run_dir)
     from bench.lib import contamination as _contam
     scan = _contam.load_scan(run_dir)
-    contam = {"scan": scan, "stale": _contam.staleness(run_dir, scan)} if scan else None
+    contam = {"scan": scan, "stale": _contam.staleness(run_dir, scan, corpus)} if scan else None
     rep = _report.aggregate(args.run_id, results, adj, corpus, weights=weights, manifest=manifest,
                             contamination=contam)
     print(_report.render_text(rep), end="")
