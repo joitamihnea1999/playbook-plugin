@@ -199,6 +199,42 @@ class ClassifyTests(unittest.TestCase):
         self.assertFalse(timed_out)
         self.assertTrue(runner.is_quota_exhausted(raw))
 
+    def test_transient_provider_error_is_dnf_with_one_retry(self):
+        # task 050 W0b (owner decision after smoke1): codex answered "Selected model is at
+        # capacity" after "Reconnecting... 3/5" — the judge never reviewed. As `fail` it would
+        # score as a completed empty review and --resume would never re-run it. It is `dnf`
+        # and, unlike quota, transient: one retry now, and --resume later; the run does NOT halt.
+        smoke1 = ("(FAILED — exit 1)\n[stderr tail]\n=== END DIFF ===\n\n\nERROR: Reconnecting... 2/5\n"
+                  "ERROR: Reconnecting... 3/5\nERROR: Selected model is at capacity. Please try a different "
+                  "model.\nERROR: Selected model is at capacity. Please try a different model.")
+        rows = (smoke1,
+                "(FAILED — exit 1)\n[stderr tail]\nERROR: Reconnecting... 5/5",
+                "(FAILED — exit 1)\n[stderr tail]\nHTTP 503 Service Unavailable",
+                "(FAILED — exit 1)\n[stdout tail]\nThe model is currently overloaded. Retry later.",
+                "(error: bench judge spawn failed: connection reset by peer)")
+        for raw in rows:
+            with self.subTest(raw=raw[-40:]):
+                self.assertTrue(runner.is_transient_provider_error(raw))
+                self.assertFalse(runner.is_quota_exhausted(raw))
+                self.assertEqual(runner.classify(raw), ("dnf", True))
+                inv = runner.finish(raw, timed_out=False, duration_ms=3, retries=0)
+                self.assertEqual((inv.status, inv.note), ("dnf", runner.TRANSIENT_NOTE))
+        # Quota wins over transient wording (no retry, halt).
+        both = "(FAILED — exit 1)\n[stderr tail]\nReconnecting... 2/5\nYou've hit your usage limit."
+        self.assertEqual(runner.classify(both), ("dnf", False))
+        self.assertEqual(runner.finish(both, timed_out=False, duration_ms=1, retries=0).note, runner.QUOTA_NOTE)
+        # Controls.
+        review = ("The pool is at capacity when N workers run.\n\nFINDINGS:\n1. FILE: a.py\n   SYMBOL: f\n"
+                  "   SEVERITY: Minor\n   WHY: reconnecting logic never backs off\nEND FINDINGS\n")
+        self.assertFalse(runner.is_transient_provider_error(review))
+        self.assertEqual(runner.classify(review), ("ok", False))
+        self.assertEqual(runner.classify("(FAILED — exit 1)\n[stderr tail]\nauth failure"), ("fail", False))
+        self.assertEqual(runner.classify("(error: bench judge timed out while reconnecting)"), ("timeout", False))
+        self.assertEqual(runner.classify("(error: codex not found on PATH; overloaded host)"), ("dnf", False))
+        raw, timed_out = runner.FakeRunner.render({"status": "transient"})
+        self.assertFalse(timed_out)
+        self.assertTrue(runner.is_transient_provider_error(raw))
+
     def test_finish_distinguishes_ok_empty_malformed(self):
         ok = runner.finish("FINDINGS:\n1. FILE: a.py\n   SEVERITY: Minor\n   WHY: w\nEND FINDINGS\n",
                            timed_out=False, duration_ms=5, retries=0)
@@ -315,6 +351,17 @@ class LiveRunnerTests(unittest.TestCase):
             self.assertEqual((inv.status, n), ("fail", 1))                       # data: no retry
             inv, n = run_with(["I think it is fine, no block"])
             self.assertEqual((inv.status, n), ("malformed", 1))                  # content: no retry
+            # task 050 W0b: a transient provider error is retried ONCE, then a real review counts.
+            cap = "(FAILED — exit 1)\n[stderr tail]\nERROR: Selected model is at capacity. Please try a different model."
+            inv, n = run_with([cap, "FINDINGS:\nNONE\nEND FINDINGS\n"])
+            self.assertEqual((inv.status, n, inv.retries), ("ok", 2, 1))
+            self.assertEqual(inv.attempts[0]["status"], "dnf")                  # the billed-or-not first try is kept
+            inv, n = run_with([cap, cap])
+            self.assertEqual((inv.status, n, inv.retries, inv.note), ("dnf", 2, 1, runner.TRANSIENT_NOTE))
+            # task 050 W0: quota is deterministic — never retried.
+            quota = "(FAILED — exit 1)\n[stderr tail]\nYou've hit your usage limit."
+            inv, n = run_with([quota, "FINDINGS:\nNONE\nEND FINDINGS\n"])
+            self.assertEqual((inv.status, n, inv.note), ("dnf", 1, runner.QUOTA_NOTE))
 
     def test_retry_keeps_the_first_attempt_on_record(self):
         # impl-panel r2 sonnet #2: a retried call's first attempt may have been billed —

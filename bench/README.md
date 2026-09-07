@@ -160,6 +160,13 @@ weights and "point estimates only" (no bootstrap CIs in v1). Nothing derived is 
   further case is launched, and the run prints a `HALT:` line and exits 1. Re-run the exact same
   command with `--resume` after the reset. A refusal worded outside the signature list degrades
   to `fail` — extend `QUOTA_SIGNATURES` and re-classify by hand if a provider changes its text.
+- **A provider-side transient is `dnf` with one retry, not `fail`** (task 050, owner decision
+  after the first live smoke: codex answered `ERROR: Reconnecting... 3/5` then `Selected model is
+  at capacity` in 13 s). `runner.is_transient_provider_error` matches capacity / reconnect
+  exhaustion / 5xx / connection-reset wording inside a failure envelope only; the pair is retried
+  once immediately (the first attempt is kept in `attempts`), the run continues to the next case,
+  and a still-failing pair stays `dnf` for `--resume`. Quota wording takes precedence (no retry,
+  halt). Anything outside both signature lists is still `fail` — a real completed bad review.
 - **Unique-valid is `n/a`, not 0, whenever some candidate in the manifest has no
   scorable result for a case** — uniqueness is only defined against peers that ran.
 - On Windows the argv-transport preflight applies the adapters' ~30k whole-command-line

@@ -356,6 +356,24 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual([r["status"] for r in recs], ["dnf", "dnf"])   # history kept
         self.assertNotIn("c-b", records.latest_results(rd)["a"])
 
+    def test_transient_provider_error_does_not_halt_and_is_resumable(self):
+        # task 050 W0b: unlike quota, a capacity blip on one pair must not stop the run —
+        # the next case may well succeed. The pair stays dnf (re-run on --resume).
+        script = self.root / "script.json"
+        script.write_text(json.dumps({"c-a|a": {"status": "transient"}, "default": {"status": "ok"}}),
+                          encoding="utf-8")
+        p = self._run("--fake", "--fake-script", str(script))
+        self.assertEqual(p.returncode, 1, p.stderr + p.stdout)
+        self.assertNotIn("HALT", p.stdout)
+        self.assertIn("4 invocations", p.stdout)                          # c-b ran
+        rd = self.runs / "r1"
+        latest = records.latest_results(rd)
+        self.assertEqual(latest["a"]["c-a"]["status"], "dnf")
+        self.assertEqual(latest["a"]["c-a"]["note"], runner.TRANSIENT_NOTE)
+        self.assertEqual(latest["b"]["c-b"]["status"], "ok")
+        done, _ = records.completed_pairs(rd, ["a", "b"])
+        self.assertEqual(done, {("c-a", "b"), ("c-b", "a"), ("c-b", "b")})
+
     def test_resume_survives_adjudication_truth_version_bump_and_pins_script_and_concurrency(self):
         # impl-panel r2 sol #2 (truth_version must NOT be a resume key — it is not a judge
         # input), sol #3 (fake-script CONTENT pinned), sol #5 (concurrency pinned).

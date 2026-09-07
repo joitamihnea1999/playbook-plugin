@@ -18,6 +18,8 @@ Classification over the REAL adapter envelope (`provider.sandbox.format_judge_ou
     "(error: …)" other                      → dnf, ONE retry (transport class)
     "(FAILED — exit N)" + "(no output captured)" → dnf, ONE retry (transport class)
     "(FAILED — exit N)" with output         → fail (data: the judge ran and broke)
+    "(FAILED — exit N)" + a provider TRANSIENT  → dnf, ONE retry (task 050 W0b: "at capacity",
+                                              "Reconnecting...", 5xx — the judge never reviewed)
     either envelope + a QUOTA/CREDIT refusal → dnf, NO retry (task 050: the judge never
                                               reviewed; deterministic until the provider's
                                               reset — the run HALTS, `--resume` re-runs it)
@@ -160,6 +162,25 @@ QUOTA_SIGNATURES = (
 )
 QUOTA_NOTE = "quota exhausted — halt; --resume after the reset"
 
+# Provider-side TRANSIENTS (task 050 W0b, owner decision after smoke1): the judge never
+# reviewed, but the next call may well succeed — one retry now, `--resume` later, and the
+# run does NOT halt. Matched inside a failure envelope only. codex-cli 0.151.0 prints
+# "ERROR: Reconnecting... N/5" then "ERROR: Selected model is at capacity. Please try a
+# different model." (smoke1, 2026-09-07). Quota (above) takes precedence.
+TRANSIENT_SIGNATURES = (
+    "at capacity",
+    "reconnecting...",
+    "service unavailable",
+    "overloaded",
+    "temporarily unavailable",
+    "connection reset",
+    "connection refused",
+    "bad gateway",
+    "gateway timeout",
+    "502 ", "503 ", "504 ", "529 ",
+)
+TRANSIENT_NOTE = "transient provider error — retried once; --resume re-runs it"
+
 
 def is_quota_exhausted(raw: str) -> bool:
     """True when a FAILURE envelope carries a provider quota/credit refusal."""
@@ -168,6 +189,18 @@ def is_quota_exhausted(raw: str) -> bool:
         return False
     low = t.lower()
     return any(sig in low for sig in QUOTA_SIGNATURES)
+
+
+def is_transient_provider_error(raw: str) -> bool:
+    """True when a FAILURE envelope carries a provider-side transient (capacity,
+    reconnect exhaustion, 5xx, connection reset) and NOT a quota refusal."""
+    t = (raw or "").lstrip()
+    if not (t.startswith("(error:") or t.startswith("(FAILED")):
+        return False
+    if is_quota_exhausted(t):
+        return False
+    low = t.lower()
+    return any(sig in low for sig in TRANSIENT_SIGNATURES)
 
 
 def classify(raw: str, timed_out: bool = False) -> tuple:
@@ -197,6 +230,8 @@ def classify(raw: str, timed_out: bool = False) -> tuple:
             return "dnf", False
         if "(no output captured)" in t:
             return "dnf", True
+        if is_transient_provider_error(t):
+            return "dnf", True
         return "fail", False
     base = _judge_status(raw)
     if base != "ok":
@@ -213,7 +248,12 @@ def finish(raw: str, *, timed_out: bool, duration_ms: int, retries: int) -> Invo
         parsed = scoring.parse_findings(raw)
         if parsed.status == "malformed":
             status = "malformed"
-    note = QUOTA_NOTE if (status == "dnf" and is_quota_exhausted(raw)) else ""
+    note = ""
+    if status == "dnf":
+        if is_quota_exhausted(raw):
+            note = QUOTA_NOTE
+        elif is_transient_provider_error(raw):
+            note = TRANSIENT_NOTE
     return Invocation(status=status, raw=raw or "", usage=usage, duration_ms=duration_ms,
                       retries=retries, findings=parsed, note=note)
 
@@ -222,7 +262,7 @@ def finish(raw: str, *, timed_out: bool, duration_ms: int, retries: int) -> Invo
 
 class FakeRunner:
     """Scripted outputs; never touches an adapter. `script` maps
-    `"<case-id>|<label>"` (or `"default"`) → {"status": ok|empty|malformed|timeout|dnf|fail|quota,
+    `"<case-id>|<label>"` (or `"default"`) → {"status": ok|empty|malformed|timeout|dnf|fail|quota|transient,
     "findings": [{file, symbol, severity, why}], "raw": "...", "duration_ms": N}."""
     needs_tree = False
 
@@ -257,6 +297,9 @@ class FakeRunner:
             return "(error: fakecli not found on PATH)", False
         if status == "fail":
             return "(FAILED — exit 1)\n[stderr tail]\nboom", False
+        if status == "transient":
+            return ("(FAILED — exit 1)\n[stderr tail]\nERROR: Reconnecting... 3/5\nERROR: Selected model "
+                    "is at capacity. Please try a different model."), False
         if status == "quota":
             return ("(FAILED — exit 1)\n[stderr tail]\nYou've hit your usage limit. Visit "
                     "https://chatgpt.com/codex/settings/usage to purchase more credits"), False
