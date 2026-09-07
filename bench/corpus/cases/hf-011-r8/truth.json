@@ -1,0 +1,45 @@
+{
+  "findings": [
+    {
+      "id": "R8-1",
+      "file": "docker/selfhost/parity-check.mjs",
+      "symbol": "assertClose",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The self-test's own gate is fail-OPEN on NaN: assertClose computes rel = NaN for a non-finite `got` and `NaN > relTol` is false, so a broken radialProfile/geometryAreaM2 returning NaN prints 'ok' and passes the entire self-test (opus#1).",
+      "fix_commit": "be0950d",
+      "fix_evidence": "if (!Number.isFinite(got)) { console.error(`SELF-TEST FAIL"
+    },
+    {
+      "id": "R8-2",
+      "file": "docker/selfhost/parity-check.mjs",
+      "symbol": "radialResidual",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The R7 cross-coverage `mismatch` guard cannot fire for a real ENCLOSING ring (a ray from an interior origin always crosses a closed boundary); a missing wedge on an enclosing ring casts a SHORT ray caught by the worst-sector max, not a null — the comment and docs over-credit the guard (opus#2).",
+      "fix_commit": "be0950d",
+      "fix_evidence": "NOT for a missing wedge on an enclosing ring"
+    },
+    {
+      "id": "R8-3",
+      "file": "docker/selfhost/run-manifest.md",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The manifest says a public-vs-public run 'cannot report parity' and contradicts itself two lines later with the honest limit; provenance must rest on configuration, not output (opus#3, sol#1).",
+      "fix_commit": "be0950d",
+      "fix_evidence": "A fully airtight output-side proof needs request-level"
+    },
+    {
+      "id": "R8-4",
+      "file": "docker/selfhost/fetch-romania-extract.sh",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "A network HEAD under `set -e` runs BEFORE the cached-file check, so an outage or retired URL blocks a valid md5-verified cached rebuild (sol#3).",
+      "fix_commit": "be0950d",
+      "fix_evidence": "if [ \"$DRY_RUN\" != \"1\" ] && [ -f \"$OUT\" ] && verify_md5 \"$OUT\"; then"
+    }
+  ],
+  "known_rejects": []
+}

@@ -1,0 +1,30 @@
+{
+  "id": "hf-007-r2",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "007",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "4d5726d184cdb2fbc3143bd1bbb58b7ea5646ec2",
+  "diff_of": "ff904f32c1e64dbb8848d0d981b15560fdc0cb73..4d5726d184cdb2fbc3143bd1bbb58b7ea5646ec2",
+  "diff_excludes": [],
+  "spec_source_sha256": "64215cb1a98538e5dda997ca9aad9e8a0eb2ee22faa5f56a505e2f384ec77161",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "feature",
+  "area": "server",
+  "difficulty": "easy",
+  "truth_version": 1,
+  "notes": "HowFar task 007 P1 config lift, first impl panel (triage label r2). Single-commit feature so base = reviewed^. Truth taken from the triage's merged 'ACCEPTED & FIXED across the rounds (with the round that raised each)' list, r2 rows only; the 'PARKED to later phases' items (rate-limit buckets, keyless ORS, PROVIDER_DATA_REVISION) are properties of a later target with no single file to cite and are omitted. Spec edits: template preamble deleted. Dropped by the closed allowlist (non-template H2 in this record): none.",
+  "mapping": {
+    "round": 2,
+    "rounds_total": 6,
+    "fix_commits": [
+      "a78f899"
+    ],
+    "evidence": "Audit receipts sit within 30 s after each commit: 13:06:25 after 4d5726d (13:06:10) = the first impl panel (the triage labels it r2; r1 = the 12:24 plan panel). Its accepts (config-blind derived caches, configCacheTag bbox, validateBaseUrl query/fragment, parseBbox empty token, cache-tag guards) are exactly a78f899 'Namespace derived caches by config and harden extent/URL validation' (13:25:19), followed by the 13:25:39 audit for the next round. Legacy record: every judge.md `**Commit:**` is the outer workspace sha; no snapshots."
+  }
+}

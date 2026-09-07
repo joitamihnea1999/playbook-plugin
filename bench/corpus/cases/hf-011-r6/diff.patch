@@ -1,0 +1,174 @@
+diff --git a/docker/selfhost/docker-compose.yml b/docker/selfhost/docker-compose.yml
+index 164d097..80a0a7d 100644
+--- a/docker/selfhost/docker-compose.yml
++++ b/docker/selfhost/docker-compose.yml
+@@ -44,7 +44,7 @@ services:
+     volumes:
+       - ../../data/osm/romania-260824.osm.pbf:/data/romania.osm.pbf:ro
+       - nominatim-data:/var/lib/postgresql/16/main
+-      - nominatim-flatnode:/nominatim/flatnode
++      - nominatim-flatnode:/nominatim/flatnode   # ~106 GB flatnode.file; prune-flatnode.sh deletes it post-import by default (serve-only doesn't need it)
+     ports:
+       - "127.0.0.1:8081:8080"              # app: NOMINATIM_BASE_URL=http://localhost:8081
+     expose:
+diff --git a/docker/selfhost/prune-flatnode.sh b/docker/selfhost/prune-flatnode.sh
+new file mode 100755
+index 0000000..2f3422e
+--- /dev/null
++++ b/docker/selfhost/prune-flatnode.sh
+@@ -0,0 +1,48 @@
++#!/usr/bin/env bash
++# Reclaim the Nominatim flatnode file after a successful import — LOCAL ONLY.
++#
++# osm2pgsql sizes the flatnode file by the WHOLE planet node-ID space, not by the
++# extract, so a Romania import still produces a ~105 GB flatnode.file. That file is
++# read only during import and during minutely/replication updates — a serve-only
++# instance (plain /search + /reverse, which is all this app does) never touches it.
++# Deleting it after the import reclaims ~105 GB and the geocoder keeps answering
++# byte-identically (verified: /search + /reverse return the same coords after the
++# file is removed and the container restarted).
++#
++# Default: DELETE the flatnode. Opt out with KEEP_FLATNODE=1 if you plan to run
++# minutely OSM updates / replication against this instance (then the file must stay).
++#
++# TRADEOFF if you delete and later need the flatnode back (e.g. to enable updates):
++# there is no rebuild-in-place — you re-import Nominatim from the extract, ~24 min
++# on a 16-core box (docs/SELFHOST.md resource table).
++#
++# Usage (after Nominatim reports healthy):
++#   bash docker/selfhost/prune-flatnode.sh          # delete (default)
++#   KEEP_FLATNODE=1 bash docker/selfhost/prune-flatnode.sh   # keep, print size, no-op
++set -euo pipefail
++
++PROJECT="${COMPOSE_PROJECT_NAME:-howfar-selfhost}"
++VOLUME="${PROJECT}_nominatim-flatnode"
++FLATNODE_PATH="/fn/flatnode.file"
++
++if ! docker volume inspect "$VOLUME" >/dev/null 2>&1; then
++  echo "flatnode volume '$VOLUME' not found — nothing to prune (has Nominatim imported yet?)." >&2
++  exit 0
++fi
++
++size="$(docker run --rm -v "${VOLUME}:/fn" alpine sh -c \
++  'if [ -f /fn/flatnode.file ]; then du -sh /fn/flatnode.file | cut -f1; else echo none; fi')"
++
++if [ "$size" = "none" ]; then
++  echo "No flatnode.file in '$VOLUME' — already pruned or import used none. Nothing to do." >&2
++  exit 0
++fi
++
++if [ "${KEEP_FLATNODE:-}" = "1" ]; then
++  echo "KEEP_FLATNODE=1 — keeping flatnode.file (${size}). Required for minutely/replication updates." >&2
++  exit 0
++fi
++
++echo "Deleting flatnode.file (${size}) from '$VOLUME' — serve-only instance does not need it." >&2
++docker run --rm -v "${VOLUME}:/fn" alpine rm -f "$FLATNODE_PATH"
++echo "Done. Reclaimed ~${size}. Re-import (~24 min) is the cost if you later need it back." >&2
+diff --git a/docker/selfhost/run-manifest.md b/docker/selfhost/run-manifest.md
+index c8c54e6..cac0862 100644
+--- a/docker/selfhost/run-manifest.md
++++ b/docker/selfhost/run-manifest.md
+@@ -10,8 +10,11 @@ engines rebuild deterministically. The **basemap tile archive is NOT bit-reprodu
+ protomaps/basemaps build downloads ~2.25 GB of upstream base datasets (Natural Earth, OSM
+ water/land polygons, Daylight landcover) via `--download` with no version pin, so a rebuild on
+ a fresh box gets whatever vintage is current upstream. The schema (source-layer set) is stable
+-across those vintages, so the map still renders; only the exact tile bytes may differ. Pinning
+-those sources (explicit `--*_path` inputs) is a future hardening.
++across those vintages, so the map still renders; only the exact tile bytes may differ. This
++non-bit-reproducibility is an **accepted tradeoff** (2026-08-25): the base data is
++dated upstream, the schema is stable, and parity is verified against the rendered output — pinning
++those sources (explicit `--*_path` inputs) is deliberately NOT built. It stays a future hardening
++option if bit-exact tile rebuilds ever become a requirement.
+ 
+ ## Data source (the ONE extract)
+ 
+@@ -41,17 +44,21 @@ those sources (explicit `--*_path` inputs) is a future hardening.
+ 
+ | Engine | Wall-time | Peak RAM | On-disk |
+ |---|---|---|---|
+-| Nominatim import (`IMPORT_STYLE=full`) | ~24 min | ~4.2 GiB | PG DB 5.4 GB + flatnode **106 GB** |
++| Nominatim import (`IMPORT_STYLE=full`) | ~24 min | ~4.2 GiB | PG DB 5.4 GB + flatnode **106 GB** (pruned by default post-import → ~8 GB) |
+ | Photon index (from Nominatim DB) | ~2.7 min | ~0.75 GiB | 468 MB (+94 MB jar) |
+ | ORS graph (foot-walking + driving-car) | ~6.6 min | ~1.82 GiB (XMX 2 g) | 799 MB |
+ | pmtiles (protomaps/basemaps, all-Romania z0–15) | ~5 min + one-time ~2.25 GB base-source download | XMX 6 g | 684 MB |
+ | Extract download | ~1 min | — | 312 MB |
+ 
+-**Total footprint ≈ 114 GB, dominated by the Nominatim flatnode (106 GB).** Measured with `du -sh`
+-(actual blocks) — `du --apparent-size` reports the same 106 GB, so the file is genuinely dense, not a
+-sparse file whose `ls -l` size would overstate disk use. The flatnode is sized by the planet node-ID
+-space (not the extract), is only needed during import/replication, and can be deleted afterwards (no
+-minutely updates here) → **~8 GB** resident without it.
++**Peak footprint ≈ 114 GB during import, dominated by the Nominatim flatnode (106 GB); ~8 GB resident
++after the default prune.** Measured with `du -sh` (actual blocks) — `du --apparent-size` reports the
++same 106 GB, so the file is genuinely dense, not a sparse file whose `ls -l` size would overstate disk
++use. The flatnode is sized by the planet node-ID space (not the extract) and is read only during import
++and minutely/replication updates. `docker/selfhost/prune-flatnode.sh` deletes it **by default** after
++the import (opt out with `KEEP_FLATNODE=1` for replication setups) → **~8 GB** resident. Verified
++2026-08-25: after deleting `flatnode.file` and restarting the container, `/search` (Piața Unirii →
++44.4280060, 26.1025098) and `/reverse` (44.4268, 26.1025) return **byte-identical** coords to the
++with-flatnode answers, confirming a serve-only instance does not need it. Getting it back = re-import (~24 min).
+ 
+ ## Parity result (public providers vs self-hosted stack, 2026-08-25)
+ 
+diff --git a/docs/SELFHOST.md b/docs/SELFHOST.md
+index a80d149..2c78ae9 100644
+--- a/docs/SELFHOST.md
++++ b/docs/SELFHOST.md
+@@ -24,8 +24,9 @@ this doc are the only committed artefacts.
+ ## Prerequisites
+ 
+ - Docker + Docker Compose v2.
+-- Disk: budget **~120 GB** during import (the Nominatim flatnode alone is ~106 GB; it is
+-  deletable afterwards → ~8 GB resident — see the table below). Downloads: extract ~312 MB,
++- Disk: budget **~120 GB** during import (the Nominatim flatnode alone is ~106 GB). The
++  runbook **deletes the flatnode by default** after the import (§2), dropping to **~8 GB**
++  resident — see the table below. Downloads: extract ~312 MB,
+   Photon jar ~98 MB, and a one-time **~2.25 GB** of Protomaps base sources for the tiles
+   (Natural Earth + OSM water/land polygons + Daylight landcover; cached after first build).
+ - RAM: the imports are the heavy part. Every service has an explicit `mem_limit`
+@@ -44,16 +45,20 @@ All commands are run from the `HowFar/` app root.
+ 
+ | Engine | Import/build wall-time | Peak RAM | On-disk |
+ |---|---|---|---|
+-| Nominatim (`IMPORT_STYLE=full`) | ~24 min | ~4.2 GiB | PG DB 5.4 GB + flatnode **106 GB** |
++| Nominatim (`IMPORT_STYLE=full`) | ~24 min | ~4.2 GiB | PG DB 5.4 GB + flatnode **106 GB** (deleted by default post-import → ~8 GB) |
+ | Photon (index from Nominatim DB) | ~2.7 min | ~0.75 GiB | 468 MB (+94 MB jar) |
+ | ORS (foot-walking + driving-car) | ~6.6 min | ~1.82 GiB (XMX 2 g) | 799 MB |
+ | pmtiles (protomaps/basemaps) | ~5 min + one-time ~2.25 GB base-source download | XMX 6 g | 684 MB (all-Romania z0–15) |
+ | **Extract download** | ~1 min | — | 312 MB |
+ 
+-**Total ≈ 114 GB, almost all the Nominatim flatnode (106 GB).** The flatnode is sized by the
+-planet node-ID space, not the extract, and is only needed during import/replication — with no
+-minutely updates you can delete it afterwards (`docker compose … exec nominatim rm /nominatim/flatnode/flatnode.file`)
+-to drop to **~8 GB** resident.
++**Peak ≈ 114 GB during import, almost all the Nominatim flatnode (106 GB); ~8 GB resident once
++the flatnode is pruned (default).** The flatnode is sized by the planet node-ID space, not the
++extract, and is read only during import and minutely/replication updates — a serve-only instance
++(plain `/search` + `/reverse`, all this app does) never touches it. §2 deletes it by default; the
++geocoder keeps answering byte-identically (verified: `/search` + `/reverse` return the same coords
++after the flatnode is removed and the container restarted). Keep it only if you plan to run OSM
++replication (`KEEP_FLATNODE=1`, §2). **Tradeoff if you delete and later need it back:** no
++in-place rebuild — you re-import Nominatim (~24 min).
+ 
+ **Parity (public vs self-hosted, 2026-08-25):** all 27 checks pass (after a provenance preflight that
+ proves all three engines are the ones the app uses) — 18/18 rings (walk + car) with median boundary
+@@ -86,6 +91,18 @@ curl -s 'http://localhost:8081/search?format=jsonv2&countrycodes=ro&q=Piata+Unir
+ curl -s 'http://localhost:8081/reverse?format=jsonv2&lat=44.4268&lon=26.1025' | head
+ ```
+ 
++Once those return (import succeeded), reclaim the ~106 GB flatnode — **the default**, since a
++serve-only instance never reads it:
++
++```bash
++docker/selfhost/prune-flatnode.sh                 # delete flatnode.file → ~8 GB resident
++# KEEP_FLATNODE=1 docker/selfhost/prune-flatnode.sh   # keep it (only if you run OSM replication)
++```
++
++The geocoder keeps answering `/search` + `/reverse` byte-identically without the flatnode (verified
++by re-querying after removal + a container restart). If you later need the flatnode back (to enable
++minutely updates), there is no in-place rebuild — re-import (~24 min).
++
+ ## 3 — Photon (index built FROM the Nominatim DB)
+ 
+ Photon derives from the same extract by importing the Nominatim database, then serves

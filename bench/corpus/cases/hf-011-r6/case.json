@@ -1,0 +1,30 @@
+{
+  "id": "hf-011-r6",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "011",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "f41fd89f3515ec497bfa7ead76e20837a2fd06fe",
+  "diff_of": "6cfc0de1c1f65fbf7bceffddcafb54c666a9f235..f41fd89f3515ec497bfa7ead76e20837a2fd06fe",
+  "diff_excludes": [],
+  "spec_source_sha256": "f6854278256dd1df5644e6105479cdcdbd05d63929cda95ccf463d30d0d984f2",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "feature",
+  "area": "server",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "The diff is the single flatnode-reclaim commit (base f41fd89^ = 6cfc0de): the triage itself says 'the one genuinely new code in this tree is prune-flatnode.sh', so the small diff is coherent with R6-1; R6-2 is about pre-existing CI wiring visible in the snapshot tree. Severities: the triage says 'No Critical'; R6-1/R6-2 recorded Important. Spec edits: template preamble deleted. Dropped by the closed allowlist (non-template H2 in this record): none.",
+  "mapping": {
+    "round": 6,
+    "rounds_total": 10,
+    "fix_commits": [
+      "58d8e88"
+    ],
+    "evidence": "Audit 22:52:56 follows f41fd89 (22:52:43) = 'round 6 — the fresh panel on the flatnode tree' in task.md; its two accepts (prune guard, CI never runs the self-test) are exactly 58d8e88 (23:03:54) 'Guard flatnode prune on import completion; run harness self-test in CI'. Rounds 1-5 are compacted in task-archive.md (their fixes are in 6cfc0de, the P3 stack commit at 22:40, which round 5 reviewed dirty); judge.md has a trim pointer for one older round."
+  }
+}

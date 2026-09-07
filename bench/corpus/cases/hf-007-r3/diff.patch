@@ -1,0 +1,1401 @@
+diff --git a/.env.example b/.env.example
+index 192de39..9f42373 100644
+--- a/.env.example
++++ b/.env.example
+@@ -24,3 +24,33 @@ ORS_API_KEY=""
+ # Optional importer failure webhook (Railway/Slack-compatible JSON receiver).
+ # The weekly job also exits non-zero and /api/catalogue-status returns 503 when stale.
+ AMENITY_IMPORT_ALERT_WEBHOOK_URL=""
++
++# ── Region / self-host (task 007) ───────────────────────────────────────────
++# Every value below is OPTIONAL and DEFAULTS to today's public host / the
++# Bucharest extent — leave them unset and the app is byte-for-byte the current
++# deployment. Set them to point at self-hosted instances (P2/P3) or a different
++# Romanian city (P4). A SET-but-invalid value fails closed (startup/build error),
++# never a silent bad fetch.
++#
++# Provider base URLs (server-side, runtime; no trailing slash; the app appends
++# the provider-version path). Defaults shown.
++# NOMINATIM_BASE_URL="https://nominatim.openstreetmap.org"
++# PHOTON_BASE_URL="https://photon.komoot.io/api"
++# ORS_BASE_URL="https://api.openrouteservice.org"
++# TRANSIT_BASE_URL="https://api.transitous.org"   # feeds both one-to-all + plan
++#
++# Overpass endpoint pools (comma/space-separated; first healthy host wins).
++# Interactive route/stop queries (default = 3 hosts):
++# OVERPASS_ENDPOINTS="https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter"
++# Weekly bulk amenity import (default = 2 hosts):
++# OVERPASS_BULK_ENDPOINTS="https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter"
++#
++# Tile archive path (server-side, runtime; absolute, or relative to cwd).
++# TILES_PMTILES_PATH="data/tiles/bucharest.pmtiles"
++#
++# Map extent = geofence + MapLibre maxBounds + the tile extract's --bbox, all
++# from this ONE var: "minLng,minLat,maxLng,maxLat". SINGLE-CITY extent (span ≤ 2°
++# per axis — the transit grid is sized from it). NOTE: NEXT_PUBLIC_* is
++# BUILD-TIME inlined, so changing the extent requires a rebuild (the provider
++# hosts above are runtime). scripts/fetch-tiles.sh reads this same var.
++# NEXT_PUBLIC_MAP_BBOX="25.8,44.2,26.4,44.7"
+diff --git a/scripts/fetch-tiles.sh b/scripts/fetch-tiles.sh
+index 0dfc616..f9eeb04 100755
+--- a/scripts/fetch-tiles.sh
++++ b/scripts/fetch-tiles.sh
+@@ -7,12 +7,25 @@ set -euo pipefail
+ 
+ cd "$(dirname "$0")/.."
+ 
++# Pick up config from .env so "point at another city" is a single .env edit that
++# reaches the tile extract too (task 007). Absent .env → today's Bucharest values.
++if [ -f .env ]; then
++  set -a
++  # shellcheck disable=SC1091
++  . ./.env
++  set +a
++fi
++
+ BUILD_DATE="${1:-$(date -u -d 'yesterday' +%Y%m%d)}"
+-BBOX="25.80,44.20,26.40,44.70" # Bucharest + Ilfov ring
+-OUT="data/tiles/bucharest.pmtiles"
++# Extent + output path are the SAME env vars the app reads (bounds.ts /
++# tiles route) — one source of truth for "which region / which archive".
++# NEXT_PUBLIC_MAP_BBOX is "minLng,minLat,maxLng,maxLat", exactly pmtiles'
++# --bbox order (west,south,east,north).
++BBOX="${NEXT_PUBLIC_MAP_BBOX:-25.80,44.20,26.40,44.70}" # default: Bucharest + Ilfov ring
++OUT="${TILES_PMTILES_PATH:-data/tiles/bucharest.pmtiles}"
+ PMTILES_VERSION="1.31.1"
+ 
+-mkdir -p data/tiles
++mkdir -p "$(dirname "$OUT")"
+ 
+ if ! command -v pmtiles >/dev/null 2>&1; then
+   echo "pmtiles CLI not found — downloading v${PMTILES_VERSION} to .cache/ ..."
+diff --git a/src/app/api/tiles/route.ts b/src/app/api/tiles/route.ts
+index 73e9aa0..64fbaf4 100644
+--- a/src/app/api/tiles/route.ts
++++ b/src/app/api/tiles/route.ts
+@@ -1,15 +1,17 @@
+ import { createReadStream, promises as fs } from "node:fs";
+-import path from "node:path";
+ import { Readable } from "node:stream";
+ 
+ import { parseByteRange } from "@/lib/byte-range";
++import { tilesPmtilesPath } from "@/lib/env";
+ 
+ // Serves the self-hosted Protomaps archive with HTTP Range support (the
+ // pmtiles client reads the archive via byte-range requests). Keyless by
+ // design: the "external API keys stay server-side" constraint rules out
+ // browser-keyed tile providers.
+ 
+-const TILES_PATH = path.join(process.cwd(), "data", "tiles", "bucharest.pmtiles");
++// Path is config-driven (task 007, `TILES_PMTILES_PATH`) — default =
++// <cwd>/data/tiles/bucharest.pmtiles, so an unset env is unchanged.
++const TILES_PATH = tilesPmtilesPath();
+ 
+ // pmtiles range requests are small (header ~16KB, tile batches well under 1MB);
+ // the cap keeps a hostile client from turning ranges into whole-archive buffers.
+diff --git a/src/features/amenities/server/bulk-overpass.test.ts b/src/features/amenities/server/bulk-overpass.test.ts
+index b13865f..908053b 100644
+--- a/src/features/amenities/server/bulk-overpass.test.ts
++++ b/src/features/amenities/server/bulk-overpass.test.ts
+@@ -66,6 +66,38 @@ describe("bulk Overpass transport", () => {
+     ).rejects.toThrow(/exceeds 20 bytes/);
+   });
+ 
++  it("defaults to today's public bulk pool when no endpoints are passed (task 007)", async () => {
++    const calls: string[] = [];
++    vi.stubGlobal(
++      "fetch",
++      vi.fn(async (url: string | URL | Request) => {
++        calls.push(String(url));
++        return bodyResponse({ elements: [{ type: "node", id: 1 }] });
++      }),
++    );
++    const snapshot = await fetchBulkOverpass(); // no endpoints → config default
++    expect(snapshot.endpoint).toBe("https://overpass-api.de/api/interpreter");
++    expect(calls[0]).toBe("https://overpass-api.de/api/interpreter");
++  });
++
++  it("uses an OVERPASS_BULK_ENDPOINTS override when set (task 007)", async () => {
++    vi.stubEnv("OVERPASS_BULK_ENDPOINTS", "https://bulk.internal/api/interpreter");
++    const calls: string[] = [];
++    vi.stubGlobal(
++      "fetch",
++      vi.fn(async (url: string | URL | Request) => {
++        calls.push(String(url));
++        return bodyResponse({ elements: [{ type: "node", id: 1 }] });
++      }),
++    );
++    try {
++      const snapshot = await fetchBulkOverpass();
++      expect(snapshot.endpoint).toBe("https://bulk.internal/api/interpreter");
++    } finally {
++      vi.unstubAllEnvs();
++    }
++  });
++
+   it("rejects timeout/error remarks even when HTTP status is 200", async () => {
+     vi.stubGlobal(
+       "fetch",
+diff --git a/src/features/amenities/server/bulk-overpass.ts b/src/features/amenities/server/bulk-overpass.ts
+index 5877e74..81f06ef 100644
+--- a/src/features/amenities/server/bulk-overpass.ts
++++ b/src/features/amenities/server/bulk-overpass.ts
+@@ -1,13 +1,9 @@
+ import { AMENITY_CATEGORIES } from "@/features/amenities/amenities";
+ import type { OverpassElement } from "@/features/amenities/server/overpass-client";
+ import { BUCHAREST_BBOX } from "@/lib/bounds";
++import { providerConfig } from "@/lib/env";
+ import { ProviderError, USER_AGENT } from "@/lib/provider-http";
+ 
+-const BULK_ENDPOINTS = [
+-  "https://overpass-api.de/api/interpreter",
+-  "https://overpass.kumi.systems/api/interpreter",
+-] as const;
+-
+ export const BULK_OVERPASS_TIMEOUT_MS = 180_000;
+ export const BULK_OVERPASS_MAX_BYTES = 50 * 1024 * 1024;
+ 
+@@ -115,7 +111,9 @@ export async function fetchBulkOverpass(
+     maxBytes?: number;
+   } = {},
+ ): Promise<BulkOverpassSnapshot> {
+-  const endpoints = options.endpoints ?? BULK_ENDPOINTS;
++  // Default pool is config-driven (task 007, `OVERPASS_BULK_ENDPOINTS`); the
++  // weekly job passes none, so it picks up the configured (or default) hosts.
++  const endpoints = options.endpoints ?? providerConfig().bulkOverpassEndpoints;
+   const query = buildBulkOverpassQuery();
+   const failures: string[] = [];
+   for (const endpoint of endpoints) {
+diff --git a/src/features/amenities/server/catalogue.test.ts b/src/features/amenities/server/catalogue.test.ts
+index c89d67e..9e0bc70 100644
+--- a/src/features/amenities/server/catalogue.test.ts
++++ b/src/features/amenities/server/catalogue.test.ts
+@@ -1,4 +1,4 @@
+-import { beforeEach, describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+ const {
+   walkingIsochrone,
+@@ -668,3 +668,21 @@ describe("nearbyAmenities merges coincident transit stops (task 047 + per-band c
+     expect(totalFor(result.countsByBand, "transit")).toBe(0);
+   });
+ });
++
++describe("amenityResultCacheKey config namespacing (task 007)", () => {
++  afterEach(() => vi.unstubAllEnvs());
++
++  it("is byte-identical on default config", () => {
++    expect(amenityResultCacheKey("dataset-1", 44.4268, 26.1025, "walk:normal")).toBe(
++      "amenity:local:v5:dataset-1:walk:normal:44.42680,26.10250",
++    );
++  });
++
++  it("gets a fresh namespace once a ring provider is overridden (amenities are derived from the rings)", () => {
++    const def = amenityResultCacheKey("dataset-1", 44.4268, 26.1025, "walk:normal");
++    vi.stubEnv("ORS_BASE_URL", "https://ors.internal");
++    const overridden = amenityResultCacheKey("dataset-1", 44.4268, 26.1025, "walk:normal");
++    expect(overridden).not.toBe(def);
++    expect(overridden.endsWith(def)).toBe(true); // tag is a prefix; base key unchanged
++  });
++});
+diff --git a/src/features/amenities/server/catalogue.ts b/src/features/amenities/server/catalogue.ts
+index dd8745f..5e7130f 100644
+--- a/src/features/amenities/server/catalogue.ts
++++ b/src/features/amenities/server/catalogue.ts
+@@ -14,6 +14,7 @@ import { DEFAULT_TIME_CONTEXT, type TimeContext } from "@/features/isochrones/ti
+ import { effectivePace, type Mode } from "@/features/map/selection-flow";
+ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
+ import { db } from "@/lib/db";
++import { taggedCacheKey } from "@/lib/env";
+ import { ProviderError, roundCoord } from "@/lib/provider-http";
+ 
+ /**
+@@ -115,7 +116,13 @@ export function amenityResultCacheKey(
+   lng: number,
+   clipIdentity: string,
+ ): string {
+-  return `${AMENITY_RESULT_CACHE_PREFIX}${datasetId}:${clipIdentity}:${roundCoord(lat)},${roundCoord(lng)}`;
++  // Config-tagged (task 007): the clipped amenity set is DERIVED from the
++  // config-lifted ORS/transit rings + the geofence bbox, but the key carries
++  // none of that — so a provider/region flip must re-namespace it too, else it
++  // serves places banded by the old provider's rings for the full TTL.
++  return taggedCacheKey(
++    `${AMENITY_RESULT_CACHE_PREFIX}${datasetId}:${clipIdentity}:${roundCoord(lat)},${roundCoord(lng)}`,
++  );
+ }
+ 
+ /**
+diff --git a/src/features/amenities/server/overpass-client.test.ts b/src/features/amenities/server/overpass-client.test.ts
+index 29d094d..8770936 100644
+--- a/src/features/amenities/server/overpass-client.test.ts
++++ b/src/features/amenities/server/overpass-client.test.ts
+@@ -1,4 +1,4 @@
+-import { beforeEach, describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+ const { providerFetch } = vi.hoisted(() => ({ providerFetch: vi.fn() }));
+ vi.mock("@/lib/provider-http", async (importOriginal) => ({
+@@ -54,3 +54,30 @@ describe("raceOverpass — empty semantics", () => {
+     await expect(raceOverpass("q", { treatEmptyAsFailure: false })).rejects.toThrow(/overpass unavailable/i);
+   });
+ });
++
++describe("config-driven endpoint pool (task 007)", () => {
++  afterEach(() => vi.unstubAllEnvs());
++
++  it("defaults to today's 3-host pool, deriving rateHost from each URL", async () => {
++    providerFetch.mockResolvedValue(resp([el]));
++    await raceOverpass("q", { treatEmptyAsFailure: false });
++    const urls = providerFetch.mock.calls.map((c) => c[0] as string);
++    expect(urls).toEqual([
++      "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
++      "https://overpass-api.de/api/interpreter",
++      "https://overpass.kumi.systems/api/interpreter",
++    ]);
++    const hosts = providerFetch.mock.calls.map((c) => (c[1] as { rateHost: string }).rateHost);
++    expect(hosts).toEqual(["maps.mail.ru", "overpass-api.de", "overpass.kumi.systems"]);
++  });
++
++  it("uses an OVERPASS_ENDPOINTS override (URL + derived rateHost)", async () => {
++    vi.stubEnv("OVERPASS_ENDPOINTS", "https://op.internal/api/interpreter");
++    providerFetch.mockResolvedValue(resp([el]));
++    await raceOverpass("q", { treatEmptyAsFailure: false });
++    expect(providerFetch).toHaveBeenCalledTimes(1);
++    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++    expect(url).toBe("https://op.internal/api/interpreter");
++    expect(opts.rateHost).toBe("op.internal");
++  });
++});
+diff --git a/src/features/amenities/server/overpass-client.ts b/src/features/amenities/server/overpass-client.ts
+index 7f0989c..ad31b0f 100644
+--- a/src/features/amenities/server/overpass-client.ts
++++ b/src/features/amenities/server/overpass-client.ts
+@@ -1,3 +1,4 @@
++import { providerConfig } from "@/lib/env";
+ import { providerFetch, ProviderError, USER_AGENT } from "@/lib/provider-http";
+ 
+ /**
+@@ -17,15 +18,12 @@ import { providerFetch, ProviderError, USER_AGENT } from "@/lib/provider-http";
+  * a valid answer instead of a 502.
+  */
+ 
+-// Ordered by observed reliability (probed 2026-07-17): maps.mail.ru answered the
+-// live query every round (~2s); overpass-api.de is variable (fast, or 504 under
+-// load); kumi is kept as a third hedge (was fully down when probed, may recover).
+-// Racing means a currently-dead host costs nothing — it simply never wins.
+-const ENDPOINTS: { url: string; host: string }[] = [
+-  { url: "https://maps.mail.ru/osm/tools/overpass/api/interpreter", host: "maps.mail.ru" },
+-  { url: "https://overpass-api.de/api/interpreter", host: "overpass-api.de" },
+-  { url: "https://overpass.kumi.systems/api/interpreter", host: "overpass.kumi.systems" },
+-];
++// The endpoint pool is config-driven (task 007, `OVERPASS_ENDPOINTS`) — default
++// is today's list, ordered by observed reliability (probed 2026-07-17):
++// maps.mail.ru answered the live query every round (~2s); overpass-api.de is
++// variable (fast, or 504 under load); kumi is a third hedge (was down when
++// probed, may recover). Racing means a currently-dead host costs nothing — it
++// simply never wins. The per-host rate-limit key is derived from each URL.
+ const MIN_INTERVAL_MS = 1100; // be a good fair-use citizen (per host)
+ const ENDPOINT_TIMEOUT_MS = 18_000; // per-host abort; the race isn't sequential so this is the whole budget
+ 
+@@ -137,7 +135,8 @@ export async function raceOverpass(
+ ): Promise<OverpassElement[]> {
+   const treatEmptyAsFailure = opts.treatEmptyAsFailure ?? true;
+   const controller = new AbortController();
+-  const attempts = ENDPOINTS.map((ep) =>
++  const endpoints = providerConfig().overpassEndpoints.map((url) => ({ url, host: new URL(url).host }));
++  const attempts = endpoints.map((ep) =>
+     fetchFromHost(ep, query, controller.signal, treatEmptyAsFailure),
+   );
+   try {
+diff --git a/src/features/amenities/server/route-path.ts b/src/features/amenities/server/route-path.ts
+index afebf91..6786091 100644
+--- a/src/features/amenities/server/route-path.ts
++++ b/src/features/amenities/server/route-path.ts
+@@ -2,6 +2,7 @@ import { parseRoutePath, type RoutePath } from "@/features/amenities/route-path"
+ import { TRANSIT_ROUTE_VALUES } from "@/features/amenities/stop-lines";
+ import { raceOverpass } from "@/features/amenities/server/overpass-client";
+ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
++import { taggedCacheKey } from "@/lib/env";
+ 
+ /**
+  * The drawable path (track + named stops) of one OSM transit route relation
+@@ -61,7 +62,9 @@ const inFlight = new Map<string, Promise<RoutePath | null>>();
+  * transit route (→ 404 at the route). Cached best-effort; single-flighted.
+  */
+ export async function routePath(relationId: number): Promise<RoutePath | null> {
+-  const key = `route-path:v1:${relationId}`;
++  // Config-tagged (task 007): route geometry comes from the config-driven
++  // Overpass pool, so an OVERPASS_ENDPOINTS switch must re-namespace this cache.
++  const key = taggedCacheKey(`route-path:v1:${relationId}`);
+   const hit = await getCachedSafe<CachedRoutePath>(key);
+   if (hit) return hit.path;
+ 
+diff --git a/src/features/amenities/server/stop-lines.ts b/src/features/amenities/server/stop-lines.ts
+index 651bcf2..ecb003a 100644
+--- a/src/features/amenities/server/stop-lines.ts
++++ b/src/features/amenities/server/stop-lines.ts
+@@ -1,6 +1,7 @@
+ import { parseRouteRelations, type StopLine } from "@/features/amenities/stop-lines";
+ import { raceOverpass } from "@/features/amenities/server/overpass-client";
+ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
++import { taggedCacheKey } from "@/lib/env";
+ 
+ /**
+  * The transit lines serving one OSM stop (task 021), via OSM public-transport
+@@ -72,7 +73,9 @@ const inFlight = new Map<string, Promise<StopLine[]>>();
+ export async function stopLines(osmType: OsmType, id: number): Promise<StopLine[]> {
+   // v2: StopLine gained relationId (task 024) — the bump keeps v1 hits (parsed
+   // before ids existed) from serving rows whose paths could never be drawn.
+-  const key = `stop-lines:v2:${osmType}/${id}`;
++  // Config-tagged (task 007): the lines come from the config-driven Overpass
++  // pool, so an OVERPASS_ENDPOINTS switch must re-namespace this 30-day cache.
++  const key = taggedCacheKey(`stop-lines:v2:${osmType}/${id}`);
+   const hit = await getCachedSafe<StopLine[]>(key);
+   if (hit) return hit;
+ 
+diff --git a/src/features/isochrones/server/ors.test.ts b/src/features/isochrones/server/ors.test.ts
+index 41b60c2..2bf7e09 100644
+--- a/src/features/isochrones/server/ors.test.ts
++++ b/src/features/isochrones/server/ors.test.ts
+@@ -1,9 +1,10 @@
+ import { beforeEach, describe, expect, it, vi } from "vitest";
+ 
+-const { store, providerFetch, serverEnv } = vi.hoisted(() => ({
++const { store, providerFetch, serverEnv, providerConfig } = vi.hoisted(() => ({
+   store: new Map<string, unknown>(),
+   providerFetch: vi.fn(),
+   serverEnv: vi.fn(() => ({ orsApiKey: "test-key" }) as { orsApiKey?: string }),
++  providerConfig: vi.fn(() => ({ orsBase: "https://api.openrouteservice.org" }) as { orsBase: string }),
+ }));
+ 
+ vi.mock("@/lib/api-cache", () => ({
+@@ -19,7 +20,11 @@ vi.mock("@/lib/provider-http", async (importOriginal) => ({
+   providerFetch,
+ }));
+ 
+-vi.mock("@/lib/env", () => ({ serverEnv }));
++vi.mock("@/lib/env", () => ({
++  serverEnv,
++  providerConfig,
++  taggedCacheKey: (key: string) => key, // identity on default config (tag tested in env.test)
++}));
+ 
+ import { carTrafficSlot, scaledCarRangesS } from "@/features/isochrones/car-traffic";
+ 
+@@ -38,6 +43,7 @@ beforeEach(() => {
+   store.clear();
+   providerFetch.mockReset();
+   serverEnv.mockReturnValue({ orsApiKey: "test-key" });
++  providerConfig.mockReturnValue({ orsBase: "https://api.openrouteservice.org" });
+ });
+ 
+ describe("walkingIsochrone", () => {
+@@ -212,6 +218,15 @@ describe("drivingIsochrone (car, tasks 053/058)", () => {
+     parsed.range.forEach((v: number, i: number) => expect(v).toBeLessThan(MIDDAY_RANGES[i]!));
+   });
+ 
++  it("routes the request URL and rate-limit host to an ORS_BASE_URL override (task 007)", async () => {
++    providerConfig.mockReturnValue({ orsBase: "https://ors.internal" });
++    providerFetch.mockResolvedValue(orsResponse(MIDDAY_RANGES.map(poly)));
++    await drivingIsochrone(44.4268, 26.1025, midday);
++    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++    expect(url).toBe("https://ors.internal/v2/isochrones/driving-car");
++    expect(opts.rateHost).toBe("ors.internal");
++  });
++
+   it("relabels the driving rings to 10/20/30 min, ascending regardless of input order", async () => {
+     providerFetch.mockResolvedValue(orsResponse([poly(1200), poly(400), poly(800)]));
+     const result = await drivingIsochrone(44.4268, 26.1025, midday);
+diff --git a/src/features/isochrones/server/ors.ts b/src/features/isochrones/server/ors.ts
+index 5bd7208..12dc2b5 100644
+--- a/src/features/isochrones/server/ors.ts
++++ b/src/features/isochrones/server/ors.ts
+@@ -5,7 +5,7 @@ import {
+ } from "@/features/isochrones/car-traffic";
+ import { DEFAULT_PACE, PACE_MODEL, type Pace } from "@/features/isochrones/pace";
+ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
+-import { serverEnv } from "@/lib/env";
++import { providerConfig, serverEnv, taggedCacheKey } from "@/lib/env";
+ import { providerFetch, ProviderError, roundCoord } from "@/lib/provider-http";
+ 
+ /**
+@@ -19,9 +19,10 @@ import { providerFetch, ProviderError, roundCoord } from "@/lib/provider-http";
+  * cache prefix.
+  */
+ 
+-const HOST = "api.openrouteservice.org";
++// Host/base are config-driven (task 007) — default = today's public ORS. Read
++// inside the fetch function; the rate-limit host derives from the base.
+ /** ORS isochrone endpoint for a routing profile (foot-walking | driving-car). */
+-const isoUrl = (profile: string) => `https://api.openrouteservice.org/v2/isochrones/${profile}`;
++const isoUrl = (base: string, profile: string) => `${base}/v2/isochrones/${profile}`;
+ const MIN_INTERVAL_MS = 1500; // free tier ~40 isochrone req/min (PROVIDERS.md) ⇒ ≥1.5s spacing
+ const TIMEOUT_MS = 12_000;
+ const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+@@ -170,7 +171,7 @@ export async function walkingIsochrone(
+   // v3 (task 051): pace added to the key. v4 (task 064): the walking speeds
+   // changed to 3/5 km/h, so every cached ring's GEOMETRY is different at the
+   // same coordinates — v3 entries must never serve (7-day TTL).
+-  const key = `iso:foot:v4:${pace}:${roundCoord(latRaw)},${roundCoord(lngRaw)}`;
++  const key = taggedCacheKey(`iso:foot:v4:${pace}:${roundCoord(latRaw)},${roundCoord(lngRaw)}`);
+   return orsIsochrone("foot-walking", latRaw, lngRaw, PACE_MODEL[pace].orsRangesS, NOMINAL_MINUTES, key);
+ }
+ 
+@@ -189,7 +190,9 @@ export async function drivingIsochrone(
+   slot: CarTrafficSlot,
+ ): Promise<IsochroneResult> {
+   const ranges = scaledCarRangesS(CAR_RANGES_S, slot.factor);
+-  const key = `iso:car:v2:${CAR_FACTOR_REVISION}:est:${slot.slotId}:${roundCoord(latRaw)},${roundCoord(lngRaw)}`;
++  const key = taggedCacheKey(
++    `iso:car:v2:${CAR_FACTOR_REVISION}:est:${slot.slotId}:${roundCoord(latRaw)},${roundCoord(lngRaw)}`,
++  );
+   return orsIsochrone("driving-car", latRaw, lngRaw, ranges, CAR_MINUTES, key);
+ }
+ 
+@@ -207,11 +210,13 @@ async function fetchAndCache(
+   const apiKey = serverEnv().orsApiKey;
+   if (!apiKey) throw new ProviderError("ORS_API_KEY is not configured");
+ 
++  const { orsBase } = providerConfig();
++
+   // A stalled/unreachable/garbled upstream is a provider error (→ 502), not a 500.
+   let body: { features?: OrsFeature[] };
+   try {
+-    const res = await providerFetch(isoUrl(profile), {
+-      rateHost: HOST,
++    const res = await providerFetch(isoUrl(orsBase, profile), {
++      rateHost: new URL(orsBase).host,
+       minIntervalMs: MIN_INTERVAL_MS,
+       timeoutMs: TIMEOUT_MS,
+       init: {
+diff --git a/src/features/isochrones/server/transit-plan.test.ts b/src/features/isochrones/server/transit-plan.test.ts
+index 62a3320..c7724ef 100644
+--- a/src/features/isochrones/server/transit-plan.test.ts
++++ b/src/features/isochrones/server/transit-plan.test.ts
+@@ -327,6 +327,26 @@ describe("planTrip", () => {
+     expect(url).toContain(`time=${encodeURIComponent(DEP)}`);
+   });
+ 
++  it("defaults to today's public plan host, and a TRANSIT_BASE_URL override moves URL + rateHost (task 007)", async () => {
++    providerFetch.mockResolvedValue(planResponse([FAST]));
++    await planTrip(FROM, TO, DEP);
++    const [defUrl, defOpts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++    expect(defUrl.startsWith("https://api.transitous.org/api/v1/plan?")).toBe(true);
++    expect(defOpts.rateHost).toBe("api.transitous.org");
++
++    vi.stubEnv("TRANSIT_BASE_URL", "https://motis.internal/");
++    try {
++      providerFetch.mockClear();
++      providerFetch.mockResolvedValue(planResponse([FAST]));
++      await planTrip({ lat: 44.30, lng: 26.05 }, { lat: 44.49, lng: 26.19 }, DEP); // fresh coords
++      const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++      expect(url.startsWith("https://motis.internal/api/v1/plan?")).toBe(true);
++      expect(opts.rateHost).toBe("motis.internal");
++    } finally {
++      vi.unstubAllEnvs();
++    }
++  });
++
+   it("matches the painted rings' walking contract: raised LAST street leg, default first leg, ring pedestrian params", async () => {
+     providerFetch.mockResolvedValue(planResponse([FAST]));
+     await planTrip(FROM, TO, DEP);
+diff --git a/src/features/isochrones/server/transit-plan.ts b/src/features/isochrones/server/transit-plan.ts
+index fff66b9..f324dcf 100644
+--- a/src/features/isochrones/server/transit-plan.ts
++++ b/src/features/isochrones/server/transit-plan.ts
+@@ -2,6 +2,7 @@ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
+ import { PACE_MODEL } from "@/features/isochrones/pace";
+ import { decodePolyline } from "@/features/isochrones/polyline";
+ import { hasTransitLeg } from "@/features/isochrones/transit-classify";
++import { providerConfig, taggedCacheKey } from "@/lib/env";
+ import { providerFetch, ProviderError, roundCoord, USER_AGENT } from "@/lib/provider-http";
+ 
+ /**
+@@ -15,8 +16,10 @@ import { providerFetch, ProviderError, roundCoord, USER_AGENT } from "@/lib/prov
+  * User-Agent + attribution to transitous.org/sources (rendered client-side).
+  */
+ 
+-const URL = "https://api.transitous.org/api/v1/plan";
+-const HOST = "api.transitous.org";
++// Transitous host is config-driven (task 007) — default = today's public MOTIS,
++// shared with one-to-all (transit.ts). The plan path is version-specific and
++// stays in code; only the base moves.
++const PLAN_PATH = "/api/v1/plan";
+ const MIN_INTERVAL_MS = 1500; // community-run; be a good citizen (shared with one-to-all's host)
+ /** END-TO-END budget for resolving one trip plan: rate-limiter queue wait +
+  * first attempt + the bounded retry, all under ONE absolute deadline (an
+@@ -308,7 +311,9 @@ export async function planTrip(
+   // legs (and therefore the chosen itinerary) can differ. maxMinutes is in the
+   // key because it changes the selected itinerary.
+   const band = typeof maxMinutes === "number" && maxMinutes > 0 ? Math.round(maxMinutes) : 0;
+-  const key = `reach:plan:v5:${roundCoord(from.lat)},${roundCoord(from.lng)}:${roundCoord(to.lat)},${roundCoord(to.lng)}:${departureIso}:${band}`;
++  const key = taggedCacheKey(
++    `reach:plan:v5:${roundCoord(from.lat)},${roundCoord(from.lng)}:${roundCoord(to.lat)},${roundCoord(to.lng)}:${departureIso}:${band}`,
++  );
+   const hit = await getCachedSafe<ReachPlan>(key);
+   if (hit) return hit;
+   const existing = inFlight.get(key);
+@@ -322,11 +327,11 @@ export async function planTrip(
+   }
+ }
+ 
+-async function fetchPlanBody(url: string, budgetSignal: AbortSignal): Promise<MotisPlanBody> {
++async function fetchPlanBody(url: string, host: string, budgetSignal: AbortSignal): Promise<MotisPlanBody> {
+   let body: MotisPlanBody;
+   try {
+     const res = await providerFetch(url, {
+-      rateHost: HOST,
++      rateHost: host,
+       minIntervalMs: MIN_INTERVAL_MS,
+       // The per-attempt timeout is a ceiling only — the ABSOLUTE budget signal
+       // is what bounds queue+attempts end-to-end (see PLAN_BUDGET_MS).
+@@ -353,8 +358,10 @@ async function fetchAndParse(
+   key: string,
+   maxSeconds?: number,
+ ): Promise<ReachPlan> {
++  const { transitBase } = providerConfig();
++  const host = new URL(transitBase).host;
+   const url =
+-    `${URL}?fromPlace=${roundCoord(from.lat)},${roundCoord(from.lng)}` +
++    `${transitBase}${PLAN_PATH}?fromPlace=${roundCoord(from.lat)},${roundCoord(from.lng)}` +
+     `&toPlace=${roundCoord(to.lat)},${roundCoord(to.lng)}` +
+     `&time=${encodeURIComponent(departureIso)}&arriveBy=false` +
+     // Match the painted rings' walking contract (see the constants above): the
+@@ -381,7 +388,7 @@ async function fetchAndParse(
+     (Array.isArray(b.direct) ? b.direct : []).some((it) => it && durationSeconds(it.duration) > 0);
+   let plan: ReachPlan;
+   try {
+-    const body = await fetchPlanBody(url, budget.signal);
++    const body = await fetchPlanBody(url, host, budget.signal);
+     plan = bestPlan(body, { maxSeconds });
+     // One bounded retry when the response yields NO public-transport answer AND
+     // no direct (walk/bike) answer either — an effectively-empty response is
+@@ -392,7 +399,7 @@ async function fetchAndParse(
+     // NEVER let a failed retry discard the first, determinate answer (review).
+     if (!isTransitAnswer(plan) && !usableDirect(body) && Date.now() + RETRY_MIN_REMAINING_MS < deadline) {
+       try {
+-        const second = bestPlan(await fetchPlanBody(url, budget.signal), { maxSeconds });
++        const second = bestPlan(await fetchPlanBody(url, host, budget.signal), { maxSeconds });
+         if (isTransitAnswer(second)) plan = second;
+       } catch {
+         // The first response already answers "no transit here" — a failed
+diff --git a/src/features/isochrones/server/transit.test.ts b/src/features/isochrones/server/transit.test.ts
+index 344bbc6..7a486ee 100644
+--- a/src/features/isochrones/server/transit.test.ts
++++ b/src/features/isochrones/server/transit.test.ts
+@@ -276,6 +276,26 @@ describe("transitIsochrone", () => {
+     expect(url).toContain("useRoutedTransfers=true");
+   });
+ 
++  it("defaults to today's public Transitous host, and a TRANSIT_BASE_URL override moves URL + rateHost (task 007)", async () => {
++    providerFetch.mockResolvedValue(oneToAll([]));
++    await transitIsochrone(44.4, 26.1);
++    const [defUrl, defOpts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++    expect(defUrl.startsWith("https://api.transitous.org/api/v6/one-to-all?")).toBe(true);
++    expect(defOpts.rateHost).toBe("api.transitous.org");
++
++    vi.stubEnv("TRANSIT_BASE_URL", "https://motis.internal");
++    try {
++      providerFetch.mockClear();
++      providerFetch.mockResolvedValue(oneToAll([]));
++      await transitIsochrone(44.41, 26.11); // fresh coords → not cached
++      const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++      expect(url.startsWith("https://motis.internal/api/v6/one-to-all?")).toBe(true);
++      expect(opts.rateHost).toBe("motis.internal");
++    } finally {
++      vi.unstubAllEnvs();
++    }
++  });
++
+   it("threads SLOW all the way through: MOTIS access speed, egress stamping, and the cache key", async () => {
+     // Task 064: every transit contract test ran at the default
+     // pace, so a broken pace→provider path would have shipped green. Slow must
+diff --git a/src/features/isochrones/server/transit.ts b/src/features/isochrones/server/transit.ts
+index 49661af..41f0a83 100644
+--- a/src/features/isochrones/server/transit.ts
++++ b/src/features/isochrones/server/transit.ts
+@@ -17,6 +17,7 @@ import {
+ } from "@/features/isochrones/time-context";
+ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
+ import { BUCHAREST_BBOX } from "@/lib/bounds";
++import { providerConfig, taggedCacheKey } from "@/lib/env";
+ import { providerFetch, ProviderError, roundCoord, USER_AGENT } from "@/lib/provider-http";
+ import { withTimeout } from "@/lib/timeout";
+ 
+@@ -30,8 +31,9 @@ import { withTimeout } from "@/lib/timeout";
+  * isochrone so the map renders both modes through one path.
+  */
+ 
+-const URL = "https://api.transitous.org/api/v6/one-to-all";
+-const HOST = "api.transitous.org";
++// Transitous host is config-driven (task 007) — default = today's public MOTIS.
++// The one-to-all path is version-specific and stays in code; only the base moves.
++const ONE_TO_ALL_PATH = "/api/v6/one-to-all";
+ const MIN_INTERVAL_MS = 1500; // community-run; be a good citizen
+ const TIMEOUT_MS = 20_000; // one-to-all is heavy (~1.5–3 s live)
+ const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+@@ -187,7 +189,7 @@ export async function transitIsochrone(
+   // filter. v5 (task 064): the walking speeds changed to 3/5 km/h, which moves
+   // both the MOTIS access walk and the egress stamping — v4 entries would serve
+   // rings built at the old speed.
+-  const key = `transit:v5:${pace}:${roundCoord(latRaw)},${roundCoord(lngRaw)}:${departure}`;
++  const key = taggedCacheKey(`transit:v5:${pace}:${roundCoord(latRaw)},${roundCoord(lngRaw)}:${departure}`);
+ 
+   const hit = await getCachedSafe<TransitIsochroneResult>(key);
+   if (hit) return hit;
+@@ -226,15 +228,17 @@ async function fetchAndBuild(
+       return null;
+     });
+ 
++  const { transitBase } = providerConfig();
++
+   // A stalled/unreachable/garbled upstream is a provider error (→ 502), not a 500.
+   let body: OneToAllBody;
+   try {
+     const url =
+-      `${URL}?one=${lat},${lng}&maxTravelTime=${MAX_TRAVEL_MIN}` +
++      `${transitBase}${ONE_TO_ALL_PATH}?one=${lat},${lng}&maxTravelTime=${MAX_TRAVEL_MIN}` +
+       `&transitModes=TRANSIT&time=${encodeURIComponent(departure)}` +
+       `&pedestrianSpeed=${paceModel.pedestrianSpeedMs}&useRoutedTransfers=true`;
+     const res = await providerFetch(url, {
+-      rateHost: HOST,
++      rateHost: new URL(transitBase).host,
+       minIntervalMs: MIN_INTERVAL_MS,
+       timeoutMs: TIMEOUT_MS,
+       init: { headers: { "User-Agent": USER_AGENT } },
+diff --git a/src/features/search/server/nominatim.test.ts b/src/features/search/server/nominatim.test.ts
+index 6009e1e..9ea5d1b 100644
+--- a/src/features/search/server/nominatim.test.ts
++++ b/src/features/search/server/nominatim.test.ts
+@@ -1,4 +1,4 @@
+-import { beforeEach, describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+ // In-memory cache + a stubbed providerFetch (so the real rate limiter isn't
+ // exercised here — that's covered in http.test.ts).
+@@ -91,6 +91,27 @@ describe("reverseGeocode", () => {
+   });
+ });
+ 
++describe("config-driven host (task 007)", () => {
++  afterEach(() => vi.unstubAllEnvs());
++
++  it("defaults to today's public Nominatim host, byte-exact (URL + rateHost)", async () => {
++    providerFetch.mockResolvedValue(jsonResponse([]));
++    await geocode("default host");
++    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++    expect(url.startsWith("https://nominatim.openstreetmap.org/search?")).toBe(true);
++    expect(opts.rateHost).toBe("nominatim.openstreetmap.org");
++  });
++
++  it("routes both the request URL and the rate-limit host to an override", async () => {
++    vi.stubEnv("NOMINATIM_BASE_URL", "https://nom.example");
++    providerFetch.mockResolvedValue(jsonResponse([]));
++    await geocode("override host");
++    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++    expect(url.startsWith("https://nom.example/search?")).toBe(true);
++    expect(opts.rateHost).toBe("nom.example");
++  });
++});
++
+ describe("error handling", () => {
+   it("wraps a network/fetch failure as ProviderError (→ 502)", async () => {
+     providerFetch.mockImplementation(async () => {
+diff --git a/src/features/search/server/nominatim.ts b/src/features/search/server/nominatim.ts
+index b67b97d..f0abb7d 100644
+--- a/src/features/search/server/nominatim.ts
++++ b/src/features/search/server/nominatim.ts
+@@ -1,5 +1,6 @@
+ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
+ import { BUCHAREST_BBOX } from "@/lib/bounds";
++import { providerConfig, taggedCacheKey } from "@/lib/env";
+ import { providerFetch, ProviderError, roundCoord, sha256Hex, USER_AGENT } from "@/lib/provider-http";
+ 
+ // Nominatim viewbox is x1,y1,x2,y2 (two opposite corners); with bounded=1 it
+@@ -14,8 +15,9 @@ const VIEWBOX = `${BUCHAREST_BBOX.minLng},${BUCHAREST_BBOX.maxLat},${BUCHAREST_B
+  * wrapper) so a bad/repeated query can't hammer the 1 req/s budget.
+  */
+ 
+-const BASE = "https://nominatim.openstreetmap.org";
+-const HOST = "nominatim.openstreetmap.org";
++// Host/base are config-driven (task 007) — default = today's public Nominatim.
++// Read inside the request functions (never at module top level) so an override
++// takes effect; the rate-limit host is derived from the configured base.
+ const MIN_INTERVAL_MS = 1100; // ToS ≤1 req/s, with margin
+ const TIMEOUT_MS = 8_000;
+ const TTL_OK_MS = 30 * 24 * 60 * 60 * 1000;
+@@ -42,7 +44,7 @@ function normalize(row: NominatimRow | undefined): GeoPoint | null {
+   return { lat, lng, label: row.display_name ?? "" };
+ }
+ 
+-async function cachedLookup(key: string, url: string): Promise<GeoPoint | null> {
++async function cachedLookup(key: string, url: string, host: string): Promise<GeoPoint | null> {
+   // Sentinel wrapper: a cached `{ result: null }` is a real "known empty",
+   // distinct from a cache miss (getCached returning null).
+   const hit = await getCachedSafe<{ result: GeoPoint | null }>(key);
+@@ -52,7 +54,7 @@ async function cachedLookup(key: string, url: string): Promise<GeoPoint | null>
+   let data: NominatimRow[] | NominatimRow;
+   try {
+     const res = await providerFetch(url, {
+-      rateHost: HOST,
++      rateHost: host,
+       minIntervalMs: MIN_INTERVAL_MS,
+       timeoutMs: TIMEOUT_MS,
+       init: { headers: { "User-Agent": USER_AGENT, Accept: "application/json" } },
+@@ -73,15 +75,17 @@ async function cachedLookup(key: string, url: string): Promise<GeoPoint | null>
+ 
+ /** Forward geocode a free-text address (restricted to Romania; top match). */
+ export function geocode(query: string): Promise<GeoPoint | null> {
++  const { nominatimBase } = providerConfig();
+   const normalized = query.trim().toLowerCase();
+-  const key = `geo:fwd:${sha256Hex(normalized)}`;
+-  const url = `${BASE}/search?format=jsonv2&countrycodes=ro&viewbox=${VIEWBOX}&bounded=1&limit=1&q=${encodeURIComponent(query.trim())}`;
+-  return cachedLookup(key, url);
++  const key = taggedCacheKey(`geo:fwd:${sha256Hex(normalized)}`);
++  const url = `${nominatimBase}/search?format=jsonv2&countrycodes=ro&viewbox=${VIEWBOX}&bounded=1&limit=1&q=${encodeURIComponent(query.trim())}`;
++  return cachedLookup(key, url, new URL(nominatimBase).host);
+ }
+ 
+ /** Reverse geocode a point to a human-readable address. */
+ export function reverseGeocode(lat: number, lng: number): Promise<GeoPoint | null> {
+-  const key = `geo:rev:${roundCoord(lat)},${roundCoord(lng)}`;
+-  const url = `${BASE}/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
+-  return cachedLookup(key, url);
++  const { nominatimBase } = providerConfig();
++  const key = taggedCacheKey(`geo:rev:${roundCoord(lat)},${roundCoord(lng)}`);
++  const url = `${nominatimBase}/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
++  return cachedLookup(key, url, new URL(nominatimBase).host);
+ }
+diff --git a/src/features/search/server/photon.test.ts b/src/features/search/server/photon.test.ts
+index 73fc422..e2f3aaf 100644
+--- a/src/features/search/server/photon.test.ts
++++ b/src/features/search/server/photon.test.ts
+@@ -1,4 +1,4 @@
+-import { beforeEach, describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+ const { store, providerFetch } = vi.hoisted(() => ({
+   store: new Map<string, unknown>(),
+@@ -120,3 +120,25 @@ describe("photon suggest", () => {
+     await expect(suggest("x")).rejects.toThrow(/request failed/i);
+   });
+ });
++
++describe("config-driven host (task 007)", () => {
++  afterEach(() => vi.unstubAllEnvs());
++
++  it("defaults to today's public Photon host, byte-exact (URL + rateHost + focus)", async () => {
++    providerFetch.mockResolvedValue(res([]));
++    await suggest("default host");
++    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++    expect(url.startsWith("https://photon.komoot.io/api?")).toBe(true);
++    expect(url).toContain("lat=44.43&lon=26.10"); // focus kept byte-identical in P1
++    expect(opts.rateHost).toBe("photon.komoot.io");
++  });
++
++  it("routes both the request URL and the rate-limit host to an override", async () => {
++    vi.stubEnv("PHOTON_BASE_URL", "https://photon.internal/api");
++    providerFetch.mockResolvedValue(res([]));
++    await suggest("override host");
++    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
++    expect(url.startsWith("https://photon.internal/api?")).toBe(true);
++    expect(opts.rateHost).toBe("photon.internal");
++  });
++});
+diff --git a/src/features/search/server/photon.ts b/src/features/search/server/photon.ts
+index 14ab670..2e5ae2d 100644
+--- a/src/features/search/server/photon.ts
++++ b/src/features/search/server/photon.ts
+@@ -1,5 +1,6 @@
+ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
+ import { BUCHAREST_BBOX, inBucharest } from "@/lib/bounds";
++import { providerConfig, taggedCacheKey } from "@/lib/env";
+ import { providerFetch, ProviderError, sha256Hex, USER_AGENT } from "@/lib/provider-http";
+ 
+ /**
+@@ -11,8 +12,8 @@ import { providerFetch, ProviderError, sha256Hex, USER_AGENT } from "@/lib/provi
+  * client debounces + a min query length.
+  */
+ 
+-const BASE = "https://photon.komoot.io/api";
+-const HOST = "photon.komoot.io";
++// Host/base are config-driven (task 007) — default = today's public Photon.
++// Read inside the fetch function; the rate-limit host derives from the base.
+ const MIN_INTERVAL_MS = 300;
+ const TIMEOUT_MS = 6_000;
+ const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+@@ -72,7 +73,7 @@ const inFlight = new Map<string, Promise<Suggestion[]>>();
+ /** Type-ahead address suggestions for a partial query, Bucharest-constrained. */
+ export async function suggest(query: string): Promise<Suggestion[]> {
+   const q = query.trim();
+-  const key = `suggest:${sha256Hex(q.toLowerCase())}`;
++  const key = taggedCacheKey(`suggest:${sha256Hex(q.toLowerCase())}`);
+   const hit = await getCachedSafe<Suggestion[]>(key);
+   if (hit) return hit;
+ 
+@@ -91,9 +92,12 @@ export async function suggest(query: string): Promise<Suggestion[]> {
+ async function fetchAndCacheSuggestions(key: string, q: string): Promise<Suggestion[]> {
+   let body: { features?: PhotonFeature[] };
+   try {
+-    const url = `${BASE}?q=${encodeURIComponent(q)}&bbox=${BBOX}&lat=44.43&lon=26.10&limit=8&lang=en`;
++    const { photonBase } = providerConfig();
++    // Focus (lat/lon) is a ranking bias only; kept byte-identical in P1 —
++    // bbox-centre derivation is a P4 region-UI item (see task Parked).
++    const url = `${photonBase}?q=${encodeURIComponent(q)}&bbox=${BBOX}&lat=44.43&lon=26.10&limit=8&lang=en`;
+     const res = await providerFetch(url, {
+-      rateHost: HOST,
++      rateHost: new URL(photonBase).host,
+       minIntervalMs: MIN_INTERVAL_MS,
+       timeoutMs: TIMEOUT_MS,
+       init: { headers: { "User-Agent": USER_AGENT, Accept: "application/json" } },
+diff --git a/src/lib/bounds.test.ts b/src/lib/bounds.test.ts
+index 0392262..420acb6 100644
+--- a/src/lib/bounds.test.ts
++++ b/src/lib/bounds.test.ts
+@@ -1,7 +1,7 @@
+ import fc from "fast-check";
+-import { describe, expect, it } from "vitest";
++import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+-import { BUCHAREST_BBOX, BUCHAREST_MAX_BOUNDS, inBucharest } from "./bounds";
++import { BUCHAREST_BBOX, BUCHAREST_MAX_BOUNDS, MAX_BBOX_SPAN_DEG, inBucharest, parseBbox } from "./bounds";
+ 
+ describe("inBucharest", () => {
+   it("accepts every point inside the bbox (property)", () => {
+@@ -49,3 +49,80 @@ describe("BUCHAREST_MAX_BOUNDS", () => {
+     ]);
+   });
+ });
++
++describe("default extent (byte-identity, task 007)", () => {
++  // NOT self-referential: pins the DEFAULT box to today's exact literals so the
++  // config lift cannot silently move the current Bucharest deployment.
++  it("with NEXT_PUBLIC_MAP_BBOX unset, is exactly Bucharest+Ilfov", () => {
++    expect(BUCHAREST_BBOX).toEqual({ minLng: 25.8, minLat: 44.2, maxLng: 26.4, maxLat: 44.7 });
++  });
++});
++
++describe("parseBbox (task 007)", () => {
++  it("parses a well-formed single-city box", () => {
++    expect(parseBbox("23.4,46.6,23.7,46.9")).toEqual({
++      minLng: 23.4,
++      minLat: 46.6,
++      maxLng: 23.7,
++      maxLat: 46.9,
++    });
++  });
++
++  it("tolerates surrounding whitespace", () => {
++    expect(parseBbox(" 25.8 , 44.2 , 26.4 , 44.7 ")).toEqual({
++      minLng: 25.8,
++      minLat: 44.2,
++      maxLng: 26.4,
++      maxLat: 44.7,
++    });
++  });
++
++  it("returns null for every malformed shape", () => {
++    expect(parseBbox(null)).toBeNull();
++    expect(parseBbox(undefined)).toBeNull();
++    expect(parseBbox("")).toBeNull();
++    expect(parseBbox("25.8,44.2,26.4")).toBeNull(); // wrong arity
++    expect(parseBbox("25.8,44.2,26.4,44.7,extra")).toBeNull();
++    expect(parseBbox("a,b,c,d")).toBeNull(); // non-finite
++    expect(parseBbox("26.4,44.2,25.8,44.7")).toBeNull(); // minLng >= maxLng
++    expect(parseBbox("25.8,44.7,26.4,44.2")).toBeNull(); // minLat >= maxLat
++    expect(parseBbox("-181,44.2,26.4,44.7")).toBeNull(); // out of world range
++  });
++
++  it("rejects a span beyond the single-city cap (all-Romania guard)", () => {
++    // ~7° wide — an all-country extent that would OOM the transit grid.
++    expect(parseBbox("20,44,27,48")).toBeNull();
++    expect(MAX_BBOX_SPAN_DEG).toBe(2);
++  });
++
++  it("rejects empty interior tokens (Number('') is 0, must not slip through)", () => {
++    expect(parseBbox("-1,,1,1")).toBeNull();
++    expect(parseBbox("25.8,44.2,,44.7")).toBeNull();
++  });
++});
++
++describe("resolveBbox via NEXT_PUBLIC_MAP_BBOX (task 007, fresh module load)", () => {
++  afterEach(() => {
++    vi.unstubAllEnvs();
++    vi.resetModules();
++  });
++
++  it("a valid override moves BUCHAREST_BBOX, inBucharest, and BUCHAREST_MAX_BOUNDS", async () => {
++    vi.resetModules();
++    vi.stubEnv("NEXT_PUBLIC_MAP_BBOX", "23.4,46.6,23.7,46.9"); // Cluj-ish
++    const fresh = await import("./bounds");
++    expect(fresh.BUCHAREST_BBOX).toEqual({ minLng: 23.4, minLat: 46.6, maxLng: 23.7, maxLat: 46.9 });
++    expect(fresh.inBucharest(46.7, 23.5)).toBe(true); // inside the override
++    expect(fresh.inBucharest(44.4, 26.1)).toBe(false); // old Bucharest point now outside
++    expect(fresh.BUCHAREST_MAX_BOUNDS).toEqual([
++      [23.4, 46.6],
++      [23.7, 46.9],
++    ]);
++  });
++
++  it("FAILS CLOSED at import on a set-but-invalid extent (no silent Bucharest fallback)", async () => {
++    vi.resetModules();
++    vi.stubEnv("NEXT_PUBLIC_MAP_BBOX", "not,a,bbox,really");
++    await expect(import("./bounds")).rejects.toThrow(/Invalid NEXT_PUBLIC_MAP_BBOX/);
++  });
++});
+diff --git a/src/lib/bounds.ts b/src/lib/bounds.ts
+index 1e4dd26..08ca2e5 100644
+--- a/src/lib/bounds.ts
++++ b/src/lib/bounds.ts
+@@ -1,18 +1,85 @@
+ /**
+- * Launch scope is Bucharest (brief §11). We reuse the exact bounding box of the
+- * self-hosted tile extract (Bucharest + Ilfov — the `--bbox` in
+- * scripts/fetch-tiles.sh; keep the two in sync) so the map, the geocoder
+- * geofence, and the isochrone origin all agree on "in area".
++ * Launch scope is a SINGLE city (Bucharest today), config-driven since task 007.
++ * The extent is lifted into `NEXT_PUBLIC_MAP_BBOX` = "minLng,minLat,maxLng,maxLat"
++ * (build-time inlined, so it is available in both server and client bundles);
++ * when unset it defaults to today's Bucharest+Ilfov box, keeping the current
++ * deployment byte-identical. The tile extract `--bbox` in scripts/fetch-tiles.sh
++ * and MapLibre's `maxBounds` read the SAME box — keep the three in sync via the
++ * one env var.
+  *
+  * Isomorphic (no server-only deps): the server uses `inBucharest` to geofence
+  * provider results; the client uses `BUCHAREST_MAX_BOUNDS` for `maxBounds`.
++ *
++ * Names stay `BUCHAREST_*` in Phase 1 (value is config-driven; a region-neutral
++ * rename is deferred to the multi-city phase). The extent is a SINGLE city on
++ * purpose: the transit grid allocates memory proportional to the bbox span
++ * (transit-grid.ts), so an all-country box would OOM — hence the per-axis span
++ * cap below.
+  */
+-export const BUCHAREST_BBOX = {
++
++// A `type` (not `interface`) on purpose: an interface is not assignable to a
++// string index signature, but this shape is stored in a Prisma JSON column
++// (catalogue-import CatalogueValidation.source.bbox → InputJsonObject).
++export type Bbox = {
++  minLng: number;
++  minLat: number;
++  maxLng: number;
++  maxLat: number;
++};
++
++/** Widest span (degrees) allowed on either axis — a single-city guard. Bucharest
++ *  is ~0.6°×0.5°; 2° leaves generous metro headroom while blocking an
++ *  all-Romania (~7°×4°) box that would OOM the transit grid. */
++export const MAX_BBOX_SPAN_DEG = 2;
++
++/** Today's Bucharest+Ilfov box — the byte-identical default when the extent env
++ *  is unset. Exported so the cache-tag can tell "default extent" from "another
++ *  city" off the RESOLVED box (not a raw env string). */
++export const DEFAULT_BBOX: Bbox = {
+   minLng: 25.8,
+   minLat: 44.2,
+   maxLng: 26.4,
+   maxLat: 44.7,
+-} as const;
++};
++
++/**
++ * Parse "minLng,minLat,maxLng,maxLat" into a valid Bbox, or return null if it is
++ * malformed: wrong arity, non-finite, mis-ordered (min ≥ max), outside world
++ * range, or a span beyond the single-city cap. Pure — no env, never throws — so
++ * it is directly unit-testable.
++ */
++export function parseBbox(raw: string | undefined | null): Bbox | null {
++  if (raw == null) return null;
++  const tokens = raw.split(",").map((s) => s.trim());
++  // Reject empty tokens BEFORE Number() — `Number("")` is 0, so "-1,,1,1" would
++  // otherwise slip through as [-1,0,1,1].
++  if (tokens.length !== 4 || tokens.some((t) => t === "")) return null;
++  const parts = tokens.map(Number);
++  if (parts.some((n) => !Number.isFinite(n))) return null;
++  const [minLng, minLat, maxLng, maxLat] = parts as [number, number, number, number];
++  if (minLng >= maxLng || minLat >= maxLat) return null;
++  if (minLng < -180 || maxLng > 180 || minLat < -90 || maxLat > 90) return null;
++  if (maxLng - minLng > MAX_BBOX_SPAN_DEG || maxLat - minLat > MAX_BBOX_SPAN_DEG) return null;
++  return { minLng, minLat, maxLng, maxLat };
++}
++
++function resolveBbox(): Bbox {
++  const raw = process.env.NEXT_PUBLIC_MAP_BBOX?.trim();
++  if (!raw) return DEFAULT_BBOX; // absent → today's Bucharest box (byte-identical)
++  const parsed = parseBbox(raw);
++  if (!parsed) {
++    // Fail-closed: a SET-but-invalid extent must NOT silently fall back to
++    // Bucharest (a Cluj deploy would then map the wrong city). NEXT_PUBLIC_* is
++    // build-time inlined, so this surfaces at build, before any deploy.
++    throw new Error(
++      `Invalid NEXT_PUBLIC_MAP_BBOX "${raw}": expected "minLng,minLat,maxLng,maxLat", ` +
++        `ordered min<max, within world range, span ≤ ${MAX_BBOX_SPAN_DEG}° per axis (single-city).`,
++    );
++  }
++  return parsed;
++}
++
++export const BUCHAREST_BBOX: Bbox = resolveBbox();
+ 
+ export function inBucharest(lat: number, lng: number): boolean {
+   return (
+diff --git a/src/lib/env.test.ts b/src/lib/env.test.ts
+index 05d575c..7cdba66 100644
+--- a/src/lib/env.test.ts
++++ b/src/lib/env.test.ts
+@@ -1,6 +1,14 @@
+ import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+-import { EnvError, parseServerEnv } from "./env";
++import {
++  EnvError,
++  PROVIDER_DEFAULTS,
++  configCacheTag,
++  parseProviderConfig,
++  parseServerEnv,
++  taggedCacheKey,
++  tilesPmtilesPath,
++} from "./env";
+ 
+ const valid = {
+   DATABASE_URL: "postgresql://user:pass@localhost:5433/howfar",
+@@ -71,3 +79,136 @@ describe("serverEnv (memoized process.env accessor)", () => {
+     expect(second.authSecret).toBe("first-value");
+   });
+ });
++
++describe("parseProviderConfig (region/self-host config lift)", () => {
++  it("defaults to today's exact public hosts when nothing is set (byte-identity)", () => {
++    const cfg = parseProviderConfig({});
++    expect(cfg.nominatimBase).toBe("https://nominatim.openstreetmap.org");
++    expect(cfg.photonBase).toBe("https://photon.komoot.io/api");
++    expect(cfg.orsBase).toBe("https://api.openrouteservice.org");
++    expect(cfg.transitBase).toBe("https://api.transitous.org");
++    expect(cfg.overpassEndpoints).toEqual([
++      "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
++      "https://overpass-api.de/api/interpreter",
++      "https://overpass.kumi.systems/api/interpreter",
++    ]);
++    expect(cfg.bulkOverpassEndpoints).toEqual([
++      "https://overpass-api.de/api/interpreter",
++      "https://overpass.kumi.systems/api/interpreter",
++    ]);
++  });
++
++  it("the returned default lists are copies, not the frozen PROVIDER_DEFAULTS arrays", () => {
++    const cfg = parseProviderConfig({});
++    expect(cfg.overpassEndpoints).not.toBe(PROVIDER_DEFAULTS.overpassEndpoints);
++    expect(() => cfg.overpassEndpoints.push("x")).not.toThrow();
++  });
++
++  it("honors a single-base override and strips a trailing slash", () => {
++    const cfg = parseProviderConfig({ NOMINATIM_BASE_URL: "https://nom.example/" });
++    expect(cfg.nominatimBase).toBe("https://nom.example");
++    expect(cfg.photonBase).toBe(PROVIDER_DEFAULTS.photonBase); // others untouched
++  });
++
++  it("splits an endpoint pool on commas and whitespace, dropping empties", () => {
++    const cfg = parseProviderConfig({
++      OVERPASS_ENDPOINTS: "https://a.example/api ,  https://b.example/api\n",
++    });
++    expect(cfg.overpassEndpoints).toEqual(["https://a.example/api", "https://b.example/api"]);
++  });
++
++  it("treats an empty/whitespace override as absent (falls back to default)", () => {
++    expect(parseProviderConfig({ ORS_BASE_URL: "   " }).orsBase).toBe(PROVIDER_DEFAULTS.orsBase);
++  });
++
++  it("FAILS CLOSED on a set-but-invalid URL", () => {
++    expect(() => parseProviderConfig({ ORS_BASE_URL: "not-a-url" })).toThrowError(EnvError);
++    expect(() => parseProviderConfig({ ORS_BASE_URL: "not-a-url" })).toThrowError(/ORS_BASE_URL/);
++  });
++
++  it("FAILS CLOSED on a non-http(s) scheme", () => {
++    expect(() => parseProviderConfig({ PHOTON_BASE_URL: "ftp://x.example" })).toThrowError(
++      /http:\/\/ or https:\/\//,
++    );
++  });
++
++  it("FAILS CLOSED on a base URL carrying a query string or fragment (path-concat would break)", () => {
++    expect(() => parseProviderConfig({ NOMINATIM_BASE_URL: "https://nom.example?x=1" })).toThrowError(
++      /query string or fragment/,
++    );
++    expect(() => parseProviderConfig({ ORS_BASE_URL: "https://ors.example#frag" })).toThrowError(
++      /query string or fragment/,
++    );
++  });
++
++  it("allows a path prefix on the base (self-host under a subpath)", () => {
++    expect(parseProviderConfig({ ORS_BASE_URL: "https://osm.internal/ors" }).orsBase).toBe(
++      "https://osm.internal/ors",
++    );
++  });
++
++  it("FAILS CLOSED on an endpoint pool whose members are all empty", () => {
++    expect(() => parseProviderConfig({ OVERPASS_ENDPOINTS: " , , " })).toThrowError(
++      /at least one endpoint/,
++    );
++  });
++
++  it("FAILS CLOSED when one endpoint in a pool is invalid", () => {
++    expect(() =>
++      parseProviderConfig({ OVERPASS_ENDPOINTS: "https://ok.example/api, nope" }),
++    ).toThrowError(EnvError);
++  });
++});
++
++describe("tilesPmtilesPath", () => {
++  it("defaults to <cwd>/data/tiles/bucharest.pmtiles", () => {
++    expect(tilesPmtilesPath({})).toBe(`${process.cwd()}/data/tiles/bucharest.pmtiles`);
++  });
++  it("uses an absolute override verbatim", () => {
++    expect(tilesPmtilesPath({ TILES_PMTILES_PATH: "/srv/tiles/cluj.pmtiles" })).toBe(
++      "/srv/tiles/cluj.pmtiles",
++    );
++  });
++  it("resolves a relative override against cwd", () => {
++    expect(tilesPmtilesPath({ TILES_PMTILES_PATH: "data/tiles/cluj.pmtiles" })).toBe(
++      `${process.cwd()}/data/tiles/cluj.pmtiles`,
++    );
++  });
++});
++
++describe("configCacheTag + taggedCacheKey", () => {
++  it("is the empty string on default config, so keys stay byte-identical", () => {
++    expect(configCacheTag({})).toBe("");
++    expect(taggedCacheKey("iso:foot:v4:normal:44.4,26.1", {})).toBe("iso:foot:v4:normal:44.4,26.1");
++  });
++
++  it("produces a stable non-empty tag once any provider host is overridden", () => {
++    const src = { ORS_BASE_URL: "https://ors.internal" };
++    const tag = configCacheTag(src);
++    expect(tag).not.toBe("");
++    expect(tag).toBe(configCacheTag(src)); // stable
++    expect(taggedCacheKey("k", src)).toBe(`${tag}:k`);
++  });
++
++  it("re-namespaces when the resolved extent changes (via a fresh module load)", async () => {
++    // The bbox component comes from the RESOLVED BUCHAREST_BBOX (build-consistent),
++    // not a raw runtime env read — so exercise it by re-importing with a stubbed
++    // extent, which also proves the tag tracks the geofence rather than a var that
++    // may be absent at runtime in a build-ARG container.
++    vi.resetModules();
++    vi.stubEnv("NEXT_PUBLIC_MAP_BBOX", "23.4,46.6,23.7,46.9");
++    try {
++      const fresh = await import("./env");
++      expect(fresh.configCacheTag({})).not.toBe("");
++    } finally {
++      vi.unstubAllEnvs();
++      vi.resetModules();
++    }
++  });
++
++  it("gives different configs different tags (no collision)", () => {
++    expect(configCacheTag({ ORS_BASE_URL: "https://a.example" })).not.toBe(
++      configCacheTag({ ORS_BASE_URL: "https://b.example" }),
++    );
++  });
++});
+diff --git a/src/lib/env.ts b/src/lib/env.ts
+index ae38cdf..b139d16 100644
+--- a/src/lib/env.ts
++++ b/src/lib/env.ts
+@@ -6,6 +6,11 @@
+  * Secrets must never be re-exported under NEXT_PUBLIC_*.
+  */
+ 
++import { createHash } from "node:crypto";
++import path from "node:path";
++
++import { BUCHAREST_BBOX, DEFAULT_BBOX } from "./bounds";
++
+ export interface ServerEnv {
+   /** PostgreSQL connection string, e.g. postgresql://user:pass@host:5432/db */
+   databaseUrl: string;
+@@ -86,3 +91,186 @@ export function serverEnv(): ServerEnv {
+   cached ??= parseServerEnv();
+   return cached;
+ }
++
++// ─────────────────────────────────────────────────────────────────────────────
++// Region / self-host configuration (Phase 1 config lift, task 007).
++//
++// Every remote-provider host and the tile path is lifted here as an OPTIONAL env
++// var, each DEFAULTING to today's public value — so an unset environment is
++// byte-for-byte identical to the pre-lift build, and pointing at a self-hosted
++// instance (or a different Romanian city) becomes an `.env` edit rather than a
++// code change. Read via `providerConfig()` — deliberately NON-memoized and
++// SEPARATE from `serverEnv()` so provider clients never gain a dependency on the
++// required DATABASE_URL / AUTH_SECRET (they only need these optional knobs).
++//
++// Fail-closed (mirrors `required()`): an ABSENT var falls back to the default; a
++// var that is SET but invalid (unparseable/non-http(s) URL, empty endpoint pool)
++// throws EnvError — a typo becomes a startup error, never a silent bad fetch.
++// ─────────────────────────────────────────────────────────────────────────────
++
++/** Built-in defaults == today's public providers. Exported so tests assert the
++ *  default path against the exact literals (byte-identity is the whole task). */
++export const PROVIDER_DEFAULTS = {
++  nominatimBase: "https://nominatim.openstreetmap.org",
++  photonBase: "https://photon.komoot.io/api",
++  orsBase: "https://api.openrouteservice.org",
++  transitBase: "https://api.transitous.org",
++  // Interactive Overpass race pool (route/stop queries) — ordered by observed
++  // reliability; racing means a dead host costs nothing.
++  overpassEndpoints: [
++    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
++    "https://overpass-api.de/api/interpreter",
++    "https://overpass.kumi.systems/api/interpreter",
++  ],
++  // Bulk importer pool (heavy whole-bbox query) — the two hosts that tolerate it.
++  bulkOverpassEndpoints: [
++    "https://overpass-api.de/api/interpreter",
++    "https://overpass.kumi.systems/api/interpreter",
++  ],
++} as const;
++
++/** Default tile archive location, relative to cwd, joined server-side. */
++export const TILES_PATH_DEFAULT_SEGMENTS = ["data", "tiles", "bucharest.pmtiles"] as const;
++
++export interface ProviderConfig {
++  /** Base URL (no trailing slash); the client appends provider-version paths. */
++  nominatimBase: string;
++  photonBase: string;
++  orsBase: string;
++  /** One host feeds both MOTIS endpoints (one-to-all + plan). */
++  transitBase: string;
++  overpassEndpoints: string[];
++  bulkOverpassEndpoints: string[];
++}
++
++/** Validate a single base URL: trailing slash stripped, must parse as an
++ *  absolute http(s) URL. Used for both single bases and each pool member. */
++function validateBaseUrl(name: string, raw: string): string {
++  const trimmed = raw.trim().replace(/\/+$/, "");
++  let url: URL;
++  try {
++    url = new URL(trimmed);
++  } catch {
++    throw new EnvError(name, `must be a valid absolute URL (got "${raw.slice(0, 40)}")`);
++  }
++  if (url.protocol !== "http:" && url.protocol !== "https:") {
++    throw new EnvError(name, `must use http:// or https:// (got "${url.protocol}")`);
++  }
++  // A base URL is path-concatenated by clients (`${base}/v2/…`), so a query or
++  // fragment would land in the wrong place (`https://h?x=1` + `/v2` → path `/`,
++  // query `x=1/v2`). Reject them; a path prefix (`https://h/osm`) is fine.
++  if (url.search || url.hash) {
++    throw new EnvError(name, `must not include a query string or fragment (got "${raw.slice(0, 40)}")`);
++  }
++  return trimmed;
++}
++
++/** Absent → default; present → validated (fail-closed). */
++function baseUrl(source: EnvSource, name: string, fallback: string): string {
++  const raw = optionalEnv(source, name);
++  return raw === undefined ? fallback : validateBaseUrl(name, raw);
++}
++
++/** A comma/space-separated endpoint pool. Absent → default; present → split,
++ *  drop empties, validate each, and reject an empty result (fail-closed). */
++function endpointPool(source: EnvSource, name: string, fallback: readonly string[]): string[] {
++  const raw = optionalEnv(source, name);
++  if (raw === undefined) return [...fallback];
++  const parts = raw
++    .split(/[,\s]+/)
++    .map((s) => s.trim())
++    .filter(Boolean);
++  if (parts.length === 0) throw new EnvError(name, "must list at least one endpoint URL");
++  return parts.map((p) => validateBaseUrl(name, p));
++}
++
++/** Parse provider config from a source. Pure (no process.env), so tests inject. */
++export function parseProviderConfig(source: EnvSource = process.env): ProviderConfig {
++  return {
++    nominatimBase: baseUrl(source, "NOMINATIM_BASE_URL", PROVIDER_DEFAULTS.nominatimBase),
++    photonBase: baseUrl(source, "PHOTON_BASE_URL", PROVIDER_DEFAULTS.photonBase),
++    orsBase: baseUrl(source, "ORS_BASE_URL", PROVIDER_DEFAULTS.orsBase),
++    transitBase: baseUrl(source, "TRANSIT_BASE_URL", PROVIDER_DEFAULTS.transitBase),
++    overpassEndpoints: endpointPool(source, "OVERPASS_ENDPOINTS", PROVIDER_DEFAULTS.overpassEndpoints),
++    bulkOverpassEndpoints: endpointPool(
++      source,
++      "OVERPASS_BULK_ENDPOINTS",
++      PROVIDER_DEFAULTS.bulkOverpassEndpoints,
++    ),
++  };
++}
++
++/** Provider config accessor. NON-memoized on purpose: call it INSIDE request
++ *  handlers so an override (or a test's `vi.stubEnv`) always takes effect — a
++ *  module-top-level const would freeze at import/build time. Parsing is a few
++ *  string ops, dwarfed by the network call it precedes. */
++export function providerConfig(source: EnvSource = process.env): ProviderConfig {
++  return parseProviderConfig(source);
++}
++
++/** Server-side resolved path to the tile archive. Absolute override used as-is;
++ *  a relative override (or the default) is joined against cwd. */
++export function tilesPmtilesPath(source: EnvSource = process.env): string {
++  const override = optionalEnv(source, "TILES_PMTILES_PATH");
++  if (override) return path.isAbsolute(override) ? override : path.join(process.cwd(), override);
++  return path.join(process.cwd(), ...TILES_PATH_DEFAULT_SEGMENTS);
++}
++
++function sameList(a: readonly string[], b: readonly string[]): boolean {
++  return a.length === b.length && a.every((v, i) => v === b[i]);
++}
++
++/**
++ * A short cache-key namespace that is the EMPTY STRING when the resolved
++ * provider/region config equals the built-in defaults (so default keys stay
++ * byte-identical and the existing multi-day ApiCache keeps serving) and a stable
++ * 8-char hash otherwise. Prepended to every ApiCache provider key so flipping a
++ * provider host or the city bbox serves a FRESH namespace instead of answers
++ * computed against the old provider/region (keys carry no host/bbox themselves).
++ *
++ * "Default" means every provider var is unset AND the resolved extent equals
++ * the Bucharest default. The bbox component is taken from the RESOLVED
++ * `BUCHAREST_BBOX` (imported from bounds.ts), NOT a raw runtime read of
++ * `NEXT_PUBLIC_MAP_BBOX`: that var is build-time inlined, so a dynamic
++ * `process.env` read would be undefined in a build-ARG container and wrongly
++ * yield tag "" for a non-default city — serving city A's cached answers for city
++ * B. Reading the resolved box keeps the tag consistent with the geofence.
++ *
++ * The tag is uniform (one tag for all providers), so any config change colds all
++ * provider caches together; config changes are rare deploy events and a cold
++ * cache is "slower but correct" — the degradation posture the app already
++ * commits to.
++ */
++export function configCacheTag(source: EnvSource = process.env): string {
++  const cfg = parseProviderConfig(source);
++  const bboxIsDefault =
++    BUCHAREST_BBOX.minLng === DEFAULT_BBOX.minLng &&
++    BUCHAREST_BBOX.minLat === DEFAULT_BBOX.minLat &&
++    BUCHAREST_BBOX.maxLng === DEFAULT_BBOX.maxLng &&
++    BUCHAREST_BBOX.maxLat === DEFAULT_BBOX.maxLat;
++  const isDefault =
++    cfg.nominatimBase === PROVIDER_DEFAULTS.nominatimBase &&
++    cfg.photonBase === PROVIDER_DEFAULTS.photonBase &&
++    cfg.orsBase === PROVIDER_DEFAULTS.orsBase &&
++    cfg.transitBase === PROVIDER_DEFAULTS.transitBase &&
++    sameList(cfg.overpassEndpoints, PROVIDER_DEFAULTS.overpassEndpoints) &&
++    sameList(cfg.bulkOverpassEndpoints, PROVIDER_DEFAULTS.bulkOverpassEndpoints) &&
++    bboxIsDefault;
++  if (isDefault) return "";
++  const canonical = JSON.stringify({
++    n: cfg.nominatimBase,
++    p: cfg.photonBase,
++    o: cfg.orsBase,
++    t: cfg.transitBase,
++    ov: cfg.overpassEndpoints,
++    bo: cfg.bulkOverpassEndpoints,
++    b: [BUCHAREST_BBOX.minLng, BUCHAREST_BBOX.minLat, BUCHAREST_BBOX.maxLng, BUCHAREST_BBOX.maxLat],
++  });
++  return createHash("sha256").update(canonical).digest("hex").slice(0, 8);
++}
++
++/** Prefix a provider cache key with the config tag (no-op on default config). */
++export function taggedCacheKey(baseKey: string, source: EnvSource = process.env): string {
++  const tag = configCacheTag(source);
++  return tag ? `${tag}:${baseKey}` : baseKey;
++}

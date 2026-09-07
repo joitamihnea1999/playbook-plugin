@@ -1,0 +1,55 @@
+{
+  "findings": [
+    {
+      "id": "C1",
+      "file": "src/app/api/ready/route.ts",
+      "symbol": "GET",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Provider configuration is validated lazily on first use, so /api/ready reports healthy with a bad provider variable and the deploy healthcheck cannot fail closed (r3 opus#1, sol#2, terra#3).",
+      "fix_commit": "e4233e1",
+      "fix_evidence": "parseProviderConfig();"
+    },
+    {
+      "id": "I1",
+      "file": "src/lib/api-util.ts",
+      "symbol": "errorResponse",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "An EnvError raised at first use surfaces as a 500 instead of a 503 'misconfigured' response (r3 opus#1/sol#2/terra#3, same cluster).",
+      "fix_commit": "e4233e1",
+      "fix_evidence": "if (err instanceof EnvError) return jsonError(503"
+    },
+    {
+      "id": "D1",
+      "file": ".env.example",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The .env.example claim about when the extent and hosts are validated is false for the shipped code (r3 opus#1 cluster).",
+      "fix_commit": "e4233e1",
+      "fix_evidence": "hosts are validated at readiness (/api/ready returns 503"
+    },
+    {
+      "id": "I2",
+      "file": "src/app/api/tiles/route.ts",
+      "symbol": "GET",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "TILES_PATH is frozen at module scope, so an override does not take effect and the accessor contradicts providerConfig's non-memoized contract (r3 sonnet#1).",
+      "fix_commit": "e4233e1",
+      "fix_evidence": "const tilesPath = tilesPmtilesPath();"
+    },
+    {
+      "id": "I3",
+      "file": "src/features/search/server/photon.ts",
+      "symbol": "fetchAndCacheSuggestions",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "PHOTON_BASE_URL is a full endpoint unlike every other provider base; the client should append /api to a bare host (r3 opus#5).",
+      "fix_commit": "ad4bda6",
+      "fix_evidence": "${photonBase}/api?q="
+    }
+  ],
+  "known_rejects": []
+}

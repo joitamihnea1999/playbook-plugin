@@ -1,0 +1,31 @@
+{
+  "id": "hf-007-r3",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "007",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "a78f8995a676bd8263a40b978ab9ea0bf7b0cf45",
+  "diff_of": "ff904f32c1e64dbb8848d0d981b15560fdc0cb73..a78f8995a676bd8263a40b978ab9ea0bf7b0cf45",
+  "diff_excludes": [],
+  "spec_source_sha256": "64215cb1a98538e5dda997ca9aad9e8a0eb2ee22faa5f56a505e2f384ec77161",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "feature",
+  "area": "server",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "Round 3 of 6 (second impl panel): residual defects after the round-2 fixes. Spec edits: template preamble deleted. Dropped by the closed allowlist (non-template H2 in this record): none.",
+  "mapping": {
+    "round": 3,
+    "rounds_total": 6,
+    "fix_commits": [
+      "e4233e1",
+      "ad4bda6"
+    ],
+    "evidence": "Audit 13:25:39 follows a78f899 (13:25:19) → the panel the triage labels r3; its accepts (lazy provider validation → /api/ready + EnvError→503 + .env.example, TILES_PATH module-scope freeze, PHOTON_BASE_URL shape) land in e4233e1 'Validate provider config at readiness and harden the tile fetch script' (13:45:48) and — for the Photon base URL — ad4bda6 'unify Photon base URL' (14:02:50). Accumulated diff from the task base 4d5726d^."
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "id": "hf-011-r8",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "011",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "924ca6927c4f082678ad05e51268787d7056439e",
+  "diff_of": "58d8e886bdf667327f0964f13da9a315945f47c6..924ca6927c4f082678ad05e51268787d7056439e",
+  "diff_excludes": [],
+  "spec_source_sha256": "f6854278256dd1df5644e6105479cdcdbd05d63929cda95ccf463d30d0d984f2",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "bugfix",
+  "area": "server",
+  "difficulty": "medium",
+  "truth_version": 1,
+  "notes": "Round 8 of 10: the panel found that the round-7 fix's own self-test gate was fail-open on NaN (the plan's '≥2 cases whose panel caught a Critical' criterion). Spec edits: template preamble deleted. Dropped by the closed allowlist (non-template H2 in this record): none.",
+  "mapping": {
+    "round": 8,
+    "rounds_total": 10,
+    "fix_commits": [
+      "be0950d"
+    ],
+    "evidence": "Audit 23:19:31 follows 924ca69 (23:19:14) = 'round 8'; its accepts (assertClose NaN fail-open CRITICAL, the R7-1 comment correction, manifest self-contradiction, fetch-romania-extract HEAD-before-cache) are be0950d 'Fail closed on non-finite self-test values; correct coverage-guard docs' (23:31:51). Diff = the round-7 harness hardening (58d8e88..924ca69), which is exactly where R8-1/R8-2 live."
+  }
+}

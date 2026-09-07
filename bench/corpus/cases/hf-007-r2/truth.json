@@ -1,0 +1,82 @@
+{
+  "findings": [
+    {
+      "id": "C1",
+      "file": "src/features/amenities/server/catalogue.ts",
+      "symbol": "amenityResultCacheKey",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Config-blind DERIVED cache: the amenity-result cache key ignores the provider/extent configuration, so a non-default city or overridden provider host serves another configuration's cached results (r2 opus#1, terra, sol#2).",
+      "fix_commit": "a78f899",
+      "fix_evidence": "taggedCacheKey"
+    },
+    {
+      "id": "C1b",
+      "file": "src/features/amenities/server/stop-lines.ts",
+      "symbol": null,
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The Overpass-backed stop-lines cache key is not namespaced by config (same rule-5 miss as the amenity cache).",
+      "fix_commit": "a78f899",
+      "fix_evidence": "taggedCacheKey"
+    },
+    {
+      "id": "C1c",
+      "file": "src/features/amenities/server/route-path.ts",
+      "symbol": null,
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The Overpass-backed route-path cache key is not namespaced by config (same rule-5 miss).",
+      "fix_commit": "a78f899",
+      "fix_evidence": "taggedCacheKey"
+    },
+    {
+      "id": "I1",
+      "file": "src/lib/env.ts",
+      "symbol": "configCacheTag",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "configCacheTag reads NEXT_PUBLIC_MAP_BBOX dynamically, which is undefined in a build-ARG container, so the tag is \"\" for a non-default city instead of the resolved extent (r2 opus#2).",
+      "fix_commit": "a78f899",
+      "fix_evidence": "import { BUCHAREST_BBOX, DEFAULT_BBOX } from \"./bounds\";"
+    },
+    {
+      "id": "I2",
+      "file": "src/lib/env.ts",
+      "symbol": "validateBaseUrl",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "A base URL carrying a query string or fragment passes validation and corrupts path concatenation downstream (r2 sol#3, terra#2).",
+      "fix_commit": "a78f899",
+      "fix_evidence": "if (url.search || url.hash) {"
+    },
+    {
+      "id": "I3",
+      "file": "src/lib/bounds.ts",
+      "symbol": "parseBbox",
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "An empty bbox token is coerced to 0 by Number() instead of being rejected (r2 sol#3).",
+      "fix_commit": "a78f899",
+      "fix_evidence": "tokens.some((t) => t === \"\")"
+    },
+    {
+      "id": "I4",
+      "file": "src/features/amenities/server/catalogue.test.ts",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "No regression guard proves the derived cache key changes when a ring provider is overridden (r2 sonnet).",
+      "fix_commit": "a78f899",
+      "fix_evidence": "amenityResultCacheKey config namespacing (task 007)"
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "RJ1",
+      "claim": "assert the runtime (non-NEXT_PUBLIC) bbox / tile-archive extent against the build-time extent",
+      "why_rejected": "Architectural (P4); mitigated by one shared variable name and a documented build-time constraint.",
+      "file": "src/lib/env.ts"
+    }
+  ]
+}

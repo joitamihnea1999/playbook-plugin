@@ -1,0 +1,207 @@
+diff --git a/docker/selfhost/parity-check.mjs b/docker/selfhost/parity-check.mjs
+index 014d859..8f2a13f 100644
+--- a/docker/selfhost/parity-check.mjs
++++ b/docker/selfhost/parity-check.mjs
+@@ -23,8 +23,10 @@
+ //     Residual = ray/polygon boundary distance at 24 bearings (density-independent).
+ //     A ring passes only if ALL hold: median sector residual <= 0.10 AND worst
+ //     sector <= 0.15 (a tail bound, so a truncated ring — which casts a short ray in
+-//     the clipped bearings — can't hide behind the median) AND area ratio within
+-//     +/-21% (area = r^2 equivalent of +/-10% radius). All enforced, not just printed.
++//     the clipped bearings — can't hide behind the median) AND zero cross-coverage
++//     mismatch (no bearing reached by only one of the two rings — the guard against a
++//     wedge missing from one leg) AND area ratio within +/-21% (area = r^2 equivalent
++//     of +/-10% radius). All enforced, not just printed.
+ //   - suggest: top type-ahead hit within 500 m (looser than exact geocode).
+ //   Before any of this, a PROVENANCE preflight proves the local leg is backed by the
+ //   LIVE self-hosted engines (distinct base URLs, engines healthy now, and the local
+@@ -125,13 +127,22 @@ function median(xs) {
+ // |ratio-1| per matched radial sector. Returns median AND the worst sector — the
+ // gate looks at the TAIL, not just the median, so a truncated ring (which casts a
+ // short ray in its clipped bearings → a large single-sector residual) can't pass.
++// ALSO returns `mismatch`: bearings where exactly ONE ring encloses the origin (one
++// profile null, the other a distance). Matched-only residuals are blind to a wedge
++// missing from just one leg (both-null and both-present bearings look fine while the
++// absent wedge's small area loss stays inside the area band) — `mismatch` is the
++// cross-coverage guard that catches it. This is NOT the tautological single-ring
++// coverage dropped earlier: it compares the TWO rings' bearing coverage to each other.
+ function radialResidual(profA, profB) {
+   const rs = [];
++  let mismatch = 0;
+   for (let i = 0; i < profA.length; i++) {
+-    if (profA[i] != null && profB[i] != null && profB[i] > 0) rs.push(Math.abs(profA[i] / profB[i] - 1));
++    const aOk = profA[i] != null, bOk = profB[i] != null;
++    if (aOk && bOk && profB[i] > 0) rs.push(Math.abs(profA[i] / profB[i] - 1));
++    else if (aOk !== bOk) mismatch++;   // one ring reaches this bearing, the other does not
+   }
+-  if (!rs.length) return { median: NaN, max: NaN };
+-  return { median: median(rs), max: Math.max(...rs) };
++  if (!rs.length) return { median: NaN, max: NaN, mismatch };
++  return { median: median(rs), max: Math.max(...rs), mismatch };
+ }
+ 
+ // ── fixtures / self-test (rule 13: validate the instrument before trusting it) ─
+@@ -185,16 +196,26 @@ function selfTest() {
+   const sres = radialResidual(spike, base);
+   assertClose("3-sector spike: median stays low", sres.median, 0.0, 1e-9);
+   assertClose("3-sector spike: caught by MAX", sres.max, 1.0, 0.01);
++  assertClose("identical ring: zero cross-coverage mismatch", radialResidual(base, base).mismatch, 0, 1e-9);
++
++  // MISSING-WEDGE (one leg not reaching a bearing the other does): the matched-sector
++  // residuals stay 0 and the small area loss can sit inside the area band, so ONLY the
++  // cross-coverage mismatch catches it. A 4-of-24 wedge absent from the local leg.
++  const wedge = base.map((v, i) => (i >= 6 && i < 10 ? null : v));
++  const wres = radialResidual(wedge, base);
++  assertClose("missing-wedge: matched sectors still 0 residual", wres.median, 0.0, 1e-9);
++  assertClose("missing-wedge: mismatch counts the absent bearings", wres.mismatch, 4, 1e-9);
+ 
+   // Exercise the VERDICT PREDICATE itself (not just the computed values) so a
+   // deleted gate clause is caught — pass/fail fixtures for each threshold.
+-  assertBool("verdict: identical ring passes", ringVerdict({ median: 0, max: 0 }, 1.0), true);
+-  assertBool("verdict: median just over fails", ringVerdict({ median: 0.11, max: 0.11 }, 1.0), false);
+-  assertBool("verdict: worst sector over fails (median ok)", ringVerdict({ median: 0.0, max: 0.16 }, 1.0), false);
+-  assertBool("verdict: area over fails (residual ok)", ringVerdict({ median: 0.0, max: 0.0 }, 1.25), false);
+-  assertBool("verdict: NaN residual fails", ringVerdict({ median: NaN, max: NaN }, 1.0), false);
+-
+-  console.log("SELF-TEST PASS — geometry instrument + verdict predicate validated (12 fixtures).");
++  assertBool("verdict: identical ring passes", ringVerdict({ median: 0, max: 0, mismatch: 0 }, 1.0), true);
++  assertBool("verdict: median just over fails", ringVerdict({ median: 0.11, max: 0.11, mismatch: 0 }, 1.0), false);
++  assertBool("verdict: worst sector over fails (median ok)", ringVerdict({ median: 0.0, max: 0.16, mismatch: 0 }, 1.0), false);
++  assertBool("verdict: area over fails (residual ok)", ringVerdict({ median: 0.0, max: 0.0, mismatch: 0 }, 1.25), false);
++  assertBool("verdict: NaN residual fails", ringVerdict({ median: NaN, max: NaN, mismatch: 0 }, 1.0), false);
++  assertBool("verdict: cross-coverage mismatch fails (missing wedge)", ringVerdict({ median: 0.0, max: 0.0, mismatch: 4 }, 1.0), false);
++
++  console.log("SELF-TEST PASS — geometry instrument + verdict predicate validated (15 fixtures).");
+ }
+ 
+ function assertClose(name, got, want, relTol) {
+@@ -230,13 +251,15 @@ const RING_AREA_TOL = 0.21;       // area band, ENFORCED: 1.10²−1 ≈ 0.21 =
+                                   // drift the per-sector residuals could average out is caught here.
+ const EXPECTED_RINGS = 3; // the app always requests 3 nested bands (ors.ts normalize() enforces it)
+ 
+-// A ring passes iff the median residual, the worst-sector residual, AND the area
+-// ratio are all in band. (No coverage clause: ray/polygon casting yields a distance
+-// at every bearing for any ring enclosing the origin, so `max` is the truncation guard.)
++// A ring passes iff the median residual, the worst-sector residual, the CROSS-coverage
++// (no bearing reached by only one of the two rings), AND the area ratio are all in band.
++// `mismatch===0` is the density-independent guard against a wedge missing from one leg —
++// a hole matched-sector residuals + a within-band area ratio would otherwise miss.
+ function ringVerdict(res, areaRatio) {
+   return Number.isFinite(res.median)
+     && res.median <= RING_RADIAL_TOL
+     && res.max <= RING_RADIAL_MAX
++    && res.mismatch === 0
+     && Math.abs(areaRatio - 1) <= RING_AREA_TOL;
+ }
+ 
+@@ -305,8 +328,15 @@ async function provenancePreflight(publicBase, localBase, o) {
+       if (feats.length !== 3 || !appRings.length) problems.push("ORS cross-check: unexpected feature/ring count");
+       else {
+         // The direct ORS 15-min feature vs the app's 15-min ring: same engine → same area.
+-        const ratio = geometryAreaM2(feats[0].geometry, o.lat) / geometryAreaM2(appRings[0].geometry, o.lat);
+-        if (Math.abs(ratio - 1) > 0.02) problems.push(`ORS: app 15-min ring differs ${((ratio - 1) * 100).toFixed(1)}% from the local ORS's own answer — app may not be using the local engine`);
++        const areaD = geometryAreaM2(feats[0].geometry, o.lat);
++        const areaP = geometryAreaM2(appRings[0].geometry, o.lat);
++        // Fail-CLOSED on a degenerate ring: a zero/NaN area would make the ratio
++        // NaN, and `Math.abs(NaN-1) > 0.02` is false — silently passing the preflight.
++        if (!(areaP > 0) || !Number.isFinite(areaD)) problems.push("ORS cross-check: degenerate ring area (zero/NaN) — cannot verify provenance");
++        else {
++          const ratio = areaD / areaP;
++          if (Math.abs(ratio - 1) > 0.02) problems.push(`ORS: app 15-min ring differs ${((ratio - 1) * 100).toFixed(1)}% from the local ORS's own answer — app may not be using the local engine`);
++        }
+       }
+     }
+   } catch (e) { problems.push(`ORS cross-check failed: ${e.message}`); }
+diff --git a/docker/selfhost/run-manifest.md b/docker/selfhost/run-manifest.md
+index cac0862..bd08287 100644
+--- a/docker/selfhost/run-manifest.md
++++ b/docker/selfhost/run-manifest.md
+@@ -64,10 +64,11 @@ with-flatnode answers, confirming a serve-only instance does not need it. Gettin
+ 
+ - Origins: Unirii (central) / Grozăvești (river barrier) / Berceni (periphery). Ring pace `normal`;
+   car `preset=crowded` (pins the traffic slot so both legs send identical ranges).
+-- Ring gate (per band, all enforced): median sector residual ≤10% AND worst sector ≤15% AND area
+-  ratio within ±21%. Residual = ray/polygon boundary distance at 24 bearings (density-independent —
+-  not vertex binning; a ray from the interior origin always hits the boundary, so the worst-sector
+-  bound, not a coverage count, is the truncation guard). Geocode + reverse ≤150 m (specific
++- Ring gate (per band, all enforced): median sector residual ≤10% AND worst sector ≤15% AND zero
++  cross-coverage mismatch AND area ratio within ±21%. Residual = ray/polygon boundary distance at
++  24 bearings (density-independent — not vertex binning). Cross-coverage mismatch = count of bearings
++  reached by only ONE of the two rings; a wedge missing from just one leg (whose small area loss can
++  sit inside ±21%) is caught here and by the worst-sector bound. Geocode + reverse ≤150 m (specific
+   landmarks); suggest top hit ≤500 m.
+ - A PROVENANCE preflight runs first and ABORTS unless all three engines are proven live AND the
+   local app's answers match each local engine's OWN direct answer (Nominatim geocode ≤150 m, ORS
+@@ -88,12 +89,15 @@ with-flatnode answers, confirming a serve-only instance does not need it. Gettin
+   different-but-valid representative point (~400 m) across geocoders; that is inherent geocoder
+   ranking variance, not a self-host defect, so the parity set uses specific landmarks.
+ - Provenance (that the local leg really hit the self-hosted engines, not a misconfigured
+-  public-vs-public passthrough): the **area ratios are 0.998–1.003, NOT exactly 1.000** — a
+-  same-backend comparison (cache hit, or both legs on the public host) would return byte-identical
+-  geometry (ratio exactly 1.000). The sub-percent, non-unity differences are the operative proof the
+-  two legs ran on DIFFERENT engine instances. Corroborating: the local app was configured with
++  public-vs-public passthrough): the **primary proof is the mechanized preflight** (§ above) —
++  distinct base URLs, all three engines proven live, and the local app's answer matched to each
++  local engine's OWN direct answer — **plus** the keyless-ORS argument: the local app is configured
+   `ORS_BASE_URL=localhost:8082` and sends no key to a non-public host (a public-ORS call would 403
+-  keyless), so its valid rings could only come from the local engine; same for Nominatim/Photon.
++  keyless), so its valid rings can only come from the local engine; the same base-URL wiring holds
++  for Nominatim/Photon. Corroborating only (NOT proof on its own): the area ratios print as
++  0.998–1.003 rather than exactly 1.000, consistent with two different engine instances — but this
++  is weak evidence (a cache row from an older vintage of the *same* host would also be non-unity, and
++  `toFixed(3)` rounds true-1.000 rows indistinguishably), so it is not relied on.
+ - Basemap: verified 2026-08-25 that the self-built `data/tiles/selfhost-romania.pmtiles` (684 MB,
+   built host-owned via `build-tiles.sh` `--user`) has the reference's exact 9 source-layers and is
+   Range-served by `/api/tiles` (HTTP 206, `PMTiles` magic) when the local app sets
+diff --git a/docs/SELFHOST.md b/docs/SELFHOST.md
+index 2c78ae9..79d6418 100644
+--- a/docs/SELFHOST.md
++++ b/docs/SELFHOST.md
+@@ -58,7 +58,11 @@ extract, and is read only during import and minutely/replication updates — a s
+ geocoder keeps answering byte-identically (verified: `/search` + `/reverse` return the same coords
+ after the flatnode is removed and the container restarted). Keep it only if you plan to run OSM
+ replication (`KEEP_FLATNODE=1`, §2). **Tradeoff if you delete and later need it back:** no
+-in-place rebuild — you re-import Nominatim (~24 min).
++in-place rebuild — you re-import Nominatim (~24 min). The "~8 GB resident" counts the serving
++engine data + the pmtiles archive (Nominatim DB 5.4 GB + Photon 468 MB + jar 94 MB + ORS 799 MB +
++tiles 684 MB ≈ 7.5 GB). The **~2.25 GB of Protomaps base sources** the tile build downloads
++(`data/selfhost/planetiler/`) is a **separate build cache**, not serving data — keep it only to
++rebuild tiles faster, else `rm -rf data/selfhost/planetiler` reclaims it.
+ 
+ **Parity (public vs self-hosted, 2026-08-25):** all 27 checks pass (after a provenance preflight that
+ proves all three engines are the ones the app uses) — 18/18 rings (walk + car) with median boundary
+@@ -160,6 +164,13 @@ Merge `docker/selfhost/env.selfhost.example` into `.env` (keep your existing
+ `DATABASE_URL` / `AUTH_SECRET`), then run the app as usual. With none of those vars
+ set the app is byte-identical to the public deployment.
+ 
++> **Tile cache after repointing `TILES_PMTILES_PATH`.** `/api/tiles` serves every archive
++> from the same URL with `Cache-Control: max-age=86400`, so if you point an already-loaded
++> origin at a *different* archive (e.g. the 25 MB Bucharest cut → the 684 MB all-Romania
++> build, which has different internal offsets), the browser may interpret cached byte ranges
++> against the wrong archive → a blank/garbled map. Hard-reload (empty cache) after switching,
++> or use a fresh origin/port. The parity run (§7) already uses a separate port for exactly this.
++
+ ## 7 — Parity check (public vs local)
+ 
+ The app reads provider env at process start, so run **two** instances from the SAME
+@@ -187,12 +198,14 @@ PORT=3001 npm run start &
+ node docker/selfhost/parity-check.mjs --public http://localhost:3000 --local http://localhost:3001
+ ```
+ 
+-The harness gates each ring on median AND worst-sector radial residual AND the area
+-band — a truncated ring casts a short ray in the clipped bearings, so the worst-sector
+-bound (not a coverage count) catches it. A provenance preflight first proves all three
+-engines are the ones the app uses (else it aborts). Tolerances: geocode + reverse ≤ 150 m
+-(specific landmarks); rings median ≤ ±10% / max ≤ ±15% / area ±21%; suggest top hit ≤ 500 m. `--public-only` does a dry-run; `--self-test` validates the
+-geometry instrument. **Bump `PROVIDER_DATA_REVISION` for a fresh run** (or purge
++The harness gates each ring on median AND worst-sector radial residual AND zero
++cross-coverage mismatch AND the area band — a truncated ring casts a short ray in the
++clipped bearings (caught by the worst-sector bound), and a wedge present in only one leg
++is caught by the cross-coverage mismatch (a bearing one ring reaches and the other does
++not). A provenance preflight first proves all three engines are the ones the app uses
++(else it aborts). Tolerances: geocode + reverse ≤ 150 m (specific landmarks); rings
++median ≤ ±10% / max ≤ ±15% / zero cross-coverage mismatch / area ±21%; suggest top hit
++≤ 500 m. `--public-only` does a dry-run; `--self-test` validates the geometry instrument. **Bump `PROVIDER_DATA_REVISION` for a fresh run** (or purge
+ `ApiCache`) so the comparison re-hits the engines rather than serving cached rows.
+ 
+ ## Teardown

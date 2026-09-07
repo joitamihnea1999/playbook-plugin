@@ -1,0 +1,970 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index c47092c..2284c7e 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -30,6 +30,9 @@ jobs:
+       # Coverage thresholds (vitest.config.ts) gate the merge, not just tests.
+       - run: npm run test:coverage
+       - run: npm run build
++      # Hermetic geometry-instrument self-test (no Docker/stack needed): guards the
++      # parity harness's area/residual/verdict math so a refactor can't silently break it.
++      - run: npm run selfhost:harness-selftest
+ 
+   e2e:
+     name: e2e (Playwright + PostGIS)
+diff --git a/.gitignore b/.gitignore
+index 26762bb..1a9cadb 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -56,3 +56,9 @@ next-env.d.ts
+ 
+ # pmtiles CLI cache
+ /.cache/
++
++# self-host stack: OSM extract + engine data volumes — multi-GB,
++# never committed. The compose files, scripts and docs under docker/selfhost/
++# ARE committed; only the downloaded/imported DATA lives here.
++/data/osm/
++/data/selfhost/
+diff --git a/docker/selfhost/docker-compose.yml b/docker/selfhost/docker-compose.yml
+new file mode 100644
+index 0000000..80a0a7d
+--- /dev/null
++++ b/docker/selfhost/docker-compose.yml
+@@ -0,0 +1,168 @@
++# HowFar self-host provider stack — LOCAL ONLY.
++#
++# Stands up the OSM provider engines the app talks to, all fed from ONE pinned
++# Geofabrik Romania extract (docker/selfhost/fetch-romania-extract.sh):
++#   - nominatim  → /search + /reverse   (submit-time geocode + reverse label)
++#   - photon     → /api                 (type-ahead autocomplete)
++#   - ors        → /ors/v2/isochrones/* (walk foot-walking + car driving-car)
++#   - planetiler → data/tiles/*.pmtiles (basemap, Protomaps schema)
++#
++# This file is SEPARATE from the app's default ../../docker-compose.yml so
++# `docker compose up -d db` (the dev Postgres) is completely unchanged. Nothing
++# here runs unless you invoke this file explicitly:
++#   docker compose -f docker/selfhost/docker-compose.yml up -d nominatim
++# See docs/SELFHOST.md for the full fetch→import→build→point-app→verify runbook.
++#
++# RAM is the binding constraint on a dev box: every service has an
++# explicit mem_limit + heap cap so an import cannot swap-thrash the host. Run the
++# heavy imports ONE AT A TIME (docs/SELFHOST.md) rather than all at once.
++#
++# All ports bind to 127.0.0.1 only — this stack is never exposed off the machine.
++# All data lives under ../../data/ (gitignored: data/osm, data/selfhost, data/tiles).
++
++name: howfar-selfhost
++
++services:
++  # ── Geocoding: Nominatim (submit-time /search + /reverse) ──────────────────
++  # First `up` runs the import from the mounted PBF, then serves on :8080.
++  # Reuses its named volume on subsequent starts (no re-import).
++  nominatim:
++    # Pinned by digest so a rebuild reproduces the exact geocoder (the `:5.3` tag
++    # can move to a patch release). Nominatim 5.3.2.
++    image: mediagis/nominatim:5.3@sha256:7923a8e67197fc6d4f4ecb7c0e8bbedffeddcfdf4519596fe946e46a28f5a9f8
++    container_name: howfar-nominatim
++    environment:
++      PBF_PATH: /data/romania.osm.pbf      # the ONE extract, mounted read-only below
++      IMPORT_STYLE: full                   # full = faithful to the public instance (parity); `address` is smaller/faster
++      NOMINATIM_PASSWORD: howfar           # password for the internal `nominatim` DB role (Photon import uses it)
++      THREADS: "8"
++      # Postgres import tuning — sized for a ~3.5 GB-free box, NOT the whole host.
++      POSTGRES_SHARED_BUFFERS: 512MB
++      POSTGRES_MAINTENANCE_WORK_MEM: 1GB
++      POSTGRES_WORK_MEM: 64MB
++      POSTGRES_EFFECTIVE_CACHE_SIZE: 2GB
++    volumes:
++      - ../../data/osm/romania-260824.osm.pbf:/data/romania.osm.pbf:ro
++      - nominatim-data:/var/lib/postgresql/16/main
++      - nominatim-flatnode:/nominatim/flatnode   # ~106 GB flatnode.file; prune-flatnode.sh deletes it post-import by default (serve-only doesn't need it)
++    ports:
++      - "127.0.0.1:8081:8080"              # app: NOMINATIM_BASE_URL=http://localhost:8081
++    expose:
++      - "5432"                             # internal PG reachable by photon-import over the compose network
++    shm_size: 1gb
++    mem_limit: 5g
++    healthcheck:
++      test: ["CMD-SHELL", "curl -fsS 'http://localhost:8080/status?format=json' | grep -q '\"status\":0' || exit 1"]
++      interval: 15s
++      timeout: 10s
++      retries: 40
++      start_period: 30m                    # first-run import can take a long time
++    restart: "no"          # opt-in local stack: do NOT auto-restart on reboot (see docs/SELFHOST.md)
++
++  # ── Geocoding autocomplete: Photon ────────────────────────────────────────
++  # Photon builds its index FROM the Nominatim DB (komoot's `-nominatim-import`),
++  # so it derives from the SAME ONE Romania extract as Nominatim — no separate
++  # planet/region dump. The pinned komoot photon jar is fetched into gitignored
++  # data/selfhost/photon/ (see docs/SELFHOST.md) and mounted here; the container
++  # is a plain JRE, which keeps the version pinned and the source explicit.
++  #
++  # One-shot import job — run AFTER nominatim is healthy. It shares nominatim's
++  # network namespace so it reaches the internal Postgres at localhost:5432
++  # (Photon needs the DB only at import time, never at serve time):
++  #   docker compose -f docker/selfhost/docker-compose.yml --profile import run --rm photon-import
++  photon-import:
++    image: eclipse-temurin:21-jre@sha256:7a65df4b22d2de92d4e04056e884f3b9122d70b21e2847fd66084278bd0ce037   # plain JRE; the pinned jar is mounted
++    container_name: howfar-photon-import
++    # Run as the host user so the built photon_data/ index is host-owned (removable
++    # by the operator's teardown). Override DOCKER_UID/GID if your uid isn't 1000.
++    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
++    profiles: ["import"]
++    depends_on:
++      nominatim:
++        condition: service_healthy
++    network_mode: "service:nominatim"       # reach the Nominatim Postgres at 127.0.0.1:5432
++    working_dir: /photon
++    command: >
++      java -jar /photon/photon.jar
++      -nominatim-import
++      -host 127.0.0.1 -port 5432
++      -database nominatim -user nominatim -password howfar
++      -languages en,ro
++    volumes:
++      - ../../data/selfhost/photon:/photon      # holds photon.jar (pinned) + the built photon_data/
++    mem_limit: 3g
++    restart: "no"
++
++  photon:
++    image: eclipse-temurin:21-jre@sha256:7a65df4b22d2de92d4e04056e884f3b9122d70b21e2847fd66084278bd0ce037
++    container_name: howfar-photon
++    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"   # host-owned index (see photon-import)
++    # Behind a profile so a bare `up -d` (whole file) can't start it crash-looping
++    # over a not-yet-built index during the import. Start it explicitly after the
++    # import: `docker compose … up -d photon` (naming a profiled service starts it).
++    profiles: ["serve"]
++    working_dir: /photon
++    command: ["java", "-jar", "/photon/photon.jar", "-listen-ip", "0.0.0.0", "-listen-port", "2322"]
++    volumes:
++      - ../../data/selfhost/photon:/photon      # serves the already-built photon_data/ (no DB needed)
++    ports:
++      - "127.0.0.1:2322:2322"              # app: PHOTON_BASE_URL=http://localhost:2322
++    mem_limit: 2g
++    healthcheck:
++      # temurin JRE has no curl/wget — a bash /dev/tcp liveness probe on the API port.
++      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/2322' 2>/dev/null || exit 1"]
++      interval: 15s
++      timeout: 10s
++      retries: 20
++      start_period: 30s
++    restart: "no"          # opt-in local stack: do NOT auto-restart on reboot (see docs/SELFHOST.md)
++
++  # ── Routing: OpenRouteService (walk + car isochrones) ─────────────────────
++  # First `up` builds the foot-walking + driving-car graphs from the PBF, then
++  # serves at :8082/ors/v2/isochrones/{profile}. Config is passed as dotted-key
++  # env (ORS 8+ convention). CRITICAL: maximum_intervals default is 1, but the
++  # app POSTs 3 ranges in one request (ors.ts normalize() needs exactly 3
++  # features) — so it is raised here or every isochrone call 502s.
++  ors:
++    # Pinned by digest so a rebuild reproduces the exact routing graph engine.
++    image: openrouteservice/openrouteservice:v9.10.0@sha256:cd7d8f3cc1b753b12d706577aca92f7bc952aa9ef9a685394ad86cef9f829473
++    container_name: howfar-ors
++    environment:
++      REBUILD_GRAPHS: "False"              # reuse the built graph across restarts
++      XMX: 2g                              # heap: PBF(0.31g) * 2 profiles * 2 ≈ 1.3g → 2g headroom
++      ors.engine.profile_default.build.source_file: /home/ors/files/romania.osm.pbf
++      ors.engine.profiles.foot-walking.enabled: "true"
++      ors.engine.profiles.driving-car.enabled: "true"
++      # Admit the app's real isochrone payload (3 intervals; walk max 2633 s, car well under).
++      ors.endpoints.isochrones.maximum_intervals: "10"
++      ors.endpoints.isochrones.maximum_locations: "5"
++      ors.endpoints.isochrones.maximum_range_time_default: "18000"
++    volumes:
++      - ../../data/osm/romania-260824.osm.pbf:/home/ors/files/romania.osm.pbf:ro
++      - ors-graphs:/home/ors/graphs
++      - ors-elevation:/home/ors/elevation_cache
++    ports:
++      - "127.0.0.1:8082:8082"             # app: ORS_BASE_URL=http://localhost:8082/ors
++    mem_limit: 3g
++    healthcheck:
++      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8082/ors/v2/health || exit 1"]
++      interval: 15s
++      timeout: 10s
++      retries: 40
++      start_period: 20m                    # first-run graph build
++    restart: "no"          # opt-in local stack: do NOT auto-restart on reboot (see docs/SELFHOST.md)
++
++  # ── Basemap tiles (pmtiles) ───────────────────────────────────────────────
++  # NOT a compose service: the Protomaps basemap schema (matching the app's
++  # @protomaps/basemaps style) is produced by the protomaps/basemaps Planetiler
++  # build profile, which is compiled from source at a pinned ref — a stock
++  # planetiler/OpenMapTiles run would render blank. That build is driven by
++  # docker/selfhost/build-tiles.sh (it uses a maven+temurin container, so no
++  # host toolchain is needed) and writes data/tiles/bucharest.pmtiles atomically.
++  # See docs/SELFHOST.md.
++
++volumes:
++  nominatim-data:
++  nominatim-flatnode:
++  ors-graphs:
++  ors-elevation:
+diff --git a/docker/selfhost/env.selfhost.example b/docker/selfhost/env.selfhost.example
+new file mode 100644
+index 0000000..a8e5dc9
+--- /dev/null
++++ b/docker/selfhost/env.selfhost.example
+@@ -0,0 +1,47 @@
++# HowFar self-host provider overlay — LOCAL ONLY.
++#
++# These are the ONLY env values that point the app at the local self-host stack
++# (docker/selfhost/docker-compose.yml). Merge them into HowFar/.env alongside the
++# normal DATABASE_URL / AUTH_SECRET (this file is a provider OVERLAY, not a full
++# .env). With none of these set, the app is byte-identical to the public Bucharest
++# deployment — that default MUST stay green with no stack running.
++#
++# Every host below matches a 127.0.0.1 port published by the compose file. Bare
++# host, no trailing slash — the app appends each provider's path (see src/lib/env.ts).
++
++# Nominatim (submit-time /search + /reverse) — compose publishes 127.0.0.1:8081->8080
++NOMINATIM_BASE_URL="http://localhost:8081"
++
++# Photon (type-ahead /api) — compose publishes 127.0.0.1:2322->2322
++PHOTON_BASE_URL="http://localhost:2322"
++
++# OpenRouteService (walk + car isochrones) — compose publishes 127.0.0.1:8082->8082.
++# NOTE the /ors path prefix: the ORS docker image serves the API under /ors, and
++# the app appends /v2/isochrones/{profile}. Self-hosted ORS is KEYLESS (the key
++# is only sent to the public host), so ORS_API_KEY is neither needed nor sent.
++ORS_BASE_URL="http://localhost:8082/ors"
++
++# Tile archive — point at the self-host build (build-tiles.sh writes here by
++# default), a DISTINCT path from the public default data/tiles/bucharest.pmtiles so
++# the two never clobber each other. Both are gitignored (data/tiles/*.pmtiles).
++TILES_PMTILES_PATH="data/tiles/selfhost-romania.pmtiles"
++
++# Cold the provider cache whenever the underlying OSM extract/graph is rebuilt
++# Use the pinned extract date so a rebuild from a newer extract colds
++# cleanly. NB the previous generation's ApiCache rows are NOT auto-purged — pair a
++# change here with `DELETE FROM "ApiCache"` (no expiry reaper yet).
++PROVIDER_DATA_REVISION="romania-260824"
++
++# You own these instances (no third-party ToS), so throttling can be disabled for
++# snappy local dev. 0 = no spacing. This is ONLY safe because every *_BASE_URL
++# above is a self-host host — the provider throttle guard REJECTS a sub-default
++# interval while a base still points at the public host (fail-closed via /api/ready 503).
++NOMINATIM_MIN_INTERVAL_MS="0"
++PHOTON_MIN_INTERVAL_MS="0"
++ORS_MIN_INTERVAL_MS="0"
++
++# ── Extent (BUILD-TIME inlined — only needed to point at a different city) ────
++# The default is Bucharest+Ilfov; leave unset for Bucharest. If you change it,
++# rebuild the app AND rebuild the tiles + re-import the engines from the matching
++# extent. build-tiles.sh + scripts/fetch-tiles.sh both read this same var.
++# NEXT_PUBLIC_MAP_BBOX="25.8,44.2,26.4,44.7"
+diff --git a/docker/selfhost/fetch-photon-jar.sh b/docker/selfhost/fetch-photon-jar.sh
+new file mode 100755
+index 0000000..3d8c05c
+--- /dev/null
++++ b/docker/selfhost/fetch-photon-jar.sh
+@@ -0,0 +1,37 @@
++#!/usr/bin/env bash
++# Fetch the pinned komoot Photon jar into the gitignored photon data dir, where
++# the photon / photon-import compose services mount it (as /photon/photon.jar).
++# Photon builds its index from the Nominatim DB (-nominatim-import), so it derives
++# from the SAME ONE Romania extract — this jar is just the pinned engine binary.
++#
++# Usage: docker/selfhost/fetch-photon-jar.sh
++set -euo pipefail
++
++PHOTON_VERSION="1.3.0"                        # pinned (komoot/photon release)
++PHOTON_SHA256="a89707c0045e4807b2a1180e132e68e108d998709f48b6c94b98a6e281f571a5"
++JAR_URL="https://github.com/komoot/photon/releases/download/${PHOTON_VERSION}/photon-${PHOTON_VERSION}.jar"
++
++ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
++OUT_DIR="${ROOT}/data/selfhost/photon"
++OUT="${OUT_DIR}/photon.jar"
++
++mkdir -p "$OUT_DIR"
++
++verify() { echo "${PHOTON_SHA256}  $1" | sha256sum -c - >/dev/null 2>&1; }
++
++# Idempotent, but re-verify: a pre-existing jar is trusted only if its checksum matches.
++if [ -f "$OUT" ] && verify "$OUT"; then
++  echo "Already present and sha256-verified: $OUT"
++  ls -lh "$OUT"
++  exit 0
++fi
++
++echo "Downloading photon-${PHOTON_VERSION}.jar (~94 MB) ..."
++curl -fSL --retry 3 --retry-delay 5 -o "${OUT}.part" "$JAR_URL"
++if ! verify "${OUT}.part"; then
++  echo "ERROR: sha256 mismatch on the downloaded jar — refusing to keep it." >&2
++  rm -f "${OUT}.part"; exit 1
++fi
++mv "${OUT}.part" "$OUT"                        # atomic publish
++echo "Downloaded + sha256-verified:"
++ls -lh "$OUT"
+diff --git a/docker/selfhost/fetch-romania-extract.sh b/docker/selfhost/fetch-romania-extract.sh
+new file mode 100755
+index 0000000..ada9045
+--- /dev/null
++++ b/docker/selfhost/fetch-romania-extract.sh
+@@ -0,0 +1,81 @@
++#!/usr/bin/env bash
++# Fetch the Geofabrik Romania OSM extract that feeds the WHOLE self-host stack
++# (Nominatim + Photon + ORS + planetiler all import from this ONE file).
++#
++# The extract is PINNED to a dated snapshot (not romania-latest) so a re-run
++# reproduces the same search/routing results without a repository change (a
++# mutable `-latest` tag would not be reproducible across rebuilds). Bump
++# EXTRACT_DATE deliberately, and bump PROVIDER_DATA_REVISION with it (see
++# env.selfhost.example) so the app's cache colds.
++#
++# Usage:
++#   docker/selfhost/fetch-romania-extract.sh            # download + verify (idempotent)
++#   docker/selfhost/fetch-romania-extract.sh --dry-run  # print target + size, download nothing
++#
++# The download is ~312 MB. It lands under the gitignored data/osm/ root.
++set -euo pipefail
++
++REGION_PATH="europe"
++REGION="romania"
++EXTRACT_DATE="260824"                       # Geofabrik snapshot YYMMDD (pinned)
++EXTRACT_MD5="abc00e5b575aa51efc9ab39ea34655f4"   # pinned integrity digest (not trusted from the remote)
++BASE="https://download.geofabrik.de/${REGION_PATH}"
++PBF_NAME="${REGION}-${EXTRACT_DATE}.osm.pbf"
++PBF_URL="${BASE}/${PBF_NAME}"
++
++# Resolve the HowFar app root (two levels up from docker/selfhost/) so the
++# extract always lands in the same gitignored place regardless of cwd.
++ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
++OUT_DIR="${ROOT}/data/osm"
++OUT="${OUT_DIR}/${PBF_NAME}"
++
++DRY_RUN=0
++[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
++
++echo "Extract:  ${PBF_URL}"
++echo "Target:   ${OUT}"
++
++# Expected size from a HEAD (also proves the pinned snapshot still exists).
++EXPECTED_LEN="$(curl -fsIL "$PBF_URL" | awk 'tolower($0) ~ /^content-length:/ {v=$2} END{gsub(/\r/,"",v); print v}')"
++if [ -n "${EXPECTED_LEN:-}" ]; then
++  echo "Size:     ${EXPECTED_LEN} bytes (~$(( EXPECTED_LEN / 1024 / 1024 )) MB)"
++else
++  echo "Size:     (HEAD returned no content-length)"
++fi
++
++verify_md5() { # $1 = file; returns 0 iff it matches the PINNED md5 (no network)
++  local got
++  got="$(md5sum "$1" | awk '{print $1}')"
++  echo "md5 want=${EXTRACT_MD5} got=${got}"
++  [ "$EXTRACT_MD5" = "$got" ]
++}
++
++if [ "$DRY_RUN" = "1" ]; then
++  echo "[dry-run] no download performed."
++  exit 0
++fi
++
++mkdir -p "$OUT_DIR"
++
++# Idempotent: keep an already-downloaded, verified extract.
++if [ -f "$OUT" ] && verify_md5 "$OUT"; then
++  echo "Already present and md5-verified — nothing to do."
++  ls -lh "$OUT"
++  exit 0
++fi
++
++echo "Downloading ${PBF_NAME} ..."
++curl -fSL --retry 3 --retry-delay 5 -o "${OUT}.part" "$PBF_URL"
++
++# Verify the .part BEFORE publishing (like fetch-photon-jar.sh) so a good file at
++# the canonical path is never at risk, and an interrupt can't leave a corrupt file
++# under the final name.
++if ! verify_md5 "${OUT}.part"; then
++  echo "ERROR: md5 mismatch on the downloaded extract — refusing to publish it." >&2
++  rm -f "${OUT}.part"
++  exit 1
++fi
++mv "${OUT}.part" "$OUT"          # atomic publish of the already-verified file
++
++echo "Downloaded + md5-verified:"
++ls -lh "$OUT"
+diff --git a/docker/selfhost/parity-check.mjs b/docker/selfhost/parity-check.mjs
+new file mode 100644
+index 0000000..014d859
+--- /dev/null
++++ b/docker/selfhost/parity-check.mjs
+@@ -0,0 +1,467 @@
++#!/usr/bin/env node
++// Parity check: does the app on the SELF-HOSTED stack return the same answers as
++// the app on the PUBLIC providers?
++//
++// NOT part of check:ci — it needs two live app instances. Run TWO builds of the
++// app (same NEXT_PUBLIC_MAP_BBOX, so one `next build` is fine) as two processes:
++//   - PUBLIC:  default provider env, e.g. PORT=3000 next start
++//   - LOCAL:   env.selfhost.example merged in (distinct PROVIDER_DATA_REVISION so
++//              the ApiCache namespaces never cross), e.g. PORT=3001 next start
++// then:  node docker/selfhost/parity-check.mjs --public http://localhost:3000 --local http://localhost:3001
++//
++// Modes:
++//   --self-test     validate the geometry instrument on known fixtures, then exit
++//   --public-only   hit only the public instance (local shown n/a) — proves the
++//                   harness + math work BEFORE any self-host stack exists
++//   (default)       full public-vs-local comparison; exits non-zero if any metric
++//                   is outside tolerance.
++//
++// Tolerances (stated, with provenance — see docs/PROVIDERS.md 2026-07-24 audit):
++//   - geocode: haversine distance between the two returned points <= 150 m
++//     (rooftop/parcel jitter between OSM geocoders).
++//   - rings: the audit's quantity was a RADIAL boundary residual, bar +/-10%.
++//     Residual = ray/polygon boundary distance at 24 bearings (density-independent).
++//     A ring passes only if ALL hold: median sector residual <= 0.10 AND worst
++//     sector <= 0.15 (a tail bound, so a truncated ring — which casts a short ray in
++//     the clipped bearings — can't hide behind the median) AND area ratio within
++//     +/-21% (area = r^2 equivalent of +/-10% radius). All enforced, not just printed.
++//   - suggest: top type-ahead hit within 500 m (looser than exact geocode).
++//   Before any of this, a PROVENANCE preflight proves the local leg is backed by the
++//   LIVE self-hosted engines (distinct base URLs, engines healthy now, and the local
++//   app's geocode matches the local Nominatim's own answer) — else it aborts.
++//   NB this compares two ORS builds of the SAME engine family with the SAME
++//   corrected ranges echoed, so the expected divergence is profile/extract-vintage
++//   only. A result outside the bar is a FINDING to investigate, never a reason to
++//   widen the bar.
++
++const R_EARTH_M = 6371008.8;
++const DEG = Math.PI / 180;
++
++// ── geometry ────────────────────────────────────────────────────────────────
++function haversineM(a, b) {
++  const dLat = (b.lat - a.lat) * DEG;
++  const dLng = (b.lng - a.lng) * DEG;
++  const la1 = a.lat * DEG, la2 = b.lat * DEG;
++  const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
++  return 2 * R_EARTH_M * Math.asin(Math.min(1, Math.sqrt(h)));
++}
++
++// Local equirectangular projection around a reference latitude → metres.
++// Adequate for area/distance RATIOS over a city-sized isochrone.
++function projector(refLatDeg) {
++  const kx = R_EARTH_M * DEG * Math.cos(refLatDeg * DEG);
++  const ky = R_EARTH_M * DEG;
++  return ([lng, lat]) => [lng * kx, lat * ky];
++}
++
++// Shoelace area (m^2) of a single linear ring in projected coords.
++function ringAreaProjected(coords) {
++  let a = 0;
++  for (let i = 0, n = coords.length; i < n; i++) {
++    const [x1, y1] = coords[i];
++    const [x2, y2] = coords[(i + 1) % n];
++    a += x1 * y2 - x2 * y1;
++  }
++  return Math.abs(a) / 2;
++}
++
++// Area (m^2) of a GeoJSON Polygon/MultiPolygon: sum exterior rings, subtract holes.
++function geometryAreaM2(geometry, refLatDeg) {
++  const proj = projector(refLatDeg);
++  const polys = geometry.type === "MultiPolygon" ? geometry.coordinates : [geometry.coordinates];
++  let total = 0;
++  for (const poly of polys) {
++    poly.forEach((ring, idx) => {
++      const a = ringAreaProjected(ring.map(proj));
++      total += idx === 0 ? a : -a; // ring[0] = exterior, rest = holes
++    });
++  }
++  return total;
++}
++
++// Radial boundary distance by RAY/POLYGON INTERSECTION (not vertex binning, which
++// gives sparse/empty sectors on small rings with few vertices). For each of `bins`
++// evenly-spaced bearings, cast a ray from the origin and take the FARTHEST crossing
++// of any exterior-ring edge — the outer reach boundary in that direction. This is
++// density-independent: every bearing that the boundary encloses yields a distance,
++// so coverage reflects real geometry, not vertex count. Holes ignored (outer reach).
++function radialProfile(geometry, origin, bins = 24) {
++  const proj = projector(origin.lat);
++  const O = proj([origin.lng, origin.lat]);
++  const polys = geometry.type === "MultiPolygon" ? geometry.coordinates : [geometry.coordinates];
++  // Exterior-ring edges in metres, relative to the origin.
++  const edges = [];
++  for (const poly of polys) {
++    const ring = poly[0].map(proj);
++    for (let i = 0; i < ring.length - 1; i++) {
++      edges.push([[ring[i][0] - O[0], ring[i][1] - O[1]], [ring[i + 1][0] - O[0], ring[i + 1][1] - O[1]]]);
++    }
++  }
++  const out = [];
++  for (let b = 0; b < bins; b++) {
++    const ang = (b / bins) * 2 * Math.PI;         // ray direction (dx, dy) from the origin
++    const dx = Math.cos(ang), dy = Math.sin(ang);
++    let best = null;
++    for (const [[x1, y1], [x2, y2]] of edges) {
++      // Solve origin + t*(dx,dy) = a + s*(b-a), t>0, s in [0,1]. (origin is the local (0,0); a,b = edge ends.)
++      const ex = x2 - x1, ey = y2 - y1;
++      const den = dx * ey - dy * ex;
++      if (Math.abs(den) < 1e-9) continue;         // parallel
++      const t = (x1 * ey - y1 * ex) / den;         // distance along the ray (metres)
++      const s = (x1 * dy - y1 * dx) / den;         // position along the edge
++      if (t > 0 && s >= 0 && s <= 1 && (best == null || t > best)) best = t;
++    }
++    out.push(best);                                // null only if the ray hits no edge (origin outside)
++  }
++  return out;
++}
++
++function median(xs) {
++  const s = [...xs].sort((a, b) => a - b);
++  const m = Math.floor(s.length / 2);
++  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
++}
++
++// |ratio-1| per matched radial sector. Returns median AND the worst sector — the
++// gate looks at the TAIL, not just the median, so a truncated ring (which casts a
++// short ray in its clipped bearings → a large single-sector residual) can't pass.
++function radialResidual(profA, profB) {
++  const rs = [];
++  for (let i = 0; i < profA.length; i++) {
++    if (profA[i] != null && profB[i] != null && profB[i] > 0) rs.push(Math.abs(profA[i] / profB[i] - 1));
++  }
++  if (!rs.length) return { median: NaN, max: NaN };
++  return { median: median(rs), max: Math.max(...rs) };
++}
++
++// ── fixtures / self-test (rule 13: validate the instrument before trusting it) ─
++function selfTest() {
++  const ref = 44.43;
++  const proj = projector(ref);
++  // A ~1km x 1km square near Bucharest. INDEPENDENT check: a rectangle's area is
++  // width×height from the projected corner spans — a DIFFERENT formula than the
++  // shoelace sum, so a regression in ringAreaProjected/geometryAreaM2 fails here.
++  const d = 0.0045; // ~0.5 km each side of centre in lat; lng scaled by cos(lat)
++  const sq = [[26.10 - d, 44.43 - d], [26.10 + d, 44.43 - d], [26.10 + d, 44.43 + d], [26.10 - d, 44.43 + d], [26.10 - d, 44.43 - d]];
++  const P = sq.map(proj);
++  const analytic = Math.abs(P[1][0] - P[0][0]) * Math.abs(P[2][1] - P[1][1]); // width × height
++  const viaGeom = geometryAreaM2({ type: "Polygon", coordinates: [sq] }, ref);
++  assertClose("square area (shoelace vs width×height)", viaGeom, analytic, 1e-6);
++
++  // MultiPolygon with a hole: outer square minus a centred quarter-size hole,
++  // plus a detached second polygon. Area = outer - hole + second.
++  const hole = [[26.10 - d / 2, 44.43 - d / 2], [26.10 + d / 2, 44.43 - d / 2], [26.10 + d / 2, 44.43 + d / 2], [26.10 - d / 2, 44.43 + d / 2], [26.10 - d / 2, 44.43 - d / 2]];
++  const second = [[26.20, 44.50], [26.21, 44.50], [26.21, 44.51], [26.20, 44.51], [26.20, 44.50]];
++  const mp = { type: "MultiPolygon", coordinates: [[sq, hole], [second]] };
++  const expect = analytic - ringAreaProjected(hole.map(proj)) + ringAreaProjected(second.map(proj));
++  assertClose("multipolygon-with-hole area", geometryAreaM2(mp, ref), expect, 1e-6);
++
++  // Reversed winding must not change |area| (shoelace uses abs()).
++  const rev = { type: "Polygon", coordinates: [[...sq].reverse()] };
++  assertClose("reversed winding area", geometryAreaM2(rev, ref), analytic, 1e-6);
++
++  // Haversine sanity: 1 degree of latitude ~= 111.2 km.
++  assertClose("haversine 1deg lat", haversineM({ lat: 44, lng: 26 }, { lat: 45, lng: 26 }), 111195, 0.01);
++
++  // Radial metric: identical geometry → residual 0; a 20%-scaled ring → residual ~0.20.
++  const origin = { lat: 44.43, lng: 26.10 };
++  const ringGeom = (scale) => {
++    const pts = [];
++    for (let a = 0; a < 360; a += 30) {
++      const r = 0.01 * scale; // ~1 km radius * scale
++      pts.push([origin.lng + r * Math.cos(a * DEG) / Math.cos(origin.lat * DEG), origin.lat + r * Math.sin(a * DEG)]);
++    }
++    pts.push(pts[0]);
++    return { type: "Polygon", coordinates: [pts] };
++  };
++  const base = radialProfile(ringGeom(1), origin);
++  assertClose("radial residual (identical)", radialResidual(base, base).median + 1, 1, 1e-9);
++  const scaled = radialResidual(radialProfile(ringGeom(1.2), origin), base);
++  assertClose("radial residual median (1.20× scaled)", scaled.median, 0.20, 0.02);
++  assertClose("radial residual max (1.20× scaled)", scaled.max, 0.20, 0.02);
++  // A FEW distorted sectors: median stays ≈0 (so the median gate would pass) but
++  // max ≈1.0 catches it — proves the tail gate does work, not just the median.
++  const spike = base.map((v, i) => (i < 3 ? v * 2 : v)); // 3 of 24 sectors 2× out
++  const sres = radialResidual(spike, base);
++  assertClose("3-sector spike: median stays low", sres.median, 0.0, 1e-9);
++  assertClose("3-sector spike: caught by MAX", sres.max, 1.0, 0.01);
++
++  // Exercise the VERDICT PREDICATE itself (not just the computed values) so a
++  // deleted gate clause is caught — pass/fail fixtures for each threshold.
++  assertBool("verdict: identical ring passes", ringVerdict({ median: 0, max: 0 }, 1.0), true);
++  assertBool("verdict: median just over fails", ringVerdict({ median: 0.11, max: 0.11 }, 1.0), false);
++  assertBool("verdict: worst sector over fails (median ok)", ringVerdict({ median: 0.0, max: 0.16 }, 1.0), false);
++  assertBool("verdict: area over fails (residual ok)", ringVerdict({ median: 0.0, max: 0.0 }, 1.25), false);
++  assertBool("verdict: NaN residual fails", ringVerdict({ median: NaN, max: NaN }, 1.0), false);
++
++  console.log("SELF-TEST PASS — geometry instrument + verdict predicate validated (12 fixtures).");
++}
++
++function assertClose(name, got, want, relTol) {
++  const rel = Math.abs(got - want) / Math.abs(want || 1);
++  if (rel > relTol) { console.error(`SELF-TEST FAIL: ${name}: got ${got}, want ${want} (rel ${rel})`); process.exit(2); }
++  console.log(`  ok ${name}: ${got.toFixed(2)} ~= ${want.toFixed(2)} (rel ${rel.toExponential(2)})`);
++}
++
++function assertBool(name, got, want) {
++  if (got !== want) { console.error(`SELF-TEST FAIL: ${name}: got ${got}, want ${want}`); process.exit(2); }
++  console.log(`  ok ${name}: ${got}`);
++}
++
++// ── origins (the 2026-07-24 audit set; coords fixed + recorded here) ──────────
++// geoQuery is a SPECIFIC landmark (not a bare neighborhood name): the 150 m
++// tolerance is calibrated for rooftop/parcel-level places. Bare area-name queries
++// (e.g. just "Grozăvești") legitimately resolve to different-but-valid representative
++// points across geocoders and are NOT a fair test of this tolerance — see suggest,
++// which exercises the type-ahead path instead.
++const ORIGINS = [
++  { name: "Unirii (central)",           geoQuery: "Piața Unirii, București",           suggestQuery: "piata unirii", lat: 44.4268, lng: 26.1025 },
++  { name: "Grozăvești (river barrier)", geoQuery: "AFI Cotroceni, București",           suggestQuery: "afi cotroceni", lat: 44.4419, lng: 26.0616 },
++  { name: "Berceni (periphery)",        geoQuery: "Piața Sudului, București",           suggestQuery: "piata sudului", lat: 44.3830, lng: 26.1230 },
++];
++const GEOCODE_TOL_M = 150;
++const REVERSE_TOL_M = 150;        // reverse geocode (map-click label path) — same rooftop tolerance as forward
++const SUGGEST_TOL_M = 500;        // type-ahead top hit — looser than exact geocode (ranking/centroid differences)
++const RING_RADIAL_TOL = 0.10;     // MEDIAN sector residual (the audit's ±10% quantity)
++const RING_RADIAL_MAX = 0.15;     // WORST single sector — the truncation guard: a ring clipped on one side has the
++                                  // ray hit the clip boundary far short in those bearings → a large max residual.
++const RING_AREA_TOL = 0.21;       // area band, ENFORCED: 1.10²−1 ≈ 0.21 = the area-equivalent of the
++                                  // MEDIAN ±10% radius bound (the primary signal); a whole-ring size
++                                  // drift the per-sector residuals could average out is caught here.
++const EXPECTED_RINGS = 3; // the app always requests 3 nested bands (ors.ts normalize() enforces it)
++
++// A ring passes iff the median residual, the worst-sector residual, AND the area
++// ratio are all in band. (No coverage clause: ray/polygon casting yields a distance
++// at every bearing for any ring enclosing the origin, so `max` is the truncation guard.)
++function ringVerdict(res, areaRatio) {
++  return Number.isFinite(res.median)
++    && res.median <= RING_RADIAL_TOL
++    && res.max <= RING_RADIAL_MAX
++    && Math.abs(areaRatio - 1) <= RING_AREA_TOL;
++}
++
++// The self-hosted engine endpoints (env.selfhost.example). Overridable so the
++// provenance preflight can point at a non-default deployment.
++const ENGINES = {
++  nominatim: process.env.PARITY_NOMINATIM || "http://localhost:8081",
++  photon: process.env.PARITY_PHOTON || "http://localhost:2322",
++  ors: process.env.PARITY_ORS || "http://localhost:8082/ors",
++};
++// The provenance cross-check POSTs the app's foot-walking ranges to the local ORS
++// and queries the local Photon with the app's bbox/focus. These MUST track the app:
++// the ranges are the normal-pace ORS seconds (pace.ts) and the bbox is
++// NEXT_PUBLIC_MAP_BBOX — both overridable so a pace tune (task 064 did one) or a
++// different city doesn't make the preflight falsely abort.
++const PROV_ORS_RANGE = (process.env.PARITY_ORS_RANGE || "861,1744,2633").split(",").map(Number);
++const PROV_BBOX = process.env.NEXT_PUBLIC_MAP_BBOX || "25.8,44.2,26.4,44.7";
++const [PROV_LON, PROV_LAT] = (() => { const b = PROV_BBOX.split(",").map(Number); return [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]; })();
++
++// PROVENANCE preflight — proves the local leg is really backed by the self-hosted
++// engines (not a mis-started public-vs-public passthrough, and not stale ApiCache
++// rows served while an engine is stopped). Returns [] on success or a list of
++// failure strings.
++async function provenancePreflight(publicBase, localBase, o) {
++  const problems = [];
++  // 1. The two app instances must be distinct (a copy-paste that points both at
++  //    the same port would "pass" trivially).
++  if (publicBase === localBase) problems.push("public and local base URLs are identical");
++  // 2. Every self-hosted engine must be reachable RIGHT NOW — so a "PARITY OK"
++  //    can't come from cached rows while the engine is down/upgraded.
++  const probes = [
++    [`${ENGINES.nominatim}/status?format=json`, "nominatim"],
++    [`${ENGINES.photon}/api?q=bucuresti&limit=1`, "photon"],
++    [`${ENGINES.ors}/v2/health`, "ors"],
++  ];
++  for (const [url, name] of probes) {
++    try { const r = await fetch(url); if (!r.ok) problems.push(`${name} engine not healthy (${r.status})`); }
++    catch (e) { problems.push(`${name} engine unreachable: ${e.message}`); }
++  }
++  // 3. Cross-check: the LOCAL app's geocode must match the LOCAL Nominatim's own
++  //    answer (within GEOCODE_TOL_M) — i.e. the app really routed to the local
++  //    engine, not silently to the public host.
++  try {
++    const appPt = await getJson(localBase, `/api/geocode?q=${encodeURIComponent(o.geoQuery)}`);
++    const direct = await getJson(ENGINES.nominatim, `/search?format=jsonv2&countrycodes=ro&q=${encodeURIComponent(o.geoQuery)}&limit=1`);
++    const d0 = direct?.[0];
++    if (!d0) problems.push("local Nominatim returned no direct result for the cross-check query");
++    else {
++      const dist = haversineM(appPt, { lat: +d0.lat, lng: +d0.lon });
++      if (dist > GEOCODE_TOL_M) problems.push(`Nominatim: local app geocode is ${dist.toFixed(0)} m from the local Nominatim's own answer — app may not be using the local engine`);
++    }
++  } catch (e) { problems.push(`Nominatim cross-check failed: ${e.message}`); }
++  // 4. ORS cross-check: the local app's walk ring must match a DIRECT POST to the
++  //    local ORS (same payload) — proves the app routed rings to the local engine,
++  //    not a public ORS with the inherited key. Compared by 15-min ring area.
++  try {
++    const appRings = await ringsFor(localBase, o, "walk");
++    const r = await fetch(`${ENGINES.ors}/v2/isochrones/foot-walking`, {
++      method: "POST", headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ locations: [[o.lng, o.lat]], range: PROV_ORS_RANGE }),
++    });
++    if (!r.ok) problems.push(`ORS direct isochrone failed (${r.status})`);
++    else {
++      const j = await r.json();
++      const feats = j.features ?? [];
++      if (feats.length !== 3 || !appRings.length) problems.push("ORS cross-check: unexpected feature/ring count");
++      else {
++        // The direct ORS 15-min feature vs the app's 15-min ring: same engine → same area.
++        const ratio = geometryAreaM2(feats[0].geometry, o.lat) / geometryAreaM2(appRings[0].geometry, o.lat);
++        if (Math.abs(ratio - 1) > 0.02) problems.push(`ORS: app 15-min ring differs ${((ratio - 1) * 100).toFixed(1)}% from the local ORS's own answer — app may not be using the local engine`);
++      }
++    }
++  } catch (e) { problems.push(`ORS cross-check failed: ${e.message}`); }
++  // 5. Photon cross-check: the local app's top suggestion must match a DIRECT query
++  //    to the local Photon (within SUGGEST_TOL_M).
++  try {
++    const appSug = (await getJson(localBase, `/api/suggest?q=${encodeURIComponent(o.suggestQuery)}`)).suggestions?.[0];
++    // Match the params the app sends Photon (bbox + Bucharest focus), else an
++    // unconstrained direct query returns a global top hit and the check is meaningless.
++    const r = await fetch(`${ENGINES.photon}/api?q=${encodeURIComponent(o.suggestQuery)}&bbox=${PROV_BBOX}&lat=${PROV_LAT}&lon=${PROV_LON}&limit=1&lang=en`);
++    const pj = r.ok ? await r.json() : null;
++    const pc = pj?.features?.[0]?.geometry?.coordinates;
++    if (!appSug || !pc) problems.push("Photon cross-check: missing app or direct suggestion");
++    else {
++      const dist = haversineM(appSug, { lat: pc[1], lng: pc[0] });
++      if (dist > SUGGEST_TOL_M) problems.push(`Photon: app suggestion is ${dist.toFixed(0)} m from the local Photon's own answer — app may not be using the local engine`);
++    }
++  } catch (e) { problems.push(`Photon cross-check failed: ${e.message}`); }
++  return problems;
++}
++
++async function getJson(base, path) {
++  const res = await fetch(base + path);
++  if (!res.ok) throw new Error(`${base}${path} → HTTP ${res.status}`);
++  return res.json();
++}
++
++async function ringsFor(base, o, kind) {
++  const q = kind === "walk"
++    ? `/api/isochrone?lat=${o.lat}&lng=${o.lng}&pace=normal`
++    : `/api/car?lat=${o.lat}&lng=${o.lng}&preset=crowded`; // pin the slot (crowded=am-peak ×2.1) → identical ranges both legs
++  const j = await getJson(base, q);
++  return j.rings ?? [];
++}
++
++async function main() {
++  const args = process.argv.slice(2);
++  if (args.includes("--self-test")) { selfTest(); return; }
++  selfTest(); // always validate the instrument first
++
++  const publicBase = argVal(args, "--public") || "http://localhost:3000";
++  const localBase = args.includes("--public-only") ? null : (argVal(args, "--local") || "http://localhost:3001");
++  console.log(`\nPUBLIC = ${publicBase}\nLOCAL  = ${localBase ?? "(public-only dry-run)"}\n`);
++
++  // Provenance gate: before trusting any parity number, prove the local leg is
++  // actually backed by the LIVE self-hosted engines. A failure here aborts (a
++  // "PARITY OK" against a misconfigured or cache-only run is worse than no run).
++  if (localBase) {
++    const problems = await provenancePreflight(publicBase, localBase, ORIGINS[0]);
++    if (problems.length) {
++      console.error("PROVENANCE PREFLIGHT FAILED — refusing to report parity:");
++      for (const p of problems) console.error(`  - ${p}`);
++      process.exit(2);
++    }
++    console.log("provenance preflight OK — local engines live + app routes to them\n");
++  }
++
++  let failures = 0;
++  const rows = [];
++
++  const fail = () => { failures++; };
++
++  for (const o of ORIGINS) {
++    // Geocode (specific landmark → apples-to-apples; 150 m bar)
++    try {
++      const pub = await getJson(publicBase, `/api/geocode?q=${encodeURIComponent(o.geoQuery)}`);
++      let dist = null, verdict = "n/a";
++      if (localBase) {
++        const loc = await getJson(localBase, `/api/geocode?q=${encodeURIComponent(o.geoQuery)}`);
++        dist = haversineM(pub, loc);
++        const pass = dist <= GEOCODE_TOL_M; if (!pass) fail();
++        verdict = pass ? "PASS" : "FAIL";
++      }
++      rows.push(["geocode", o.name, "-", localBase ? `${dist.toFixed(1)} m` : "n/a", `<= ${GEOCODE_TOL_M} m`, verdict]);
++    } catch (e) { rows.push(["geocode", o.name, "-", "ERR", "-", String(e.message)]); fail(); }
++
++    // Reverse geocode (the map-click LABEL path) — both legs reverse the same origin
++    // coordinate; the nearest-address point returned must match.
++    try {
++      const pub = await getJson(publicBase, `/api/reverse?lat=${o.lat}&lng=${o.lng}`);
++      let dist = null, verdict = "n/a";
++      if (localBase) {
++        const loc = await getJson(localBase, `/api/reverse?lat=${o.lat}&lng=${o.lng}`);
++        dist = haversineM(pub, loc);
++        const pass = dist <= REVERSE_TOL_M; if (!pass) fail();
++        verdict = pass ? "PASS" : "FAIL";
++      }
++      rows.push(["reverse", o.name, "-", localBase ? `${dist.toFixed(1)} m` : "n/a", `<= ${REVERSE_TOL_M} m`, verdict]);
++    } catch (e) { rows.push(["reverse", o.name, "-", "ERR", "-", String(e.message)]); fail(); }
++
++    // Suggest (Photon type-ahead) — top hit must land at the SAME place (not just exist)
++    try {
++      const pub = await getJson(publicBase, `/api/suggest?q=${encodeURIComponent(o.suggestQuery)}`);
++      const pubTop = pub.suggestions?.[0] ?? null;
++      let verdict = "n/a", detail = pubTop ? `pub top: ${(pubTop.label || "").slice(0, 30)}` : "no pub hit";
++      if (!pubTop) fail();
++      if (localBase) {
++        const loc = await getJson(localBase, `/api/suggest?q=${encodeURIComponent(o.suggestQuery)}`);
++        const locTop = loc.suggestions?.[0] ?? null;
++        const dist = pubTop && locTop ? haversineM(pubTop, locTop) : null;
++        const pass = dist != null && dist <= SUGGEST_TOL_M;
++        if (!pass) fail();
++        verdict = pass ? "PASS" : "FAIL";
++        detail = dist == null ? "no local hit" : `top hit ${dist.toFixed(0)} m apart`;
++      }
++      rows.push(["suggest", o.name, "-", localBase ? detail : (pubTop ? "pub hit" : "no hit"), `top ≤ ${SUGGEST_TOL_M} m`, verdict]);
++    } catch (e) { rows.push(["suggest", o.name, "-", "ERR", "-", String(e.message)]); fail(); }
++
++    // Rings: walk + car — require exactly EXPECTED_RINGS on BOTH legs
++    for (const kind of ["walk", "car"]) {
++      try {
++        const pubRings = await ringsFor(publicBase, o, kind);
++        const locRings = localBase ? await ringsFor(localBase, o, kind) : [];
++        if (pubRings.length !== EXPECTED_RINGS || (localBase && locRings.length !== EXPECTED_RINGS)) {
++          rows.push([`${kind}`, o.name, `${pubRings.length} rings`, localBase ? `${locRings.length} rings` : "n/a",
++            `exactly ${EXPECTED_RINGS} each`, "FAIL"]);
++          fail();
++          continue;
++        }
++        for (let i = 0; i < pubRings.length; i++) {
++          const pg = pubRings[i].geometry;
++          const areaP = geometryAreaM2(pg, o.lat);
++          let res = null, areaRatio = null, verdict = "n/a", detail = "n/a";
++          if (localBase) {
++            const lg = locRings[i].geometry;
++            res = radialResidual(radialProfile(lg, o), radialProfile(pg, o));
++            areaRatio = geometryAreaM2(lg, o.lat) / areaP;
++            const pass = ringVerdict(res, areaRatio);
++            if (!pass) fail();
++            verdict = pass ? "PASS" : "FAIL";
++            detail = `med ${(res.median * 100).toFixed(1)}% max ${(res.max * 100).toFixed(1)}% area×${areaRatio.toFixed(3)}`;
++          }
++          rows.push([
++            `${kind} ${pubRings[i].minutes}min`, o.name,
++            `${(areaP / 1e6).toFixed(2)} km²`,
++            detail,
++            `med≤${RING_RADIAL_TOL * 100}% max≤${RING_RADIAL_MAX * 100}% area±${RING_AREA_TOL * 100}%`, verdict,
++          ]);
++        }
++      } catch (e) { rows.push([`${kind}`, o.name, "-", "ERR", "-", String(e.message)]); fail(); }
++    }
++  }
++
++  console.log(table(["metric", "origin", "public", "local vs public", "tolerance", "verdict"], rows));
++  console.log(`\n${failures === 0 ? "PARITY OK" : `PARITY FAILURES: ${failures}`}`);
++  // Any failure (missing rings, ERR, out-of-tolerance) exits non-zero in EVERY mode.
++  process.exit(failures > 0 ? 1 : 0);
++}
++
++function argVal(args, flag) { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; }
++function table(head, rows) {
++  const all = [head, ...rows];
++  const w = head.map((_, c) => Math.max(...all.map((r) => String(r[c] ?? "").length)));
++  const line = (r) => r.map((c, i) => String(c ?? "").padEnd(w[i])).join("  ");
++  return [line(head), w.map((n) => "-".repeat(n)).join("  "), ...rows.map(line)].join("\n");
++}
++
++main().catch((e) => { console.error(e); process.exit(2); });
+diff --git a/docker/selfhost/prune-flatnode.sh b/docker/selfhost/prune-flatnode.sh
+new file mode 100755
+index 0000000..6505bd2
+--- /dev/null
++++ b/docker/selfhost/prune-flatnode.sh
+@@ -0,0 +1,65 @@
++#!/usr/bin/env bash
++# Reclaim the Nominatim flatnode file after a successful import — LOCAL ONLY.
++#
++# osm2pgsql sizes the flatnode file by the WHOLE planet node-ID space, not by the
++# extract, so a Romania import still produces a ~105 GB flatnode.file. That file is
++# read only during import and during minutely/replication updates — a serve-only
++# instance (plain /search + /reverse, which is all this app does) never touches it.
++# Deleting it after the import reclaims ~105 GB and the geocoder keeps answering
++# byte-identically (verified: /search + /reverse return the same coords after the
++# file is removed and the container restarted).
++#
++# Default: DELETE the flatnode. Opt out with KEEP_FLATNODE=1 if you plan to run
++# minutely OSM updates / replication against this instance (then the file must stay).
++#
++# TRADEOFF if you delete and later need the flatnode back (e.g. to enable updates):
++# there is no rebuild-in-place — you re-import Nominatim from the extract, ~24 min
++# on a 16-core box (docs/SELFHOST.md resource table).
++#
++# Usage (after Nominatim reports healthy):
++#   bash docker/selfhost/prune-flatnode.sh          # delete (default)
++#   KEEP_FLATNODE=1 bash docker/selfhost/prune-flatnode.sh   # keep, print size, no-op
++set -euo pipefail
++
++PROJECT="${COMPOSE_PROJECT_NAME:-howfar-selfhost}"
++VOLUME="${PROJECT}_nominatim-flatnode"
++CONTAINER="${NOMINATIM_CONTAINER:-howfar-nominatim}"
++FLATNODE_PATH="/fn/flatnode.file"
++
++if ! docker volume inspect "$VOLUME" >/dev/null 2>&1; then
++  echo "flatnode volume '$VOLUME' not found — nothing to prune (has Nominatim imported yet?)." >&2
++  exit 0
++fi
++
++# Refuse to delete unless the import has COMPLETED. The flatnode file is written by
++# osm2pgsql throughout the ~24-min import; removing it mid-import corrupts a build
++# that has no in-place rebuild. The container's own healthcheck reports 'healthy'
++# only once /status returns 0 (= import done and serving), so gate on that. If the
++# import already finished but you stopped the container, start it, wait for healthy,
++# then re-run. (Override the name with NOMINATIM_CONTAINER if you renamed it.)
++health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}}' "$CONTAINER" 2>/dev/null || echo absent)"
++if [ "$health" != "healthy" ]; then
++  echo "Refusing to prune: Nominatim container '$CONTAINER' is '$health', not 'healthy'." >&2
++  echo "  healthy   = import finished & serving  -> safe to prune" >&2
++  echo "  starting  = still importing            -> DO NOT prune (would corrupt the import)" >&2
++  echo "  absent/nohealth = container not up      -> start it, wait for healthy, then re-run" >&2
++  echo "Start with: docker compose -f docker/selfhost/docker-compose.yml up -d nominatim" >&2
++  exit 1
++fi
++
++size="$(docker run --rm -v "${VOLUME}:/fn" alpine sh -c \
++  'if [ -f /fn/flatnode.file ]; then du -sh /fn/flatnode.file | cut -f1; else echo none; fi')"
++
++if [ "$size" = "none" ]; then
++  echo "No flatnode.file in '$VOLUME' — already pruned or import used none. Nothing to do." >&2
++  exit 0
++fi
++
++if [ "${KEEP_FLATNODE:-}" = "1" ]; then
++  echo "KEEP_FLATNODE=1 — keeping flatnode.file (${size}). Required for minutely/replication updates." >&2
++  exit 0
++fi
++
++echo "Deleting flatnode.file (${size}) from '$VOLUME' — serve-only instance does not need it." >&2
++docker run --rm -v "${VOLUME}:/fn" alpine rm -f "$FLATNODE_PATH"
++echo "Done. Reclaimed ~${size}. Re-import (~24 min) is the cost if you later need it back." >&2
+diff --git a/eslint.config.mjs b/eslint.config.mjs
+index 12117bf..161d616 100644
+--- a/eslint.config.mjs
++++ b/eslint.config.mjs
+@@ -14,6 +14,9 @@ const eslintConfig = defineConfig([
+     "next-env.d.ts",
+     // Generated coverage report (npm run test:coverage).
+     "coverage/**",
++    // Local data: downloaded OSM extracts, tile archives, and self-host engine
++    // volumes + the vendored tile-generator checkout (all gitignored, not our code).
++    "data/**",
+   ]),
+ ]);
+ 
+diff --git a/package.json b/package.json
+index b9614c2..2577bcb 100644
+--- a/package.json
++++ b/package.json
+@@ -16,8 +16,9 @@
+     "test:db": "POSTGIS_INTEGRATION=1 node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run src/lib/postgres.integration.test.ts && POSTGIS_INTEGRATION=1 node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --no-file-parallelism src/features/amenities/server/catalogue-store.integration.test.ts src/features/amenities/server/catalogue-import.integration.test.ts",
+     "test:coverage": "vitest run --coverage",
+     "test:e2e": "playwright test",
+-    "check": "npm run security:google-keys && npm run lint && npm run typecheck && npm test",
+-    "check:ci": "npm run security:google-keys && npm run lint && npm run typecheck && npm run test:coverage && npm run build"
++    "selfhost:harness-selftest": "node docker/selfhost/parity-check.mjs --self-test",
++    "check": "npm run security:google-keys && npm run lint && npm run typecheck && npm test && npm run selfhost:harness-selftest",
++    "check:ci": "npm run security:google-keys && npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run selfhost:harness-selftest"
+   },
+   "dependencies": {
+     "@auth/prisma-adapter": "^2.11.2",
+diff --git a/tsconfig.json b/tsconfig.json
+index cf9c65d..08c6dc7 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -30,5 +30,5 @@
+     ".next/dev/types/**/*.ts",
+     "**/*.mts"
+   ],
+-  "exclude": ["node_modules"]
++  "exclude": ["node_modules", "data"]
+ }

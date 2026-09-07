@@ -1,0 +1,49 @@
+{
+  "findings": [
+    {
+      "id": "R6-1",
+      "file": "docker/selfhost/prune-flatnode.sh",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "prune-flatnode.sh deletes the ~106 GB flatnode file with no import-complete guard; run mid-import it corrupts a 24-minute Nominatim build that has no in-place rebuild (opus#3, sol#3).",
+      "fix_commit": "58d8e88",
+      "fix_evidence": "if [ \"$health\" != \"healthy\" ]; then"
+    },
+    {
+      "id": "R6-2",
+      "file": ".github/workflows/ci.yml",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The geometry-instrument --self-test is wired into check/check:ci but ci.yml runs steps individually and never calls check:ci, so GitHub CI never runs it (opus#1).",
+      "fix_commit": "58d8e88",
+      "fix_evidence": "- run: npm run selfhost:harness-selftest"
+    },
+    {
+      "id": "R6-P1",
+      "file": "docker/selfhost/parity-check.mjs",
+      "symbol": "provenancePreflight",
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "ApiCache staleness / public-vs-public preflight escape: an airtight provenance proof needs request-level counters (opus#2, sol#1; documented honest limit, parked)."
+    },
+    {
+      "id": "R6-P2",
+      "file": "docker/selfhost/parity-check.mjs",
+      "symbol": "radialProfile",
+      "severity": "Minor",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "A notch between two rays is invisible to the radial profile (sol#2; parked)."
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "R6-RJ",
+      "claim": "the area self-test validates ringAreaProjected with the same primitive it tests",
+      "why_rejected": "False against source: parity-check.mjs validates the shoelace area against an INDEPENDENT width×height on the projected corners.",
+      "file": "docker/selfhost/parity-check.mjs",
+      "symbol": "ringAreaProjected"
+    }
+  ]
+}
