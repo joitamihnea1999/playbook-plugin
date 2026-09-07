@@ -16,10 +16,11 @@ positives, resource use, latency. Raw measurements are persisted; composites
 are computed at report time and labeled with their parameters.
 
 ```
-python3 bench/judgebench.py corpus validate
+python3 bench/judgebench.py corpus validate [--transport [--platform posix|windows] [--spec-mode full|compact]]
 python3 bench/judgebench.py corpus show [<case-id>]
-python3 bench/judgebench.py run --cases all|id,id --candidates sol-med,sol-high --run-id A1 [--resume] (--fake | --live)
-python3 bench/judgebench.py adjudicate <run-id>
+python3 bench/judgebench.py run --cases all|id,id --candidates sol-med,sol-high --run-id A1 [--resume] [--spec-mode compact] (--fake | --live)
+python3 bench/judgebench.py adjudicate <run-id> [--auto]
+python3 bench/judgebench.py contamination <run-id> --history NAME=PATH…
 python3 bench/judgebench.py report <run-id> [--md out.md] [--weights 8,3,1]
 ```
 
@@ -165,6 +166,44 @@ weights and "point estimates only" (no bootstrap CIs in v1). Nothing derived is 
   `judge.md`, a `CAP:` line, an H3 review/triage heading inside a kept section) makes
   `build_package` fail loud with `LeakageError` — clean `spec.md` by hand and record why
   in `case.json.notes`.
+
+## Rehearsal and ergonomics (step 10, task 049)
+
+- **`corpus validate --transport`** renders every case exactly as `run` would (time-budget clause
+  included) and asks each Test A/B seat's ADAPTER whether its transport can carry the prompt:
+  codex/claude read stdin (200k-char budget), grok reads argv (100k-char budget, POSIX 128 KiB
+  per element, Windows ~30k whole line). `bench/lib/transport.py::seat_verdict` is the single
+  decision and `LiveRunner.preflight` delegates to it, so the report and the run never disagree.
+  The default platform is **posix** — Test B's host; `--platform windows` is an explicit,
+  informational simulation (every frozen prompt exceeds grok's Windows line cap, so Test B is
+  not runnable from a Windows host). Rows print `spec`/`diff` chars so you can see where the
+  size is. Exit 1 when any case fails any seat. Frozen corpus v3: 19/19 fit on posix.
+- **`run --spec-mode compact`** shows every candidate the spec's Intent, Why, References and
+  Work Plan only (Design Phase and housekeeping dropped; the leak scan still runs). Recorded in
+  `manifest.spec_mode` and every result line; `--resume` refuses a mode flip (the prompt hash
+  already did — this is the clearer message). It is the fallback for a case that would not fit
+  a seat, and it helps only SPEC-dominated prompts — a diff-dominated one needs a re-freeze or an
+  exclusion, which is why the transport rows show the split.
+- **`contamination <run-id> --history NAME=PATH…`** — live judges on this machine can read the
+  historical `.agent/tasks/*/judge.md` the corpus came from. The scan compares each judge's
+  LATEST raw output with that case's `judge.md` + `judge-archive.md` (history root keyed on
+  `case.json` `source.workspace`, task dir resolved as `<NNN>-*` exactly once — never guessed;
+  only `judge*.md` is read) for shared word 12-grams, EXCLUDING every n-gram present in the
+  rendered prompt (spec, diff, template, context) so quoting the inputs is never flagged.
+  Entries carry raw/prompt/history sha256; the scan holds the run lock and writes
+  `contamination.json` atomically; `report` shows `contam?` (flagged pairs; `n/a` before a scan;
+  `stale` when a raw changed after it) and marks flagged cases `!c` in the matrix. **It detects
+  QUOTING, not silent influence** — a judge steered by history without copying twelve words is
+  invisible to it; that residual is disclosed in every report note.
+- **Rehearsal** — `bench/fake-scripts/rehearsal.json` drives four fake seats over the real corpus
+  with mixed outcomes (ok with real-truth hits + novel findings, malformed, timeout, dnf, fail,
+  empty). `tests/test_judgebench_rehearsal.py` runs it end to end: `run` exits 1 (timeout/dnf are
+  scripted), `adjudicate --auto` credits the real hits and leaves the novel ones pending, `report`
+  shows every status in its own column, the contamination scan flags nothing (the false-positive
+  bound on the real corpus), and interactive adjudication with scripted stdin (`m <id>`, `v` +
+  its failure-mode line, `i`, `q`) runs ONLY against a temp copy of the corpus — `v` rewrites
+  `truth.json`/`case.json`, so it must never run against the frozen tree; the test asserts the
+  freeze is byte-identical afterwards.
 
 ## Layout
 

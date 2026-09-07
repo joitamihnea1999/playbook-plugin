@@ -1,0 +1,833 @@
+{
+ "_doc": "Rehearsal script (task 049, plan \u00a75.4): deterministic per (case|label). sol-med = ok with ONE real-truth hit (auto-matched) + one NOVEL finding (routes to the human loop); sol-high = ok with novel findings only; grok-med cycles malformed/timeout/dnf/fail by case index; grok-high = empty (FINDINGS: NONE). Never used with --live. `v` is exercised only on a TEMP COPY of the corpus.",
+ "pb-036-r2|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "plugins/playbook/tasks/review.py",
+    "symbol": "_tail_cert_review_diff",
+    "severity": "Important",
+    "why": "rehearsal hit on R2-1"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-036-r2: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 41000
+ },
+ "pb-036-r2|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-036-r2: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for pb-036-r2"
+   }
+  ],
+  "duration_ms": 95000
+ },
+ "pb-036-r2|grok-med": {
+  "status": "malformed",
+  "duration_ms": 30000
+ },
+ "pb-036-r2|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "pb-032-r1|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/guarantee-ledger.json",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal hit on O1"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-032-r1: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 42000
+ },
+ "pb-032-r1|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-032-r1: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for pb-032-r1"
+   }
+  ],
+  "duration_ms": 96000
+ },
+ "pb-032-r1|grok-med": {
+  "status": "timeout",
+  "duration_ms": 30000
+ },
+ "pb-032-r1|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "pb-032-r2|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "plugins/playbook/tasks/core.py",
+    "symbol": "_risk_heading_lines",
+    "severity": "Critical",
+    "why": "rehearsal hit on C1"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-032-r2: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 43000
+ },
+ "pb-032-r2|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-032-r2: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for pb-032-r2"
+   }
+  ],
+  "duration_ms": 97000
+ },
+ "pb-032-r2|grok-med": {
+  "status": "dnf",
+  "duration_ms": 30000
+ },
+ "pb-032-r2|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "pb-039-r1|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "plugins/playbook/tasks/core.py",
+    "symbol": "has_risk_section",
+    "severity": "Critical",
+    "why": "rehearsal hit on O1"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-039-r1: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 44000
+ },
+ "pb-039-r1|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-039-r1: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for pb-039-r1"
+   }
+  ],
+  "duration_ms": 98000
+ },
+ "pb-039-r1|grok-med": {
+  "status": "fail",
+  "duration_ms": 30000
+ },
+ "pb-039-r1|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "pb-039-r2|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "plugins/playbook/tasks/core.py",
+    "symbol": "extract_risk",
+    "severity": "Critical",
+    "why": "rehearsal hit on T1"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-039-r2: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 45000
+ },
+ "pb-039-r2|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-039-r2: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for pb-039-r2"
+   }
+  ],
+  "duration_ms": 99000
+ },
+ "pb-039-r2|grok-med": {
+  "status": "malformed",
+  "duration_ms": 30000
+ },
+ "pb-039-r2|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "pb-042-r2|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "plugins/playbook/scripts/pb_journal.py",
+    "symbol": "append_review",
+    "severity": "Important",
+    "why": "rehearsal hit on R2-F1"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-042-r2: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 46000
+ },
+ "pb-042-r2|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-042-r2: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for pb-042-r2"
+   }
+  ],
+  "duration_ms": 100000
+ },
+ "pb-042-r2|grok-med": {
+  "status": "timeout",
+  "duration_ms": 30000
+ },
+ "pb-042-r2|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "pb-020-r1|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "plugins/playbook/tasks/core.py",
+    "symbol": "write_handoff",
+    "severity": "Critical",
+    "why": "rehearsal hit on C1"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-020-r1: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 47000
+ },
+ "pb-020-r1|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-020-r1: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for pb-020-r1"
+   }
+  ],
+  "duration_ms": 101000
+ },
+ "pb-020-r1|grok-med": {
+  "status": "dnf",
+  "duration_ms": 30000
+ },
+ "pb-020-r1|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-007-r2|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "src/features/amenities/server/catalogue.ts",
+    "symbol": "amenityResultCacheKey",
+    "severity": "Critical",
+    "why": "rehearsal hit on C1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-007-r2: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 48000
+ },
+ "hf-007-r2|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-007-r2: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-007-r2"
+   }
+  ],
+  "duration_ms": 102000
+ },
+ "hf-007-r2|grok-med": {
+  "status": "fail",
+  "duration_ms": 30000
+ },
+ "hf-007-r2|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-007-r3|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "src/app/api/ready/route.ts",
+    "symbol": "GET",
+    "severity": "Critical",
+    "why": "rehearsal hit on C1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-007-r3: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 49000
+ },
+ "hf-007-r3|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-007-r3: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-007-r3"
+   }
+  ],
+  "duration_ms": 103000
+ },
+ "hf-007-r3|grok-med": {
+  "status": "malformed",
+  "duration_ms": 30000
+ },
+ "hf-007-r3|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-011-r6|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docker/selfhost/prune-flatnode.sh",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal hit on R6-1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-011-r6: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 50000
+ },
+ "hf-011-r6|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-011-r6: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-011-r6"
+   }
+  ],
+  "duration_ms": 104000
+ },
+ "hf-011-r6|grok-med": {
+  "status": "timeout",
+  "duration_ms": 30000
+ },
+ "hf-011-r6|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-011-r8|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docker/selfhost/parity-check.mjs",
+    "symbol": "assertClose",
+    "severity": "Critical",
+    "why": "rehearsal hit on R8-1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-011-r8: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 51000
+ },
+ "hf-011-r8|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-011-r8: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-011-r8"
+   }
+  ],
+  "duration_ms": 105000
+ },
+ "hf-011-r8|grok-med": {
+  "status": "dnf",
+  "duration_ms": 30000
+ },
+ "hf-011-r8|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-015-r1|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "scripts/perf/browser.mjs",
+    "symbol": "openBrowser",
+    "severity": "Critical",
+    "why": "rehearsal hit on C1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-015-r1: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 52000
+ },
+ "hf-015-r1|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-015-r1: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-015-r1"
+   }
+  ],
+  "duration_ms": 106000
+ },
+ "hf-015-r1|grok-med": {
+  "status": "fail",
+  "duration_ms": 30000
+ },
+ "hf-015-r1|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-015-r2|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "scripts/perf/run-runtime-profile.mjs",
+    "symbol": null,
+    "severity": "Critical",
+    "why": "rehearsal hit on C1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-015-r2: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 53000
+ },
+ "hf-015-r2|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-015-r2: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-015-r2"
+   }
+  ],
+  "duration_ms": 107000
+ },
+ "hf-015-r2|grok-med": {
+  "status": "malformed",
+  "duration_ms": 30000
+ },
+ "hf-015-r2|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-017-r2|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "src/features/map/AppMap.tsx",
+    "symbol": "AppMap",
+    "severity": "Critical",
+    "why": "rehearsal hit on C1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-017-r2: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 54000
+ },
+ "hf-017-r2|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-017-r2: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-017-r2"
+   }
+  ],
+  "duration_ms": 108000
+ },
+ "hf-017-r2|grok-med": {
+  "status": "timeout",
+  "duration_ms": 30000
+ },
+ "hf-017-r2|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-018-r4|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "src/features/isochrones/server/transit.ts",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal hit on P1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-018-r4: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 55000
+ },
+ "hf-018-r4|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-018-r4: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-018-r4"
+   }
+  ],
+  "duration_ms": 109000
+ },
+ "hf-018-r4|grok-med": {
+  "status": "dnf",
+  "duration_ms": 30000
+ },
+ "hf-018-r4|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-014-r3|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/SELFHOST.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal hit on D1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-014-r3: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 56000
+ },
+ "hf-014-r3|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-014-r3: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-014-r3"
+   }
+  ],
+  "duration_ms": 110000
+ },
+ "hf-014-r3|grok-med": {
+  "status": "fail",
+  "duration_ms": 30000
+ },
+ "hf-014-r3|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-014-r4|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "src/app/api/ready/route.ts",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal hit on D1"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-014-r4: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 57000
+ },
+ "hf-014-r4|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-014-r4: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-014-r4"
+   }
+  ],
+  "duration_ms": 111000
+ },
+ "hf-014-r4|grok-med": {
+  "status": "malformed",
+  "duration_ms": 30000
+ },
+ "hf-014-r4|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "hf-007-r6|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-007-r6: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 58000
+ },
+ "hf-007-r6|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for hf-007-r6: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "README.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for hf-007-r6"
+   }
+  ],
+  "duration_ms": 112000
+ },
+ "hf-007-r6|grok-med": {
+  "status": "timeout",
+  "duration_ms": 30000
+ },
+ "hf-007-r6|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ },
+ "pb-039-r4|sol-med": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "plugins/playbook/tasks/compact.py",
+    "symbol": "_protected_section_spans",
+    "severity": "Important",
+    "why": "rehearsal hit on P1"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-039-r4: a doc sentence overstates the guarantee"
+   }
+  ],
+  "duration_ms": 59000
+ },
+ "pb-039-r4|sol-high": {
+  "status": "ok",
+  "findings": [
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Minor",
+    "why": "rehearsal novel finding for pb-039-r4: a doc sentence overstates the guarantee (second seat)"
+   },
+   {
+    "file": "docs/cli.md",
+    "symbol": null,
+    "severity": "Important",
+    "why": "rehearsal second novel finding for pb-039-r4"
+   }
+  ],
+  "duration_ms": 113000
+ },
+ "pb-039-r4|grok-med": {
+  "status": "dnf",
+  "duration_ms": 30000
+ },
+ "pb-039-r4|grok-high": {
+  "status": "empty",
+  "duration_ms": 60000
+ }
+}
