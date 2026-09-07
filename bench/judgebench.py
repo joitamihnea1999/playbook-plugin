@@ -55,8 +55,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     corpus = sub.add_parser("corpus", help="validate / inspect the frozen corpus")
     csub = corpus.add_subparsers(dest="corpus_cmd", metavar="<action>")
-    csub.add_parser("validate", parents=[common],
+    val = csub.add_parser("validate", parents=[common],
                     help="validate corpus.json + every case dir")
+    val.add_argument("--transport", action="store_true",
+                     help="also render every prompt and report per-seat transport fit (exit 1 if any case fails a seat)")
+    val.add_argument("--platform", choices=("posix", "windows"), default=None,
+                     help="simulate the argv caps of this platform (default: the host's)")
+    val.add_argument("--spec-mode", choices=("full", "compact"), default="full",
+                     help="render the transport report with this spec mode")
     show = csub.add_parser("show", parents=[common],
                            help="print the corpus index or one case")
     show.add_argument("case_id", nargs="?", default=None)
@@ -126,6 +132,16 @@ def cmd_corpus(args) -> int:
             biggest = max(biggest, (pkg.prompt_chars, c.id))
         size = f", largest prompt {biggest[0]:,} chars ({biggest[1]})" if corpus.cases else ""
         print(f"corpus v{corpus.version}: {len(corpus.cases)} cases OK{size}")
+        if getattr(args, "transport", False):
+            from bench.lib import REPO_ROOT, runner as _runner, transport as _transport
+            cands = _runner.parse_candidates("sol-med,sol-high,grok-med,grok-high")
+            nt = None if args.platform is None else (args.platform == "windows")
+            rows = _transport.transport_rows(corpus.cases, cands, repo_root=REPO_ROOT, platform_nt=nt,
+                                             spec_mode=getattr(args, "spec_mode", "full"))
+            label = args.platform or ("windows" if __import__("os").name == "nt" else "posix")
+            print(_transport.render_rows(rows, cands, f"platform={label}, spec_mode={getattr(args, 'spec_mode', 'full')}"))
+            if not all(r["fits_all"] for r in rows):
+                return EXIT_DNF
         return EXIT_OK
     if args.case_id is None:
         for c in corpus.cases:

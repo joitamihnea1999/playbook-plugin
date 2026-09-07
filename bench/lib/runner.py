@@ -279,38 +279,12 @@ class LiveRunner:
 
     def preflight(self, candidates, package, repo_root) -> dict:
         """label → error string for candidates whose transport cannot carry the
-        prompt; {} when all fit. Uses each adapter's own transport decision."""
-        from provider.argv_guard import argv_byte_error
-        from tasks.core import resolve_review_context_chars
-        errors = {}
-        for cand in candidates:
-            try:
-                inv = self._adapter(cand, repo_root).headless_argv(package.prompt, cand.variant)
-            except Exception as exc:
-                errors[cand.label] = f"preflight could not build argv: {exc}"
-                continue
-            argv_transport = getattr(inv, "stdin", None) is None
-            if argv_transport:
-                argv = list(getattr(inv, "argv", []))
-                err = argv_byte_error(argv, cand.backend)
-                if err:
-                    errors[cand.label] = err
-                    continue
-                if self.platform_nt:            # argv_byte_error is a no-op there (r4 grok #2)
-                    payload = sum(len(a) + 1 for a in argv)
-                    if payload > _WINDOWS_CMDLINE_CAP:
-                        errors[cand.label] = (f"(excluded: {cand.backend} prompt is ~{payload:,} chars on "
-                                              f"argv; Windows caps the command line at 32,767 chars)")
-                        continue
-            try:
-                budget = resolve_review_context_chars(Path(repo_root), stdin=not argv_transport)
-            except Exception:
-                budget = None
-            if budget is not None and len(package.prompt) > budget:
-                errors[cand.label] = (f"(excluded: prompt is {len(package.prompt):,} chars; "
-                                      f"{cand.backend} {'stdin' if not argv_transport else 'argv'} "
-                                      f"budget is {budget:,} chars)")
-        return errors
+        prompt; {} when all fit. One decision, shared with `corpus validate --transport`
+        (bench/lib/transport.py) so the report and the run can never disagree."""
+        from bench.lib import transport as _transport
+        return _transport.preflight_errors(candidates, package.prompt, repo_root,
+                                           adapter_factory=self._adapter_factory,
+                                           platform_nt=self.platform_nt)
 
     def invoke(self, case, candidate, package, tree, *, soft_timeout, hard_timeout) -> Invocation:
         with self._lock:
