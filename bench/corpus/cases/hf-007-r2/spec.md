@@ -107,5 +107,5 @@ Owner ruling 9 (MIND_MAP [0], 2026-08-17): HowFar becomes a paid, self-hosted, m
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md
+- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
 

@@ -114,5 +114,5 @@ The commercial pivot (MIND_MAP [0] ruling 9) is to run the whole OSM stack self-
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md
+- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
 

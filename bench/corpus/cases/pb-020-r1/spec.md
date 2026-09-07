@@ -66,15 +66,14 @@ turn the proven manual session-handoff pattern into a tasks handoff command: wri
 
 - [ ] W1 (RED): write `tests/test_handoff.py`
 - [ ] W2 (GREEN): add `build_handoff_section(project_path, task_file)` to `core.py`
-- [ ] W3 (GREEN): add `upsert` of the `## Handoff` section (idempotent replace, blockquote-safe like set_task_blocked)
+- [ ] W3 (GREEN)
 - [ ] W4 (GREEN): `cmd_handoff` in `lifecycle.py`
 - [ ] W5 (GREEN): dispatch
 - [ ] W6 (GREEN): bootstrap surfacing
 - [ ] W7 (GREEN): docs
-- [ ] W8: full verify green (`cd playbook-plugin && python3 scripts/verify`); suite count moved; test_cli_dispatch green.
-- [ ] W9: impl panel (assertive close); triage; then close + commit nested + push + CI + workspace task record.
+- [ ] W8: full verify green (`cd playbook-plugin && python3 scripts/verify`); suite count moved; test_cli_dispatch green
+- [ ] W9: impl panel (assertive close); triage; then close + commit nested + push + CI + workspace task record
 
----
 
 ## Pre-review
 - [ ] All tests pass

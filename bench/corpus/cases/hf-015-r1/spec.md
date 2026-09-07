@@ -60,25 +60,25 @@ Mobile is the product's headline surface (node [36]: the dark map-first shell "*
 ### Round 1: Lighthouse mobile (deliverable 1)
 - **Hypothesis:** MapLibre + basemap on the critical path pushes TTI/TBT over budget; LCP/CLS likely OK (map canvas paints fast, dock is static).
 - **Test:** Lighthouse mobile preset (Moto G-class CPU 4×, 4G throttle) against the main map flow URL; capture Performance score, TTI, LCP, TBT, CLS; median of N≥3.
-- [ ] Checkpoint
+- [ ] Checkpoint: numbers stable across runs? report point or range.
 
 ### Round 2: Bundle analysis (deliverable 2)
 - **Hypothesis:** initial JS gz > 350KB driven by MapLibre GL (~200KB+ gz alone); app + vendors add the rest; pmtiles/turf/d3-contour may or may not be on the critical path.
 - **Test:** production `.next` build output → initial/first-load JS gz, broken down MapLibre vs app vs vendors; what's on the critical path vs lazy/dynamic-imported; largest modules. Use `@next/bundle-analyzer` run OUT OF TREE (env flag, no committed config change) + raw `.next/*` gz sizes as the ground-truth cross-check.
-- [ ] Checkpoint
+- [ ] Checkpoint: breakdown reconciles with the raw first-load number Next prints?
 
 ### Round 3: Runtime profile of the 3 hot interactions (deliverable 3)
 - **Hypothesis (owner's ask to verify):** the controller architecture [6] keeps pan/zoom gesture paths render-free (MapLibre-internal, no React re-render). Address-select→ring-reveal and mode-toggle DO re-render (expected) but should be bounded.
 - **Test:** Chrome trace + React profiling for: (i) address select → ring reveal, (ii) mode toggle, (iii) pan/zoom. Capture main-thread long tasks, dropped frames / frame times, and React commit count during each. Instrument re-renders (React DevTools profiler API / `<Profiler>` onRender count captured via injected script — measurement only, not committed to app).
-- [ ] Checkpoint
+- [ ] Checkpoint: is the gesture path actually render-free? (falsifiable
 
 ### Round 4: API latency from the browser (deliverable 4)
 - **Hypothesis:** self-hosted suggest/geocode/isochrone/car/amenities are fast warm (cache hit) but cold cost is dominated by ORS isochrone + amenities PostGIS intersect.
 - **Test:** from the browser (Resource Timing / fetch timing), measure suggest / geocode / isochrone / car / amenities against the LOCAL stack, cold (first call, cache cold) and warm (repeat). Report p50/p95 per endpoint. Transit/reach EXCLUDED (not self-hosted — noted).
-- [ ] Checkpoint
+- [ ] Checkpoint: cold vs warm clearly separated; p95 computed from enough samples.
 
 ### Round 5: Synthesis — THE GAP LIST (deliverables 5 + 6)
-- [ ] Build the gap list
+- [ ] Build the gap list: one row per owner budget
 - [ ] Tag every emulation-based number `[EMU]` and state exactly what needs real-Android re-measurement + the one command to do it
 - [ ] What remains unknown / follow-up
 
@@ -86,5 +86,5 @@ Mobile is the product's headline surface (node [36]: the dark map-first shell "*
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md
+- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
 

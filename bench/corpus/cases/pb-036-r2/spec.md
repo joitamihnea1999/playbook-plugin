@@ -28,7 +28,7 @@ the exact delta) for the docs/test tail, while PRESERVING assertive discipline: 
 independent judge still reads every claim-bearing docs delta, and any code-path
 delta still forces a fresh full panel. Safety-critical direction: a WRONG tail-cert
 that lets code through unreviewed is a serious hole, so the delta computation and
-classifier must FAIL SAFE (unknown/ambiguous → require the full panel).
+classifier must FAIL SAFE (unknown/ambiguous → require the full).
 
 ## References
 - [x] Context: `.claude/bin/tasks recall keyword1 keyword2` (locates matching nodes across MIND_MAP.md + overflow), then `tasks recall <N>` for each → paste relevant excerpts below → recalled [7] lifecycle close path, [8] review.py panel write, [6] core.py freshness, [24] PB-PANEL-FRESHNESS:
@@ -88,7 +88,6 @@ classifier must FAIL SAFE (unknown/ambiguous → require the full panel).
 - [ ] **W7 — docs + guarantee ledger + owner-decision record (assertive core).** Update: close-gate docs (architecture.md/the freshness section), `docs/cli.md` (`tasks work done` freshness paragraph), the CLAUDE.md **template** text describing freshness; extend PB-PANEL-FRESHNESS statement + add tail-cert proofs (PASS-certifies-nonbehavioral, code-delta-still-blocks, FAIL-blocks, missing-descriptor-falls-back) with negative controls; record owner decision A + rationale (where owner decisions live
 - [ ] **W8 — full verify + mind map.** `python3 playbook-plugin/scripts/verify` 9/9 green; update MIND_MAP node [7] (close path) in place with the tail-cert third outcome. No provider mirror touched (review.py/core.py/lifecycle.py are canonical, not `provider/`)
 
----
 
 ## Pre-review
 - [ ] All tests pass

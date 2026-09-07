@@ -43,32 +43,21 @@ P1 defect parked by the 1.5.39 release panel (task 030 Parked; two judges conver
 > Fix/Verify pairs. What could this break?
 
 - [ ] RED: add regression tests to tests/test_blocked_state.py
-- [ ] Fix: route `set_task_blocked` + `resume_blocked_task` section location through `core._iter_nonfenced` (add a small module-level `_drop_live_section`/span helper). Keep normal-flow output byte-identical.
+- [ ] Fix: route `set_task_blocked` + `resume_blocked_task` section location through `core._iter_nonfenced` (add a small module-level `_drop_live_section`/span helper)
 - [ ] Verify: new tests GREEN; full `cd playbook-plugin && python3 scripts/verify` PASS.
-- [ ] Sweep: enumerate every task.md section-locating writer/reader; fix fence-blind writers or report each as already-safe with the proving line. Record the table under this gate.
+- [ ] Sweep: enumerate every task.md section-locating writer/reader; fix fence-blind writers or report each as already-safe with the proving line
 
  **WRITERS (mutate task.md by section — the corruption class):**
- | Symbol | File:line | Status | Proof / action |
- |---|---|---|---|
- | `set_task_blocked` | core.py:2192 | **FIXED** | now via `_live_section_span` → `_iter_nonfenced` (core.py:2203-2210) |
- | `resume_blocked_task` | core.py:2221 | **FIXED** | now via `_live_section_span` (core.py:2229-2234) |
- | `write_handoff` | core.py:2370 | already-safe | local `_section_span` on `_iter_nonfenced` (core.py:2390) — Session C |
- | `upsert_task_section` | core.py:2163 | already-safe | skips `_closed_fence_line_indices(lines)`, `if i not in fenced` (core.py:2180/2185) |
- | `compact` archiver | compact.py:134 | already-safe | `not (j not in fenced and lines[j].strip().startswith("## "))` |
 
  **READERS on the blocked/handoff path (agree with the fixed writers):**
- | `_extract_block_reason` | core.py:2432 | already-safe | `for _i, s in _iter_nonfenced(lines)` (core.py:2441) |
- | `find_unconsumed_handoff` | core.py:2456 | already-safe | delegates to `_extract_block_reason` (fence-aware) |
- | audit receipt sweep | audit.py:704 | already-safe | `if i in skip: continue` (skip = closed-fence indices, audit.py:698) |
 
  **KNOWN fence-blind — REPORTED OUT OF SCOPE (not corruption of the blocked/handoff record; each needs its own task):**
  - **Status pair** `_set_status` (core.py:2113, `line.strip()=="## Status"`) + `_extract_status` (core.py:2033) + the reopen writer `lifecycle.py:559`: fence-blind, but a `## Status`-in-a-fence corruption is a single-line overwrite, AND there is a **bash/awk twin** in the stop-hook that reads `## Status`, locked to Python by parity test `test_blocked_state.py:185 test_duplicate_status_headings_hook_agrees_with_python`. Fixing the Python side alone would BREAK that parity; fixing both is a cross-language enforcement-path change disproportionate to the hazard. → **PARK** (see Parked).
  - **Readers, non-corrupting misread** (produce phantom items from a fenced example but never rewrite the file): `extract_parked_items` (core.py:1715, phantom parked bullets), `_extract_problem` (core.py:2048), retro.py `_extract_section`/`_extract_status` (retro.py:150/164, analysis of completed tasks only). → **PARK**.
  - `standing_gates` heading-dedup (core.py:867): fence-blind but operates on freshly template-generated content at task creation, before any user-authored fenced example can exist → not exploitable in practice; noted, no action.
-- [ ] Ledger: extend PB-TASK-BLOCKED statement to include fence-safety + bind the new proof & negative control in docs/guarantee-ledger.json; re-run the ledger validator.
+- [ ] Ledger: extend PB-TASK-BLOCKED statement to include fence-safety + bind the new proof & negative control in docs/guarantee-ledger.json; re-run the ledger validator
 - [ ] Side effects: anything else that changed? Adjacent code still works? (mirror sync check
 
----
 
 ## Pre-review
 - [ ] All tests pass

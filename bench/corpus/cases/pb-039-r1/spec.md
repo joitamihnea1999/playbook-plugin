@@ -75,10 +75,9 @@ The task.md fence scanners are on the ENFORCEMENT path — they decide whether `
 - [ ] V5
 - [ ] V6
 - [ ] V7
-- [ ] Verify (each vector): red-first test green, FULL `scripts/verify` green (esp. the fence/handoff/blocked/parity suites), no `provider/` change expected (all in `core.py`)
-- [ ] Side effects: the non-corrupting readers `extract_parked_items`/`_extract_problem`/`retro._extract_section`/`retro._extract_status` (route through the shared scanner where cheap), and every existing fence parity table. Update PB-RISK-CLASSIFY / PB-TASK-BLOCKED / PB-CLOSE-VERIFY-CONTRACT ledger limitations to the new (tighter) bounds. (The `## Status` bash/awk twin is out of scope
+- [ ] Verify (each vector)
+- [ ] Side effects
 
----
 
 ## Pre-review
 - [ ] All tests pass

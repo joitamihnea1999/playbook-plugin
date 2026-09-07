@@ -68,13 +68,13 @@ The task.md fence scanners are on the ENFORCEMENT path — they decide whether `
 > each change (behavior change on unclosed fences must be DELIBERATE). Land the
 > vectors as separate Fix/Verify pairs (add gates as you go):
 
-- [ ] V1 — Unify the two scanners into one strict CommonMark opener/closer impl with a per-consumer `unclosed_is_live` policy arg (delete-writers=False/fail-closed, receipt-writer=True/fail-open)
-- [ ] V2 — Risk close-gate uncertain→BLOCK (codex-sol #1 Critical, task 032)
-- [ ] V3 — Readers fail-OPEN (`_extract_block_reason`, `find_unconsumed_handoff`, `_latest_receipt_line`)
-- [ ] V4 — Indented-code-block awareness (≥4-space, no fence)
-- [ ] V5 — Strict ATX-H2 boundary matcher shared by `_live_section_span` + `write_handoff._section_span` + readers
-- [ ] V6 — NBSP + tab handling in fence closers and ATX headings (per the brief)
-- [ ] V7 — SPLIT OUT (structure-gate decision, see Fix Orientation + Parked)
+- [ ] V1
+- [ ] V2
+- [ ] V3
+- [ ] V4
+- [ ] V5
+- [ ] V6
+- [ ] V7
 - [ ] Verify (each vector)
 - [ ] Side effects
 
@@ -82,5 +82,5 @@ The task.md fence scanners are on the ENFORCEMENT path — they decide whether `
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md
+- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
 

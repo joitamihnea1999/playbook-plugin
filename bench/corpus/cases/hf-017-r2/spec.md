@@ -84,7 +84,7 @@ Task 015 measured the mobile map flow against the owner budgets and 6/8 FAIL (`d
 - [ ] Audit every eager vendor in the shell's initial graph (turf, d3, pmtiles, prisma leakage)
 - [ ] **(F2) Selection continuity across the boundary:** ... **Check (new e2e):** an address submitted before the map loads results in rings drawn once it loads.
 - [ ] Rebuild + `fuser -k 3000/tcp` (prod, not dev) + full Playwright (incl
-- [ ] Re-measure bundle + lighthouse ..
+- [ ] Re-measure bundle + lighthouse ... **TTI/score: report the HONEST measured number.** ...
 
 ### WS-B — Amenities cold p95 (gap #8; #5/#6 ride along; F3+F4+F5)
 - [ ] Add server-side spans to `nearbyAmenities`/`computeNearbyAmenities` ..
@@ -106,13 +106,13 @@ Task 015 measured the mobile map flow against the owner budgets and 6/8 FAIL (`d
 - [ ] Pause: WS-I/A/B/C all green ...?
 
 ### WS-D — Re-measure the full suite + update PERF_AUDIT (assertive close-out)
-- [ ] Final `next build` + full `scripts/perf` re-run on the MERGED/shipped code ..
-- [ ] Update `docs/PERF_AUDIT.md` with a before/after table ..
+- [ ] Final `next build` + full `scripts/perf` re-run on the MERGED/shipped code ...
+- [ ] Update `docs/PERF_AUDIT.md` with a before/after table ...
 - [ ] Update MIND_MAP node [36] (and [24]/[13]/[26] if their contracts moved) in place ..
 
 
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md
+- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
 

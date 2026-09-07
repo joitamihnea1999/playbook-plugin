@@ -71,7 +71,6 @@ The owner wants to monitor Playbook's token/review spend so it doesn't burn toke
 - [ ] **W5 — record-shape contract doc.** Document the record shape for playbook-lens (a docs file), with the HONEST usage skew (claude judge = plain-text mode
 - [ ] **W6 — MIND_MAP.md.** Update the owning node ([8] review + [5]/[24] journal) in place to record the review-spend record surface; no new node.
 
----
 
 ## Pre-review
 - [ ] All tests pass

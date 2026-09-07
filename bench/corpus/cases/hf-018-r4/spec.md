@@ -76,7 +76,7 @@ Four defects surfaced in the owner's live testing on a real phone over LAN. They
 - [ ] W1: Add `/test-results/` to the OUTER workspace `.gitignore`; confirm `git status` at workspace root no longer lists `?? test-results/`
 
 **Item 2 — hover + sibling pick race guards (red-first, rule 5 — 3 sites)**
-- [ ] W2: RED — add tests proving each `queryRenderedFeatures` caller returns empty (not throws) when the source is mid-swap
+- [ ] W2: RED
 - [ ] W3: GREEN
 
 **Item 3 — LAN dev origins (hostname-only) + docs**
@@ -85,14 +85,14 @@ Four defects surfaced in the owner's live testing on a real phone over LAN. They
 
 **Item 1 — transit-family resilience (red-first, delicate — LAST**
 - M068 signatures pinned: (1) `/plan` *"operation aborted at 10.0 s"* = SLOW-but-working remote → cure is the modest budget RAISE (longer single attempt); (2) *"fetch failed" 502* = FAST network drop → cure is the remaining-budget-gated retry. One-to-all shares signature (2); its heavy 20 s stall is signature (1) with no client deadline, so it needs an absolute budget.
-- [ ] W6: RED — add `isRetriableFetchError(err)` to `lib/provider-http.ts` + an optional `retriable` field on `ProviderError`
+- [ ] W6: RED
 - [ ] W7: one-to-all (`transit.ts`)
 - [ ] W8: `/plan` (`transit-plan.ts`)
-- [ ] W9: client-retry interaction + honest copy
+- [ ] W9: client-retry interaction + honest copy.
 
 **Cross-cutting close-out**
 - [ ] W10: Rebuild `.next` + `fuser -k 3799/tcp`, run full `check:ci` (unit+coverage+lint+budgets) + e2e green
-- [ ] W11: audit sweeps recorded + MIND_MAP updated + mindmap_check clean
+- [ ] W11: audit sweeps recorded + MIND_MAP updated + mindmap_check clean.
  - **S1 stale-claim** (`grep -riE "12s deadline|fetch at 10s|client's 12"`): found 5 stale timing comments I'd left after moving `REACH_TIMEOUT_MS 12→14`/`PLAN_BUDGET_MS 10→11` — fixed the CLASS by rephrasing them constant-relative (`PLAN_BUDGET_MS`/`REACH_TIMEOUT_MS`, no magic seconds) in `transit-plan.ts` (×3) + `reach-directions-controller.ts` (×1) + the earlier doc line; re-grep clean (only the intentional "12s→14s" change-note remains); tsc clean; 117/117 on the 4 touched test files after.
  - **Publication hygiene** (`hygiene_check.py --repo HowFar` over staged diff, 19 files): **PASS**.
  - **Test-count**: `test_count_guard.py` EXIT 0; the increase is intentional (~26 added tests across the 4 items) and all green in check:ci's 1164-test run — rule 2 satisfied (movement up, explained).
@@ -104,5 +104,5 @@ Four defects surfaced in the owner's live testing on a real phone over LAN. They
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md
+- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
 

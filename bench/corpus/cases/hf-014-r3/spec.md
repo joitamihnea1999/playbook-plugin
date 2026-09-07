@@ -78,16 +78,16 @@ convenience removes day-2 friction for running the app against the local engines
 > Standard feature: 6-8 work gates + tests. Large tasks work fine — if >15 gates, add a mid-point checkpoint to reassess direction.
 
 ### (a) Fast-forward merge self-host → main (local only, no push)
-- [ ] `tasks audit` clean + HowFar pre-commit hook armed (hook_sentinel) before touching git
-- [ ] `git checkout main` in HowFar; confirm main @ ff904f3 and clean tree
+- [ ] `tasks audit` clean + HowFar pre-commit hook armed (hook_sentinel) before touching git.
+- [ ] `git checkout main` in HowFar; confirm main @ ff904f3 and clean tree.
 - [ ] `git merge --ff-only self-host`
 - [ ] Verify green on main
-- [ ] Confirm NOTHING pushed
+- [ ] Confirm NOTHING pushed: `git status` shows `main` ahead of `origin/main`, no push performed.
 
 ### (c) dev:selfhost convenience (build first — code lands before)
 - [ ] Write `docker/selfhost/dev-selfhost.sh`
 - [ ] Write `docker/selfhost/stop-selfhost.sh`
-- [ ] Add `dev:selfhost` + `dev:selfhost:down` to HowFar `package.json` scripts
+- [ ] Add `dev:selfhost` + `dev:selfhost:down` to HowFar `package.json` scripts.
 - [ ] Verify: `npm run dev:selfhost -- --dry-run` runs the preflight side-effect-free; `bash -n` both scripts; `shellcheck` if available; confirm `.env` untouched
 - [ ] Document a "Day-2 dev loop (`npm run dev:selfhost`)" section in docs/SELFHOST.md
 
@@ -103,5 +103,5 @@ convenience removes day-2 friction for running the app against the local engines
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md
+- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
 
