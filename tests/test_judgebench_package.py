@@ -191,7 +191,9 @@ class ReconstructSpecTests(unittest.TestCase):
         self.assertNotIn("LEAK_WRAPPED", out)
         self.assertIn("- [ ] **W1 — thing.** Do it. Check: x.", out)
         self.assertIn("KEEP_W2_CONTINUATION", out)
-        self.assertIn("KEEP_PROSE_AFTER_BLANK", out)
+        # Since task 048 impl-panel round 2 a plain paragraph inside Work Plan is DROPPED (execution
+        # results live there; over-strip is the safe direction) — the earlier expectation is inverted.
+        self.assertNotIn("KEEP_PROSE_AFTER_BLANK", out)
 
     def test_idempotent(self):
         self.assertEqual(package.reconstruct_spec(self.spec), self.spec)
@@ -433,7 +435,7 @@ OWNER RULING — stop the panel loop and close. LEAK_CHAT
 - **Cache tag** (panel opus#1/terra-crit/sol#2): a tag KEEP_TAG
 - Proven by LITERAL tests (panel sonnet#1/#2), not self-referential ones KEEP_LIT
 - bare ref opus#2 and codex:sol#4 and terra-crit#1 here KEEP_BARE
-**Item 2 — race guards (red-first; ACCEPT-C, rule 5 — 3 sites)** KEEP_ITEM
+**Item 2 — race guards (red-first; ACCEPT-C, rule 5 — 3 sites) KEEP_ITEM**
 - [ ] W9: honest copy (ACCEPT-B decision). KEEP_W9
 - [x] **W1 — implement.** Write the loop. → **PANEL PASS 5/5** LEAK_ARROW_OUTCOME
 - **Result:** measured 15 fps LEAK_RESULT
@@ -496,3 +498,87 @@ OWNER RULING — stop the panel loop and close. LEAK_CHAT
         once = package.reconstruct_spec(self.MD)
         self.assertEqual(package.reconstruct_spec(once), once)
         self.assertEqual(package.leak_scan(once), [])
+
+
+class ImplPanelRound2Tests(unittest.TestCase):
+    """Task 048 impl-panel round 2 (codex:sol/terra Critical, grok, opus/sonnet): Work Plan
+    BODY text — separator-less checked gates, tables, result paragraphs, bold continuations
+    — carried execution outcomes; a dangling `panel )` survived seat-ref removal."""
+
+    MD = """# 011 - X
+
+## Intent
+Self-host.
+
+## Work Plan
+> **Shape:** Phase A → proof → CHECKPOINT. KEEP_QUOTE
+
+### Phase A — author the stack
+- [x] W2. [P5] `fetch.sh` written. Pins the DATED extract 260824, md5 `abc` verified LEAK_NOSEP_BODY
+- [x] W8. [P8] **Byte-identity proven.** Working tree: only `M .gitignore` LEAK_BOLD_NOSEP
+- [x] **W1 — implement foo.** Write the loop carefully. — DONE, 12 tests LEAK_SEP_NOTE
+- [ ] W3. Authored `compose.yml` (SEPARATE file). KEEP_OPEN_GATE
+**Item 2 — race guards (red-first, rule 5 — 3 sites) KEEP_BOLD_ONLY**
+**Design decisions (locked before coding) KEEP_BOLD_COLON:**
+- **Provider hosts** → read inside handlers (span > 2° either axis (single-city cap, panel opus#2)). KEEP_HOSTS
+- [x] W15. **Parity measured** LEAK_PARITY_TITLE_OK
+
+ | metric | origin | verdict |
+ |---|---|---|
+ | walk | Unirii | PASS | LEAK_TABLE
+
+ **17/18 ring metrics exact** (radial 0.0%) LEAK_RESULT_PARA
+plain paragraph with measured 24 min import LEAK_PLAIN_PARA
+- [x] W9. [P4] **Reassessed.** Sizes stated; plan panel triaged (P1–P10) folded in. LEAK_TRIAGED
+**bold continuation of a checked gate LEAK_BOLD_CONT**
+- W4. plan bullet without a checkbox KEEP_BULLET
+  indented continuation of an OPEN bullet KEEP_INDENT
+"""
+
+    def test_separator_less_checked_gate_keeps_only_its_title(self):
+        spec = package.reconstruct_spec(self.MD)
+        self.assertNotIn("LEAK_NOSEP_BODY", spec)
+        self.assertNotIn("md5", spec)
+        self.assertIn("- [ ] W2. [P5] `fetch.sh` written", spec)          # first clause survives as the title
+        self.assertNotIn("LEAK_BOLD_NOSEP", spec)
+        self.assertIn("- [ ] W8. [P8] **Byte-identity proven.**", spec)
+        self.assertNotIn("LEAK_SEP_NOTE", spec)
+        self.assertIn("- [ ] **W1 — implement foo.** Write the loop carefully.", spec)   # separator rule unchanged
+        self.assertIn("KEEP_OPEN_GATE", spec)
+
+    def test_tables_and_result_paragraphs_in_work_plan_are_dropped(self):
+        spec = package.reconstruct_spec(self.MD)
+        for leak in ("LEAK_TABLE", "| metric |", "LEAK_RESULT_PARA", "LEAK_PLAIN_PARA", "LEAK_BOLD_CONT"):
+            self.assertNotIn(leak, spec, leak)
+        for keep in ("KEEP_QUOTE", "KEEP_BOLD_ONLY", "KEEP_BOLD_COLON", "KEEP_HOSTS", "KEEP_BULLET", "KEEP_INDENT",
+                     "### Phase A — author the stack"):
+            self.assertIn(keep, spec, keep)
+
+    def test_dangling_panel_word_and_triaged_clause_are_redacted(self):
+        spec = package.reconstruct_spec(self.MD)
+        self.assertNotIn("panel )", spec)
+        self.assertNotIn("opus#2", spec)
+        self.assertIn("(single-city cap)", spec)
+        self.assertNotIn("LEAK_TRIAGED", spec)          # the W9 body goes with the title-only rule
+        self.assertNotIn("triaged", spec)
+        self.assertEqual(package.leak_scan(spec), [], spec)
+        self.assertEqual(package.reconstruct_spec(spec), spec)
+
+    def test_long_untitled_checked_gate_keeps_only_its_first_clause_even_with_a_late_separator(self):
+        md = ("## Work Plan\n- [x] W2. [P5] `fetch.sh` written. Pins the DATED extract; verifies the published md5 "
+              "(`abc`) and refuses a corrupt file — Session C note LEAK_LATE\n- [x] short gate — done\n")
+        spec = package.reconstruct_spec(md)
+        self.assertIn("- [ ] W2. [P5] `fetch.sh` written\n", spec)
+        self.assertNotIn("LEAK_LATE", spec)
+        self.assertIn("- [ ] short gate\n", spec)
+
+    def test_status_table_cells_are_leak_tokens(self):
+        self.assertTrue(package.leak_scan("| `set_task_blocked` | core.py:2192 | **FIXED** | now via x |"))
+        self.assertTrue(package.leak_scan("| x | **HARDENED** |"))
+        self.assertEqual(package.leak_scan("the bug is fixed in this diff"), [])
+
+    def test_leak_scan_catches_dangling_panel_and_triaged(self):
+        for text in ("cap, panel ).", "the (panel) said", "plan panel triaged (P1–P10)", "items triaged above"):
+            self.assertTrue(package.leak_scan(text), text)
+        for text in ("a panel of experts", "the panel-review gate", "solar panel"):
+            self.assertEqual(package.leak_scan(text), [], text)

@@ -55,37 +55,36 @@ Mobile is the product's headline surface (node [36]: the dark map-first shell "*
 ### Round 0: Measurement harness (infra — the instrument)
 - **Goal:** production build served locally with the self-host provider stack + reusable, re-runnable measurement scripts checked into the repo (`scripts/perf/`), parameterized by target URL + throttle profile + `--device emulated|real` so a real Android re-run is ONE command (adb reverse + Chrome remote debugging on `localhost:9222`).
 - **Steps:** (a) `next build`; (b) bring up self-host stack (`dev:selfhost:down`-safe; reuse existing volumes) and serve `next start` on a fixed port with the provider overlay env; (c) seed the amenity catalogue is already imported? verify `/api/ready` 200 + `/api/catalogue-status` available; (d) author `scripts/perf/README.md` + the runner scripts.
-- [ ] Checkpoint: prod build serving, self-host `/api/ready` green, harness scripts hand-validated on one real run each.
+- [ ] Checkpoint
 
 ### Round 1: Lighthouse mobile (deliverable 1)
 - **Hypothesis:** MapLibre + basemap on the critical path pushes TTI/TBT over budget; LCP/CLS likely OK (map canvas paints fast, dock is static).
 - **Test:** Lighthouse mobile preset (Moto G-class CPU 4×, 4G throttle) against the main map flow URL; capture Performance score, TTI, LCP, TBT, CLS; median of N≥3.
-- [ ] Checkpoint: numbers stable across runs? report point or range.
+- [ ] Checkpoint
 
 ### Round 2: Bundle analysis (deliverable 2)
 - **Hypothesis:** initial JS gz > 350KB driven by MapLibre GL (~200KB+ gz alone); app + vendors add the rest; pmtiles/turf/d3-contour may or may not be on the critical path.
 - **Test:** production `.next` build output → initial/first-load JS gz, broken down MapLibre vs app vs vendors; what's on the critical path vs lazy/dynamic-imported; largest modules. Use `@next/bundle-analyzer` run OUT OF TREE (env flag, no committed config change) + raw `.next/*` gz sizes as the ground-truth cross-check.
-- [ ] Checkpoint: breakdown reconciles with the raw first-load number Next prints?
+- [ ] Checkpoint
 
 ### Round 3: Runtime profile of the 3 hot interactions (deliverable 3)
 - **Hypothesis (owner's ask to verify):** the controller architecture [6] keeps pan/zoom gesture paths render-free (MapLibre-internal, no React re-render). Address-select→ring-reveal and mode-toggle DO re-render (expected) but should be bounded.
 - **Test:** Chrome trace + React profiling for: (i) address select → ring reveal, (ii) mode toggle, (iii) pan/zoom. Capture main-thread long tasks, dropped frames / frame times, and React commit count during each. Instrument re-renders (React DevTools profiler API / `<Profiler>` onRender count captured via injected script — measurement only, not committed to app).
-- [ ] Checkpoint: is the gesture path actually render-free? (falsifiable
+- [ ] Checkpoint
 
 ### Round 4: API latency from the browser (deliverable 4)
 - **Hypothesis:** self-hosted suggest/geocode/isochrone/car/amenities are fast warm (cache hit) but cold cost is dominated by ORS isochrone + amenities PostGIS intersect.
 - **Test:** from the browser (Resource Timing / fetch timing), measure suggest / geocode / isochrone / car / amenities against the LOCAL stack, cold (first call, cache cold) and warm (repeat). Report p50/p95 per endpoint. Transit/reach EXCLUDED (not self-hosted — noted).
-- [ ] Checkpoint: cold vs warm clearly separated; p95 computed from enough samples.
+- [ ] Checkpoint
 
 ### Round 5: Synthesis — THE GAP LIST (deliverables 5 + 6)
-- [ ] Build the gap list: one row per owner budget
-- [ ] Tag every emulation-based number `[EMU]` and state exactly what needs real-Android re-measurement + the one command to do it. Confirm scripts are checked in + `--device real` path documented and dry-run-verified.
-- [ ] What remains unknown / follow-up: what the FIX task should investigate that measurement couldn't settle.
+- [ ] Build the gap list
+- [ ] Tag every emulation-based number `[EMU]` and state exactly what needs real-Android re-measurement + the one command to do it
+- [ ] What remains unknown / follow-up
 
----
 
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
+- [ ] MIND_MAP.md
 

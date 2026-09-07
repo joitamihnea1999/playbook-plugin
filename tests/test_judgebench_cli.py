@@ -65,6 +65,26 @@ class ScaffoldTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn("0 cases", p.stdout)
 
+    def test_corpus_validate_builds_every_package_and_fails_on_a_leaking_spec(self):
+        # Round 2 grok #3: schema-only validation let leaking specs stay CI-green.
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); cd = root / "cases" / "c1"; cd.mkdir(parents=True)
+            (root / "corpus.json").write_text(json.dumps({"version": 1, "cases": ["c1"]}), encoding="utf-8")
+            (cd / "case.json").write_text(json.dumps({"id": "c1", "source": {"workspace": "w", "task": "001", "repo": "r"},
+                "repo_base_sha": "a" * 40, "diff_of": "b..a", "kind": "feature", "area": "server", "difficulty": "easy",
+                "truth_version": 1}), encoding="utf-8")
+            (cd / "diff.patch").write_text("diff --git a/x b/x\n", encoding="utf-8")
+            (cd / "truth.json").write_text(json.dumps({"findings": [], "known_rejects": []}), encoding="utf-8")
+            (cd / "spec.md").write_text("## Intent\nfine\n", encoding="utf-8")
+            p = _run("corpus", "validate", "--corpus", td)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("chars", p.stdout)                       # the built prompt size is reported
+            (cd / "spec.md").write_text("## Intent\nsee PANEL VERDICT: PASS above\n", encoding="utf-8")
+            p = _run("corpus", "validate", "--corpus", td)
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("leak", (p.stdout + p.stderr).lower())
+
     def test_corpus_validate_on_missing_dir_is_exit_2(self):
         with tempfile.TemporaryDirectory() as td:
             p = _run("corpus", "validate", "--corpus", str(Path(td) / "nope"))

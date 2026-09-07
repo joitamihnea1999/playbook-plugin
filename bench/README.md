@@ -178,23 +178,28 @@ bench/
 
 Tests live in `tests/test_judgebench_*.py` so `scripts/verify` runs them.
 
-## Corpus v2 (step 9 — built 2026-09-07, task 048)
+## Corpus v3 (step 9 — built 2026-09-07, task 048)
 
-**20 frozen cases** in `bench/corpus/` (`corpus.json` version 2 — v1 was re-frozen after the implementation panel found review provenance the section filter let through; no live run ever saw v1), reconstructed from two
+**19 frozen cases** in `bench/corpus/` (`corpus.json` version 3 — v1 and v2 were re-frozen after two implementation-panel rounds found review provenance and execution results the section filter let through; no live run ever saw v1 or v2), reconstructed from two
 workspaces' historical panel reviews: `playbook-plugin-dev` (this plugin, 8 enforcement
-cases) and `HowFarAI-v2` (a Next.js app reviewed with playbook; 6 server, 4 UI/perf,
-2 docs). `python3 bench/judgebench.py corpus validate` → `corpus v1: 20 cases OK`.
+cases) and `HowFarAI-v2` (a Next.js app reviewed with playbook; 5 server, 4 UI/perf,
+2 docs). `python3 bench/judgebench.py corpus validate` → `corpus v3: 19 cases OK` — validate
+BUILDS every package (leak scan + budgets), so a leaking spec fails in CI.
 
 | stratum | cases | notes |
 |---|---|---|
 | plugin enforcement | pb-020-r1, pb-032-r1, pb-032-r2, pb-036-r2, pb-039-r1, pb-039-r2, pb-039-r4, pb-042-r2 | 039-r4 is a converged-tree bait |
-| HowFar server | hf-007-r2, hf-007-r3, hf-007-r6, hf-011-r6, hf-011-r7, hf-011-r8 | 007-r6 is a pure bait (`findings: []`) |
+| HowFar server | hf-007-r2, hf-007-r3, hf-007-r6, hf-011-r6, hf-011-r8 | 007-r6 is a pure bait (`findings: []`); 011-r7 was DROPPED (its round's doc accepts could not be kept in a diff under the budget — a round's truth minus its accepts does not ship) |
 | HowFar UI/perf | hf-015-r1, hf-015-r2, hf-017-r2, hf-018-r4 | 018-r4: parked-only residuals |
 | HowFar docs/assertive | hf-014-r3, hf-014-r4 | the retired-hosting claim class |
 
-12 cases carry at least one Critical the historical panel caught; 3 have zero fixed
-findings (bait); difficulty: 3 easy / 5 medium / 12 hard. Every rendered prompt is under
-90,000 chars and 120,000 bytes (grok's argv element), largest pb-039-r2 at 81,541 chars.
+11 cases carry at least one Critical the historical panel caught; 3 have zero fixed
+findings (bait); difficulty: 3 easy / 5 medium / 11 hard. Every rendered prompt is under
+90,000 chars and 120,000 bytes (grok's argv element); `corpus validate` prints the largest.
+**Plan §4.2 said target 16, minimum 12; 19 are frozen** — every case is real and checked,
+but the live-run spend scales with the count, so the subset for Tests A/B is an OWNER
+decision (`--cases` takes an explicit list); the two "clean bait" slots are filled by one pure
+bait (007-r6) and two near-clean cases whose only truth is parked residuals (039-r4, 018-r4).
 
 ### How a case is built (deterministic, re-derivable)
 
@@ -234,15 +239,21 @@ READ-ONLY and write only under `bench/corpus/`:
    several of the builder's first evidence strings (pre-existing text, wrong file, wrong
    symbol) — that is the point.
 
-### What the spec filter redacts (v2, after the implementation panel)
+### What the spec filter redacts (v3, after two implementation-panel rounds)
 
 `reconstruct_spec` keeps the allowlisted sections, and inside them now ALSO drops
 `### Recent Chat` blocks (auto-captured session messages — one carried the owner's
 "stop the panel loop" ruling), execution `- **Result:**` bullets, checked-gate outcomes
-after ` → ` as well as ` — `, and mechanically redacts inline review provenance:
+after ` → ` as well as ` — `, the WHOLE body of a checked gate that has no outcome
+separator (such gates were written as execution logs — only the bold title or first clause
+survives), every table row and plain paragraph inside Work Plan / Pre-review (measurement
+tables, sweep-status tables and result prose live there; bold-only sub-headers, blockquotes,
+list items and an open item's indented continuation are kept), any continuation line after a
+checked gate up to the next real list item, and mechanically redacts inline review provenance:
 `(panel opus#1/terra#4)` parentheticals, bare seat refs (`sonnet#2`, `codex:sol#4`,
 `terra-crit`), plan-triage labels (`ACCEPT-C`, `ACCEPT-D/F/G`) and lettered plan-finding
-refs (`(finding H, …)`). `leak_scan` was broadened for what redaction cannot decide
+refs (`(finding H, …)`), a dangling `, panel )` left by seat-ref removal and `plan panel
+triaged (…)` clauses. `leak_scan` was broadened for what redaction cannot decide
 (`added at impl-review`, `revised after`, `FIXED (round 2-4)`, `finding H`, an owner ruling
 about a panel/round, a Recent Chat heading) — those are cleaned by hand as recorded
 `spec_edits`. Redaction over-strips by design (a parenthetical that merely starts with
@@ -276,11 +287,13 @@ diff, never a lone fix commit's delta.
   not shown every changed file in such cases.
 - Two truth entries on one `(file, symbol)` never auto-match (scoring needs exactly one);
   `check_truth` prints the collisions and `adjudicate` routes them to the human.
-- Truth = the named round's ACCEPTED findings, so three known-real defects of a reviewed
-  tree are deliberately NOT in truth and must be adjudicated `v` (valid-new) if a judge
-  reports them: pb-036-r2's `__test_stub__` env seam (rejected in round 2, conceded and
-  removed in round 3) and hf-011-r7's three doc accepts (their files are excluded from that
-  case's diff for the budget). Each case's `notes` names them.
+- Truth = the named round's ACCEPTED findings, so one known-real defect of a reviewed tree
+  is deliberately NOT in truth and must be adjudicated `v` (valid-new) if a judge reports
+  it: pb-036-r2's `__test_stub__` env seam (rejected in round 2, conceded and removed in
+  round 3). The case's `notes` names it. A truth file may never sit in `diff_excludes`
+  (`check_truth` fails), which is why hf-011-r7 was dropped rather than shipped short.
+- `check_truth --workspace` treats a drifted source record as a FAILURE (the record no
+  longer vouches for the spec); re-freeze from the current record or restore the source.
 - Baits are not all pure: `pb-039-r4` and `hf-018-r4` carry accepted+parked residuals so
   a judge who finds them is credited, not penalized; only `hf-007-r6` has `findings: []`.
 - No credential appears in any diff; the only password-like string is the self-host

@@ -74,7 +74,8 @@ def compute_excludes(paths: list, user_globs: list) -> list:
 # textconv) cannot change the bytes `check_truth` re-derives (impl-panel round 1, opus #2).
 _DIFF_PINS = ("-c", "core.abbrev=40", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
               "-c", "diff.algorithm=myers", "-c", "diff.renames=true", "-c", "diff.renameLimit=1000",
-              "-c", "core.quotePath=true", "-c", "diff.suppressBlankEmpty=false", "-c", "diff.wsErrorHighlight=none")
+              "-c", "core.quotePath=true", "-c", "diff.suppressBlankEmpty=false", "-c", "diff.wsErrorHighlight=none",
+              "-c", "diff.indentHeuristic=true", "-c", "diff.context=3", "-c", "diff.interHunkContext=0")
 
 
 def derive_diff(repo: Path, parent: str, reviewed: str, excludes: list) -> str:

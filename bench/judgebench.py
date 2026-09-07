@@ -113,7 +113,19 @@ def cmd_corpus(args) -> int:
         print(f"judgebench: corpus invalid: {exc}", file=sys.stderr)
         return EXIT_UNUSABLE
     if args.corpus_cmd == "validate":
-        print(f"corpus v{corpus.version}: {len(corpus.cases)} cases OK")
+        # Schema is not enough (task 048 impl-panel r2 grok #3): build every frozen package so a
+        # review-provenance leak or an over-budget prompt fails here, in CI, not at run time.
+        from bench.lib import package as _package
+        biggest = (0, "")
+        for c in corpus.cases:
+            try:
+                pkg = _package.build_package(c)
+            except (_package.LeakageError, ValueError, OSError) as exc:
+                print(f"judgebench: corpus invalid — leak or build failure: {exc}", file=sys.stderr)
+                return EXIT_UNUSABLE
+            biggest = max(biggest, (pkg.prompt_chars, c.id))
+        size = f", largest prompt {biggest[0]:,} chars ({biggest[1]})" if corpus.cases else ""
+        print(f"corpus v{corpus.version}: {len(corpus.cases)} cases OK{size}")
         return EXIT_OK
     if args.case_id is None:
         for c in corpus.cases:

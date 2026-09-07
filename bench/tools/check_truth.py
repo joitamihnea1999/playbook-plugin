@@ -77,8 +77,15 @@ def check_case(case, repo: Path, max_chars: int, max_bytes: int) -> dict:
             fails.append(f"mapping.rounds_total must be an int >= round, got {tot!r} (round {rnd!r})")
         if not isinstance(mapping.get("evidence"), str) or not mapping["evidence"].strip():
             fails.append("mapping.evidence must be a non-empty sentence")
-        mfix = {git(repo, "rev-parse", f"{c}^{{commit}}", check=False).strip() for c in (mapping.get("fix_commits") or [])
-                if git_ok(repo, "cat-file", "-e", f"{c}^{{commit}}")}
+        mfix = set()
+        for c in (mapping.get("fix_commits") or []):
+            if not isinstance(c, str) or not git_ok(repo, "cat-file", "-e", f"{c}^{{commit}}"):
+                fails.append(f"mapping.fix_commits entry {c!r} does not resolve")
+                continue
+            full = git(repo, "rev-parse", f"{c}^{{commit}}").strip()
+            if full == sha or not git_ok(repo, "merge-base", "--is-ancestor", sha, full):
+                fails.append(f"mapping.fix_commits entry {short(c)} does not descend from the reviewed commit {short(sha)}")
+            mfix.add(full)
         tfix = {git(repo, "rev-parse", f"{c}^{{commit}}", check=False).strip() for c in truth_fixes
                 if git_ok(repo, "cat-file", "-e", f"{c}^{{commit}}")}
         if tfix - mfix:
@@ -172,7 +179,8 @@ def check_spec_regenerates(case, workspaces: dict) -> tuple:
     raw = (tdir / "task.md").read_bytes()
     recorded = case.meta.get("spec_source_sha256")
     if recorded and hashlib.sha256(raw).hexdigest() != recorded:
-        return "drift", "source task.md drifted since the case was frozen (digest differs) — regeneration not judged"
+        return "drift", ("source task.md drifted since the case was frozen (digest differs) — the record no longer "
+                         "vouches for spec.md; re-freeze the case from the current record or restore the source")
     edits = [e for e in case.meta.get("spec_edits", []) if isinstance(e, dict)]
     try:
         regen = apply_spec_edits(package.reconstruct_spec(_lf(raw)), edits)
@@ -227,9 +235,9 @@ def main(argv=None) -> int:
             continue
         res = check_case(case, Path(repo), a.max_prompt_chars, a.max_prompt_bytes)
         status, msg = check_spec_regenerates(case, workspaces)
-        if status == "fail":
+        if status in ("fail", "drift"):            # drift = the source no longer vouches for the spec (r2 sol #3)
             res["fails"].append(msg)
-        elif status in ("skip", "drift"):
+        elif status == "skip":
             res["warns"].append(msg)
         if res["fails"]:
             bad += 1

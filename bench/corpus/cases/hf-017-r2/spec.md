@@ -68,31 +68,28 @@ Task 015 measured the mobile map flow against the owner budgets and 6/8 FAIL (`d
 > For each work section: what could go wrong? How will you know it worked? (specific check, not "looks good")
 > Standard feature: 6-8 work gates + tests. Large tasks work fine — if >15 gates, add a mid-point checkpoint to reassess direction.
 
-<!-- pin -->
-**OWNER RULING (2026-08-30, binding) — TTI/UX trigger decision.** After WS-A measured the trigger tradeoff (auto-load: Lighthouse 66 / TTI 7843 ms; interaction-gate: 97 / 2813 ms), the owner ruled: **SHIP AUTO-LOAD.** "Interaction-gating exists to please the metric, not the user — Lighthouse never taps, real users do; choosing load behaviour so the auditor can't see the parse is metric-gaming, which this project doesn't do. A map app should show its map unprompted." Consequences that bind WS-C + WS-D: (1) **Report the Lighthouse/TTI budget as MISSED** under auto-load, with the reason (the 327 KB engine parses on the 4×-throttled main thread inside the interactive window; the software-GL no-GPU box inflates it further). (2) **Fix the INSTRUMENT, not the behaviour:** the budget's intent was "user can interact within 2.5 s" — with the paint-fast shell that is now TRUE (search usable immediately). Report **shell-interactive time as the PRIMARY number**; treat engine-parse as an emulation artifact. (3) **Record two real-Android follow-ups:** shell-interactive ≤2.5 s and map-visible-unprompted ≤4 s. (4) If the real device ALSO misses, revisit load strategy with data — not before. ⇒ WS-C's Lighthouse gate does NOT hard-block on score ≥90 (that would pressure toward metric-gaming); it records the score + the shell-interactive number. The initial-JS gate stays a hard block.
 
-<!-- pin -->
 ### WS-0 — MY baseline (DONE before the panel; measure before touching anything; rule 13)
 - [ ] Bring up the self-host stack (`docker/selfhost` up
-- [ ] `next build` (prod) + serve; run `scripts/perf` bundle + lighthouse + api-latency on CURRENT `main`. Record MY baseline; confirm same ballpark as PERF_AUDIT. **Check:** reproduce initial-JS ≈470 KB gz and amenities cold p95 ≈900 ms? Results in scratchpad `baseline-017.md`.
+- [ ] `next build` (prod) + serve; run `scripts/perf` bundle + lighthouse + api-latency on CURRENT `main`
 - [ ] **(F8) Make the paired before/after causally comparable:** freeze a committed deterministic sample set (seed the cold-coord jitter / fix the origin list) so "before" and "after" exercise the SAME polygons; document the ApiCache-flush protocol (regenerable cache, not a data migration). **Check:** two baseline runs on unchanged code agree within noise on the SAME inputs.
 
 ### WS-I — Fix the measurement instrument FIRST (prereq for WS-A Check + WS-C gate; F1)
-- [ ] Replace `analyze-bundle.mjs`'s `networkidle0`=initial heuristic with an EXPLICIT lifecycle classifier ... **Check:** on the CURRENT (undeferred) build the classifier still reports maplibre INITIAL (instrument didn't just move the goalposts); on a trivial deferred prototype it reports maplibre LAZY; a forced-broken trigger EXITS NON-ZERO.
+- [ ] Replace `analyze-bundle.mjs`'s `networkidle0`=initial heuristic with an EXPLICIT lifecycle classifier ..
 - [ ] Validate the fixed instrument against one real build by hand (rule 13
 
 ### WS-A — Map-free shell + deferred map engine (gaps #1/#2/#3; F1+F2)
 - [ ] **(F2) Real boundary, not whole-AppMap defer:** ... **Check:** the eager shell renders header+search with ZERO maplibre in its import graph.
 - [ ] **(F1) Trigger policy — implement the owner's stated "map hydrates behind it" (auto-load after shell interactive), instrumented by the WS-I mark.** ...
-- [ ] Audit every eager vendor in the shell's initial graph (turf, d3, pmtiles, prisma leakage). Move non-essential ones behind the boundary or confirm needed for first paint. Record the initial-set inventory.
+- [ ] Audit every eager vendor in the shell's initial graph (turf, d3, pmtiles, prisma leakage)
 - [ ] **(F2) Selection continuity across the boundary:** ... **Check (new e2e):** an address submitted before the map loads results in rings drawn once it loads.
-- [ ] Rebuild + `fuser -k 3000/tcp` (prod, not dev) + full Playwright (incl. mobile Pixel). **Check:** all 17 specs green; map renders; search works; rings + amenities draw; teardown/dispose contract intact.
-- [ ] Re-measure bundle + lighthouse ... **TTI/score: report the HONEST measured number.** ...
+- [ ] Rebuild + `fuser -k 3000/tcp` (prod, not dev) + full Playwright (incl
+- [ ] Re-measure bundle + lighthouse ..
 
 ### WS-B — Amenities cold p95 (gap #8; #5/#6 ride along; F3+F4+F5)
-- [ ] Add server-side spans to `nearbyAmenities`/`computeNearbyAmenities` ... **Check:** the real ms split?
-- [ ] `EXPLAIN (ANALYZE, BUFFERS)` the intersect query on the live 8,774-place dataset ... **Check:** is `AmenityPlace_geom_gist` used ... or a seq scan?
-- [ ] Apply the smallest EXPLAIN-justified optimization (... or NOTHING if the index is already used and the floor is irreducible).
+- [ ] Add server-side spans to `nearbyAmenities`/`computeNearbyAmenities` ..
+- [ ] `EXPLAIN (ANALYZE, BUFFERS)` the intersect query on the live 8,774-place dataset ..
+- [ ] Apply the smallest EXPLAIN-justified optimization (..
 - [ ] **(F4) Verify the ORS single-flight, don't re-architect:** ... **Check (integration test):** one selection ⇒ one ORS computation.
 - [ ] **(F3) Keep the cold-cold probe as the VERDICT instrument ...** Add any in-session ... NEW separately-labelled cell ...
 - [ ] **(F5) Warmup done SAFELY, and only if the cause is warmth:** ... **Check:** concurrent `/api/ready` probes don't duplicate warmup nor re-hit providers; a failed provider neither marks done-forever nor floods; readiness latency unaffected.
@@ -100,23 +97,22 @@ Task 015 measured the mobile map flow against the owner budgets and 6/8 FAIL (`d
 - [ ] **(discovered — the REAL amenities fix) Apply `MATERIALIZED` to the `intersections` + `clipped_rows` CTEs** in `catalogue-query.ts`. ...
 
 ### WS-C — Enforce the budgets in CI + document (gap #3; assertive; F6+F7)
-- [ ] Build the deterministic bundle/laziness gate ... **(F6)** HARD-FAIL if the harness/browser is absent. ... **Check:** exits non-zero on a +100 KB STATIC import into the initial graph (mutation-proof); zero on the deferred build.
+- [ ] Build the deterministic bundle/laziness gate ..
 - [ ] **(F7)** Lighthouse-mobile budget ... **(F6)** Runs as a SEPARATE explicitly-invoked job (`perf:lighthouse`) whose recorded result is cited at close
 - [ ] **(F6) Make the gate actually run in CI:** ... **Check:** the gate is a real CI step ...
-- [ ] Document in README what each budget means + enforces (assertive) ... **Check:** re-read the gate code against the prose
+- [ ] Document in README what each budget means + enforces (assertive) ..
 
 ### CHECKPOINT (rule 11 — reassess before the final re-measure)
 - [ ] Pause: WS-I/A/B/C all green ...?
 
 ### WS-D — Re-measure the full suite + update PERF_AUDIT (assertive close-out)
-- [ ] Final `next build` + full `scripts/perf` re-run on the MERGED/shipped code ...
-- [ ] Update `docs/PERF_AUDIT.md` with a before/after table ...
-- [ ] Update MIND_MAP node [36] (and [24]/[13]/[26] if their contracts moved) in place ... Run `mindmap_check.py`.
+- [ ] Final `next build` + full `scripts/perf` re-run on the MERGED/shipped code ..
+- [ ] Update `docs/PERF_AUDIT.md` with a before/after table ..
+- [ ] Update MIND_MAP node [36] (and [24]/[13]/[26] if their contracts moved) in place ..
 
----
 
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
+- [ ] MIND_MAP.md
 

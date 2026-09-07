@@ -659,12 +659,12 @@ class PanelHardeningTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("skipped", out.lower())
 
-    def test_source_drift_is_reported_not_failed(self):
+    def test_source_drift_fails(self):
         self._build("r1", self.fx.c1); self._index("r1"); self._truth("r1", self._good())
         md = self.fx.taskdir / "task.md"
         md.write_text(md.read_text(encoding="utf-8") + "\n## Debrief\nlater edit\n", encoding="utf-8")
         rc, out = self._check("--workspace", f"ws={self.fx.ws}")
-        self.assertEqual(rc, 0, out)
+        self.assertEqual(rc, 1, out)
         self.assertIn("drift", out.lower())
 
     # --- sol #2: the mapping decision is a reviewable object ---------------------------
@@ -774,10 +774,29 @@ class ImplPanelRound1ToolTests(unittest.TestCase):
         rc, out = self._check()
         self.assertEqual(rc, 1); self.assertIn("diff_excludes", out)
 
+    def test_source_drift_is_a_failure(self):
+        # Round 2 codex:sol #3: a drifted source cannot vouch for the frozen spec → FAIL, not a warning.
+        md = self.fx.taskdir / "task.md"
+        md.write_text(md.read_text(encoding="utf-8") + "\n## Debrief\nlater edit\n", encoding="utf-8")
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = check_truth.main(["--corpus", str(self.fx.out), "--source-repo", f"app={self.fx.repo}",
+                                   "--workspace", f"ws={self.fx.ws}"])
+        self.assertEqual(rc, 1, buf.getvalue()); self.assertIn("drift", buf.getvalue().lower())
+
+    def test_mapping_fix_commits_must_each_resolve_and_descend(self):
+        self._meta(mapping={"round": 1, "rounds_total": 2, "fix_commits": [self.fx.c2, "deadbeefcafe"], "evidence": "x"})
+        rc, out = self._check(); self.assertEqual(rc, 1); self.assertIn("deadbeefcafe", out)
+        self._meta(mapping={"round": 1, "rounds_total": 2, "fix_commits": [self.fx.c2, self.fx.c_side], "evidence": "x"})
+        rc, out = self._check(); self.assertEqual(rc, 1); self.assertIn("descend", out.lower())
+
     def test_derive_diff_is_pinned_against_operator_git_config(self):
         _git(self.fx.repo, "config", "diff.noprefix", "true")
         _git(self.fx.repo, "config", "diff.mnemonicPrefix", "true")
         _git(self.fx.repo, "config", "core.abbrev", "12")
+        _git(self.fx.repo, "config", "diff.indentHeuristic", "false")
         d = case_from_task.derive_diff(self.fx.repo, self.fx.c0, self.fx.c1, ["docs/ledger.json"])
         self.assertIn("--- a/a.py", d); self.assertIn("+++ b/a.py", d)
         rc, out = self._check()

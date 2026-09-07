@@ -78,31 +78,30 @@ convenience removes day-2 friction for running the app against the local engines
 > Standard feature: 6-8 work gates + tests. Large tasks work fine — if >15 gates, add a mid-point checkpoint to reassess direction.
 
 ### (a) Fast-forward merge self-host → main (local only, no push)
-- [ ] `tasks audit` clean + HowFar pre-commit hook armed (hook_sentinel) before touching git.
-- [ ] `git checkout main` in HowFar; confirm main @ ff904f3 and clean tree.
+- [ ] `tasks audit` clean + HowFar pre-commit hook armed (hook_sentinel) before touching git
+- [ ] `git checkout main` in HowFar; confirm main @ ff904f3 and clean tree
 - [ ] `git merge --ff-only self-host`
-- [ ] Verify green on main: `npm run check` (security:google-keys + lint + typecheck + vitest + selfhost harness self-test). Record pass/counts.
-- [ ] Confirm NOTHING pushed: `git status` shows `main` ahead of `origin/main`, no push performed.
+- [ ] Verify green on main
+- [ ] Confirm NOTHING pushed
 
-### (c) dev:selfhost convenience (build first — code lands before impl panel)
-- [ ] Write `docker/selfhost/dev-selfhost.sh`: preflight (docker present; built prerequisites `data/tiles/selfhost-romania.pmtiles` + `data/selfhost/photon/photon_data` + `data/selfhost/photon/photon.jar` present
-- [ ] Write `docker/selfhost/stop-selfhost.sh`: `docker compose -f docker/selfhost/docker-compose.yml stop` (preserve named volumes
-- [ ] Add `dev:selfhost` + `dev:selfhost:down` to HowFar `package.json` scripts.
-- [ ] Verify: `npm run dev:selfhost -- --dry-run` runs the preflight side-effect-free; `bash -n` both scripts; `shellcheck` if available; confirm `.env` untouched.
-- [ ] Document a "Day-2 dev loop (`npm run dev:selfhost`)" section in docs/SELFHOST.md: what it does, that it assumes the one-time import/build is done, preserves volumes, points env inline (doesn't pollute `.env`), and the down/stop path. Note transit still not self-hosted; app dev DB prerequisite.
+### (c) dev:selfhost convenience (build first — code lands before)
+- [ ] Write `docker/selfhost/dev-selfhost.sh`
+- [ ] Write `docker/selfhost/stop-selfhost.sh`
+- [ ] Add `dev:selfhost` + `dev:selfhost:down` to HowFar `package.json` scripts
+- [ ] Verify: `npm run dev:selfhost -- --dry-run` runs the preflight side-effect-free; `bash -n` both scripts; `shellcheck` if available; confirm `.env` untouched
+- [ ] Document a "Day-2 dev loop (`npm run dev:selfhost`)" section in docs/SELFHOST.md
 
 ### (b) Correct MIND_MAP node [0] (+ false live-claims in [1]/[30])
-- [ ] Rewrite node [0] "Product state" line: replace the 2026-08-07 live/Railway proof with the dated truth
-- [ ] Correct the now-false "running live on Railway at …railway.app" clause in [1]; add a dated retired-Railway note to [30] so nothing reads as currently-live. Keep railway.json config description (still committed).
-- [ ] `python3 .agent/scripts/mindmap_check.py` green (no undated live-state claim, node[0] first, no phantom paths); `mindmap_check` after every MIND_MAP edit per CLAUDE.md.
+- [ ] Rewrite node [0] "Product state" line
+- [ ] Correct the now-false "running live on Railway at …railway.app" clause in [1]; add a dated retired-Railway note to [30] so nothing reads as currently-live
+- [ ] `python3 .agent/scripts/mindmap_check.py` green (no undated live-state claim, node[0] first, no phantom paths); `mindmap_check` after every MIND_MAP edit per CLAUDE.md
 
 ### Pre-panel
-- [ ] `tasks audit` + `.agent/PRE_PANEL_AUDIT.md` sweeps (stale-claim grep, publication hygiene over git diff + untracked, test-count) recorded here.
+- [ ] `tasks audit` + `.agent/PRE_PANEL_AUDIT.md` sweeps (stale-claim grep, publication hygiene over git diff + untracked, test-count) recorded here
 
----
 
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
+- [ ] MIND_MAP.md
 

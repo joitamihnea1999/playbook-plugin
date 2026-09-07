@@ -81,10 +81,9 @@ Owner ruling 9 (MIND_MAP [0], 2026-08-17): HowFar becomes a paid, self-hosted, m
 > For each work section: what could go wrong? How will you know it worked? (specific check, not "looks good")
 > Standard feature: 6-8 work gates + tests. Large tasks work fine — if >15 gates, add a mid-point checkpoint to reassess direction.
 
-<!-- pin -->
 **Design decisions (locked before coding):**
-- **Provider hosts** (all server-side, in `server/` folders) → a new **optional-only, NON-memoized** `providerConfig()` in `lib/env.ts`, read **inside the request functions** (never at module top level — panel ), separate from `serverEnv()` so provider clients never newly depend on required `DATABASE_URL`/`AUTH_SECRET`. Each field defaults to today's literal. Granularity = **base URL per provider** (paths like `/v2/isochrones/{profile}`, `/api/v6/one-to-all` are provider-version-specific, stay in code). Rate-limit host derived via `new URL(base).host` (verified == every current `HOST`).
-- **Fail-closed validation** (matches `env.ts` `required()`): absent var ⇒ default; a var that is SET but invalid ⇒ `EnvError`. Invalid = non-`http(s)` / unparseable URL; empty endpoint pool; bbox that is non-finite, mis-ordered (min≥max), or span > 2° either axis (single-city cap, panel ).
+- **Provider hosts** (all server-side, in `server/` folders) → a new **optional-only, NON-memoized** `providerConfig()` in `lib/env.ts`, read **inside the request functions** (never at module top level —), separate from `serverEnv()` so provider clients never newly depend on required `DATABASE_URL`/`AUTH_SECRET`. Each field defaults to today's literal. Granularity = **base URL per provider** (paths like `/v2/isochrones/{profile}`, `/api/v6/one-to-all` are provider-version-specific, stay in code). Rate-limit host derived via `new URL(base).host` (verified == every current `HOST`).
+- **Fail-closed validation** (matches `env.ts` `required()`): absent var ⇒ default; a var that is SET but invalid ⇒ `EnvError`. Invalid = non-`http(s)` / unparseable URL; empty endpoint pool; bbox that is non-finite, mis-ordered (min≥max), or span > 2° either axis (single-city cap).
 - Env var names: `NOMINATIM_BASE_URL`, `PHOTON_BASE_URL`, `ORS_BASE_URL`, `TRANSIT_BASE_URL` (one host feeds both one-to-all + plan), `OVERPASS_ENDPOINTS`, `OVERPASS_BULK_ENDPOINTS` (comma/space-separated lists), `TILES_PMTILES_PATH`. Extent bbox: `NEXT_PUBLIC_MAP_BBOX` = `"minLng,minLat,maxLng,maxLat"`.
 - **Cache-safety on switch**: a `configCacheTag()` = **empty string when resolved config deep-equals defaults** (⇒ default keys byte-identical, 30d cache still valid), else a short sha; prepended uniformly to **all 9 provider-dependent ApiCache key families** — nominatim fwd/rev, photon suggest, ors foot/car, transit, transit-plan. The tag's bbox component reads the RESOLVED `BUCHAREST_BBOX` (build-consistent), not a runtime env read. Flipping a host/bbox then serves a fresh namespace instead of stale old-provider/old-city answers.
 - **Extent bbox** stays in `lib/bounds.ts` (isomorphic) reading `NEXT_PUBLIC_MAP_BBOX` **directly** (build-time inlined — honest constraint: changing the extent needs a rebuild; provider hosts are runtime) via a pure tested `parseBbox` + validation, fallback = current Bucharest numbers. **Single-city extent** by design (per-city GTFS/MOTIS arch). Export names `BUCHAREST_BBOX`/`inBucharest`/`BUCHAREST_MAX_BOUNDS` **kept** (rename → P4, Parked). Photon focus point derived from bbox centre (terra).
@@ -104,10 +103,9 @@ Owner ruling 9 (MIND_MAP [0], 2026-08-17): HowFar becomes a paid, self-hosted, m
 - [ ] **WG10 — .env.example.** Document every new var under a "Region / self-host" section (today's public defaults, commented; note bbox is build-time / hosts are runtime; single-city extent). Check: hygiene grep clean.
 - [ ] **WG11 — verify + mind map.** Rebuild `.next`, `fuser -k 3799/tcp`, run `npm run check` + full e2e. Update MIND_MAP [18] (config-driven hosts + cache tag), [23] (tiles path + fetch-tiles env), [25] (bbox env + single-city + names-kept), [0] status (Phase 1 done). Run `mindmap_check.py`. Check: all green; publication-hygiene grep over whole diff + untracked.
 
----
 
 ## Pre-review
 - [ ] All tests pass
 - [ ] No debug artifacts
-- [ ] MIND_MAP.md: update the OWNING subsystem node **in place**
+- [ ] MIND_MAP.md
 

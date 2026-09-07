@@ -64,7 +64,10 @@ _H2_RE = re.compile(r"^ {0,3}##(?!#)\s*(.*?)\s*(?:#+\s*)?$")   # CommonMark: ≤
 _FINDINGS_OPEN_RE = re.compile(r"<!--\s*playbook:[a-z-]*review-findings\s*-->")
 _FINDINGS_CLOSE_RE = re.compile(r"<!--\s*/playbook:[a-z-]*review-findings\s*-->")
 _CHECKED_GATE_RE = re.compile(r"^(\s*[-*]\s*)\[[xX]\](\s*)(.*)$")
-_BOLD_TITLE_RE = re.compile(r"^(\*\*.*?\*\*)(.*)$", re.DOTALL)
+_BOLD_TITLE_RE = re.compile(r"^((?:[\w.\[\]()/-]+\s+){0,3}\*\*.*?\*\*)(.*)$", re.DOTALL)   # `W8. [P8] **Title.** …` too
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s)")                                   # a REAL list item (not `**bold`)
+_BOLD_ONLY_LINE_RE = re.compile(r"^\s*\*\*[^*]+\*\*:?\s*$")                               # `**Item 2 — …**` sub-headers
+_FIRST_CLAUSE_RE = re.compile(r"^(.{8,}?)(?:\. |: | — | → )")                                # title of a title-less gate
 _OUTCOME_SEP = " — "
 # Impl-panel round 1 (task 048): kept sections still carried review provenance the
 # section filter cannot see. These are REDACTED mechanically (deterministic, over-strips):
@@ -143,8 +146,18 @@ def strip_outcome(gate_line: str) -> str:
     else:
         title, tail = "", rest
     cuts = [i for i in (tail.find(_OUTCOME_SEP), tail.find(_ARROW_SEP)) if i != -1]
-    if cuts:
-        tail = tail[:min(cuts)]
+    body = tail[:min(cuts)] if cuts else tail
+    if not title and len(body.strip()) > (100 if cuts else 60):
+        # A long, title-less checked gate is an execution log ("W2. `x` written. Pins …; verifies
+        # md5 …"), separator or not — keep its first clause only (task 048 impl-panel r2).
+        m2 = _FIRST_CLAUSE_RE.match(tail)
+        tail = m2.group(1) if m2 else ""
+    elif cuts:
+        tail = body
+    elif title:
+        # A checked gate with NO outcome separator was written as an execution log (task 048
+        # impl-panel r2): its whole body is outcome → keep the title only.
+        tail = ""
     nl = "\n" if gate_line.endswith("\n") else ""
     return f"{lead}[ ]{sp}{title}{tail}".rstrip() + nl
 
@@ -159,6 +172,8 @@ def redact_review_refs(line: str) -> str:
     out = _PANEL_PAREN_LEAD_RE.sub("(", out)
     out = _TRIAGE_LABEL_RE.sub("", out)
     out = _FINDING_LETTER_RE.sub("", out)
+    out = re.sub(r",?\s*\b(?:plan[- ]|impl[- ])?panel\s*(?=\))", "", out)          # dangling `, panel )` (r2 opus/sonnet)
+    out = re.sub(r"[;,]?\s*\b(?:plan|impl)[- ]?panel triaged\b[^.;\n]*", "", out)   # `plan panel triaged (P1–P10)`
     out = re.sub(r"(?<=\s)\(\s*\)", "", out)          # an emptied parenthetical (not a call like `f()`)
     out = re.sub(r"[ \t]{2,}(?=\S)", " ", out)         # collapse the gap a removal left
     return out
@@ -198,9 +213,10 @@ def reconstruct_spec(task_md: str) -> str:
             continue
         line = redact_review_refs(line)
         if strip_outcomes:
-            # A checked gate's outcome note may wrap onto INDENTED continuation lines
-            # (impl-panel grok F2): drop them until the next list item, blank line or
-            # heading. An OPEN gate's wrapped text is spec and is kept.
+            # A checked gate's outcome note may wrap onto continuation lines (indented or not,
+            # `**bold` included — impl-panel r2 grok): drop them until the next REAL list item,
+            # blank line or heading. An OPEN gate's wrapped text is spec and is kept.
+            stripped_line = line.strip()
             if _CHECKED_GATE_RE.match(line.rstrip("\n")):
                 in_stripped_gate = True
                 out.append(strip_outcome(line))
@@ -209,9 +225,15 @@ def reconstruct_spec(task_md: str) -> str:
                 in_stripped_gate = True                # (drop its wrapped continuation too)
                 continue
             if in_stripped_gate:
-                if line.strip() and line[:1] in (" ", "\t") and not line.lstrip().startswith(("-", "*")):
+                if stripped_line and not _LIST_ITEM_RE.match(line) and not line.lstrip().startswith("#"):
                     continue
                 in_stripped_gate = False
+            # Body text that is not a list item, heading, blockquote or bold-only sub-header is
+            # where execution results live (tables, measurement paragraphs) — drop it (r2 sol/terra).
+            if stripped_line and not _LIST_ITEM_RE.match(line) and not line.lstrip().startswith(("#", ">")) \
+                    and not _BOLD_ONLY_LINE_RE.match(line):
+                if stripped_line.startswith("|") or not line[:1].isspace() or not out or not _LIST_ITEM_RE.match(out[-1]):
+                    continue                            # a table row, a paragraph, or an orphan indent
             out.append(line)
             continue
         if in_status:
@@ -252,6 +274,9 @@ _LEAK_TOKENS = (
     re.compile(r"\bowner ruling\b[^\n]*\b(?:panel|round|converge)", re.IGNORECASE),
     re.compile(r"^\s{0,3}#{1,6}\s+Recent Chat\b", re.MULTILINE),
     re.compile(r"\b(?:ACCEPT|REJECT|PARK)(?:ED)?-[A-Z]\b"),
+    re.compile(r"\bpanel\s*\)|\(panel\)", re.IGNORECASE),                # a dangling `panel )` after redaction (r2)
+    re.compile(r"\btriaged\b", re.IGNORECASE),
+    re.compile(r"\|\s*\*\*(?:FIXED|HARDENED|RESOLVED|DONE)\*\*\s*\|"),   # a status table mutated after the rounds
 )
 
 
