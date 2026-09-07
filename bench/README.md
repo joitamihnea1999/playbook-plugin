@@ -178,7 +178,89 @@ bench/
 
 Tests live in `tests/test_judgebench_*.py` so `scripts/verify` runs them.
 
-## Corpus build checklist (step 9 — content, not code)
+## Corpus v1 (step 9 — built 2026-09-07, task 048)
 
-Filled in when the corpus is built. Until then the corpus is empty and
-`corpus validate` reports `0 cases`.
+**20 frozen cases** in `bench/corpus/` (`corpus.json` version 1), reconstructed from two
+workspaces' historical panel reviews: `playbook-plugin-dev` (this plugin, 8 enforcement
+cases) and `HowFarAI-v2` (a Next.js app reviewed with playbook; 6 server, 4 UI/perf,
+2 docs). `python3 bench/judgebench.py corpus validate` → `corpus v1: 20 cases OK`.
+
+| stratum | cases | notes |
+|---|---|---|
+| plugin enforcement | pb-020-r1, pb-032-r1, pb-032-r2, pb-036-r2, pb-039-r1, pb-039-r2, pb-039-r4, pb-042-r2 | 039-r4 is a converged-tree bait |
+| HowFar server | hf-007-r2, hf-007-r3, hf-007-r6, hf-011-r6, hf-011-r7, hf-011-r8 | 007-r6 is a pure bait (`findings: []`) |
+| HowFar UI/perf | hf-015-r1, hf-015-r2, hf-017-r2, hf-018-r4 | 018-r4: parked-only residuals |
+| HowFar docs/assertive | hf-014-r3, hf-014-r4 | the retired-hosting claim class |
+
+12 cases carry at least one Critical the historical panel caught; 3 have zero fixed
+findings (bait); difficulty: 3 easy / 5 medium / 12 hard. Every rendered prompt is under
+90,000 chars and 120,000 bytes (grok's argv element), largest hf-007-r3 at 89,587 chars.
+
+### How a case is built (deterministic, re-derivable)
+
+The three dev tools in `bench/tools/` read the two workspaces and their git repos
+READ-ONLY and write only under `bench/corpus/`:
+
+1. `map_rounds.py --workspace WS --task N --repo PATH` prints the round↔commit
+   **evidence**: judge.md rounds in FILE order (playbook prepends, so newest-first),
+   task.md audit receipts chronologically, the repo's commits in the receipt window,
+   and — where a `**Panel-snapshot:**` exists (plugin ≥ task 039, HowFar ≥ 014) — the
+   deterministic pairing. Legacy records (trim pointers, fewer receipts than rounds) are
+   flagged AMBIGUOUS; their triage lives in `task-archive.md`. The human decides.
+2. `case_from_task.py … --reviewed SHA [--base SHA] [--exclude PATH] [--delete TEXT]
+   [--replace OLD=NEW] --round N --fix-commit SHA --evidence "…"` writes the case dir:
+   `spec.md = reconstruct_spec(task.md)` + the recorded `spec_edits`; `diff.patch =
+   git diff base..reviewed` minus `diff_excludes` (lockfiles, minified/map/dist/vendored,
+   binaries, plus explicit paths for the size budget); `case.json` carries the REVIEWED
+   sha (the tree WITH the diff), `diff_of`, `spec_source_sha256`, and a `mapping` object
+   (round ordinal, fix commits, the evidence sentence). `truth.json` starts empty.
+3. The builder writes `truth.json` from that round's triage: one entry per ACCEPTED
+   finding, `severity` = the triage's word, `historical_outcome` accepted+fixed (with
+   `fix_commit` + `fix_evidence`) or accepted+parked; explicit REJECT lines become
+   `known_rejects` (with `file`/`symbol` when the claim named them).
+4. `check_truth.py --source-repo NAME=PATH… [--workspace NAME=PATH…]` is the mechanical
+   instrument: `repo_base_sha` resolves; `diff.patch` re-derives byte-for-byte; every
+   finding's `file` exists at the reviewed sha and its `symbol` occurs in it; an
+   accepted+fixed finding's `fix_commit` DESCENDS from the reviewed commit, touches the
+   file, and its `fix_evidence` (an exact substring) is ABSENT from the file at the
+   reviewed sha and PRESENT at the fix commit — so the fix is provably not in the
+   reviewed diff and lands where claimed; no two cases share (repo, sha, diff_of); the
+   package builds leak-free under the char and byte budgets; with `--workspace`, spec.md
+   regenerates from the source record + `spec_edits`. It rejected several of the
+   builder's first evidence strings (pre-existing text, wrong file, wrong symbol) — that
+   is the point.
+
+### Base commit and rounds
+
+A "feature commit" is often the POST-round-1 tree: the first panel ran on the dirty
+pre-commit tree and its fixes were committed together with the feature (plugin 036 →
+`0714585`, 042 → `36dda9f`, 017 → `4bb6923`). The evidence check catches this (the
+round-1 fix evidence is already present), so such cases reproduce ROUND 2. Later-round
+cases use `--base` = the task's pre-feature commit so the judge sees the ACCUMULATED
+diff, never a lone fix commit's delta.
+
+### Known limits (disclose in every report)
+
+- **Defect reality is the historical panel's judgment**, read by the builder from the
+  triage prose; the machine proves only fix-absence-at-review / fix-presence-after and
+  that files/symbols exist. Severity labels come from the triage's words; where a
+  triage gave none the builder applied the plan vocabulary and said so in `notes`.
+- `spec.md` approximates the pre-review task.md via the closed allowlist filter; the
+  template preamble blockquote is deleted in every case and a handful of one-phrase
+  replaces neutralize domain text that trips `leak_scan` (all recorded in `spec_edits`).
+  Non-template H2 sections (e.g. HowFar 015's `## Scope guardrails`) are DROPPED — the
+  judge does not see them; per-case `notes` list them. Design-Phase answers were hand-
+  audited for post-review edits (none found).
+- The reviewed commit may differ from the exact dirty tree a historical panel saw; what
+  matters — the fixes were not in it — is what `fix_evidence` proves.
+- Some `diff.patch` files exclude tests, docs or perf scripts to fit the budget; those
+  files are in the snapshot tree and are listed in `diff_excludes`. A judge is therefore
+  not shown every changed file in such cases.
+- Two truth entries on one `(file, symbol)` never auto-match (scoring needs exactly one);
+  `check_truth` prints the collisions and `adjudicate` routes them to the human.
+- Baits are not all pure: `pb-039-r4` and `hf-018-r4` carry accepted+parked residuals so
+  a judge who finds them is credited, not penalized; only `hf-007-r6` has `findings: []`.
+- No credential appears in any diff; the only password-like string is the self-host
+  stack's local default DB-role password, already public in the HowFar repository.
+- The corpus is FROZEN at version 1 before any run. Additions bump the version and never
+  edit an existing case.
