@@ -70,9 +70,18 @@ def compute_excludes(paths: list, user_globs: list) -> list:
     return sorted(out)
 
 
+# Pinned so an operator's git config (noprefix, mnemonicPrefix, abbrev, algorithm, renames,
+# textconv) cannot change the bytes `check_truth` re-derives (impl-panel round 1, opus #2).
+_DIFF_PINS = ("-c", "core.abbrev=40", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
+              "-c", "diff.algorithm=myers", "-c", "diff.renames=true", "-c", "diff.renameLimit=1000",
+              "-c", "core.quotePath=true", "-c", "diff.suppressBlankEmpty=false", "-c", "diff.wsErrorHighlight=none")
+
+
 def derive_diff(repo: Path, parent: str, reviewed: str, excludes: list) -> str:
-    """The exact command `check_truth` re-runs: exclusions are exact pathspecs."""
-    args = ["diff", "--no-color", "--no-ext-diff", parent, reviewed, "--", "."]
+    """The exact command `check_truth` re-runs: exclusions are exact pathspecs; every
+    output-affecting git knob is pinned on the command line."""
+    args = [*_DIFF_PINS, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M", "-U3",
+            "--src-prefix=a/", "--dst-prefix=b/", parent, reviewed, "--", "."]
     args += [f":(exclude){p}" for p in excludes]
     return git(repo, *args)
 

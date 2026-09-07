@@ -66,6 +66,20 @@ _FINDINGS_CLOSE_RE = re.compile(r"<!--\s*/playbook:[a-z-]*review-findings\s*-->"
 _CHECKED_GATE_RE = re.compile(r"^(\s*[-*]\s*)\[[xX]\](\s*)(.*)$")
 _BOLD_TITLE_RE = re.compile(r"^(\*\*.*?\*\*)(.*)$", re.DOTALL)
 _OUTCOME_SEP = " — "
+# Impl-panel round 1 (task 048): kept sections still carried review provenance the
+# section filter cannot see. These are REDACTED mechanically (deterministic, over-strips):
+_RECENT_CHAT_RE = re.compile(r"^ {0,3}###\s+Recent Chat\b")          # auto-captured session messages
+_H3_OR_HIGHER_RE = re.compile(r"^ {0,3}#{1,3}(?!#)\s")
+_SEAT_BASE = r"(?:opus|sonnet|sol|terra|grok|codex|claude)(?::[\w.\-\[\]]+)*"
+_SEAT = _SEAT_BASE + r"(?:-crit(?:#\d+)?|#\d+)"                # a seat ref: `opus#1`, `codex:sol#4`, `terra-crit`
+_PANEL_WORD = r"(?:per[- ])?(?:plan[- ]|impl[- ])?panel\b"
+_PANEL_PAREN_EMPTY_RE = re.compile(r"\s*\(" + _PANEL_WORD + r"[\s,;:/-]*\)")      # "(panel )" once the seat refs are gone
+_PANEL_PAREN_LEAD_RE = re.compile(r"\((" + _PANEL_WORD + r"[\s,;:/-]*)")             # "(panel , matches …)" → "(matches …)"
+_SEAT_REF_RE = re.compile(r"(?:\b(?:and|,|/)\s*)?\b" + _SEAT + r"(?:/(?:#?\d+|" + _SEAT + r"))*\b")
+_TRIAGE_LABEL_RE = re.compile(r"\s*(?:\(|;\s*)?\b(?:ACCEPT|REJECT|PARK)(?:ED)?-[A-Z](?:/[A-Z])*(?:\s+decision)?\b\)?")
+_FINDING_LETTER_RE = re.compile(r"\s*\(findings? [A-H]\b[^()]*\)")          # "(finding H, surface to owner)"
+_RESULT_BULLET_RE = re.compile(r"^\s*[-*]\s*\*\*(?:Result|Results|Outcome|Measured|Measurement)s?\b")
+_ARROW_SEP = " → "
 
 
 class LeakageError(ValueError):
@@ -128,11 +142,26 @@ def strip_outcome(gate_line: str) -> str:
         title, tail = bm.group(1), bm.group(2)
     else:
         title, tail = "", rest
-    cut = tail.find(_OUTCOME_SEP)
-    if cut != -1:
-        tail = tail[:cut]
+    cuts = [i for i in (tail.find(_OUTCOME_SEP), tail.find(_ARROW_SEP)) if i != -1]
+    if cuts:
+        tail = tail[:min(cuts)]
     nl = "\n" if gate_line.endswith("\n") else ""
     return f"{lead}[ ]{sp}{title}{tail}".rstrip() + nl
+
+
+def redact_review_refs(line: str) -> str:
+    """Remove inline review provenance a kept section may carry: `(panel opus#1/terra#4)`
+    parentheticals, bare seat refs (`sonnet#2`, `codex:sol#4`, `terra-crit#1`), and
+    plan-triage labels (`ACCEPT-C`, `ACCEPT-D/F/G`, `ACCEPT-B decision`). Over-strips a
+    parenthetical that merely starts with the word panel — the safe direction."""
+    out = _SEAT_REF_RE.sub("", line)
+    out = _PANEL_PAREN_EMPTY_RE.sub("", out)
+    out = _PANEL_PAREN_LEAD_RE.sub("(", out)
+    out = _TRIAGE_LABEL_RE.sub("", out)
+    out = _FINDING_LETTER_RE.sub("", out)
+    out = re.sub(r"(?<=\s)\(\s*\)", "", out)          # an emptied parenthetical (not a call like `f()`)
+    out = re.sub(r"[ \t]{2,}(?=\S)", " ", out)         # collapse the gap a removal left
+    return out
 
 
 def reconstruct_spec(task_md: str) -> str:
@@ -143,6 +172,7 @@ def reconstruct_spec(task_md: str) -> str:
     strip_outcomes = False
     in_status = False
     in_stripped_gate = False        # inside a CHECKED gate's wrapped note (drop continuations)
+    in_recent_chat = False          # a `### Recent Chat` block inside References (session messages)
     for line in text.splitlines(keepends=True):
         title = _h2_title(line)
         if title is not None:
@@ -150,11 +180,23 @@ def reconstruct_spec(task_md: str) -> str:
             strip_outcomes = title in OUTCOME_STRIPPED_SECTIONS
             in_status = title == "status"
             in_stripped_gate = False
+            in_recent_chat = False
             if not dropping:
                 out.append(line)
             continue
         if dropping:
             continue
+        if in_recent_chat:
+            if _H3_OR_HIGHER_RE.match(line) or line.strip() == "---":
+                in_recent_chat = False
+                if line.strip() == "---":
+                    continue
+            else:
+                continue
+        if _RECENT_CHAT_RE.match(line):
+            in_recent_chat = True
+            continue
+        line = redact_review_refs(line)
         if strip_outcomes:
             # A checked gate's outcome note may wrap onto INDENTED continuation lines
             # (impl-panel grok F2): drop them until the next list item, blank line or
@@ -162,6 +204,9 @@ def reconstruct_spec(task_md: str) -> str:
             if _CHECKED_GATE_RE.match(line.rstrip("\n")):
                 in_stripped_gate = True
                 out.append(strip_outcome(line))
+                continue
+            if _RESULT_BULLET_RE.match(line):          # an execution result written during the work
+                in_stripped_gate = True                # (drop its wrapped continuation too)
                 continue
             if in_stripped_gate:
                 if line.strip() and line[:1] in (" ", "\t") and not line.lstrip().startswith(("-", "*")):
@@ -197,6 +242,16 @@ _LEAK_TOKENS = (
                r"\bflagged\b|\bcaught\b)", re.IGNORECASE),
     re.compile(r"^\s*CAP:\s*\d+/\d+", re.MULTILINE),
     re.compile(r"\btriage\b[^\n]*\b(accept|reject|park)(ed)?\b", re.IGNORECASE),
+    # impl-panel round 1 (task 048): provenance the section filter cannot see
+    re.compile(r"\((?:per[- ])?(?:plan[- ]|impl[- ])?panel\b[^()]*#\d", re.IGNORECASE),
+    re.compile(r"\b(?:opus|sonnet|sol|terra|grok|codex)(?::[\w.-]+)*(?:-crit)?#\d", re.IGNORECASE),
+    re.compile(r"\badded at (?:the )?(?:impl|plan)[- ]?review", re.IGNORECASE),
+    re.compile(r"\brevised after\b", re.IGNORECASE),
+    re.compile(r"\b(?:fixed|hardened|done|resolved)\s*\((?:round|r)\s*\d", re.IGNORECASE),
+    re.compile(r"\bfinding [A-H]\b"),
+    re.compile(r"\bowner ruling\b[^\n]*\b(?:panel|round|converge)", re.IGNORECASE),
+    re.compile(r"^\s{0,3}#{1,6}\s+Recent Chat\b", re.MULTILINE),
+    re.compile(r"\b(?:ACCEPT|REJECT|PARK)(?:ED)?-[A-Z]\b"),
 )
 
 

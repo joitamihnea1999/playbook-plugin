@@ -1,5 +1,5 @@
 diff --git a/docs/cli.md b/docs/cli.md
-index 0863e59..21a9340 100644
+index 0863e594ea17fa3f29027c2df382f59128b1d77d..21a934078ef8657a9f201a2ca79496f950837789 100644
 --- a/docs/cli.md
 +++ b/docs/cli.md
 @@ -12,6 +12,8 @@ Everything the `tasks` CLI does. In a playbook-managed project the agent calls i
@@ -12,7 +12,7 @@ index 0863e59..21a9340 100644
  
  **`tasks audit`** — run the pre-panel sweeps against the active task and record a receipt into its `task.md`; exits non-zero on error-severity findings so it can gate a panel review. Part of the close machinery, not the daily loop. Four built-in mind-map checks run here: `mindmap-stale-refs` (a cited path that no longer exists), `mindmap-node-freshness` (a node whose cited code has changed in ≥2 commits *since the node was last edited* — stale institutional memory; git-only, advisory, tunable via `audit.node_freshness_commits` / `node_freshness_severity`, disable with `audit.node_freshness: false`), `mindmap-dangling-links` (a `[N]` cross-link pointing at a node id that isn't defined anywhere — a dead end the agent follows; fence-aware, names the source node, advisory, `audit.dangling_links_severity` raises it), and `mindmap-wellformed` (structural defects in how the map is written — duplicate node ids, nodes missing a `**bold title**`, and unreachable islands a non-routing node nothing links to; advisory, `audit.wellformed_severity` raises it). A `verify-contract-change` sweep also runs, flagging any `verify` command recorded at a past close but no longer in the current contract for that risk — see [the verify-contract guard](configuration.md#the-verify-contract-guard-a-change-to-verify-is-made-visible).
 diff --git a/plugins/playbook/tasks/cli.py b/plugins/playbook/tasks/cli.py
-index beab60a..cebd821 100644
+index beab60af022ca68b765333fe2cc2447cfbb68528..cebd82139c4623d783bbcc32559c039cd97bf860 100644
 --- a/plugins/playbook/tasks/cli.py
 +++ b/plugins/playbook/tasks/cli.py
 @@ -29,7 +29,7 @@ COMMANDS = (
@@ -38,7 +38,7 @@ index beab60a..cebd821 100644
          from tasks.lifecycle import cmd_parked
          cmd_parked(cmd_args)
 diff --git a/plugins/playbook/tasks/core.py b/plugins/playbook/tasks/core.py
-index 8996256..48315fb 100644
+index 8996256786357f83ce066ed7666dca455f253010..48315fbdc9986afc3360e849b26ea7109336e79c 100644
 --- a/plugins/playbook/tasks/core.py
 +++ b/plugins/playbook/tasks/core.py
 @@ -2083,6 +2083,166 @@ def resume_blocked_task(task_file: Path) -> None:
@@ -209,7 +209,7 @@ index 8996256..48315fb 100644
      """Does a task folder name match the activation filter?
  
 diff --git a/plugins/playbook/tasks/lifecycle.py b/plugins/playbook/tasks/lifecycle.py
-index 3407753..80977e5 100644
+index 34077530e298f766bdb00ef4b6df07c9f9a901dc..80977e53ea8942e8eb4d5e23d74b345953b070ff 100644
 --- a/plugins/playbook/tasks/lifecycle.py
 +++ b/plugins/playbook/tasks/lifecycle.py
 @@ -899,6 +899,48 @@ def cmd_blocked(cmd_args):
@@ -262,7 +262,7 @@ index 3407753..80977e5 100644
      """The `tasks parked` arm — body moved verbatim from cli.py (1.5.9 split)."""
      # P9: the standing query that makes parked items un-swallowable. Lists
 diff --git a/plugins/playbook/tasks/project_setup.py b/plugins/playbook/tasks/project_setup.py
-index 5782638..da39532 100644
+index 5782638c3d87e928818d309b728fc8d3ab246fe8..da3953210e232f3bff2bb7bd5216872a44d69a39 100644
 --- a/plugins/playbook/tasks/project_setup.py
 +++ b/plugins/playbook/tasks/project_setup.py
 @@ -150,6 +150,22 @@ def cmd_bootstrap(cmd_args):
@@ -289,7 +289,7 @@ index 5782638..da39532 100644
      print("=== PENDING TASKS ===")
      list_tasks(project_path, pending_only=True)
 diff --git a/plugins/playbook/tasks/template.py b/plugins/playbook/tasks/template.py
-index 3a5d68b..169f62e 100644
+index 3a5d68b4ae9ca132519fdd4c3ffee243777b0fbf..169f62e31bdae7ded070e213f8a3ac758d0c8527 100644
 --- a/plugins/playbook/tasks/template.py
 +++ b/plugins/playbook/tasks/template.py
 @@ -889,6 +889,11 @@ Commands:
@@ -305,7 +305,7 @@ index 3a5d68b..169f62e 100644
    new <type> <name> [intent]   Create task (intent pre-fills ## Intent)
    new --stub <type> <name> [intent]   Create stub (expands on work)
 diff --git a/tests/test_cli_dispatch.py b/tests/test_cli_dispatch.py
-index 2607fb8..9c7bdfa 100644
+index 2607fb87d8db2363afe9e4aa8e0ed16af6a6dfe3..9c7bdfa474e60f0d587baa36a4854ebaf2e9ca3b 100644
 --- a/tests/test_cli_dispatch.py
 +++ b/tests/test_cli_dispatch.py
 @@ -80,6 +80,7 @@ _BASELINE = {
@@ -318,7 +318,7 @@ index 2607fb8..9c7bdfa 100644
      # I5: doctor exits non-zero when a check FAILs. The bare scratch project has
 diff --git a/tests/test_handoff.py b/tests/test_handoff.py
 new file mode 100644
-index 0000000..7fb462e
+index 0000000000000000000000000000000000000000..7fb462e947e0d35cf80957f429fe3fe75743231d
 --- /dev/null
 +++ b/tests/test_handoff.py
 @@ -0,0 +1,187 @@

@@ -19,36 +19,6 @@
       "failure_mode": "Fail-OPEN NaN in the ORS provenance cross-check: ratio = areaD/areaP with a zero/NaN app-ring area makes Math.abs(NaN-1) > 0.02 false, so the preflight silently passes (sonnet#2).",
       "fix_commit": "924ca69",
       "fix_evidence": "if (!(areaP > 0) || !Number.isFinite(areaD)) problems.push("
-    },
-    {
-      "id": "R7-3",
-      "file": "docker/selfhost/run-manifest.md",
-      "symbol": null,
-      "severity": "Important",
-      "historical_outcome": "accepted+fixed",
-      "failure_mode": "The manifest calls the non-unity area ratios 'the operative proof' of distinct backends — unsound (toFixed(3) hides a true 1.000; a same-host older-vintage cache row is also non-unity) (opus#3).",
-      "fix_commit": "924ca69",
-      "fix_evidence": "the **primary proof is the mechanized preflight**"
-    },
-    {
-      "id": "R7-4",
-      "file": "docs/SELFHOST.md",
-      "symbol": null,
-      "severity": "Minor",
-      "historical_outcome": "accepted+fixed",
-      "failure_mode": "Tile HTTP-cache footgun: /api/tiles sends max-age=86400, so repointing one origin to a different archive serves stale byte ranges (blank map) until a hard reload (opus#4).",
-      "fix_commit": "924ca69",
-      "fix_evidence": "Tile cache after repointing `TILES_PMTILES_PATH`."
-    },
-    {
-      "id": "R7-5",
-      "file": "docs/SELFHOST.md",
-      "symbol": null,
-      "severity": "Minor",
-      "historical_outcome": "accepted+fixed",
-      "failure_mode": "'~8 GB resident' understates the footprint: the ~2.25 GB Protomaps base-source cache is a separate build artifact (sol#4).",
-      "fix_commit": "924ca69",
-      "fix_evidence": "is a **separate build cache**, not serving data"
     }
   ],
   "known_rejects": []

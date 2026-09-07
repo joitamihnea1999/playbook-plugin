@@ -19,7 +19,6 @@
     "scripts/perf/measure-shell-interactive.mjs",
     "scripts/perf/package.json",
     "scripts/perf/perf-budget.mjs",
-    "scripts/perf/run-api-latency.mjs",
     "src/features/amenities/server/warmup.test.ts",
     "src/features/map/amenity-cluster-controller.test.ts",
     "src/features/map/amenity-spider-controller.test.ts"
@@ -40,7 +39,7 @@
   "area": "ui",
   "difficulty": "medium",
   "truth_version": 1,
-  "notes": "The UI-code half of the diff only: scripts/perf/*, e2e/*, *.test.ts, docs/PERF_AUDIT.md and README.md are excluded from diff.patch for the 90k budget (raw diff 103 KB); all are in the snapshot tree. The truth Critical is in src/features/map/AppMap.tsx (in the diff); the parked P1-P5 are about src/ files in the diff plus scripts/perf/run-api-latency.mjs (tree only). Dropped non-template H2: 'Fresh impl panel on the final committed tree (…)' (a review section — correctly dropped). Spec edits: template preamble deleted; one Work Plan H3 title '(DONE before triage' → '(DONE before the panel' (a pre-review heading that trips the review-heading regex).",
+  "notes": "The UI-code half of the diff plus scripts/perf/run-api-latency.mjs: the other perf scripts, e2e/*, *.test.ts, docs/PERF_AUDIT.md and README.md are excluded from diff.patch for the 90k budget (raw diff 103 KB); all are in the snapshot tree. Every truth file (AppMap.tsx, warmup.ts, catalogue-query.ts, run-api-latency.mjs) is in the diff. Dropped non-template H2: 'Fresh impl panel on the final committed tree (…)' (a review section — correctly dropped). Spec edits: template preamble deleted; one Work Plan H3 title '(DONE before triage' → '(DONE before the panel' (a pre-review heading that trips the review-heading regex).",
   "mapping": {
     "round": 2,
     "rounds_total": 2,

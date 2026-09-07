@@ -178,9 +178,9 @@ bench/
 
 Tests live in `tests/test_judgebench_*.py` so `scripts/verify` runs them.
 
-## Corpus v1 (step 9 — built 2026-09-07, task 048)
+## Corpus v2 (step 9 — built 2026-09-07, task 048)
 
-**20 frozen cases** in `bench/corpus/` (`corpus.json` version 1), reconstructed from two
+**20 frozen cases** in `bench/corpus/` (`corpus.json` version 2 — v1 was re-frozen after the implementation panel found review provenance the section filter let through; no live run ever saw v1), reconstructed from two
 workspaces' historical panel reviews: `playbook-plugin-dev` (this plugin, 8 enforcement
 cases) and `HowFarAI-v2` (a Next.js app reviewed with playbook; 6 server, 4 UI/perf,
 2 docs). `python3 bench/judgebench.py corpus validate` → `corpus v1: 20 cases OK`.
@@ -194,7 +194,7 @@ cases) and `HowFarAI-v2` (a Next.js app reviewed with playbook; 6 server, 4 UI/p
 
 12 cases carry at least one Critical the historical panel caught; 3 have zero fixed
 findings (bait); difficulty: 3 easy / 5 medium / 12 hard. Every rendered prompt is under
-90,000 chars and 120,000 bytes (grok's argv element), largest hf-007-r3 at 89,587 chars.
+90,000 chars and 120,000 bytes (grok's argv element), largest pb-039-r2 at 81,541 chars.
 
 ### How a case is built (deterministic, re-derivable)
 
@@ -219,16 +219,34 @@ READ-ONLY and write only under `bench/corpus/`:
    `fix_commit` + `fix_evidence`) or accepted+parked; explicit REJECT lines become
    `known_rejects` (with `file`/`symbol` when the claim named them).
 4. `check_truth.py --source-repo NAME=PATH… [--workspace NAME=PATH…]` is the mechanical
-   instrument: `repo_base_sha` resolves; `diff.patch` re-derives byte-for-byte; every
-   finding's `file` exists at the reviewed sha and its `symbol` occurs in it; an
-   accepted+fixed finding's `fix_commit` DESCENDS from the reviewed commit, touches the
-   file, and its `fix_evidence` (an exact substring) is ABSENT from the file at the
-   reviewed sha and PRESENT at the fix commit — so the fix is provably not in the
-   reviewed diff and lands where claimed; no two cases share (repo, sha, diff_of); the
-   package builds leak-free under the char and byte budgets; with `--workspace`, spec.md
-   regenerates from the source record + `spec_edits`. It rejected several of the
-   builder's first evidence strings (pre-existing text, wrong file, wrong symbol) — that
-   is the point.
+   instrument: `repo_base_sha` resolves and is the RIGHT endpoint of `diff_of` (base an
+   ancestor); `diff.patch` re-derives byte-for-byte under pinned `git diff` flags (prefixes,
+   abbrev, algorithm, renames, textconv — an operator's git config cannot change the bytes);
+   the `mapping` object is present and consistent (round ≤ rounds_total, non-empty evidence,
+   fix_commits ⊇ the truth's fix commits); every finding's `file` exists at the reviewed sha,
+   is NOT in `diff_excludes` (a truth file must be in the diff the judge sees), and its
+   `symbol` occurs in it; an accepted+fixed finding's `fix_commit` DESCENDS from the reviewed
+   commit, touches the file, and its `fix_evidence` (an exact substring) is ABSENT at the
+   reviewed sha, ABSENT at the fix commit's parent, and PRESENT at the fix commit — so the fix
+   is provably not in the reviewed diff and is introduced by the named commit; no two cases
+   share (repo, sha, diff_of); the package builds leak-free under the char and byte budgets;
+   with `--workspace`, spec.md regenerates from the source record + `spec_edits`. It rejected
+   several of the builder's first evidence strings (pre-existing text, wrong file, wrong
+   symbol) — that is the point.
+
+### What the spec filter redacts (v2, after the implementation panel)
+
+`reconstruct_spec` keeps the allowlisted sections, and inside them now ALSO drops
+`### Recent Chat` blocks (auto-captured session messages — one carried the owner's
+"stop the panel loop" ruling), execution `- **Result:**` bullets, checked-gate outcomes
+after ` → ` as well as ` — `, and mechanically redacts inline review provenance:
+`(panel opus#1/terra#4)` parentheticals, bare seat refs (`sonnet#2`, `codex:sol#4`,
+`terra-crit`), plan-triage labels (`ACCEPT-C`, `ACCEPT-D/F/G`) and lettered plan-finding
+refs (`(finding H, …)`). `leak_scan` was broadened for what redaction cannot decide
+(`added at impl-review`, `revised after`, `FIXED (round 2-4)`, `finding H`, an owner ruling
+about a panel/round, a Recent Chat heading) — those are cleaned by hand as recorded
+`spec_edits`. Redaction over-strips by design (a parenthetical that merely starts with
+"panel" goes too).
 
 ### Base commit and rounds
 
@@ -258,6 +276,11 @@ diff, never a lone fix commit's delta.
   not shown every changed file in such cases.
 - Two truth entries on one `(file, symbol)` never auto-match (scoring needs exactly one);
   `check_truth` prints the collisions and `adjudicate` routes them to the human.
+- Truth = the named round's ACCEPTED findings, so three known-real defects of a reviewed
+  tree are deliberately NOT in truth and must be adjudicated `v` (valid-new) if a judge
+  reports them: pb-036-r2's `__test_stub__` env seam (rejected in round 2, conceded and
+  removed in round 3) and hf-011-r7's three doc accepts (their files are excluded from that
+  case's diff for the budget). Each case's `notes` names them.
 - Baits are not all pure: `pb-039-r4` and `hf-018-r4` carry accepted+parked residuals so
   a judge who finds them is credited, not penalized; only `hf-007-r6` has `findings: []`.
 - No credential appears in any diff; the only password-like string is the self-host

@@ -1,5 +1,5 @@
 diff --git a/docs/guarantee-ledger.json b/docs/guarantee-ledger.json
-index 520e0e0..dd14d89 100644
+index 520e0e0d25e7ece4dd606a66d20911c856d91f92..dd14d89fb1c02e25c97f9afea9ec45e7ccb6403a 100644
 --- a/docs/guarantee-ledger.json
 +++ b/docs/guarantee-ledger.json
 @@ -40,15 +40,15 @@
@@ -23,7 +23,7 @@ index 520e0e0..dd14d89 100644
        "required_live_evidence": [],
        "semantic_protocol": null,
 diff --git a/plugins/playbook/tasks/core.py b/plugins/playbook/tasks/core.py
-index 62c0560..36d1356 100644
+index 62c056007eb925492a579bffeaa8d1c11eac5f94..36d1356f9842da798d7866c53c6a9c40e7c4f63f 100644
 --- a/plugins/playbook/tasks/core.py
 +++ b/plugins/playbook/tasks/core.py
 @@ -969,6 +969,27 @@ def _iter_nonfenced(lines: "list[str]"):
@@ -114,7 +114,7 @@ index 62c0560..36d1356 100644
  
  # ── Session handoff (C1) ─────────────────────────────────────────────────────
 diff --git a/tests/test_blocked_state.py b/tests/test_blocked_state.py
-index 50eb67e..7e59873 100644
+index 50eb67e2ad6ed0111d3eb2bac27ae68090082c77..7e598733646af97a5644e4e87d1e5435967ac50f 100644
 --- a/tests/test_blocked_state.py
 +++ b/tests/test_blocked_state.py
 @@ -109,6 +109,92 @@ class SetBlockedPure(unittest.TestCase):
@@ -211,7 +211,7 @@ index 50eb67e..7e59873 100644
      def setUp(self):
          self._tmp = tempfile.TemporaryDirectory()
 diff --git a/tests/test_handoff.py b/tests/test_handoff.py
-index ef7f2ef..beb3b5e 100644
+index ef7f2efbba925a03bdd9711fba8698926f4e49a8..beb3b5e2958f152c7bd8f49804e372ce7c086e32 100644
 --- a/tests/test_handoff.py
 +++ b/tests/test_handoff.py
 @@ -255,6 +255,37 @@ class FenceAndContainment(_Base):

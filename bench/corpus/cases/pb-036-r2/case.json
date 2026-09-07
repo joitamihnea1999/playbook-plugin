@@ -24,7 +24,7 @@
     },
     {
       "replace": [
-        "> **⚠ READ FIRST — the Plan Review triage (findings A–H, above) SUPERSEDES/HARDENS these W-gates.** The plan panel reshaped the design materially. Apply, per gate: ",
+        "> **⚠ READ FIRST — the Plan Review triage SUPERSEDES/HARDENS these W-gates.** The plan panel reshaped the design materially. Apply, per gate: ",
         "> **Design amendments, per gate:** "
       ]
     }
@@ -33,14 +33,13 @@
   "area": "enforcement",
   "difficulty": "hard",
   "truth_version": 1,
-  "notes": "Plan §3.1 said feature 0714585 -> round-1 A-H -> fix e032d92; the repository shows 0714585 is the POST-round-1 tree, so this case reproduces round 2. Excluded from diff.patch for the 90k budget: docs/guarantee-ledger.json (36 KB for 8 changed entries) and the NEW test file tests/test_tail_certification.py (31 KB) — both are present in the snapshot tree the judge can read; every truth finding is in core.py/review.py. Spec edits: the task.md template preamble blockquote deleted (agent instructions; trips leak_scan on 'triage narrative'); 'impl panel' -> 'implementation panel' once in Intent (domain text about tail certification, trips the impl-panel regex); the Work Plan's 'READ FIRST — the Plan Review triage (findings A–H) …' lead-in replaced by 'Design amendments, per gate:' (written after the PLAN review, before implementation — legitimately pre-impl-review spec, but it names dropped plan-review findings). Judge text for rounds 1-6 is trimmed from judge.md (pointer at judge.md:497); truth wording comes from the triage in task-archive.md:22-34. Severity labels are the triage's.",
+  "notes": "Plan §3.1 said feature 0714585 -> round-1 A-H -> fix e032d92; the repository shows 0714585 is the POST-round-1 tree, so this case reproduces round 2. Excluded from diff.patch for the 90k budget: docs/guarantee-ledger.json (36 KB for 8 changed entries) and the NEW test file tests/test_tail_certification.py (31 KB) — both are present in the snapshot tree the judge can read; every truth finding is in core.py/review.py. Spec edits: the task.md template preamble blockquote deleted (agent instructions; trips leak_scan on 'triage narrative'); 'impl panel' -> 'implementation panel' once in Intent (domain text about tail certification, trips the impl-panel regex); the Work Plan's 'READ FIRST — the Plan Review triage (findings A–H) …' lead-in replaced by 'Design amendments, per gate:' (written after the PLAN review, before implementation — legitimately pre-impl-review spec, but they name dropped plan-review findings). Recent Chat blocks are dropped by the filter (they carried the owner's round-11 ruling). Judge text for rounds 1-6 is trimmed from judge.md (pointer at judge.md:497); truth wording comes from the triage in task-archive.md:22-34. Severity labels are the triage's.",
   "mapping": {
     "round": 2,
     "rounds_total": 11,
     "fix_commits": [
-      "e032d92",
-      "2064484"
+      "e032d92"
     ],
-    "evidence": "0714585 (08-27 16:57) ALREADY contains the round-1 fixes I1-I8 (__test_stub__, is_outer_scope, --name-status present at 0714585, absent at 0714585^); round 1 ran on the dirty pre-commit tree (audit receipt 16:37:13). So the tree at 0714585 is what ROUND 2 reviewed (task-archive.md 'ROUND 2 (tree 723769546254, after the I1-I8 fixes)'); its accepts were fixed in e032d92 'round-2 hardening' (17:15). sol#2 (__test_stub__ seam) was REJECTED in round 2, but the round-3 triage concedes that defense was factually wrong and 2064484 removed the seam — recorded as truth because the defect existed in the reviewed tree."
+    "evidence": "0714585 (08-27 16:57) ALREADY contains the round-1 fixes I1-I8 (__test_stub__, is_outer_scope, --name-status present at 0714585, absent at 0714585^); round 1 ran on the dirty pre-commit tree (audit receipt 16:37:13). So the tree at 0714585 is what ROUND 2 reviewed (task-archive.md 'ROUND 2 (tree 723769546254, after the I1-I8 fixes)'); its accepts were fixed in e032d92 'round-2 hardening' (17:15). sol#2 (the __test_stub__ env seam) was REJECTED in round 2 and only conceded + removed in round 3 (2064484) — NOT in this round's truth (impl-panel r1 sol#2/grok#1: truth = the named round's ACCEPTS); it is a known REAL defect of this tree, so a judge who reports it should be adjudicated valid-new (`v`), never marked a false positive."
   }
 }

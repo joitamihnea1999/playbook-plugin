@@ -30,12 +30,6 @@ Task 015 measured the mobile map flow against the owner budgets and 6/8 FAIL (`d
 - Playbook: playbook/Build
 - Note: Don't hardcode task numbers in plans — `.claude/bin/tasks new` auto-increments.
 
-### Recent Chat (auto-captured at activation — review and remove unrelated)
-
-**[M062]** [2026-08-30 19:33:16]
-Run .claude/bin/tasks bootstrap, follow the handoff (task 017, H3a — work complete and committed at app main 4bb6923, verification green), resume with tasks work 017, and CLOSE it properly: the post-p...
-
----
 
 ## Design Phase
 

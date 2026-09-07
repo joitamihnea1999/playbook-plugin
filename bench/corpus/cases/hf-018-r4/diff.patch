@@ -1,5 +1,5 @@
 diff --git a/docs/SELFHOST.md b/docs/SELFHOST.md
-index b5e3e95..0f2db52 100644
+index b5e3e950c6fc5d2874090fdcd9088b4991f3a633..0f2db525ecb4c8db78e1941c7a5aedc091eeaee1 100644
 --- a/docs/SELFHOST.md
 +++ b/docs/SELFHOST.md
 @@ -245,6 +245,56 @@ For a fuller teardown (remove containers, or delete the volumes) see [Teardown](
@@ -60,7 +60,7 @@ index b5e3e95..0f2db52 100644
  
  The app reads provider env at process start, so run **two** instances from the SAME
 diff --git a/next.config.ts b/next.config.ts
-index 319153d..61ce0bd 100644
+index 319153da5d96dda9ee181bb042a314e22c01fc57..61ce0bdd8601a4776d1e1d1869ff98eb0cb2f1fd 100644
 --- a/next.config.ts
 +++ b/next.config.ts
 @@ -1,10 +1,17 @@
@@ -82,7 +82,7 @@ index 319153d..61ce0bd 100644
  
  export default nextConfig;
 diff --git a/src/features/isochrones/server/transit-plan.ts b/src/features/isochrones/server/transit-plan.ts
-index e796c28..1625497 100644
+index e796c289fe30eb544c0f651fc0dae5214a42e184..1625497b43f50104ac72fbf3b2ef687bbbca244b 100644
 --- a/src/features/isochrones/server/transit-plan.ts
 +++ b/src/features/isochrones/server/transit-plan.ts
 @@ -3,7 +3,7 @@ import { PACE_MODEL } from "@/features/isochrones/pace";
@@ -240,7 +240,7 @@ index e796c28..1625497 100644
    // keep for hours; a plan with no transit leg (unreachable, or the walk/bike
    // direct fallback — both rendered as "No public-transport route") heals in
 diff --git a/src/features/isochrones/server/transit.ts b/src/features/isochrones/server/transit.ts
-index 0d18fdc..371ac6b 100644
+index 0d18fdc799f5419dd4b71834e54194cfccc5ce7b..371ac6b56ef8dc3e1d779b4e986a4e68d3738f25 100644
 --- a/src/features/isochrones/server/transit.ts
 +++ b/src/features/isochrones/server/transit.ts
 @@ -18,7 +18,7 @@ import {
@@ -349,7 +349,7 @@ index 0d18fdc..371ac6b 100644
      console.error("[transit] walking rings timed out; radial origin fallback (ORS call continues into cache)");
    }
 diff --git a/src/features/map/hover-controller.ts b/src/features/map/hover-controller.ts
-index 4f73194..a94e30a 100644
+index 4f73194bf99e5a5eef9a5f26ae96926bcd3e028f..a94e30aeba5b5f2a771ce21bd3d7fbae9b7b1423 100644
 --- a/src/features/map/hover-controller.ts
 +++ b/src/features/map/hover-controller.ts
 @@ -2,6 +2,7 @@ import type maplibregl from "maplibre-gl";
@@ -385,7 +385,7 @@ index 4f73194..a94e30a 100644
        if (f.geometry.type !== "Point") continue;
 diff --git a/src/features/map/query-features.ts b/src/features/map/query-features.ts
 new file mode 100644
-index 0000000..a9b5b0e
+index 0000000000000000000000000000000000000000..a9b5b0e9289a84f60c581c55bc036e6d98cc59f2
 --- /dev/null
 +++ b/src/features/map/query-features.ts
 @@ -0,0 +1,87 @@
@@ -477,7 +477,7 @@ index 0000000..a9b5b0e
 +  }
 +}
 diff --git a/src/features/map/reach-directions-controller.ts b/src/features/map/reach-directions-controller.ts
-index 537dcc0..8e82839 100644
+index 537dcc0cdae220b3d2dd6ae841f7efe1c7a02193..8e82839a121730d66daf7afdfca13c6ff6adde5d 100644
 --- a/src/features/map/reach-directions-controller.ts
 +++ b/src/features/map/reach-directions-controller.ts
 @@ -20,7 +20,7 @@ import type { EdgeInsets } from "@/features/map/route-framing";
@@ -504,7 +504,7 @@ index 537dcc0..8e82839 100644
  export interface ReachStepView {
    primary: string;
 diff --git a/src/features/map/reach-journey-controller.ts b/src/features/map/reach-journey-controller.ts
-index 3a7499b..edcb650 100644
+index 3a7499b06083d0f75217f7959b1d1a38020db169..edcb65072f37bba3c2157ca243dde68c2d67aecd 100644
 --- a/src/features/map/reach-journey-controller.ts
 +++ b/src/features/map/reach-journey-controller.ts
 @@ -6,6 +6,7 @@ import type { EdgeInsets } from "@/features/map/route-framing";
@@ -550,7 +550,7 @@ index 3a7499b..edcb650 100644
  
    /** Fit the camera to the drawn journey so the whole path is visible beside the
 diff --git a/src/features/map/route-path-controller.ts b/src/features/map/route-path-controller.ts
-index ea95af6..08ac6d5 100644
+index ea95af6c7640eccc4afd930155c59a3130bb48ab..08ac6d56d939f64a4968ea02b95835a148b5d51e 100644
 --- a/src/features/map/route-path-controller.ts
 +++ b/src/features/map/route-path-controller.ts
 @@ -6,6 +6,7 @@ import {
@@ -581,7 +581,7 @@ index ea95af6..08ac6d5 100644
    return {
 diff --git a/src/lib/dev-origins.ts b/src/lib/dev-origins.ts
 new file mode 100644
-index 0000000..62533e2
+index 0000000000000000000000000000000000000000..62533e256ae4a3b9dc18661399a595218fb181a3
 --- /dev/null
 +++ b/src/lib/dev-origins.ts
 @@ -0,0 +1,33 @@
@@ -619,7 +619,7 @@ index 0000000..62533e2
 +  return s.trim().toLowerCase();
 +}
 diff --git a/src/lib/provider-http.ts b/src/lib/provider-http.ts
-index 60f8e24..abcd504 100644
+index 60f8e2401197852da42bee8bf43679255464daba..abcd504f8518dd488bd9d3160bae61630aa8e122 100644
 --- a/src/lib/provider-http.ts
 +++ b/src/lib/provider-http.ts
 @@ -17,11 +17,59 @@ import { createHash } from "node:crypto";

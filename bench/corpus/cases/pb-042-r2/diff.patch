@@ -1,6 +1,6 @@
 diff --git a/docs/enforcement-journal.md b/docs/enforcement-journal.md
 new file mode 100644
-index 0000000..7504047
+index 0000000000000000000000000000000000000000..7504047fd3362d94576a7f0e92f709ff279da167
 --- /dev/null
 +++ b/docs/enforcement-journal.md
 @@ -0,0 +1,110 @@
@@ -115,7 +115,7 @@ index 0000000..7504047
 +`judge.md` round), not an exact iteration index. `0` means it could not be
 +determined.
 diff --git a/docs/guarantee-ledger.json b/docs/guarantee-ledger.json
-index 7681522..7b6c820 100644
+index 7681522d35de4e3e074ce44338fdb199ea8a4445..7b6c8204515cce01f5a6a6859da9a587000bc1cd 100644
 --- a/docs/guarantee-ledger.json
 +++ b/docs/guarantee-ledger.json
 @@ -9572,7 +9572,133 @@
@@ -254,7 +254,7 @@ index 7681522..7b6c820 100644
        "follow_up_phases": [],
        "required_live_evidence": [],
 diff --git a/plugins/playbook/scripts/pb_journal.py b/plugins/playbook/scripts/pb_journal.py
-index ac38a89..bd46522 100644
+index ac38a891e007d246a0344d46b938c222a205b174..bd4652224479096584f977a38f8b4a7beddfb00d 100644
 --- a/plugins/playbook/scripts/pb_journal.py
 +++ b/plugins/playbook/scripts/pb_journal.py
 @@ -92,16 +92,6 @@ def append(agent_dir, hook, decision, reason, session_id="",
@@ -400,7 +400,7 @@ index ac38a89..bd46522 100644
      return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
  
 diff --git a/plugins/playbook/tasks/review.py b/plugins/playbook/tasks/review.py
-index e90e2b1..e322bfe 100644
+index e90e2b15d31fd664e1d905f7ad6d903b50795e0a..e322bfeb3ee95438c4c23b60d3e60eb8845ff804 100644
 --- a/plugins/playbook/tasks/review.py
 +++ b/plugins/playbook/tasks/review.py
 @@ -17,10 +17,12 @@ command module (design-1.5.9.md §4).
@@ -773,7 +773,7 @@ index e90e2b1..e322bfe 100644
      # user how to raise the cap, and exit nonzero — it's not a review.
 diff --git a/tests/test_review_spend_journal.py b/tests/test_review_spend_journal.py
 new file mode 100644
-index 0000000..48778e1
+index 0000000000000000000000000000000000000000..48778e1c1148a6b5b0f5abd2e270da4649770bb6
 --- /dev/null
 +++ b/tests/test_review_spend_journal.py
 @@ -0,0 +1,398 @@

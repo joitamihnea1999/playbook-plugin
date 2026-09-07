@@ -1,5 +1,5 @@
 diff --git a/docs/guarantee-ledger.json b/docs/guarantee-ledger.json
-index 6eb4efc..2baf0b7 100644
+index 6eb4efc15d88f94257d7eacd8988487c57c3a487..2baf0b76dbbec0a72c50fce5abf67ff759a932a3 100644
 --- a/docs/guarantee-ledger.json
 +++ b/docs/guarantee-ledger.json
 @@ -1,7 +1,7 @@
@@ -144,7 +144,7 @@ index 6eb4efc..2baf0b7 100644
        "follow_up_phases": [],
        "required_live_evidence": [],
 diff --git a/plugins/playbook/tasks/core.py b/plugins/playbook/tasks/core.py
-index d1e2e56..943eb80 100644
+index d1e2e5619ae5593500cc28913207ffd0e0d5d60d..943eb800f8fb6498bff8dff6fb88536de9f8638f 100644
 --- a/plugins/playbook/tasks/core.py
 +++ b/plugins/playbook/tasks/core.py
 @@ -912,69 +912,247 @@ _RISK_HEADING_RE = re.compile(
@@ -635,7 +635,7 @@ index d1e2e56..943eb80 100644
                  body = s.lstrip(">").strip()
 diff --git a/tests/test_fence_scanner.py b/tests/test_fence_scanner.py
 new file mode 100644
-index 0000000..be40bda
+index 0000000000000000000000000000000000000000..be40bda21e033f15c7e8599d99cd3a1f630d3ab5
 --- /dev/null
 +++ b/tests/test_fence_scanner.py
 @@ -0,0 +1,336 @@
@@ -976,7 +976,7 @@ index 0000000..be40bda
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tests/test_unclassified_fails_closed.py b/tests/test_unclassified_fails_closed.py
-index ef422a6..344629b 100644
+index ef422a6668f5f786f700864f9f078ad9e61c5b3a..344629ba176bb8f264508db7a962bac6d77ae3d3 100644
 --- a/tests/test_unclassified_fails_closed.py
 +++ b/tests/test_unclassified_fails_closed.py
 @@ -127,6 +127,47 @@ class RiskSectionDetection(unittest.TestCase):

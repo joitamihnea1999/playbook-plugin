@@ -1,6 +1,6 @@
 diff --git a/docs/PERF_AUDIT.md b/docs/PERF_AUDIT.md
 new file mode 100644
-index 0000000..ad0ec6e
+index 0000000000000000000000000000000000000000..ad0ec6e412b8352968396890a9e7e1a2e207639f
 --- /dev/null
 +++ b/docs/PERF_AUDIT.md
 @@ -0,0 +1,112 @@
@@ -118,7 +118,7 @@ index 0000000..ad0ec6e
 +- The Photon cold-tail cause behind the suggest p95 spike (p50 is fine).
 diff --git a/scripts/perf/.gitignore b/scripts/perf/.gitignore
 new file mode 100644
-index 0000000..b062fd4
+index 0000000000000000000000000000000000000000..b062fd495642118c2afb06cff45ff4e110b6ee15
 --- /dev/null
 +++ b/scripts/perf/.gitignore
 @@ -0,0 +1,7 @@
@@ -131,7 +131,7 @@ index 0000000..b062fd4
 +*.report.html
 diff --git a/scripts/perf/README.md b/scripts/perf/README.md
 new file mode 100644
-index 0000000..ab56b8e
+index 0000000000000000000000000000000000000000..ab56b8eeb0fc7d83b71f0b5e409825b635317697
 --- /dev/null
 +++ b/scripts/perf/README.md
 @@ -0,0 +1,86 @@
@@ -223,7 +223,7 @@ index 0000000..ab56b8e
 +  the cold (first-touch) p95.
 diff --git a/scripts/perf/analyze-bundle.mjs b/scripts/perf/analyze-bundle.mjs
 new file mode 100644
-index 0000000..0ede561
+index 0000000000000000000000000000000000000000..0ede561510b36b224ae6f89983509fa1305753a6
 --- /dev/null
 +++ b/scripts/perf/analyze-bundle.mjs
 @@ -0,0 +1,150 @@
@@ -379,7 +379,7 @@ index 0000000..0ede561
 +});
 diff --git a/scripts/perf/browser.mjs b/scripts/perf/browser.mjs
 new file mode 100644
-index 0000000..51c937e
+index 0000000000000000000000000000000000000000..51c937e5b87622dbe77562f736c104a6d29de09a
 --- /dev/null
 +++ b/scripts/perf/browser.mjs
 @@ -0,0 +1,88 @@
@@ -473,7 +473,7 @@ index 0000000..51c937e
 +}
 diff --git a/scripts/perf/config.mjs b/scripts/perf/config.mjs
 new file mode 100644
-index 0000000..cc0c937
+index 0000000000000000000000000000000000000000..cc0c93706605878a29c030913b526ef3406a2ee1
 --- /dev/null
 +++ b/scripts/perf/config.mjs
 @@ -0,0 +1,96 @@
@@ -575,7 +575,7 @@ index 0000000..cc0c937
 +}
 diff --git a/scripts/perf/package.json b/scripts/perf/package.json
 new file mode 100644
-index 0000000..5a1d6c2
+index 0000000000000000000000000000000000000000..5a1d6c2909b01877e22a122201f2233b67447611
 --- /dev/null
 +++ b/scripts/perf/package.json
 @@ -0,0 +1,19 @@
@@ -600,7 +600,7 @@ index 0000000..5a1d6c2
 +}
 diff --git a/scripts/perf/run-all.mjs b/scripts/perf/run-all.mjs
 new file mode 100644
-index 0000000..a841d1e
+index 0000000000000000000000000000000000000000..a841d1e9355eb135e4a3c4fd25279493b3ed7e86
 --- /dev/null
 +++ b/scripts/perf/run-all.mjs
 @@ -0,0 +1,41 @@
@@ -647,7 +647,7 @@ index 0000000..a841d1e
 +if (rt && !rt.panZoom.renderFree) console.log(`  ⚠ gesture NOT render-free — investigate.`);
 diff --git a/scripts/perf/run-api-latency.mjs b/scripts/perf/run-api-latency.mjs
 new file mode 100644
-index 0000000..b941baa
+index 0000000000000000000000000000000000000000..b941baa9327de680f7e03ee943c4ce057d3a3366
 --- /dev/null
 +++ b/scripts/perf/run-api-latency.mjs
 @@ -0,0 +1,110 @@
@@ -763,7 +763,7 @@ index 0000000..b941baa
 +});
 diff --git a/scripts/perf/run-lighthouse.mjs b/scripts/perf/run-lighthouse.mjs
 new file mode 100644
-index 0000000..cbad4c3
+index 0000000000000000000000000000000000000000..cbad4c3e8b0c027a131567395f1dd584a4e91787
 --- /dev/null
 +++ b/scripts/perf/run-lighthouse.mjs
 @@ -0,0 +1,104 @@
@@ -873,7 +873,7 @@ index 0000000..cbad4c3
 +});
 diff --git a/scripts/perf/run-runtime-profile.mjs b/scripts/perf/run-runtime-profile.mjs
 new file mode 100644
-index 0000000..4adb242
+index 0000000000000000000000000000000000000000..4adb2428e95bcd00dfd79c5da7b05adfd793a5e8
 --- /dev/null
 +++ b/scripts/perf/run-runtime-profile.mjs
 @@ -0,0 +1,265 @@
@@ -1144,7 +1144,7 @@ index 0000000..4adb242
 +});
 diff --git a/scripts/perf/serve-prod.sh b/scripts/perf/serve-prod.sh
 new file mode 100755
-index 0000000..48e1e25
+index 0000000000000000000000000000000000000000..48e1e25836aec7290a600ed2f67a091240257822
 --- /dev/null
 +++ b/scripts/perf/serve-prod.sh
 @@ -0,0 +1,59 @@

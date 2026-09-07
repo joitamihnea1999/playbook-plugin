@@ -42,17 +42,6 @@ The task.md fence scanners are on the ENFORCEMENT path — they decide whether `
 - Playbook: playbook/Fix
 - Note: Don't hardcode task numbers in plans — `.claude/bin/tasks new` auto-increments.
 
-### Recent Chat (auto-captured at activation — reviewed; unrelated removed)
-
-M321-M329 removed — all from an UNRELATED project (a "howfar"/transit app: ORS quota, walk/transit/car preset minutes). Not this task.
-
-**[M330]** [2026-09-02] — the activating prompt for THIS task. Distilled binding constraints (into Intent/Why + Work Plan):
-- Branch `fix/1.5.42-batch` off up-to-date origin/main (main already carries the tamper-FP + review-spend merges — confirmed 0/0 vs origin at activation).
-- BUILD per this spec: one strict scanner, per-consumer fail directions (readers fail-open, destructive writers fail-closed, risk close-gate uncertain→BLOCK), indented-code-block awareness, NBSP/tab in fence closers & ATX headings, fenced-`## Status` stop-gate.
-- V7 (`## Status`) is a lockstep bash+python parity change — SPLIT it out to its own task if it runs heavy (owner honors the spec's own judgment).
-- Standing rules: red-first per vector with the existing parity tables as negative controls; update PB-RISK-CLASSIFY / PB-TASK-BLOCKED ledger limitations to the new bounds; verify green per commit; push + CI to four green lanes; reviews in background; judges per models.json (grok 402 = infrastructure, quorum 3 of 4 holds); NO version bump, NO merge, never `claude plugin` commands. Hand off at a boundary if context runs high. Capped report; stop after.
-
----
 
 ## Design Phase
 

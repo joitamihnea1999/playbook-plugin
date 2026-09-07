@@ -16,13 +16,16 @@
   "spec_edits": [
     {
       "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    },
+    {
+      "delete": "> **Revised after plan-review round 1 (P1–P10 folded in).**\n"
     }
   ],
   "kind": "feature",
   "area": "server",
   "difficulty": "hard",
   "truth_version": 1,
-  "notes": "docs/SELFHOST.md, docker/selfhost/run-manifest.md and docker/selfhost/build-tiles.sh are excluded from diff.patch for the 90k budget (all three are in the snapshot tree; R7-3/R7-4/R7-5 are doc findings about the first two and are kept as truth with those files; build-tiles.sh has no finding). Severities: the triage gives none for R7 ('3 fixed on the instrument'); R7-2 (a silent pass on NaN) recorded Critical by the plan's severity vocabulary (a gate that fails open), the others Important. Spec edits: template preamble deleted. Dropped by the closed allowlist (non-template H2 in this record): none.",
+  "notes": "docs/SELFHOST.md, docker/selfhost/run-manifest.md and docker/selfhost/build-tiles.sh are excluded from diff.patch for the 90k budget (all three are in the snapshot tree). Because a truth file must be in the diff (impl-panel r1 grok#3), the round's three DOC accepts are NOT truth here: R7-3 manifest 'operative proof' overclaim (run-manifest.md, opus#3), R7-4 tile HTTP-cache footgun (SELFHOST.md, opus#4), R7-5 '~8 GB resident' understated (SELFHOST.md, sol#4) — all fixed in 924ca69; a judge who reports one should be adjudicated valid-new. Severities: the triage gives none for R7 ('3 fixed on the instrument'); R7-2 (a silent pass on NaN) recorded Critical by the plan's severity vocabulary (a gate that fails open), the others Important. Spec edits: template preamble deleted. Dropped by the closed allowlist (non-template H2 in this record): none.",
   "mapping": {
     "round": 7,
     "rounds_total": 10,

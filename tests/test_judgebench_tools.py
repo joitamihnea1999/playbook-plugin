@@ -243,6 +243,8 @@ class MapRoundsTests(unittest.TestCase):
         self.assertIn("13:06:25", out)
         self.assertIn("app=" + self.fx.c2[:10], out)   # snapshot pairing printed
         self.assertIn("newest-first", out.lower())     # the file-order caveat is stated
+        self.assertIn("file#", out)                     # indices are FILE positions, never round numbers
+        self.assertIn("CHRONOLOGICAL", out)             # snapshot-dated rounds listed oldest→newest
         self.fx.assert_workspace_untouched(self)
 
     def test_unknown_task_number_exits_2(self):
@@ -355,7 +357,9 @@ class CheckTruthTests(unittest.TestCase):
                                  "--repo", str(self.fx.repo), "--reviewed", self.fx.c1,
                                  "--id", "demo-007-r1", "--kind", "feature", "--area", "server",
                                  "--difficulty", "easy", "--repo-name", "app",
-                                 "--out", str(self.fx.out / "cases"), "--exclude", "docs/ledger.json"])
+                                 "--out", str(self.fx.out / "cases"), "--exclude", "docs/ledger.json",
+                                 "--round", "1", "--rounds-total", "2", "--fix-commit", self.fx.c2,
+                                 "--evidence", "audit follows commit"])
         self.case_dir = self.fx.out / "cases" / "demo-007-r1"
         (self.fx.out / "corpus.json").write_text(json.dumps({"version": 1, "cases": ["demo-007-r1"]}),
                                                  encoding="utf-8")
@@ -488,6 +492,8 @@ class PanelHardeningTests(unittest.TestCase):
                                       "--id", case_id, "--kind", "feature", "--area", "server",
                                       "--difficulty", "easy", "--repo-name", "app",
                                       "--out", str(self.fx.out / "cases"), "--exclude", "docs/ledger.json",
+                                      *(["--round", "1", "--rounds-total", "2", "--fix-commit", self.fx.c2,
+                                         "--evidence", "audit follows commit"] if "--round" not in extra else []),
                                       *extra])
         return rc, buf.getvalue()
 
@@ -687,6 +693,95 @@ class PanelHardeningTests(unittest.TestCase):
         self.assertIn("trimmed", out)
         self.assertIn("task-archive.md", out)
         self.assertIn("ROUND 2", out)          # the compacted triage headers are listed
+
+
+class ImplPanelRound1ToolTests(unittest.TestCase):
+    """Task 048 impl-panel round 1: check_truth tightenings (diff_of endpoint = repo_base_sha,
+    mapping schema, fix_evidence absent at the fix commit's PARENT, truth file must not be
+    in diff_excludes) and derive_diff pinned against operator git config."""
+
+    def setUp(self):
+        self.fx = _Fixture()
+        self.addCleanup(self.fx.close)
+        import io
+        from contextlib import redirect_stdout
+        with redirect_stdout(io.StringIO()):
+            case_from_task.main(["--workspace", str(self.fx.ws), "--task", "007", "--repo", str(self.fx.repo),
+                                 "--reviewed", self.fx.c1, "--id", "r1", "--kind", "feature", "--area", "server",
+                                 "--difficulty", "easy", "--repo-name", "app", "--out", str(self.fx.out / "cases"),
+                                 "--exclude", "docs/ledger.json", "--round", "1", "--rounds-total", "2",
+                                 "--fix-commit", self.fx.c2, "--evidence", "audit follows commit"])
+        self.cdir = self.fx.out / "cases" / "r1"
+        (self.fx.out / "corpus.json").write_text(json.dumps({"version": 1, "cases": ["r1"]}), encoding="utf-8")
+        self._truth([{"id": "F1", "file": "a.py", "symbol": "foo", "failure_mode": "empty list", "severity": "Critical",
+                      "historical_outcome": "accepted+fixed", "fix_commit": self.fx.c2, "fix_evidence": "if not xs:"}])
+
+    def _truth(self, findings):
+        (self.cdir / "truth.json").write_text(json.dumps({"findings": findings, "known_rejects": []}), encoding="utf-8")
+
+    def _meta(self, **changes):
+        m = json.loads((self.cdir / "case.json").read_text(encoding="utf-8"))
+        for k, v in changes.items():
+            if v is None: m.pop(k, None)
+            else: m[k] = v
+        (self.cdir / "case.json").write_text(json.dumps(m), encoding="utf-8")
+
+    def _check(self):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = check_truth.main(["--corpus", str(self.fx.out), "--source-repo", f"app={self.fx.repo}"])
+        return rc, buf.getvalue()
+
+    def test_baseline_passes(self):
+        rc, out = self._check(); self.assertEqual(rc, 0, out)
+
+    def test_diff_of_right_endpoint_must_equal_repo_base_sha(self):
+        self._meta(diff_of=f"{self.fx.c0}..{self.fx.c2}")             # snapshot = c1, diff ends at c2
+        rc, out = self._check()
+        self.assertEqual(rc, 1); self.assertIn("repo_base_sha", out); self.assertIn("diff_of", out)
+
+    def test_diff_of_base_must_be_an_ancestor(self):
+        self._meta(diff_of=f"{self.fx.c_side}..{self.fx.c1}")
+        rc, out = self._check()
+        self.assertEqual(rc, 1); self.assertIn("ancestor", out.lower())
+
+    def test_mapping_is_required_and_validated(self):
+        self._meta(mapping=None)
+        rc, out = self._check(); self.assertEqual(rc, 1); self.assertIn("mapping", out)
+        self._meta(mapping={"round": 3, "rounds_total": 2, "fix_commits": [self.fx.c2], "evidence": "x"})
+        rc, out = self._check(); self.assertEqual(rc, 1); self.assertIn("rounds_total", out)
+        self._meta(mapping={"round": 1, "rounds_total": 2, "fix_commits": [self.fx.c2], "evidence": ""})
+        rc, out = self._check(); self.assertEqual(rc, 1); self.assertIn("evidence", out)
+        self._meta(mapping={"round": 1, "rounds_total": 2, "fix_commits": [self.fx.c3], "evidence": "x"})
+        rc, out = self._check(); self.assertEqual(rc, 1); self.assertIn("fix_commits", out)   # truth cites c2
+
+    def test_fix_evidence_must_be_absent_at_the_fix_commits_parent(self):
+        # c3 descends from c1 and we make it touch a.py; but the evidence was introduced by c2 (its parent).
+        _git(self.fx.repo, "checkout", "-q", self.fx.c3)
+        (self.fx.repo / "a.py").write_text((self.fx.repo / "a.py").read_text(encoding="utf-8") + "\n# tail\n", encoding="utf-8")
+        c4 = _commit(self.fx.repo, "touch a.py again", "2026-08-24T15:00:00+03:00")
+        self._truth([{"id": "F1", "file": "a.py", "symbol": "foo", "failure_mode": "m", "severity": "Critical",
+                      "historical_outcome": "accepted+fixed", "fix_commit": c4, "fix_evidence": "if not xs:"}])
+        self._meta(mapping={"round": 1, "rounds_total": 2, "fix_commits": [c4], "evidence": "x"})
+        rc, out = self._check()
+        self.assertEqual(rc, 1); self.assertIn("parent", out.lower())
+
+    def test_truth_file_in_diff_excludes_fails(self):
+        self._truth([{"id": "F1", "file": "docs/ledger.json", "symbol": None, "failure_mode": "m", "severity": "Minor",
+                      "historical_outcome": "accepted+parked"}])
+        rc, out = self._check()
+        self.assertEqual(rc, 1); self.assertIn("diff_excludes", out)
+
+    def test_derive_diff_is_pinned_against_operator_git_config(self):
+        _git(self.fx.repo, "config", "diff.noprefix", "true")
+        _git(self.fx.repo, "config", "diff.mnemonicPrefix", "true")
+        _git(self.fx.repo, "config", "core.abbrev", "12")
+        d = case_from_task.derive_diff(self.fx.repo, self.fx.c0, self.fx.c1, ["docs/ledger.json"])
+        self.assertIn("--- a/a.py", d); self.assertIn("+++ b/a.py", d)
+        rc, out = self._check()
+        self.assertEqual(rc, 0, out)           # the frozen diff.patch still re-derives byte-for-byte
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index c47092c..2284c7e 100644
+index c47092c714e08058e1d85b1a8b585b34070ab74c..2284c7e19e0e0a3c5a240bd0a8530ce51b5b64a3 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
 @@ -30,6 +30,9 @@ jobs:
@@ -13,7 +13,7 @@ index c47092c..2284c7e 100644
    e2e:
      name: e2e (Playwright + PostGIS)
 diff --git a/.gitignore b/.gitignore
-index 26762bb..1a9cadb 100644
+index 26762bb70c149e39c16e8b565e920f9225622b82..1a9cadbe77e331e53702e10fb5cc9ff4523c5e9b 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -56,3 +56,9 @@ next-env.d.ts
@@ -28,7 +28,7 @@ index 26762bb..1a9cadb 100644
 +/data/selfhost/
 diff --git a/docker/selfhost/docker-compose.yml b/docker/selfhost/docker-compose.yml
 new file mode 100644
-index 0000000..80a0a7d
+index 0000000000000000000000000000000000000000..80a0a7dc3bb87068fb784ed35dc315f181a5a55d
 --- /dev/null
 +++ b/docker/selfhost/docker-compose.yml
 @@ -0,0 +1,168 @@
@@ -202,7 +202,7 @@ index 0000000..80a0a7d
 +  ors-elevation:
 diff --git a/docker/selfhost/env.selfhost.example b/docker/selfhost/env.selfhost.example
 new file mode 100644
-index 0000000..a8e5dc9
+index 0000000000000000000000000000000000000000..a8e5dc921c79a46f084f2bb8a3acf79e6f1244f6
 --- /dev/null
 +++ b/docker/selfhost/env.selfhost.example
 @@ -0,0 +1,47 @@
@@ -255,7 +255,7 @@ index 0000000..a8e5dc9
 +# NEXT_PUBLIC_MAP_BBOX="25.8,44.2,26.4,44.7"
 diff --git a/docker/selfhost/fetch-photon-jar.sh b/docker/selfhost/fetch-photon-jar.sh
 new file mode 100755
-index 0000000..3d8c05c
+index 0000000000000000000000000000000000000000..3d8c05c21cd60006d7c112bf2ab3f3a18e8976da
 --- /dev/null
 +++ b/docker/selfhost/fetch-photon-jar.sh
 @@ -0,0 +1,37 @@
@@ -298,7 +298,7 @@ index 0000000..3d8c05c
 +ls -lh "$OUT"
 diff --git a/docker/selfhost/fetch-romania-extract.sh b/docker/selfhost/fetch-romania-extract.sh
 new file mode 100755
-index 0000000..ada9045
+index 0000000000000000000000000000000000000000..ada904506cd2912f0ef67edcece531e7251bdc24
 --- /dev/null
 +++ b/docker/selfhost/fetch-romania-extract.sh
 @@ -0,0 +1,81 @@
@@ -385,7 +385,7 @@ index 0000000..ada9045
 +ls -lh "$OUT"
 diff --git a/docker/selfhost/parity-check.mjs b/docker/selfhost/parity-check.mjs
 new file mode 100644
-index 0000000..014d859
+index 0000000000000000000000000000000000000000..014d859df6ca8eb21b6ce9e49c85c95a40122f51
 --- /dev/null
 +++ b/docker/selfhost/parity-check.mjs
 @@ -0,0 +1,467 @@
@@ -858,7 +858,7 @@ index 0000000..014d859
 +main().catch((e) => { console.error(e); process.exit(2); });
 diff --git a/docker/selfhost/prune-flatnode.sh b/docker/selfhost/prune-flatnode.sh
 new file mode 100755
-index 0000000..6505bd2
+index 0000000000000000000000000000000000000000..6505bd2718a1f42240d3b61deda40fd39a6f57d9
 --- /dev/null
 +++ b/docker/selfhost/prune-flatnode.sh
 @@ -0,0 +1,65 @@
@@ -928,7 +928,7 @@ index 0000000..6505bd2
 +docker run --rm -v "${VOLUME}:/fn" alpine rm -f "$FLATNODE_PATH"
 +echo "Done. Reclaimed ~${size}. Re-import (~24 min) is the cost if you later need it back." >&2
 diff --git a/eslint.config.mjs b/eslint.config.mjs
-index 12117bf..161d616 100644
+index 12117bf080c65d96197dd4010d2c385f74685b85..161d6163b4dfe783383bea6e218e832a3538fdee 100644
 --- a/eslint.config.mjs
 +++ b/eslint.config.mjs
 @@ -14,6 +14,9 @@ const eslintConfig = defineConfig([
@@ -942,7 +942,7 @@ index 12117bf..161d616 100644
  ]);
  
 diff --git a/package.json b/package.json
-index b9614c2..2577bcb 100644
+index b9614c21ce2b13bc16a195525f7622ff6c3dac64..2577bcb9c79b640241db02bd5069251fca4f48f1 100644
 --- a/package.json
 +++ b/package.json
 @@ -16,8 +16,9 @@
@@ -958,7 +958,7 @@ index b9614c2..2577bcb 100644
    "dependencies": {
      "@auth/prisma-adapter": "^2.11.2",
 diff --git a/tsconfig.json b/tsconfig.json
-index cf9c65d..08c6dc7 100644
+index cf9c65d3e0676a0169374d827f7abb97497789ef..08c6dc7cf6f480880e96df844f2d229ef1db62a2 100644
 --- a/tsconfig.json
 +++ b/tsconfig.json
 @@ -30,5 +30,5 @@

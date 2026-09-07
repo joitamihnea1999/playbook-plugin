@@ -1,5 +1,5 @@
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index 2284c7e..cd751b9 100644
+index 2284c7e19e0e0a3c5a240bd0a8530ce51b5b64a3..cd751b94f5acd53d961da9f4ce7dd8dc6ce81dfe 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
 @@ -33,6 +33,9 @@ jobs:
@@ -13,7 +13,7 @@ index 2284c7e..cd751b9 100644
    e2e:
      name: e2e (Playwright + PostGIS)
 diff --git a/README.md b/README.md
-index bc1e3a4..cfbd8dd 100644
+index bc1e3a4bfaa4f68a4630adc324215a721159682b..cfbd8ddb3f04ea0328f43c9a5a08c1c522e7160c 100644
 --- a/README.md
 +++ b/README.md
 @@ -7,8 +7,8 @@ score are planned next (not shipped yet).
@@ -60,7 +60,7 @@ index bc1e3a4..cfbd8dd 100644
  
 diff --git a/docker/selfhost/dev-selfhost.sh b/docker/selfhost/dev-selfhost.sh
 new file mode 100755
-index 0000000..3a7d36d
+index 0000000000000000000000000000000000000000..3a7d36d28e4d7d18acb12948d06527712ca0a822
 --- /dev/null
 +++ b/docker/selfhost/dev-selfhost.sh
 @@ -0,0 +1,212 @@
@@ -277,7 +277,7 @@ index 0000000..3a7d36d
 +log "Starting the app: npm run dev (Ctrl-C stops the app; run 'npm run dev:selfhost:down' to stop the engines)."
 +exec npm run dev
 diff --git a/docker/selfhost/env.selfhost.example b/docker/selfhost/env.selfhost.example
-index a8e5dc9..a0ee5c1 100644
+index a8e5dc921c79a46f084f2bb8a3acf79e6f1244f6..a0ee5c167eb260c4e6a754ecadee8842215fbce2 100644
 --- a/docker/selfhost/env.selfhost.example
 +++ b/docker/selfhost/env.selfhost.example
 @@ -3,8 +3,9 @@
@@ -294,7 +294,7 @@ index a8e5dc9..a0ee5c1 100644
  # host, no trailing slash — the app appends each provider's path (see src/lib/env.ts).
 diff --git a/docker/selfhost/script-check.sh b/docker/selfhost/script-check.sh
 new file mode 100755
-index 0000000..bdc39d0
+index 0000000000000000000000000000000000000000..bdc39d053baf2c6e660bbcb2017fef755d79d468
 --- /dev/null
 +++ b/docker/selfhost/script-check.sh
 @@ -0,0 +1,66 @@
@@ -366,7 +366,7 @@ index 0000000..bdc39d0
 +echo "[script-check] OK: scripts parse; host-artifact, OSM-extract, and overlay-key guards each fail loud (exit 2)."
 diff --git a/docker/selfhost/stop-selfhost.sh b/docker/selfhost/stop-selfhost.sh
 new file mode 100755
-index 0000000..89b031b
+index 0000000000000000000000000000000000000000..89b031beeaa7992ee77bb6d83674aaaf2e251740
 --- /dev/null
 +++ b/docker/selfhost/stop-selfhost.sh
 @@ -0,0 +1,45 @@
@@ -416,7 +416,7 @@ index 0000000..89b031b
 +
 +echo "[dev:selfhost:down] Stopped engines + db. Restart with 'npm run dev:selfhost'. Fuller teardown: docs/SELFHOST.md." >&2
 diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
-index 369a61f..3e599f2 100644
+index 369a61f031fc6aa3b0fc3b5152c23a61d3d2a67a..3e599f265b9646b92f1dd0a72158106cee6282aa 100644
 --- a/docs/ARCHITECTURE.md
 +++ b/docs/ARCHITECTURE.md
 @@ -1,8 +1,10 @@
@@ -433,7 +433,7 @@ index 369a61f..3e599f2 100644
  1. **No external data call from the browser, ever.** Every provider request
     runs server-side, is rate-limited per provider (bucket `provider@host`), and is cached in PostgreSQL where appropriate — the
 diff --git a/docs/PROVIDERS.md b/docs/PROVIDERS.md
-index 7cf7f9b..15ed628 100644
+index 7cf7f9b560e80827a802c2cb5354592cba3b143b..15ed6284965e2b3c992736162bb06a689ffdaebf 100644
 --- a/docs/PROVIDERS.md
 +++ b/docs/PROVIDERS.md
 @@ -342,7 +342,11 @@ T&C above); a live TomTom layer would require an owner decision on a paid Permit
@@ -459,7 +459,7 @@ index 7cf7f9b..15ed628 100644
 +| 3 | Hosting at launch | **Superseded** — owner ruling 2026-08-29: Hetzner VPS at launch, €0 until then; Railway trial expired/retired |
  | 4 | Keep the GitHub repo public (Transitous open-source-client + portfolio) | **Done** — public at github.com/joitamihnea1999/HowFar |
 diff --git a/docs/SELFHOST.md b/docs/SELFHOST.md
-index a1a5df5..32c9618 100644
+index a1a5df53975252d113715584eaca519351a5357d..32c96188256d3448751c85305ab953fd2b227fbf 100644
 --- a/docs/SELFHOST.md
 +++ b/docs/SELFHOST.md
 @@ -178,7 +178,7 @@ app's `maxBounds`.
@@ -537,7 +537,7 @@ index a1a5df5..32c9618 100644
  
  The app reads provider env at process start, so run **two** instances from the SAME
 diff --git a/package.json b/package.json
-index 2577bcb..8757db3 100644
+index 2577bcb9c79b640241db02bd5069251fca4f48f1..8757db31ec511df5d62de6587753a733dbe88474 100644
 --- a/package.json
 +++ b/package.json
 @@ -4,6 +4,8 @@
@@ -562,7 +562,7 @@ index 2577bcb..8757db3 100644
    "dependencies": {
      "@auth/prisma-adapter": "^2.11.2",
 diff --git a/src/lib/provider-http.ts b/src/lib/provider-http.ts
-index 9425d2e..60f8e24 100644
+index 9425d2e063392be4343bcd842e6299aeb628bb55..60f8e2401197852da42bee8bf43679255464daba 100644
 --- a/src/lib/provider-http.ts
 +++ b/src/lib/provider-http.ts
 @@ -15,7 +15,7 @@ import { createHash } from "node:crypto";

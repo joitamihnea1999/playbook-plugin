@@ -1,5 +1,5 @@
 diff --git a/docs/cli.md b/docs/cli.md
-index 113a318..e332082 100644
+index 113a318c36692b0bafc57a257d04cfda9f6ea367..e33208221756db523f0326a6dccd08ae54a5f7f1 100644
 --- a/docs/cli.md
 +++ b/docs/cli.md
 @@ -6,7 +6,7 @@ Everything the `tasks` CLI does. In a playbook-managed project the agent calls i
@@ -12,7 +12,7 @@ index 113a318..e332082 100644
  **`tasks freehand`** — freehand mode: you drive, the agent executes, and the hooks stop pressuring for gates until the next task is activated. For exploration, quick experiments, and pairing sessions where the task ceremony would get in the way.
  
 diff --git a/docs/configuration.md b/docs/configuration.md
-index 0d675d7..76d676c 100644
+index 0d675d7e737546da803ce69aab0abfb372d7d73a..76d676ccd9d5b534b1959e85cb5aaadc18388bb7 100644
 --- a/docs/configuration.md
 +++ b/docs/configuration.md
 @@ -278,6 +278,32 @@ and would read silently FRESH — declare those repos in
@@ -49,7 +49,7 @@ index 0d675d7..76d676c 100644
  
  `verify` lives in `.agent/config.json`, which is on the management path and so
 diff --git a/plugins/playbook/scripts/CLAUDE.md.template b/plugins/playbook/scripts/CLAUDE.md.template
-index 92d7f52..e755121 100644
+index 92d7f5251101ba106d86a113396ef42cbfa3fd95..e755121a50af91256cf8efebcd5c8eb23907d057 100644
 --- a/plugins/playbook/scripts/CLAUDE.md.template
 +++ b/plugins/playbook/scripts/CLAUDE.md.template
 @@ -82,7 +82,7 @@ The close is **earned, not asserted** — these are enforced by the CLI, not con
@@ -62,7 +62,7 @@ index 92d7f52..e755121 100644
  .claude/bin/tasks list [--pending]           # task overview
  .claude/bin/tasks status                     # current gate position
 diff --git a/plugins/playbook/tasks/core.py b/plugins/playbook/tasks/core.py
-index f2cbab3..a265613 100644
+index f2cbab373d00093ece32dde0a6564ed05b811f5d..a2656130145244c9af38e354d89f274c2c2cc8de 100644
 --- a/plugins/playbook/tasks/core.py
 +++ b/plugins/playbook/tasks/core.py
 @@ -1366,11 +1366,389 @@ def tree_state_fingerprint(project_path: Path) -> str:
@@ -494,7 +494,7 @@ index f2cbab3..a265613 100644
              line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} "
                      f"vs close {freshness.get('now_fp', '?')} — {v}")
 diff --git a/plugins/playbook/tasks/lifecycle.py b/plugins/playbook/tasks/lifecycle.py
-index 00c3740..51e4190 100644
+index 00c3740a23251ad5874d21849f7649a086f0ea0a..51e4190ec39252776ebd2748a5cd7daf61f2f433 100644
 --- a/plugins/playbook/tasks/lifecycle.py
 +++ b/plugins/playbook/tasks/lifecycle.py
 @@ -362,6 +362,67 @@ def cmd_work(cmd_args):
@@ -566,7 +566,7 @@ index 00c3740..51e4190 100644
                      print(f"\nBlocked: cannot close task {prev_task} — {_f_reason}",
                            file=sys.stderr, flush=True)
 diff --git a/plugins/playbook/tasks/review.py b/plugins/playbook/tasks/review.py
-index f2a78c0..85c99ee 100644
+index f2a78c049b2ba76c1348eaae6fae8ef130b9532e..85c99eee923460bee6a083e8102283a3ee7c2780 100644
 --- a/plugins/playbook/tasks/review.py
 +++ b/plugins/playbook/tasks/review.py
 @@ -1004,6 +1004,31 @@ def cmd_panel_review(cmd_args):

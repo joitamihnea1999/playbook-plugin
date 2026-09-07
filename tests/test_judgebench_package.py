@@ -401,3 +401,98 @@ class BuildPackageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImplPanelRound1Tests(unittest.TestCase):
+    """Task 048 impl-panel round 1 (opus #1 / codex:sol #1): kept sections still carried
+    review provenance — Recent Chat blocks, `(panel opus#4/terra#4)` parentheticals, bare
+    seat#N refs, ACCEPT-<label> tags, `→` gate outcomes, execution `**Result:**` bullets —
+    and `leak_scan` false-passed them. Redaction is mechanical (deterministic, over-strips)
+    and the scan is broadened for what redaction cannot decide."""
+
+    MD = """# 007 - X
+
+## Intent
+Add foo.
+
+## References
+- Context: node [3]
+
+### Recent Chat (auto-captured at activation — review and remove unrelated)
+
+**[M245]** [2026-08-27 21:43:12]
+OWNER RULING — stop the panel loop and close. LEAK_CHAT
+
+---
+
+## Design Phase
+- [x] Restate → sum the list. LEAK_ARROW_DESIGN_KEEP
+
+## Work Plan
+- **Fail-closed validation** (panel sol#3/terra#4, matches `required()`): absent var ⇒ default LEAK_PAREN
+- **Cache tag** (panel opus#1/terra-crit/sol#2): a tag KEEP_TAG
+- Proven by LITERAL tests (panel sonnet#1/#2), not self-referential ones KEEP_LIT
+- bare ref opus#2 and codex:sol#4 and terra-crit#1 here KEEP_BARE
+**Item 2 — race guards (red-first; ACCEPT-C, rule 5 — 3 sites)** KEEP_ITEM
+- [ ] W9: honest copy (ACCEPT-B decision). KEEP_W9
+- [x] **W1 — implement.** Write the loop. → **PANEL PASS 5/5** LEAK_ARROW_OUTCOME
+- **Result:** measured 15 fps LEAK_RESULT
+- **Note:** planning remark KEEP_NOTE
+"""
+
+    def test_recent_chat_block_is_dropped(self):
+        spec = package.reconstruct_spec(self.MD)
+        self.assertNotIn("LEAK_CHAT", spec)
+        self.assertNotIn("Recent Chat", spec)
+        self.assertIn("- Context: node [3]", spec)          # the rest of References survives
+        self.assertIn("## Design Phase", spec)
+
+    def test_panel_parentheticals_and_seat_refs_are_redacted(self):
+        spec = package.reconstruct_spec(self.MD)
+        for leak in ("panel sol#3", "terra#4", "opus#1", "terra-crit", "sonnet#1", "opus#2", "codex:sol#4"):
+            self.assertNotIn(leak, spec, leak)
+        for keep in ("KEEP_TAG", "KEEP_LIT", "KEEP_BARE", "matches `required()`", "absent var"):
+            self.assertIn(keep, spec, keep)
+
+    def test_accept_labels_are_redacted(self):
+        spec = package.reconstruct_spec(self.MD)
+        self.assertNotIn("ACCEPT-", spec)
+        self.assertIn("KEEP_ITEM", spec)
+        self.assertIn("KEEP_W9", spec)
+        self.assertIn("rule 5", spec)
+
+    def test_arrow_gate_outcome_is_stripped_but_design_arrow_answer_kept(self):
+        spec = package.reconstruct_spec(self.MD)
+        self.assertNotIn("LEAK_ARROW_OUTCOME", spec)
+        self.assertNotIn("PANEL PASS", spec)
+        self.assertIn("- [ ] **W1 — implement.** Write the loop.", spec)
+        self.assertIn("LEAK_ARROW_DESIGN_KEEP", spec)       # Design answers are pre-review
+
+    def test_result_bullets_in_work_plan_are_dropped(self):
+        spec = package.reconstruct_spec(self.MD)
+        self.assertNotIn("LEAK_RESULT", spec)
+        self.assertIn("KEEP_NOTE", spec)
+
+    def test_broadened_leak_scan_catches_the_panel_classes(self):
+        for text in ("see (panel opus#4/terra#4) here", "added at impl-review the cache",
+                     "> Revised after plan-review round 1.", "status **FIXED (round 2-4)** now",
+                     "bar is HARDENED (r3)", "BEHAVIORAL (finding H, surface)", "OWNER RULING — stop the panel loop",
+                     "### Recent Chat (auto)", "red-first; ACCEPT-C, rule 5", "bare terra#4 ref"):
+            self.assertTrue(package.leak_scan(text), text)
+        for text in ("run the plan review then build", "the impl panel reviews the tree", "finding the bug",
+                     "round trip latency", "accept the input", "we PARK the car",
+                     "Owner ruling 9 (MIND_MAP [0], 2026-08-17): the product becomes self-hosted"):
+            self.assertEqual(package.leak_scan(text), [], text)
+
+    def test_plan_finding_letter_parentheticals_are_redacted(self):
+        md = "## Work Plan\n- **W1** the LITERAL set only; the ledger is BEHAVIORAL (finding H, surface to owner). **W4** add a value (finding G). Also (findings A, B, C) here. Keep finding the bug.\n"
+        spec = package.reconstruct_spec(md)
+        for leak in ("finding H", "finding G", "findings A"):
+            self.assertNotIn(leak, spec, leak)
+        self.assertIn("Keep finding the bug.", spec)
+        self.assertIn("the ledger is BEHAVIORAL. **W4** add a value. Also here.", spec)
+
+    def test_reconstruct_spec_is_idempotent_and_clean_on_the_fixture(self):
+        once = package.reconstruct_spec(self.MD)
+        self.assertEqual(package.reconstruct_spec(once), once)
+        self.assertEqual(package.leak_scan(once), [])

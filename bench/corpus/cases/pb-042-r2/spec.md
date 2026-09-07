@@ -16,57 +16,16 @@ assertive
 > - Leaving it `unclassified` is **not** the cheap way out: an unset gate cannot be evaluated, so the close is held to the same bar as `assertive`/`irreversible` (review evidence, or `--force --reason`). One word here is the whole cost.
 
 ## Intent
-Best-effort review-spend records: every judge invocation (panel seat, single, tail-cert) appends one hook=review decision=record journal line via pb_journal — seat, task, round, kind, wall duration, exit status, token usage (unknown when CLI does not report it)
+Best-effort review-spend records: every judge invocation (seat, single, tail-cert) appends one hook=review decision=record journal line via pb_journal — seat, task, round, kind, wall duration, exit status, token usage (unknown when CLI does not report it)
 
 ## Why
-The owner wants to monitor Playbook's token/review spend so it doesn't burn tokens uselessly (M293: "we should also monitor the usage of tokens for playbook … we don't have infinite tokens"). Reviews (panel seats especially) are the dominant spend surface. Today nothing records what each judge invocation cost — no seat, duration, or usage trail — so there is no data to optimize against. This adds the observability layer (same class as the enforcement journal) that a later playbook-lens can consume to attribute and reduce spend. Owner-ratified 2026-09-01.
+The owner wants to monitor Playbook's token/review spend so it doesn't burn tokens uselessly (M293: "we should also monitor the usage of tokens for playbook … we don't have infinite tokens"). Reviews (seats especially) are the dominant spend surface. Today nothing records what each judge invocation cost — no seat, duration, or usage trail — so there is no data to optimize against. This adds the observability layer (same class as the enforcement journal) that a later playbook-lens can consume to attribute and reduce spend. Owner-ratified 2026-09-01.
 
 ## References
 - [x] Context: recalled nodes [8] review.py, [5] enforcement journal, [24] verify/ledger. Read `scripts/pb_journal.py` (contract: never-raise, one O_APPEND under PIPE_BUF, lane-only), `lifecycle.py:515-559` (the existing `decision="record"` close emitter — the pattern to mirror), `review.py` panel arm `run_judge`+as_completed loop (~904-982), single-judge `cmd_single_review` common completion (~2010) + `_bail_review_timeout` (timeout exit), tail-cert `_run_tail_cert_judge_raw` (~1363). Ledger: `docs/guarantee-ledger.json` PB-ENFORCEMENT-JOURNAL + `scripts/guarantee_ledger.py` resolves every owner/proof reference (runs in verify). Tests: `tests/test_enforcement_journal.py`.
 - Playbook: playbook/Build
 - Note: Don't hardcode task numbers in plans — `.claude/bin/tasks new` auto-increments.
 
-### Recent Chat (auto-captured at activation — trimmed to the relevant messages)
-
-**[M293]** [2026-09-01 16:23:13]
-we should also monitor the usage of tokens for playbook, so that it doesn't use too many tokens uselessly. we don't have infinite tokens, so we have to optimize the usage. [→ motivation]
-
-**[M295]** [2026-09-01 16:24:53]
-Work under playbook discipline … OWNER-RATIFIED observability addition (same class as the enforcement journal, decision 2026-09-01): REVIEW-SPEND RECORDS. Every judge invocation (panel seat, single judge, tail-cert judge) appends one best-effort `record` entry to the enforcement journal via the existing pb_journal contract (hook="review", decision="record"): seat spec (model:effort), task number, round number, review kind (panel|single|tail-cert), wall duration, exit status (ok|fail|timeout|dnf), and token usage WHERE the CLI reports it … for codex/grok record duration + a usage=unknown marker rather than guessing — never fabricate numbers. Constraints identical to the journal's: best-effort, one O_APPEND line under PIPE_BUF, no new interpreter startups on hot paths (emit from the existing review runner where the subprocess already completed), works multi-lane. Red-first tests + extend PB-ENFORCEMENT-JOURNAL (or sibling entry). Document the record shape for playbook-lens (separate repo — note the skew). Capped report; do not merge. [→ the spec]
-
-### Recent Chat (auto-captured at activation — review and remove unrelated)
-
-**[M301]** [2026-09-01 20:19:16]
-<task-notification> <task-id>bv37ysytp</task-id> <tool-use-id>toolu_01UUMecxysKvjnTy46QWMUvx</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M302]** [2026-09-01 20:29:53]
-<task-notification> <task-id>bqeuaxbdx</task-id> <tool-use-id>toolu_01Txse5mwDyLH6LDCsCV1gYR</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M303]** [2026-09-01 20:35:17]
-<task-notification> <task-id>b34297s68</task-id> <tool-use-id>toolu_01EYD13cQ2gG1UCHBYLbvfRS</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M304]** [2026-09-01 20:41:30]
-<task-notification> <task-id>bds9dxzdx</task-id> <tool-use-id>toolu_01SXsfDH1TsTDzKYmafsHhYd</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M305]** [2026-09-01 21:00:27]
-<task-notification> <task-id>bzv6z776f</task-id> <tool-use-id>toolu_018xcBbtzcBJU7FAMPrawopc</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M306]** [2026-09-01 21:04:21]
-<task-notification> <task-id>bb0tu26ws</task-id> <tool-use-id>toolu_01CoMugyrmvusQqHJknCduUj</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M307]** [2026-09-01 21:09:48]
-<task-notification> <task-id>brbe8nvp5</task-id> <tool-use-id>toolu_01AhU6bVZSB1BF5MH3CbRYyZ</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M308]** [2026-09-01 21:09:48]
-<task-notification> <task-id>bprv8bxqa</task-id> <tool-use-id>toolu_01C9PwZtJFtmJVCe8udZqBg4</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M309]** [2026-09-01 21:09:49]
-<task-notification> <task-id>btfkx7xyz</task-id> <tool-use-id>toolu_01LW1ZsxnCBPQjho36VCtKPP</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
-**[M310]** [2026-09-01 21:21:13]
-<task-notification> <task-id>bm2q3nyiz</task-id> <tool-use-id>toolu_015acd8kPZJjo4i9Swctc37w</tool-use-id> <output-file>/tmp/claude-1000/-home-mihnea-Documents-Workspace-playbook-plugin-dev/4d0b9352-c...
-
----
 
 ## Design Phase
 
@@ -78,7 +37,7 @@ Work under playbook discipline … OWNER-RATIFIED observability addition (same c
 - [x] Trimmed the chat to M293 (motivation: monitor/optimize token spend) + M295 (the owner-ratified spec) and pulled both into Why/Intent; dropped M291/M292/M294 (rate-limit notices + unrelated h-fix design).
 
 ### Understand
-- [x] Restate the request in my own words. What does the user actually want? — every judge invocation leaves one best-effort spend line in the enforcement journal (hook="review", decision="record"): seat, task, round, kind (panel|single|tail-cert), wall duration, exit status (ok|fail|timeout|dnf), token usage where the CLI reports it (never fabricated). Emitted where the subprocess already finished; a write failure never affects the review.
+- [x] Restate the request in my own words. What does the user actually want? — every judge invocation leaves one best-effort spend line in the enforcement journal (hook="review", decision="record"): seat, task, round, kind (|single|tail-cert), wall duration, exit status (ok|fail|timeout|dnf), token usage where the CLI reports it (never fabricated). Emitted where the subprocess already finished; a write failure never affects the review.
 - [x] Critique: Am I solving the stated problem or a different one I find more interesting? — solving the stated one (spend observability). NOT building the reader/analytics (lens = separate repo), NOT changing judge output format to harvest usage (would ripple through the whole review pipeline). Staying in the log-only lane the owner named.
 - [x] What would "done" look like? How will we know the task succeeded? — red-first tests prove a record lands per panel seat + per single judge + tail-cert, an unwritable journal changes nothing, format pinned; ledger extended + validator green; contract docs describe the record shape with the honest usage skew; verify green 4 lanes; impl panel PASS.
 - [x] What are you assuming about the existing code/architecture that you haven't verified? — verified: pb_journal.append writes exactly the enforcement envelope; claude `-p` judge runs PLAIN TEXT (no `--output-format json`) so usage is not surfaced today → `unknown` in practice unless a real usage JSON shape appears (read headless_argv/run_headless_judge/format_judge_output). That skew is documented, not a defect.
@@ -109,7 +68,7 @@ Work under playbook discipline … OWNER-RATIFIED observability addition (same c
 - [ ] **W2 — review.py emit wiring (3 sites).** Module helpers (`_load_pb_journal` cached, `_journal_review_spend`, `_judge_status`, `_parse_judge_usage`, `_next_review_round`) + emit at: panel per-seat (as_completed loop, shared round), single-judge common completion + `_bail_review_timeout` (timeout), tail-cert `_run_tail_cert_judge_raw` (all return paths). Purely additive/best-effort. Check: full suite green (no control-flow regression); in-process smoke shows a record per emit.
 - [ ] **W3 — red-first tests (`tests/test_review_spend_journal.py`).** Prove: a record lands per panel seat + per single judge (+ tail-cert); an unwritable journal changes the review's outcome NOT AT ALL (negative control); format/envelope pinned; usage unknown-vs-known; byte-cap. Watch each new assertion FAIL against a stubbed-out emitter first (red), then pass.
 - [ ] **W4 — guarantee ledger.** Add sibling `PB-REVIEW-SPEND-JOURNAL` (owner/proof references that the validator resolves: `symbol:append_review`, the new test methods) + note the owner decision; update `guarantee-ledger.md` if it enumerates. Check: `scripts/guarantee_ledger.py --summary` + `test_guarantee_ledger` green.
-- [ ] **W5 — record-shape contract doc.** Document the record shape for playbook-lens (a docs file), with the HONEST usage skew (claude judge = plain-text mode → usage normally `unknown`; codex/grok never surface per-call tokens here) and the approximate-round note. Note the lens is a separate repo (skew disclosed).
+- [ ] **W5 — record-shape contract doc.** Document the record shape for playbook-lens (a docs file), with the HONEST usage skew (claude judge = plain-text mode
 - [ ] **W6 — MIND_MAP.md.** Update the owning node ([8] review + [5]/[24] journal) in place to record the review-spend record surface; no new node.
 
 ---

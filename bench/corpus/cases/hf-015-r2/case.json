@@ -8,7 +8,6 @@
   "repo_base_sha": "11341d61e94450e7b8b41e1598c7d6f78e9cdd01",
   "diff_of": "6208fe6d037f4154ba452dc21c9de377a14c6011..11341d61e94450e7b8b41e1598c7d6f78e9cdd01",
   "diff_excludes": [
-    "scripts/perf/README.md",
     "scripts/perf/package-lock.json",
     "scripts/perf/package.json",
     "scripts/perf/run-lighthouse.mjs",
@@ -24,7 +23,7 @@
   "area": "ui",
   "difficulty": "hard",
   "truth_version": 1,
-  "notes": "Round 2 of 4: residual defects in the hardened harness (a gesture with no proof it moved the map; a bundle claim that was false). Accumulated diff from the task base. Excluded from diff.patch for the budget (all in the snapshot tree, none carries a finding except the README caveat I8 which is kept as truth with that file): scripts/perf/run-lighthouse.mjs, serve-prod.sh, README.md, package.json, and the lockfile by default. Dropped by the closed allowlist (non-template H2s in this record): '## Scope guardrails (binding for this task)' (no behavior changes; production build; emulation numbers flagged) and '## Structure decision (Structure gate)' — the judge does not see them; their substance is partly restated in Intent/Work Plan. Spec edits: template preamble deleted.",
+  "notes": "Round 2 of 4: residual defects in the hardened harness (a gesture with no proof it moved the map; a bundle claim that was false). Accumulated diff from the task base. Excluded from diff.patch for the budget (all in the snapshot tree, none carries a finding): scripts/perf/run-lighthouse.mjs, serve-prod.sh, package.json, and the lockfile by default; scripts/perf/README.md stays IN the diff because finding I8 cites it. Dropped by the closed allowlist (non-template H2s in this record): '## Scope guardrails (binding for this task)' (no behavior changes; production build; emulation numbers flagged) and '## Structure decision (Structure gate)' — the judge does not see them; their substance is partly restated in Intent/Work Plan. Spec edits: template preamble deleted.",
   "mapping": {
     "round": 2,
     "rounds_total": 4,

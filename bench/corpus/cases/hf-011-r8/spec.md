@@ -37,15 +37,6 @@ The commercial pivot (MIND_MAP [0] ruling 9) is to run the whole OSM stack self-
 
 **Sizes (stated before pulling, per M045):** Geofabrik `romania-260824.osm.pbf` = **326,778,421 B ≈ 312 MB** (dated 2026-08-24). Machine: 16 cores, 496 GB disk free, **~3.5 GB RAM available** of 13 GB (owner apps using ~10 GB, 6.9 GB already in swap) → peak-RAM of a full-Romania Nominatim/ORS import is the binding constraint; addressed in the Work Plan.
 
-### Recent Chat (auto-captured at activation — review and remove unrelated)
-
-**[M046]** [2026-08-25 18:38:12]
-Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete.
-
-**[M047]** [2026-08-25 19:44:05]
-Run .claude/bin/tasks bootstrap, follow the handoff it surfaces (task 011 — P3 self-host provider stack), and resume with tasks work 011. The work is essentially complete (committed as 6cfc0de on self...
-
----
 
 ## Design Phase
 
@@ -86,48 +77,47 @@ Run .claude/bin/tasks bootstrap, follow the handoff it surfaces (task 011 — P3
 
 > **Shape:** Phase A (author — no heavy resources) → byte-identity proof → **CHECKPOINT** → Phase D (imports + measurement) → Phase E (review/close). P3 adds NO `src/` code.
 
-> **Revised after plan-review round 1 (P1–P10 folded in).**
 
 ### Phase A — author the stack (zero heavy-resource risk)
 - [ ] W1. **gitignore FIRST.**
-- [ ] W2. [P5] `docker/selfhost/fetch-romania-extract.sh` written. Pins the DATED extract `romania-260824.osm.pbf` (EXTRACT_DATE=260824, not `-latest`); downloads to `.part` then atomic `mv`; verifies the published `.md5` (`abc00e5b575aa51efc9ab39ea34655f4`) and refuses to keep a corrupt file; idempotent (skips if present + md5-verified); lands in gitignored `data/osm/`. Check: `bash -n` OK; `--dry-run` prints target + **326,778,421 B (~311 MB)** and downloads nothing; HEAD 200 + md5 URL confirmed live. Fixed a mawk portability bug (gawk-only `IGNORECASE` → `tolower()`), re-verified.
-- [ ] W3. [P6][P7][P9] Authored `docker/selfhost/docker-compose.yml` (SEPARATE file → default `docker compose up -d db` untouched, verified: `git diff --stat docker-compose.yml` empty; both files `config`-parse). Services, all pins verified live via `gh`/docker-hub: **nominatim** `mediagis/nominatim:5.3` (Nominatim 5.3.2), `IMPORT_STYLE=full` (parity-faithful), PG tuning sized to ~3.5 GB-free, `mem_limit 5g`, `/status` healthcheck, 127.0.0.1:8081, PBF mounted `:ro`. **photon**
-- [ ] W4. Orchestration authored as small pinned scripts + compose (full command runbook lands in SELFHOST.md at W7). `build-tiles.sh`: builds the **protomaps/basemaps** generator from source in a `maven:3.9-eclipse-temurin-21` container (no host toolchain), runs it against the ONE extract with the app's `NEXT_PUBLIC_MAP_BBOX`, writes to a temp then atomic `mv` INSIDE the container (same mount → truly atomic), records `RESOLVED_PROTOMAPS_SHA` for the manifest, and rejects a `TILES_PMTILES_PATH` outside the HowFar root (only `/work` is mounted). `fetch-photon-jar.sh`: pins `photon-1.3.0.jar` (verified the release asset exists, 98 MB) into gitignored `data/selfhost/photon/photon.jar` where the compose mounts it. Nominatim/ORS imports are driven by their compose services on first `up` (no extra script); Photon import is the `--profile import` one-shot. All reference only gitignored paths + env; `bash -n` clean on all three scripts; imports documented to run one-at-a-time (SELFHOST.md).
-- [ ] W5. `docker/selfhost/env.selfhost.example` written (a provider OVERLAY to merge into .env). Maps `NOMINATIM_BASE_URL=http://localhost:8081`, `PHOTON_BASE_URL=http://localhost:2322`, `ORS_BASE_URL=http://localhost:8082/ors` (the `/ors` prefix documented), `PROVIDER_DATA_REVISION=romania-260824`, and `*_MIN_INTERVAL_MS=0` with the task-009 guard note (0 safe only because bases are self-host). Verified: `git check-ignore` says committable (no leading dot → not caught by `.env*`); all var names present in the overlay are exactly the names `env.ts` reads (grep cross-checked NOMINATIM/PHOTON/ORS base + interval + PROVIDER_DATA_REVISION + TILES_PMTILES_PATH).
-- [ ] W6. [P2][P3][P10] `docker/selfhost/parity-check.mjs` written (no deps, node ≥18 fetch; NOT in `check:ci`). Drives two app instances via `--public`/`--local` base URLs (SELFHOST.md documents running two `next start` with distinct `PROVIDER_DATA_REVISION` → no cache crossover). 3 audit origins with FIXED coords recorded in the file. Geocode: haversine, bar ≤150 m. Rings walk (`pace=normal`) + car (**`weekday=1&time=12:00`** pins the traffic slot → identical ranges both legs, killing the wall-clock effect): reports **radial boundary residual** (median |ratio−1| over 24 bearing sectors, bar ±10% = the audit's quantity) AND area ratio (band ±21%), labelled per column; verdict keys off radial. `--self-test` / `--public-only` / full modes. **Instrument validated (rule 13):** `--self-test` PASS on 4 fixtures
-- [ ] W7. `docs/SELFHOST.md` written: scope box (transit OUT), prerequisites (disk ~30–40 GB, downloads 312 MB + 98 MB, RAM = the constraint), a **measured-resources table with TBD placeholders** (filled at W16), the full 1→7 runbook (fetch → nominatim → photon → ors → tiles → point-app → two-instance parity), exact smoke-test curls incl. the ORS 3-interval payload, teardown, and honest caveats (transit not self-hosted; glyph/sprite still remote [23]; imports one-at-a-time; reproducibility via run-manifest + PROVIDER_DATA_REVISION/no-reaper).
+- [ ] W2. [P5] `docker/selfhost/fetch-romania-extract.sh` written. Pins the DATED extract `romania-260824.osm.pbf` (EXTRACT_DATE=260824, not `-latest`); downloads to `.part` then atomic `mv`; verifies the published `.md5` (`abc00e5b575aa51efc9ab39ea34655f4`) and refuses to keep a corrupt file; idempotent (skips if present + md5-verified); lands in gitignored `data/osm/`. Check: `bash -n` OK; `--dry-run` prints target + **326,778,421 B (~311 MB)** and downloads nothing; HEAD 200 + md5 URL confirmed live. Fixed a mawk portability bug (gawk-only `IGNORECASE`
+- [ ] W3. [P6][P7][P9] Authored `docker/selfhost/docker-compose.yml` (SEPARATE file
+- [ ] W4. Orchestration authored as small pinned scripts + compose (full command runbook lands in SELFHOST.md at W7). `build-tiles.sh`: builds the **protomaps/basemaps** generator from source in a `maven:3.9-eclipse-temurin-21` container (no host toolchain), runs it against the ONE extract with the app's `NEXT_PUBLIC_MAP_BBOX`, writes to a temp then atomic `mv` INSIDE the container (same mount
+- [ ] W5. `docker/selfhost/env.selfhost.example` written (a provider OVERLAY to merge into .env). Maps `NOMINATIM_BASE_URL=http://localhost:8081`, `PHOTON_BASE_URL=http://localhost:2322`, `ORS_BASE_URL=http://localhost:8082/ors` (the `/ors` prefix documented), `PROVIDER_DATA_REVISION=romania-260824`, and `*_MIN_INTERVAL_MS=0` with the task-009 guard note (0 safe only because bases are self-host). Verified: `git check-ignore` says committable (no leading dot
+- [ ] W6. [P2][P3][P10] `docker/selfhost/parity-check.mjs` written (no deps, node ≥18 fetch; NOT in `check:ci`). Drives two app instances via `--public`/`--local` base URLs (SELFHOST.md documents running two `next start` with distinct `PROVIDER_DATA_REVISION`
+- [ ] W7. `docs/SELFHOST.md` written: scope box (transit OUT), prerequisites (disk ~30–40 GB, downloads 312 MB + 98 MB, RAM = the constraint), a **measured-resources table with TBD placeholders** (filled at W16), the full 1→7 runbook (fetch
 
 ### Byte-identity proof (default config, no stack)
 - [ ] W8. [P8] **Byte-identity proven.** Working tree: only `M .gitignore` + new `docker/selfhost/` + `docs/SELFHOST.md`; `git diff --stat -- src/` **empty** (zero app-code change). Shell provider env grep **empty**; `.env` has no provider/extent overrides (public defaults apply). `npm run check:ci` (security:google-keys + lint + typecheck + test:coverage + build) **green**
 
 ### CHECKPOINT — reassess before heavy imports
-- [ ] W9. [P4] **Reassessed.** Sizes stated (extract 312 MB, downloads acknowledged by owner); gitignore verified (W1); byte-identity green (W8); plan panel triaged (P1–P10). **Decision: proceed with the FULL-Romania measured run.** Rationale: owner explicitly wants "measured parity numbers", acknowledged "long first runs", and the imports are LOCAL + gitignored + reversible (`docker down -v`) → low risk to owner data/prod; the only soft cost is machine time/RAM, mitigated by per-service `mem_limit` + sequential imports + live RAM monitoring, backing off if the owner's session is threatened. Bbox-clip stays a non-closing fallback. Extract + Photon-jar downloads launched in background (RAM at decision: 4.7 GB available). Context not high → no handoff yet; will handoff/block if wall-clock or RAM turns unsafe.
+- [ ] W9. [P4] **Reassessed.** Sizes stated (extract 312 MB, downloads acknowledged by owner); gitignore verified (W1); byte-identity green (W8); plan panel triaged (P1–P10). **Decision: proceed with the FULL-Romania measured run.** Rationale: owner explicitly wants "measured parity numbers", acknowledged "long first runs", and the imports are LOCAL + gitignored + reversible (`docker down -v`)
 
 ### Phase D — imports + measurement (heavy; full Romania; gitignored data)
 - [ ] W10. Extract fetched: `data/osm/romania-260824.osm.pbf` = 312 MB (326,778,421 B), **md5 `abc00e5b575aa51efc9ab39ea34655f4` verified** against Geofabrik's published `.md5`. Download wall-time ~51 s (~6 MB/s). Photon jar also fetched: `data/selfhost/photon/photon.jar` = 94 MB (photon-1.3.0). Both under gitignored paths.
-- [ ] W11. **Nominatim import done + verified.** Import wall-time **~24 min** (15:46:40 → healthy 16:10:31; full Romania, `IMPORT_STYLE=full`, 8 threads, osm2pgsql 1.11.0/PG16/PostGIS3.4). **Peak RAM ~4.2 GiB** (osm2pgsql phase; `mem_limit 5g` never hit; host stayed ≥4.3 GiB available
-- [ ] W12. **Photon import + serve done + verified.** Pre-checked the DB was reachable (nominatim role auths over TCP scram-sha-256; `placex`=1,961,055 rows). `photon-import` (shares nominatim netns → 127.0.0.1:5432) built the index from the Nominatim DB in **~2.7 min** (13:12:35→13:15:16), languages en/ro, importDate 2026-08-24, structured queries supported; import peak heap ~750 MB (OpenSearch embedded). **Index disk 468 MB.** Server up; `/api?q=unirii&bbox=25.8,44.2,26.4,44.7&lat=44.43&lon=26.10&limit=3` → 3 Bucharest-area features (Otopeni/Măgurele/Balotești, Ilfov). The komoot-jar + `-nominatim-import` path (chosen in W3 over rtuszik's prebuilt-db image) works and correctly derives from the SAME extract.
+- [ ] W11. **Nominatim import done + verified.** Import wall-time **~24 min** (15:46:40
+- [ ] W12. **Photon import + serve done + verified.** Pre-checked the DB was reachable (nominatim role auths over TCP scram-sha-256; `placex`=1,961,055 rows). `photon-import` (shares nominatim netns
 - [ ] W13. [P6] **ORS graph build done + P6 verified.** Both profiles built from the extract
 - [ ] W14. [P1][P9] **pmtiles built + schema-verified.** `build-tiles.sh` compiled the protomaps/basemaps generator from source (SHA `a50c699`) and produced the archive. **P1 CONFIRMED: source-layers = `boundaries, buildings, earth, landcover, landuse, places, pois, roads, water`
 - [ ] W15. [P2][P3] **Parity measured
 
-  | metric | origin | radial resid | area ratio | verdict |
-  |---|---|---|---|---|
-  | walk 15/30/45 | Unirii | 0.0% | 0.999 | PASS |
-  | walk 15/30/45 | Grozăvești | 0.0% | 0.999–1.000 | PASS |
-  | walk 15/30/45 | Berceni | 0.0% | 1.000 | PASS |
-  | car 10/20/30 | Unirii | 0.0% | 0.999–1.000 | PASS |
-  | car 10/20/30 | Grozăvești | 0.0% | 0.998–1.003 | PASS |
-  | car 10/20/30 | Berceni | 0.0% | 1.000 | PASS |
-  | geocode | Unirii | — | 0.0 m | PASS |
-  | geocode | Berceni | — | 0.0 m | PASS |
-  | geocode | Grozăvești | — | **401.5 m** | see below |
+ | metric | origin | radial resid | area ratio | verdict |
+ |---|---|---|---|---|
+ | walk 15/30/45 | Unirii | 0.0% | 0.999 | PASS |
+ | walk 15/30/45 | Grozăvești | 0.0% | 0.999–1.000 | PASS |
+ | walk 15/30/45 | Berceni | 0.0% | 1.000 | PASS |
+ | car 10/20/30 | Unirii | 0.0% | 0.999–1.000 | PASS |
+ | car 10/20/30 | Grozăvești | 0.0% | 0.998–1.003 | PASS |
+ | car 10/20/30 | Berceni | 0.0% | 1.000 | PASS |
+ | geocode | Unirii | — | 0.0 m | PASS |
+ | geocode | Berceni | — | 0.0 m | PASS |
+ | geocode | Grozăvești | — | **401.5 m** | see below |
 
-  **17/18 ring metrics exact** (radial 0.0%, area within ±0.3% — the self-hosted ORS reproduces public-ORS isochrones essentially byte-for-byte, both walk + car). Geocode exact for specific places (Unirii square, Berceni) at 0.0 m. **The one miss (Grozăvești geocode 401.5 m) is investigated, not widened (my STOP trigger):** it is a bare *neighborhood-name* query — public Nominatim returns 44.4427,26.0604 ("…Pasajul Basarab…"), local returns 44.4432,26.0654 ("Grozăvești, Sector 6"); BOTH are correct Grozăvești/Sector-6 representative points, differing only in which OSM object each ranks first for an ambiguous area name. Specific-address/POI geocoding is exact; this is inherent geocoder ranking variance, not a self-host defect, and the 150 m bar (calibrated for rooftop addresses) simply doesn't apply to an area-name query. **Live tile render:** `/api/tiles` on the local app serves valid PMTiles (HTTP 206 Range, `PMTiles` magic bytes) and the self-built archive carries the exact Protomaps schema (W14) → the map renders (P1 resolved); a literal browser screenshot was blocked by claude-in-chrome's script-injection timing out on MapLibre's WebGL loop (tooling limitation, not a render failure) — the render path is the same one the W8 e2e exercises.
-- [ ] W16. [P4][P5] Docs filled with MEASURED numbers, labelled full-Romania 2026-08-25. `docs/SELFHOST.md`: resource table (per-engine wall-time/RAM/disk), total ≈114 GB (106 GB deletable flatnode → ~8 GB), parity summary, corrected prerequisites (disk ~120 GB during import, ~2.25 GB tiles aux download, 6 GB tile-build heap). `docker/selfhost/run-manifest.md`: extract date+md5, **resolved image digests** (nominatim/ors/temurin/maven sha256), protomaps/basemaps commit `a50c699`, engine config knobs, measured resources, parity result. Mind-map edit deferred to W17. (P4 honoured: every number labelled with the artifact actually measured
+ **17/18 ring metrics exact** (radial 0.0%, area within ±0.3% — the self-hosted ORS reproduces public-ORS isochrones essentially byte-for-byte, both walk + car). Geocode exact for specific places (Unirii square, Berceni) at 0.0 m. **The one miss (Grozăvești geocode 401.5 m) is investigated, not widened (my STOP trigger):** it is a bare *neighborhood-name* query — public Nominatim returns 44.4427,26.0604 ("…Pasajul Basarab…"), local returns 44.4432,26.0654 ("Grozăvești, Sector 6"); BOTH are correct Grozăvești/Sector-6 representative points, differing only in which OSM object each ranks first for an ambiguous area name. Specific-address/POI geocoding is exact; this is inherent geocoder ranking variance, not a self-host defect, and the 150 m bar (calibrated for rooftop addresses) simply doesn't apply to an area-name query. **Live tile render:** `/api/tiles` on the local app serves valid PMTiles (HTTP 206 Range, `PMTiles` magic bytes) and the self-built archive carries the exact Protomaps schema (W14) → the map renders (P1 resolved); a literal browser screenshot was blocked by claude-in-chrome's script-injection timing out on MapLibre's WebGL loop (tooling limitation, not a render failure) — the render path is the same one the W8 e2e exercises.
+- [ ] W16. [P4][P5] Docs filled with MEASURED numbers, labelled full-Romania 2026-08-25. `docs/SELFHOST.md`: resource table (per-engine wall-time/RAM/disk), total ≈114 GB (106 GB deletable flatnode
 
 ### Phase E — review / close
-- [ ] W17. [P8] **Byte-identity re-proven + hygiene + mind-map done.** Restored the public 25 MB Bucharest tiles (removed the root-owned 684 MB build via docker, re-ran `tiles:fetch` → 25 MB, user-owned) so the default path serves public tiles. **`src/` diff EMPTY** (staged + unstaged); shell provider env empty; engines stopped. `check:ci` green; e2e **112/112** with `--workers=4` (no flakes; engines-stopped RAM headroom). **Publication hygiene: found + scrubbed 9 workflow-leak lines** (task/phase/"plan panel"/"acceptance bar" refs in the committed docker/docs files) via explicit literal edits → hygiene PASS (11 staged), leakage grep CLEAN. **Two tooling-config excludes added** (`eslint.config.mjs` + `tsconfig.json` → ignore the gitignored `data/` tree): the tile build caches the protomaps/basemaps checkout under `data/selfhost/planetiler/`, and eslint(flat)/tsc don't read `.gitignore`, so without the exclude any dev who runs the self-host build reddens `check:ci`
+- [ ] W17. [P8] **Byte-identity re-proven + hygiene + mind-map done.** Restored the public 25 MB Bucharest tiles (removed the root-owned 684 MB build via docker, re-ran `tiles:fetch`
 - [ ] W18. [owner decision 1
 - [ ] W19. [owner decision 2
 - [ ] W20. [owner decision 3

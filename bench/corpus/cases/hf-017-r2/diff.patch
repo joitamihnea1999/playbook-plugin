@@ -1,5 +1,5 @@
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index cd751b9..1954215 100644
+index cd751b94f5acd53d961da9f4ce7dd8dc6ce81dfe..1954215a24465f9b370b05f1d6606e40840e20fc 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
 @@ -30,6 +30,14 @@ jobs:
@@ -18,7 +18,7 @@ index cd751b9..1954215 100644
        # parity harness's area/residual/verdict math so a refactor can't silently break it.
        - run: npm run selfhost:harness-selftest
 diff --git a/package.json b/package.json
-index 8757db3..b90fb74 100644
+index 8757db31ec511df5d62de6587753a733dbe88474..b90fb74471c6c0c348241b2958ff8696df5724f8 100644
 --- a/package.json
 +++ b/package.json
 @@ -20,8 +20,12 @@
@@ -36,8 +36,85 @@ index 8757db3..b90fb74 100644
    },
    "dependencies": {
      "@auth/prisma-adapter": "^2.11.2",
+diff --git a/scripts/perf/run-api-latency.mjs b/scripts/perf/run-api-latency.mjs
+index 5424fd3fcdc0aa034adcadf36b9c21316c9fefc1..4bc069f2197cfe7570040acd8bce2936b0165773 100644
+--- a/scripts/perf/run-api-latency.mjs
++++ b/scripts/perf/run-api-latency.mjs
+@@ -13,7 +13,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
+ import { fileURLToPath } from "node:url";
+ import { dirname, join } from "node:path";
+ import { openBrowser, closeBrowser } from "./browser.mjs";
+-import { ORIGIN, TARGET_URL, endpointProbes, percentile, median } from "./config.mjs";
++import { ORIGIN, TARGET_URL, endpointProbes, amenityInSessionPairs, percentile, median } from "./config.mjs";
+ 
+ const HERE = dirname(fileURLToPath(import.meta.url));
+ // ≥30 so cold p95 (nearest-rank index ⌈0.95·n⌉−1) is an actual tail percentile, not the
+@@ -91,10 +91,53 @@ async function main() {
+     );
+   }
+ 
++  // Cold-vs-warm sanity guard (task 017): the coord-jittered endpoints (reverse/isochrone/car/
++  // amenities) must pay a real provider/PostGIS round trip on a genuinely cold key. If a fresh
++  // cache namespace was NOT used (the deterministic coords repeat, so a re-run without bumping
++  // PROVIDER_DATA_REVISION serves ApiCache HITS), their "cold" p50 collapses to a few ms — a warm
++  // reading masquerading as cold, which would falsely PASS the verdict. Flag it and fail closed.
++  // (suggest/geocode are EXCLUDED: they use fixed keys and are documented as warm-on-repeat.)
++  const WARM_MASQUERADE_FLOOR_MS = 15;
++  const JITTERED = new Set(["reverse", "isochrone", "car", "amenities"]);
++  for (const r of out) {
++    if (JITTERED.has(r.endpoint) && r.cold && r.cold.p50 < WARM_MASQUERADE_FLOOR_MS) {
++      hardFail = true;
++      console.error(
++        `[api] ${r.endpoint}: cold p50 ${r.cold.p50} ms < ${WARM_MASQUERADE_FLOOR_MS} ms — this is a WARM cache hit, not a cold provider call. ` +
++          `Bump PROVIDER_DATA_REVISION (or flush ApiCache) for a true cold run; the "cold" verdict here is INVALID.`,
++      );
++    }
++  }
++
++  // IN-SESSION amenities cell (task 017) — a SEPARATE label, NOT a replacement for the
++  // cold-cold verdict above. The real flow draws the ring first, so here we GET /api/isochrone
++  // at each origin (priming/coalescing the ORS ring) BEFORE timing /api/amenities at the same
++  // origin — isolating the amenities-per-selection cost (warm ORS ring + PostGIS). Its value
++  // still depends on PostGIS buffer warmth (cold-buffer disk I/O dominates a fresh area; a
++  // warmed stack is ~100ms), so it is reported alongside, not as the budget verdict.
++  const pairAt = amenityInSessionPairs();
++  const inSession = [];
++  let inSessionFail = 0;
++  for (let i = 0; i < SAMPLES; i++) {
++    const { iso, amenities } = pairAt(i);
++    await timeFetch(page, ORIGIN + iso); // draw the ring first (prime/coalesce ORS)
++    const r = await timeFetch(page, ORIGIN + amenities);
++    if (r.status < 400) inSession.push(r.ms);
++    else inSessionFail++;
++  }
++  if (inSessionFail > 0) hardFail = true;
++  const inSessionCell = inSession.length
++    ? { p50: +median(inSession).toFixed(1), p95: +percentile(inSession, 95).toFixed(1), n: inSession.length, fail: inSessionFail }
++    : null;
++  console.error(
++    `[api] amenities(in-session, ring pre-drawn) cold p50/p95 ${inSessionCell?.p50 ?? "—"}/${inSessionCell?.p95 ?? "—"} ms (budget 400) n=${inSession.length}/${SAMPLES}`,
++  );
++
+   const report = {
+     takenAt: new Date().toISOString(),
+     target: TARGET_URL,
+     samplesPerCell: SAMPLES,
++    amenitiesInSession: inSessionCell,
+     device: ctx.emulated ? "throttled" : "unthrottled (stack latency; add real-device network RTT on-device)",
+     percentile: `nearest-rank, n=${SAMPLES} per cell (p95 index ⌈0.95·n⌉−1)`,
+     reliable: !hardFail,
+@@ -125,6 +168,9 @@ async function main() {
+     console.log(`${r.endpoint.padEnd(12)} ${cold}  ${warm}  ${String(r.budgetMs).padEnd(6)}  ${verdict}`);
+   }
+   console.log(`(verdict on COLD p95 = first-touch cache-miss, n=${SAMPLES}; warm = ApiCache hit, returning user)`);
++  if (inSessionCell) {
++    console.log(`amenities(in-session, ring pre-drawn): p50/p95 ${inSessionCell.p50}/${inSessionCell.p95} ms  — the per-selection amenities cost with the ORS ring already drawn (context, not the verdict; still PostGIS-buffer-sensitive)`);
++  }
+   console.log(`\nWrote ${join(outDir, "api-latency.json")}`);
+   await closeBrowser(ctx);
+   if (hardFail) {
 diff --git a/src/features/amenities/server/catalogue-query.ts b/src/features/amenities/server/catalogue-query.ts
-index e91038e..8f7df52 100644
+index e91038e27ffca19cec453cba4fe241bef3dea1f3..8f7df520536102f8352a2fc3cec28a87cb6b71cb 100644
 --- a/src/features/amenities/server/catalogue-query.ts
 +++ b/src/features/amenities/server/catalogue-query.ts
 @@ -173,7 +173,23 @@ export async function queryCatalogueSummaryInRing(
@@ -124,7 +201,7 @@ index e91038e..8f7df52 100644
        )
      ), bucketed AS (
 diff --git a/src/features/amenities/server/catalogue.ts b/src/features/amenities/server/catalogue.ts
-index f30953b..8d04fd2 100644
+index f30953b7666075429212430e85c4751d01b85448..8d04fd2621d1508bb6acb011144fb40207a53011 100644
 --- a/src/features/amenities/server/catalogue.ts
 +++ b/src/features/amenities/server/catalogue.ts
 @@ -411,7 +411,15 @@ async function computeNearbyAmenities(
@@ -163,7 +240,7 @@ index f30953b..8d04fd2 100644
    // `members`). (impl-panel finding F5.)
 diff --git a/src/features/amenities/server/warmup.ts b/src/features/amenities/server/warmup.ts
 new file mode 100644
-index 0000000..5d023e9
+index 0000000000000000000000000000000000000000..5d023e945234f4b8ebf183181380ce7d8674f941
 --- /dev/null
 +++ b/src/features/amenities/server/warmup.ts
 @@ -0,0 +1,106 @@
@@ -274,7 +351,7 @@ index 0000000..5d023e9
 +  `;
 +}
 diff --git a/src/features/map/AppMap.tsx b/src/features/map/AppMap.tsx
-index 02d7b2e..f839727 100644
+index 02d7b2ec9ccdb165258a4661b00f972ec4ca031f..f839727354bef5698b1ba6ec7b6c0b4a82993bc9 100644
 --- a/src/features/map/AppMap.tsx
 +++ b/src/features/map/AppMap.tsx
 @@ -1,7 +1,7 @@
@@ -500,7 +577,7 @@ index 02d7b2e..f839727 100644
      </div>
    );
 diff --git a/src/features/map/amenity-cluster-controller.ts b/src/features/map/amenity-cluster-controller.ts
-index af4bc8d..9058077 100644
+index af4bc8d068e4b72b2c72dc818fbe7943956ee199..90580779142d8078db6efae8a58c1f6e57a0d4da 100644
 --- a/src/features/map/amenity-cluster-controller.ts
 +++ b/src/features/map/amenity-cluster-controller.ts
 @@ -1,4 +1,5 @@
@@ -520,7 +597,7 @@ index af4bc8d..9058077 100644
          key,
          marker,
 diff --git a/src/features/map/amenity-spider-controller.ts b/src/features/map/amenity-spider-controller.ts
-index 4309367..f67f820 100644
+index 4309367bc2775f754af0050f1413eccc6c3c7bc5..f67f82071da53dddb25af461d2825a598ffd3988 100644
 --- a/src/features/map/amenity-spider-controller.ts
 +++ b/src/features/map/amenity-spider-controller.ts
 @@ -1,4 +1,5 @@
@@ -541,7 +618,7 @@ index 4309367..f67f820 100644
      onActiveChange(true);
 diff --git a/src/features/map/map-runtime.ts b/src/features/map/map-runtime.ts
 new file mode 100644
-index 0000000..1e65f19
+index 0000000000000000000000000000000000000000..1e65f191db89b28b933feb1245731a9008bc7181
 --- /dev/null
 +++ b/src/features/map/map-runtime.ts
 @@ -0,0 +1,38 @@
@@ -584,7 +661,7 @@ index 0000000..1e65f19
 +  gl = null;
 +}
 diff --git a/src/features/map/popup-controller.ts b/src/features/map/popup-controller.ts
-index 6dbced0..ab25f1e 100644
+index 6dbced03c0d308ecabb29261f098ea2a3813ceef..ab25f1e7b8f2ff2bfd5f73360f0b2e2e439ffff3 100644
 --- a/src/features/map/popup-controller.ts
 +++ b/src/features/map/popup-controller.ts
 @@ -1,4 +1,5 @@
@@ -631,7 +708,7 @@ index 6dbced0..ab25f1e 100644
        .setDOMContent(renderStopPopup(buildStopPopupModel(title, "loading"), coords))
        .addTo(map);
 diff --git a/src/features/map/selection-render.ts b/src/features/map/selection-render.ts
-index b609664..73a6988 100644
+index b6096640ceceb6a0b55e4d975bdc03fcede55d2f..73a69882a890cd34e3ec359a51ac2d457fe8e142 100644
 --- a/src/features/map/selection-render.ts
 +++ b/src/features/map/selection-render.ts
 @@ -1,4 +1,5 @@
@@ -652,7 +729,7 @@ index b609664..73a6988 100644
      // — closes the exact-origin transit stop limitation parked in task 021).
 diff --git a/src/instrumentation.ts b/src/instrumentation.ts
 new file mode 100644
-index 0000000..a6bfdf3
+index 0000000000000000000000000000000000000000..a6bfdf38c162cf22f72ce61b4fe41faf4de9d47d
 --- /dev/null
 +++ b/src/instrumentation.ts
 @@ -0,0 +1,15 @@

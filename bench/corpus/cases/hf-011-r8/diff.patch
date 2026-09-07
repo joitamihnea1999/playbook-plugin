@@ -1,5 +1,5 @@
 diff --git a/docker/selfhost/parity-check.mjs b/docker/selfhost/parity-check.mjs
-index 014d859..8f2a13f 100644
+index 014d859df6ca8eb21b6ce9e49c85c95a40122f51..8f2a13f721470f1e00b33db86c6db44319b8807f 100644
 --- a/docker/selfhost/parity-check.mjs
 +++ b/docker/selfhost/parity-check.mjs
 @@ -23,8 +23,10 @@
@@ -113,7 +113,7 @@ index 014d859..8f2a13f 100644
      }
    } catch (e) { problems.push(`ORS cross-check failed: ${e.message}`); }
 diff --git a/docker/selfhost/run-manifest.md b/docker/selfhost/run-manifest.md
-index cac0862..bd08287 100644
+index cac08625655ff3773123c852f27e9293dabd04d6..bd082874be78dd7e5dad4b44b72cea8478b3de64 100644
 --- a/docker/selfhost/run-manifest.md
 +++ b/docker/selfhost/run-manifest.md
 @@ -64,10 +64,11 @@ with-flatnode answers, confirming a serve-only instance does not need it. Gettin
@@ -154,7 +154,7 @@ index cac0862..bd08287 100644
    built host-owned via `build-tiles.sh` `--user`) has the reference's exact 9 source-layers and is
    Range-served by `/api/tiles` (HTTP 206, `PMTiles` magic) when the local app sets
 diff --git a/docs/SELFHOST.md b/docs/SELFHOST.md
-index 2c78ae9..79d6418 100644
+index 2c78ae90ce62fb1f1ef8995f7ce46b7c775b18cc..79d641859a41e2f51f495a309c2587ee9c0d1d9d 100644
 --- a/docs/SELFHOST.md
 +++ b/docs/SELFHOST.md
 @@ -58,7 +58,11 @@ extract, and is read only during import and minutely/replication updates — a s

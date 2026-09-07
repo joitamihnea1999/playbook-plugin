@@ -161,11 +161,11 @@ def main(argv=None) -> int:
         print()
     print("ROUNDS (judge-archive.md then judge.md, FILE order — playbook prepends, so each file is "
           "NEWEST-FIRST; do not read position as chronology)")
-    print(f"{'#':>2}  {'kind':<18} {'verdict':<7} {'judges':<6} {'commit(outer)':<14} snapshot scopes")
+    print(f"{'file#':>5}  {'kind':<18} {'verdict':<7} {'judges':<6} {'commit(outer)':<14} snapshot scopes")
     for i, r in enumerate(rounds):
         scopes = " ".join(f"{k or '<root>'}={short(v)}{'*' if r['dirty'].get(k) else ''}"
                           for k, v in r["snapshot"].items()) or "-"
-        print(f"{i:>2}  {r['kind']:<18} {r['verdict']:<7} {r['judges']:<6} {short(r['commit']):<14} {scopes}")
+        print(f"{i:>5}  {r['kind']:<18} {r['verdict']:<7} {r['judges']:<6} {short(r['commit']):<14} {scopes}")
     if not rounds:
         print("   (no rounds found)")
     print("   (* = that scope had dirty files at panel time)")
@@ -198,6 +198,20 @@ def main(argv=None) -> int:
                 any_pair = True
     if not any_pair:
         print("   (no snapshot pairing available — pair audit receipts to the latest earlier commit BY HAND)")
+    # Impl-panel r1 terra #4: where snapshots date the rounds, list them OLDEST→NEWEST so a
+    # reader never mistakes the file index for a round ordinal.
+    dated = []
+    for i, r in enumerate(rounds):
+        for scope, sha in r["snapshot"].items():
+            if sha and _exists(a.repo, sha):
+                ts = git(a.repo, "log", "-1", "--format=%cI", sha).strip()
+                dated.append((ts, i, scope or "<root>", sha, r["verdict"], bool(r["dirty"].get(scope))))
+    print()
+    print("CHRONOLOGICAL (snapshot-dated rounds only, by the reviewed commit's date; undated rounds are NOT ordered)")
+    for n, (ts, i, scope, sha, verdict, dirty) in enumerate(sorted(dated), 1):
+        print(f"   {n}. file#{i}  {ts}  {scope}={short(sha)}{'*' if dirty else ''}  {verdict}")
+    if not dated:
+        print("   (none — legacy record)")
     return 0
 
 

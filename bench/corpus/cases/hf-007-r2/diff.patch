@@ -1,5 +1,5 @@
 diff --git a/.env.example b/.env.example
-index 192de39..9f42373 100644
+index 192de39cc9c4d6932508e63e6392148df45bbc24..9f42373f8310702559e07785b84943a63df54bc4 100644
 --- a/.env.example
 +++ b/.env.example
 @@ -24,3 +24,33 @@ ORS_API_KEY=""
@@ -37,7 +37,7 @@ index 192de39..9f42373 100644
 +# hosts above are runtime). scripts/fetch-tiles.sh reads this same var.
 +# NEXT_PUBLIC_MAP_BBOX="25.8,44.2,26.4,44.7"
 diff --git a/scripts/fetch-tiles.sh b/scripts/fetch-tiles.sh
-index 0dfc616..f9eeb04 100755
+index 0dfc616a88aa583463fcdb51edc8872f44a992bd..f9eeb04957cc88ef1d41ea715507f10fe488da4a 100755
 --- a/scripts/fetch-tiles.sh
 +++ b/scripts/fetch-tiles.sh
 @@ -7,12 +7,25 @@ set -euo pipefail
@@ -70,7 +70,7 @@ index 0dfc616..f9eeb04 100755
  if ! command -v pmtiles >/dev/null 2>&1; then
    echo "pmtiles CLI not found — downloading v${PMTILES_VERSION} to .cache/ ..."
 diff --git a/src/app/api/tiles/route.ts b/src/app/api/tiles/route.ts
-index 73e9aa0..64fbaf4 100644
+index 73e9aa032c60900693ecbea6a458df71fb1f179f..64fbaf435fd4c274ab3338e8bddab65ab484d3d3 100644
 --- a/src/app/api/tiles/route.ts
 +++ b/src/app/api/tiles/route.ts
 @@ -1,15 +1,17 @@
@@ -94,7 +94,7 @@ index 73e9aa0..64fbaf4 100644
  // pmtiles range requests are small (header ~16KB, tile batches well under 1MB);
  // the cap keeps a hostile client from turning ranges into whole-archive buffers.
 diff --git a/src/features/amenities/server/bulk-overpass.test.ts b/src/features/amenities/server/bulk-overpass.test.ts
-index b13865f..908053b 100644
+index b13865f7a389d53733cd14e83fcd114282ec19fe..908053bcea33a6bcf5e710ccd9cef08c8b1f7c60 100644
 --- a/src/features/amenities/server/bulk-overpass.test.ts
 +++ b/src/features/amenities/server/bulk-overpass.test.ts
 @@ -66,6 +66,38 @@ describe("bulk Overpass transport", () => {
@@ -137,7 +137,7 @@ index b13865f..908053b 100644
      vi.stubGlobal(
        "fetch",
 diff --git a/src/features/amenities/server/bulk-overpass.ts b/src/features/amenities/server/bulk-overpass.ts
-index 5877e74..81f06ef 100644
+index 5877e740194bd35b95f2940fb3da30b94a95f4d6..81f06ef70d306f7a305f4585a8f7e03a2fdff45b 100644
 --- a/src/features/amenities/server/bulk-overpass.ts
 +++ b/src/features/amenities/server/bulk-overpass.ts
 @@ -1,13 +1,9 @@
@@ -167,7 +167,7 @@ index 5877e74..81f06ef 100644
    const failures: string[] = [];
    for (const endpoint of endpoints) {
 diff --git a/src/features/amenities/server/overpass-client.ts b/src/features/amenities/server/overpass-client.ts
-index 7f0989c..ad31b0f 100644
+index 7f0989caa52360f71da9c3efdf1ea6efe65dc80b..ad31b0f0ff3954605ab656f17d8c9b0d2377ea99 100644
 --- a/src/features/amenities/server/overpass-client.ts
 +++ b/src/features/amenities/server/overpass-client.ts
 @@ -1,3 +1,4 @@
@@ -208,7 +208,7 @@ index 7f0989c..ad31b0f 100644
    );
    try {
 diff --git a/src/features/isochrones/server/ors.test.ts b/src/features/isochrones/server/ors.test.ts
-index 41b60c2..2bf7e09 100644
+index 41b60c271e0e81e62a485e423f5f6e17c58da5c3..2bf7e09d294b1c6a0577e1e860193016f9aedc97 100644
 --- a/src/features/isochrones/server/ors.test.ts
 +++ b/src/features/isochrones/server/ors.test.ts
 @@ -1,9 +1,10 @@
@@ -261,7 +261,7 @@ index 41b60c2..2bf7e09 100644
      providerFetch.mockResolvedValue(orsResponse([poly(1200), poly(400), poly(800)]));
      const result = await drivingIsochrone(44.4268, 26.1025, midday);
 diff --git a/src/features/isochrones/server/ors.ts b/src/features/isochrones/server/ors.ts
-index 5bd7208..12dc2b5 100644
+index 5bd7208d8d09ea81db93b3394ecf4e1103adc6e6..12dc2b58a272c75fb6eb1458ca12d1599274726d 100644
 --- a/src/features/isochrones/server/ors.ts
 +++ b/src/features/isochrones/server/ors.ts
 @@ -5,7 +5,7 @@ import {
@@ -323,7 +323,7 @@ index 5bd7208..12dc2b5 100644
        timeoutMs: TIMEOUT_MS,
        init: {
 diff --git a/src/features/isochrones/server/transit-plan.test.ts b/src/features/isochrones/server/transit-plan.test.ts
-index 62a3320..c7724ef 100644
+index 62a332051b47cbde9be7da70e56514e6f245c5c3..c7724efa21f0dddb9607047ce79839a22f1d715f 100644
 --- a/src/features/isochrones/server/transit-plan.test.ts
 +++ b/src/features/isochrones/server/transit-plan.test.ts
 @@ -327,6 +327,26 @@ describe("planTrip", () => {
@@ -354,7 +354,7 @@ index 62a3320..c7724ef 100644
      providerFetch.mockResolvedValue(planResponse([FAST]));
      await planTrip(FROM, TO, DEP);
 diff --git a/src/features/isochrones/server/transit-plan.ts b/src/features/isochrones/server/transit-plan.ts
-index fff66b9..f324dcf 100644
+index fff66b9f297f7b6a640100714dbf591db666b31c..f324dcf2aa5a9d5a199bb05077d386b34d1f304b 100644
 --- a/src/features/isochrones/server/transit-plan.ts
 +++ b/src/features/isochrones/server/transit-plan.ts
 @@ -2,6 +2,7 @@ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
@@ -434,7 +434,7 @@ index fff66b9..f324dcf 100644
        } catch {
          // The first response already answers "no transit here" — a failed
 diff --git a/src/features/isochrones/server/transit.test.ts b/src/features/isochrones/server/transit.test.ts
-index 344bbc6..7a486ee 100644
+index 344bbc6e55d17803516e0461b59529826623027b..7a486ee873601d3383dd79bcb6b87b2459c231c5 100644
 --- a/src/features/isochrones/server/transit.test.ts
 +++ b/src/features/isochrones/server/transit.test.ts
 @@ -276,6 +276,26 @@ describe("transitIsochrone", () => {
@@ -465,7 +465,7 @@ index 344bbc6..7a486ee 100644
      // Task 064: every transit contract test ran at the default
      // pace, so a broken pace→provider path would have shipped green. Slow must
 diff --git a/src/features/isochrones/server/transit.ts b/src/features/isochrones/server/transit.ts
-index 49661af..41f0a83 100644
+index 49661af325726c607c5dd579cdf7d6f82d5f30b0..41f0a831f241a36298ad1b419b4c0e75e689bbc0 100644
 --- a/src/features/isochrones/server/transit.ts
 +++ b/src/features/isochrones/server/transit.ts
 @@ -17,6 +17,7 @@ import {
@@ -518,7 +518,7 @@ index 49661af..41f0a83 100644
        timeoutMs: TIMEOUT_MS,
        init: { headers: { "User-Agent": USER_AGENT } },
 diff --git a/src/features/search/server/nominatim.test.ts b/src/features/search/server/nominatim.test.ts
-index 6009e1e..9ea5d1b 100644
+index 6009e1efcdbf82c5bc55bb36caf0cbbe98e38748..9ea5d1bbbeacb04153e9e04d78a73ffd506839de 100644
 --- a/src/features/search/server/nominatim.test.ts
 +++ b/src/features/search/server/nominatim.test.ts
 @@ -1,4 +1,4 @@
@@ -556,7 +556,7 @@ index 6009e1e..9ea5d1b 100644
    it("wraps a network/fetch failure as ProviderError (→ 502)", async () => {
      providerFetch.mockImplementation(async () => {
 diff --git a/src/features/search/server/nominatim.ts b/src/features/search/server/nominatim.ts
-index b67b97d..f0abb7d 100644
+index b67b97db29ea35bdf49533db3f1d77e4c9a597a4..f0abb7dc2093c912be63e70f2a246d929caffaf0 100644
 --- a/src/features/search/server/nominatim.ts
 +++ b/src/features/search/server/nominatim.ts
 @@ -1,5 +1,6 @@
@@ -621,7 +621,7 @@ index b67b97d..f0abb7d 100644
 +  return cachedLookup(key, url, new URL(nominatimBase).host);
  }
 diff --git a/src/features/search/server/photon.test.ts b/src/features/search/server/photon.test.ts
-index 73fc422..e2f3aaf 100644
+index 73fc422d6fbfd88ca0f54b856f74722bf3c5a571..e2f3aafb459dc9bf3ac34b251cf305e25dee9247 100644
 --- a/src/features/search/server/photon.test.ts
 +++ b/src/features/search/server/photon.test.ts
 @@ -1,4 +1,4 @@
@@ -657,7 +657,7 @@ index 73fc422..e2f3aaf 100644
 +  });
 +});
 diff --git a/src/features/search/server/photon.ts b/src/features/search/server/photon.ts
-index 14ab670..2e5ae2d 100644
+index 14ab670ff6686f3369d32a7aa280b07d532f14ae..2e5ae2d35e0014da6fbe6b068f95c9807825d47b 100644
 --- a/src/features/search/server/photon.ts
 +++ b/src/features/search/server/photon.ts
 @@ -1,5 +1,6 @@
@@ -703,7 +703,7 @@ index 14ab670..2e5ae2d 100644
        timeoutMs: TIMEOUT_MS,
        init: { headers: { "User-Agent": USER_AGENT, Accept: "application/json" } },
 diff --git a/src/lib/bounds.test.ts b/src/lib/bounds.test.ts
-index 0392262..e807fcf 100644
+index 0392262f3f4f51a38e00b6cb54733cb82a2d2db7..e807fcf7d288b12cde2f6eee5558847850133a5f 100644
 --- a/src/lib/bounds.test.ts
 +++ b/src/lib/bounds.test.ts
 @@ -1,7 +1,7 @@
@@ -766,7 +766,7 @@ index 0392262..e807fcf 100644
 +  });
 +});
 diff --git a/src/lib/bounds.ts b/src/lib/bounds.ts
-index 1e4dd26..b811189 100644
+index 1e4dd26617d8892351b62c7c13fcadc6f67664f8..b811189ccd7d4036a244d1d4f42358a4411ed511 100644
 --- a/src/lib/bounds.ts
 +++ b/src/lib/bounds.ts
 @@ -1,18 +1,78 @@
@@ -855,7 +855,7 @@ index 1e4dd26..b811189 100644
  export function inBucharest(lat: number, lng: number): boolean {
    return (
 diff --git a/src/lib/env.test.ts b/src/lib/env.test.ts
-index 05d575c..12d2920 100644
+index 05d575c768f9de42d17c1764f9f74b888ce838d0..12d2920474d98e77efa2f08c7f9285bb9b5c2f55 100644
 --- a/src/lib/env.test.ts
 +++ b/src/lib/env.test.ts
 @@ -1,6 +1,14 @@
@@ -985,7 +985,7 @@ index 05d575c..12d2920 100644
 +  });
 +});
 diff --git a/src/lib/env.ts b/src/lib/env.ts
-index ae38cdf..daa3588 100644
+index ae38cdf3a4819e9eeb9c19e56509f891718d6b7b..daa35880327bd9fe0c5d017394680dcfb70677f7 100644
 --- a/src/lib/env.ts
 +++ b/src/lib/env.ts
 @@ -6,6 +6,9 @@

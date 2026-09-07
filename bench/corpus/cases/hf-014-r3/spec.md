@@ -39,12 +39,6 @@ convenience removes day-2 friction for running the app against the local engines
 - Playbook: playbook/Build
 - Note: Don't hardcode task numbers in plans — `.claude/bin/tasks new` auto-increments.
 
-### Recent Chat (auto-captured at activation — review and remove unrelated)
-
-**[M052]** [2026-08-28 20:45:30]
-Work under playbook discipline on HowFar (nested HowFar/ repo). H1 — three housekeeping items, one task (classify honestly): (a) merge branch self-host into main in HowFar/ (Railway has EXPIRED — prod...
-
----
 
 ## Design Phase
 
@@ -91,7 +85,7 @@ Work under playbook discipline on HowFar (nested HowFar/ repo). H1 — three hou
 - [ ] Confirm NOTHING pushed: `git status` shows `main` ahead of `origin/main`, no push performed.
 
 ### (c) dev:selfhost convenience (build first — code lands before impl panel)
-- [ ] Write `docker/selfhost/dev-selfhost.sh`: preflight (docker present; built prerequisites `data/tiles/selfhost-romania.pmtiles` + `data/selfhost/photon/photon_data` + `data/selfhost/photon/photon.jar` present → else fail loud pointing at docs/SELFHOST.md §1–§5); `--dry-run` prints the plan + preflight result and exits with ZERO side effects; otherwise bring up app dev DB (root compose `db`) + provider serve stack (nominatim/ors/photon), wait for health with a bounded timeout (exit with a "still importing/building
+- [ ] Write `docker/selfhost/dev-selfhost.sh`: preflight (docker present; built prerequisites `data/tiles/selfhost-romania.pmtiles` + `data/selfhost/photon/photon_data` + `data/selfhost/photon/photon.jar` present
 - [ ] Write `docker/selfhost/stop-selfhost.sh`: `docker compose -f docker/selfhost/docker-compose.yml stop` (preserve named volumes
 - [ ] Add `dev:selfhost` + `dev:selfhost:down` to HowFar `package.json` scripts.
 - [ ] Verify: `npm run dev:selfhost -- --dry-run` runs the preflight side-effect-free; `bash -n` both scripts; `shellcheck` if available; confirm `.env` untouched.

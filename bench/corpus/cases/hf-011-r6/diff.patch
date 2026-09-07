@@ -1,5 +1,5 @@
 diff --git a/docker/selfhost/docker-compose.yml b/docker/selfhost/docker-compose.yml
-index 164d097..80a0a7d 100644
+index 164d097df52e4ae643e6907b0d518f327ebc61e7..80a0a7dc3bb87068fb784ed35dc315f181a5a55d 100644
 --- a/docker/selfhost/docker-compose.yml
 +++ b/docker/selfhost/docker-compose.yml
 @@ -44,7 +44,7 @@ services:
@@ -13,7 +13,7 @@ index 164d097..80a0a7d 100644
      expose:
 diff --git a/docker/selfhost/prune-flatnode.sh b/docker/selfhost/prune-flatnode.sh
 new file mode 100755
-index 0000000..2f3422e
+index 0000000000000000000000000000000000000000..2f3422eb71307d0f0f28d4b132e5480218861e0d
 --- /dev/null
 +++ b/docker/selfhost/prune-flatnode.sh
 @@ -0,0 +1,48 @@
@@ -66,7 +66,7 @@ index 0000000..2f3422e
 +docker run --rm -v "${VOLUME}:/fn" alpine rm -f "$FLATNODE_PATH"
 +echo "Done. Reclaimed ~${size}. Re-import (~24 min) is the cost if you later need it back." >&2
 diff --git a/docker/selfhost/run-manifest.md b/docker/selfhost/run-manifest.md
-index c8c54e6..cac0862 100644
+index c8c54e6ad2dff1515f92e54e44d213289dfbe60b..cac08625655ff3773123c852f27e9293dabd04d6 100644
 --- a/docker/selfhost/run-manifest.md
 +++ b/docker/selfhost/run-manifest.md
 @@ -10,8 +10,11 @@ engines rebuild deterministically. The **basemap tile archive is NOT bit-reprodu
@@ -112,7 +112,7 @@ index c8c54e6..cac0862 100644
  ## Parity result (public providers vs self-hosted stack, 2026-08-25)
  
 diff --git a/docs/SELFHOST.md b/docs/SELFHOST.md
-index a80d149..2c78ae9 100644
+index a80d149e11c9124ab131eaa9f631e1ca919fcbe0..2c78ae90ce62fb1f1ef8995f7ce46b7c775b18cc 100644
 --- a/docs/SELFHOST.md
 +++ b/docs/SELFHOST.md
 @@ -24,8 +24,9 @@ this doc are the only committed artefacts.

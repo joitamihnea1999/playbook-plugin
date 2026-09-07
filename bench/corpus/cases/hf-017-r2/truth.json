@@ -41,6 +41,14 @@
       "severity": "Minor",
       "historical_outcome": "accepted+parked",
       "failure_mode": "The eager maplibre-gl CSS import sits outside the lazy-boundary claim and test; the bundle instrument measures JS only (sonnet#1; parked)."
+    },
+    {
+      "id": "P5",
+      "file": "scripts/perf/run-api-latency.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "PERF_API_SAMPLES=0 or a non-number runs zero samples yet writes reliable:true and exits 0; the harness should validate an integer ≥30 and require every cell to hold exactly that many successes (codex:sol#3, #4; sonnet#5; parked)."
     }
   ],
   "known_rejects": [

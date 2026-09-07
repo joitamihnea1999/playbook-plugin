@@ -26,39 +26,6 @@ P1 defect parked by the 1.5.39 release panel (task 030 Parked; two judges conver
 - Playbook: playbook/Fix
 - Note: Don't hardcode task numbers in plans — `.claude/bin/tasks new` auto-increments.
 
-### Recent Chat (auto-captured at activation — review and remove unrelated)
-
-**[M190]** [2026-08-26 11:08:30]
-1.5.39 batch — completion report Branch: fix/1.5.39-batch (both repos). NOT merged, no version bump. Nested HEAD eca4707, all pushed, CI run 32959897672 = 4-lane GREEN (linux 3.10/3.12, macOS, windows...
-
-**[M191]** [2026-08-26 11:11:30]
-This checkout sits inside a playbook-managed workspace — create the appropriately-sized playbook task for cutting a release and work through its gates. Default judge codex:gpt-5.6-terra:high; grok may...
-
-**[M192]** [2026-08-26 11:58:13]
-it finished: Release complete. Here's the final debrief. Release 1.5.39 — cut, pushed, and CI-green ✅ Published: inner repo playbook-plugin @ d552031 → pushed 8b677b7..d552031 main -> main CI: run 329...
-
-**[M193]** [2026-08-26 11:59:13]
-Don't open a 1.5.40 task — P1–P3 are recorded in the owner's backlog and will batch later with other findings (P1's fence-blind corruption is noted as the priority of the three). DO run tasks retro no...
-
-**[M194]** [2026-08-26 12:02:04]
-this is what it did after i gave the prompt from step 1: Understood — P1–P3 stay in the owner's backlog (P1 the priority). Running the retro now. Ran 1 shell command The retro created an analysis task...
-
-**[M195]** [2026-08-26 12:02:32]
-this is what it did after i gave the prompt from step 1: Understood — P1–P3 stay in the owner's backlog (P1 the priority). Running the retro now. Ran 1 shell command The retro created an analysis task...
-
-**[M196]** [2026-08-26 12:04:59]
-i did step 1. before i go to step 2, is playbook plugin finally working as optimal and best as it should, or are there still known problems?
-
-**[M197]** [2026-08-26 12:06:34]
-One small task in this playbook-managed workspace (nested playbook-plugin/ checkout, branch fix/p1-fence-blind-blocked off up-to-date origin/main). Standing rules: red-first, verify green per commit, ...
-
-**[M198]** [2026-08-26 13:42:03]
-Done. Here's the capped report. P1 fence-blind blocked writers — fixed, verified, not merged Branch: fix/p1-fence-blind-blocked (nested checkout), off up-to-date origin/main. HEAD 1a51624, pushed. CI ...
-
-**[M199]** [2026-08-26 13:42:46]
-Decision A: close task 032 as-is through the contract (P1 + the risk-classification Critical are the deliverable; the panel evidence covers the final tree). The fence-consolidation hardening stays par...
-
----
 
 ## Design Phase
 
@@ -80,26 +47,24 @@ Decision A: close task 032 as-is through the contract (P1 + the risk-classificat
 - [ ] Verify: new tests GREEN; full `cd playbook-plugin && python3 scripts/verify` PASS.
 - [ ] Sweep: enumerate every task.md section-locating writer/reader; fix fence-blind writers or report each as already-safe with the proving line. Record the table under this gate.
 
-  **WRITERS (mutate task.md by section — the corruption class):**
-  | Symbol | File:line | Status | Proof / action |
-  |---|---|---|---|
-  | `set_task_blocked` | core.py:2192 | **FIXED** | now via `_live_section_span` → `_iter_nonfenced` (core.py:2203-2210) |
-  | `resume_blocked_task` | core.py:2221 | **FIXED** | now via `_live_section_span` (core.py:2229-2234) |
-  | `write_handoff` | core.py:2370 | already-safe | local `_section_span` on `_iter_nonfenced` (core.py:2390) — Session C |
-  | `upsert_task_section` | core.py:2163 | already-safe | skips `_closed_fence_line_indices(lines)`, `if i not in fenced` (core.py:2180/2185) |
-  | `compact` archiver | compact.py:134 | already-safe | `not (j not in fenced and lines[j].strip().startswith("## "))` |
-  | `_risk_heading_lines` (risk gate) | core.py:917 | **FIXED (round 2-4)** | now `[(i,s) for i,s in _iter_nonfenced(...)]` — was a parallel loose-closer loop → **Critical fenced-`## Risk` bypass** (fixed); pre-existing unclosed/indented edges parked |
-  | `_iter_nonfenced` (shared scanner) | core.py:943 | **HARDENED (round 2-4)** | strict CommonMark opener/closer (≤3-space, whitespace-closer, backtick-info reject) + fail-CLOSED on unclosed (safe for destructive writers) |
+ **WRITERS (mutate task.md by section — the corruption class):**
+ | Symbol | File:line | Status | Proof / action |
+ |---|---|---|---|
+ | `set_task_blocked` | core.py:2192 | **FIXED** | now via `_live_section_span` → `_iter_nonfenced` (core.py:2203-2210) |
+ | `resume_blocked_task` | core.py:2221 | **FIXED** | now via `_live_section_span` (core.py:2229-2234) |
+ | `write_handoff` | core.py:2370 | already-safe | local `_section_span` on `_iter_nonfenced` (core.py:2390) — Session C |
+ | `upsert_task_section` | core.py:2163 | already-safe | skips `_closed_fence_line_indices(lines)`, `if i not in fenced` (core.py:2180/2185) |
+ | `compact` archiver | compact.py:134 | already-safe | `not (j not in fenced and lines[j].strip().startswith("## "))` |
 
-  **READERS on the blocked/handoff path (agree with the fixed writers):**
-  | `_extract_block_reason` | core.py:2432 | already-safe | `for _i, s in _iter_nonfenced(lines)` (core.py:2441) |
-  | `find_unconsumed_handoff` | core.py:2456 | already-safe | delegates to `_extract_block_reason` (fence-aware) |
-  | audit receipt sweep | audit.py:704 | already-safe | `if i in skip: continue` (skip = closed-fence indices, audit.py:698) |
+ **READERS on the blocked/handoff path (agree with the fixed writers):**
+ | `_extract_block_reason` | core.py:2432 | already-safe | `for _i, s in _iter_nonfenced(lines)` (core.py:2441) |
+ | `find_unconsumed_handoff` | core.py:2456 | already-safe | delegates to `_extract_block_reason` (fence-aware) |
+ | audit receipt sweep | audit.py:704 | already-safe | `if i in skip: continue` (skip = closed-fence indices, audit.py:698) |
 
-  **KNOWN fence-blind — REPORTED OUT OF SCOPE (not corruption of the blocked/handoff record; each needs its own task):**
-  - **Status pair** `_set_status` (core.py:2113, `line.strip()=="## Status"`) + `_extract_status` (core.py:2033) + the reopen writer `lifecycle.py:559`: fence-blind, but a `## Status`-in-a-fence corruption is a single-line overwrite, AND there is a **bash/awk twin** in the stop-hook that reads `## Status`, locked to Python by parity test `test_blocked_state.py:185 test_duplicate_status_headings_hook_agrees_with_python`. Fixing the Python side alone would BREAK that parity; fixing both is a cross-language enforcement-path change disproportionate to the hazard. → **PARK** (see Parked).
-  - **Readers, non-corrupting misread** (produce phantom items from a fenced example but never rewrite the file): `extract_parked_items` (core.py:1715, phantom parked bullets), `_extract_problem` (core.py:2048), retro.py `_extract_section`/`_extract_status` (retro.py:150/164, analysis of completed tasks only). → **PARK**.
-  - `standing_gates` heading-dedup (core.py:867): fence-blind but operates on freshly template-generated content at task creation, before any user-authored fenced example can exist → not exploitable in practice; noted, no action.
+ **KNOWN fence-blind — REPORTED OUT OF SCOPE (not corruption of the blocked/handoff record; each needs its own task):**
+ - **Status pair** `_set_status` (core.py:2113, `line.strip()=="## Status"`) + `_extract_status` (core.py:2033) + the reopen writer `lifecycle.py:559`: fence-blind, but a `## Status`-in-a-fence corruption is a single-line overwrite, AND there is a **bash/awk twin** in the stop-hook that reads `## Status`, locked to Python by parity test `test_blocked_state.py:185 test_duplicate_status_headings_hook_agrees_with_python`. Fixing the Python side alone would BREAK that parity; fixing both is a cross-language enforcement-path change disproportionate to the hazard. → **PARK** (see Parked).
+ - **Readers, non-corrupting misread** (produce phantom items from a fenced example but never rewrite the file): `extract_parked_items` (core.py:1715, phantom parked bullets), `_extract_problem` (core.py:2048), retro.py `_extract_section`/`_extract_status` (retro.py:150/164, analysis of completed tasks only). → **PARK**.
+ - `standing_gates` heading-dedup (core.py:867): fence-blind but operates on freshly template-generated content at task creation, before any user-authored fenced example can exist → not exploitable in practice; noted, no action.
 - [ ] Ledger: extend PB-TASK-BLOCKED statement to include fence-safety + bind the new proof & negative control in docs/guarantee-ledger.json; re-run the ledger validator.
 - [ ] Side effects: anything else that changed? Adjacent code still works? (mirror sync check
 

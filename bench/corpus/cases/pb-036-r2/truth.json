@@ -71,16 +71,6 @@
       "fix_evidence": "budget_usd=resolve_judge_budget(project_path)"
     },
     {
-      "id": "R2-STUB",
-      "file": "plugins/playbook/tasks/review.py",
-      "symbol": "_run_tail_cert_judge_raw",
-      "severity": "Critical",
-      "historical_outcome": "accepted+fixed",
-      "failure_mode": "The PLAYBOOK_TAIL_CERT_JUDGE_CMD env seam guarded by default_judge == '__test_stub__' is still a production force-PASS path because .agent/models.json is gitignored and per-install (codex:sol#2; rejected in round 2, conceded and removed in round 3).",
-      "fix_commit": "2064484",
-      "fix_evidence": "There is NO ambient production seam"
-    },
-    {
       "id": "R2-P1",
       "file": "plugins/playbook/tasks/lifecycle.py",
       "symbol": null,

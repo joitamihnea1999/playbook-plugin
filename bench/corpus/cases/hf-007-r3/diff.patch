@@ -1,5 +1,5 @@
 diff --git a/.env.example b/.env.example
-index 192de39..9f42373 100644
+index 192de39cc9c4d6932508e63e6392148df45bbc24..9f42373f8310702559e07785b84943a63df54bc4 100644
 --- a/.env.example
 +++ b/.env.example
 @@ -24,3 +24,33 @@ ORS_API_KEY=""
@@ -37,7 +37,7 @@ index 192de39..9f42373 100644
 +# hosts above are runtime). scripts/fetch-tiles.sh reads this same var.
 +# NEXT_PUBLIC_MAP_BBOX="25.8,44.2,26.4,44.7"
 diff --git a/scripts/fetch-tiles.sh b/scripts/fetch-tiles.sh
-index 0dfc616..f9eeb04 100755
+index 0dfc616a88aa583463fcdb51edc8872f44a992bd..f9eeb04957cc88ef1d41ea715507f10fe488da4a 100755
 --- a/scripts/fetch-tiles.sh
 +++ b/scripts/fetch-tiles.sh
 @@ -7,12 +7,25 @@ set -euo pipefail
@@ -70,7 +70,7 @@ index 0dfc616..f9eeb04 100755
  if ! command -v pmtiles >/dev/null 2>&1; then
    echo "pmtiles CLI not found — downloading v${PMTILES_VERSION} to .cache/ ..."
 diff --git a/src/app/api/tiles/route.ts b/src/app/api/tiles/route.ts
-index 73e9aa0..64fbaf4 100644
+index 73e9aa032c60900693ecbea6a458df71fb1f179f..64fbaf435fd4c274ab3338e8bddab65ab484d3d3 100644
 --- a/src/app/api/tiles/route.ts
 +++ b/src/app/api/tiles/route.ts
 @@ -1,15 +1,17 @@
@@ -93,51 +93,8 @@ index 73e9aa0..64fbaf4 100644
  
  // pmtiles range requests are small (header ~16KB, tile batches well under 1MB);
  // the cap keeps a hostile client from turning ranges into whole-archive buffers.
-diff --git a/src/features/amenities/server/bulk-overpass.test.ts b/src/features/amenities/server/bulk-overpass.test.ts
-index b13865f..908053b 100644
---- a/src/features/amenities/server/bulk-overpass.test.ts
-+++ b/src/features/amenities/server/bulk-overpass.test.ts
-@@ -66,6 +66,38 @@ describe("bulk Overpass transport", () => {
-     ).rejects.toThrow(/exceeds 20 bytes/);
-   });
- 
-+  it("defaults to today's public bulk pool when no endpoints are passed (task 007)", async () => {
-+    const calls: string[] = [];
-+    vi.stubGlobal(
-+      "fetch",
-+      vi.fn(async (url: string | URL | Request) => {
-+        calls.push(String(url));
-+        return bodyResponse({ elements: [{ type: "node", id: 1 }] });
-+      }),
-+    );
-+    const snapshot = await fetchBulkOverpass(); // no endpoints → config default
-+    expect(snapshot.endpoint).toBe("https://overpass-api.de/api/interpreter");
-+    expect(calls[0]).toBe("https://overpass-api.de/api/interpreter");
-+  });
-+
-+  it("uses an OVERPASS_BULK_ENDPOINTS override when set (task 007)", async () => {
-+    vi.stubEnv("OVERPASS_BULK_ENDPOINTS", "https://bulk.internal/api/interpreter");
-+    const calls: string[] = [];
-+    vi.stubGlobal(
-+      "fetch",
-+      vi.fn(async (url: string | URL | Request) => {
-+        calls.push(String(url));
-+        return bodyResponse({ elements: [{ type: "node", id: 1 }] });
-+      }),
-+    );
-+    try {
-+      const snapshot = await fetchBulkOverpass();
-+      expect(snapshot.endpoint).toBe("https://bulk.internal/api/interpreter");
-+    } finally {
-+      vi.unstubAllEnvs();
-+    }
-+  });
-+
-   it("rejects timeout/error remarks even when HTTP status is 200", async () => {
-     vi.stubGlobal(
-       "fetch",
 diff --git a/src/features/amenities/server/bulk-overpass.ts b/src/features/amenities/server/bulk-overpass.ts
-index 5877e74..81f06ef 100644
+index 5877e740194bd35b95f2940fb3da30b94a95f4d6..81f06ef70d306f7a305f4585a8f7e03a2fdff45b 100644
 --- a/src/features/amenities/server/bulk-overpass.ts
 +++ b/src/features/amenities/server/bulk-overpass.ts
 @@ -1,13 +1,9 @@
@@ -166,40 +123,8 @@ index 5877e74..81f06ef 100644
    const query = buildBulkOverpassQuery();
    const failures: string[] = [];
    for (const endpoint of endpoints) {
-diff --git a/src/features/amenities/server/catalogue.test.ts b/src/features/amenities/server/catalogue.test.ts
-index c89d67e..9e0bc70 100644
---- a/src/features/amenities/server/catalogue.test.ts
-+++ b/src/features/amenities/server/catalogue.test.ts
-@@ -1,4 +1,4 @@
--import { beforeEach, describe, expect, it, vi } from "vitest";
-+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
- 
- const {
-   walkingIsochrone,
-@@ -668,3 +668,21 @@ describe("nearbyAmenities merges coincident transit stops (task 047 + per-band c
-     expect(totalFor(result.countsByBand, "transit")).toBe(0);
-   });
- });
-+
-+describe("amenityResultCacheKey config namespacing (task 007)", () => {
-+  afterEach(() => vi.unstubAllEnvs());
-+
-+  it("is byte-identical on default config", () => {
-+    expect(amenityResultCacheKey("dataset-1", 44.4268, 26.1025, "walk:normal")).toBe(
-+      "amenity:local:v5:dataset-1:walk:normal:44.42680,26.10250",
-+    );
-+  });
-+
-+  it("gets a fresh namespace once a ring provider is overridden (amenities are derived from the rings)", () => {
-+    const def = amenityResultCacheKey("dataset-1", 44.4268, 26.1025, "walk:normal");
-+    vi.stubEnv("ORS_BASE_URL", "https://ors.internal");
-+    const overridden = amenityResultCacheKey("dataset-1", 44.4268, 26.1025, "walk:normal");
-+    expect(overridden).not.toBe(def);
-+    expect(overridden.endsWith(def)).toBe(true); // tag is a prefix; base key unchanged
-+  });
-+});
 diff --git a/src/features/amenities/server/catalogue.ts b/src/features/amenities/server/catalogue.ts
-index dd8745f..5e7130f 100644
+index dd8745fb6de44bb1f3d5449d143e62475ab4435e..5e7130fcd782eedf410d43f0f30f86542f308f2e 100644
 --- a/src/features/amenities/server/catalogue.ts
 +++ b/src/features/amenities/server/catalogue.ts
 @@ -14,6 +14,7 @@ import { DEFAULT_TIME_CONTEXT, type TimeContext } from "@/features/isochrones/ti
@@ -225,49 +150,8 @@ index dd8745f..5e7130f 100644
  }
  
  /**
-diff --git a/src/features/amenities/server/overpass-client.test.ts b/src/features/amenities/server/overpass-client.test.ts
-index 29d094d..8770936 100644
---- a/src/features/amenities/server/overpass-client.test.ts
-+++ b/src/features/amenities/server/overpass-client.test.ts
-@@ -1,4 +1,4 @@
--import { beforeEach, describe, expect, it, vi } from "vitest";
-+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
- 
- const { providerFetch } = vi.hoisted(() => ({ providerFetch: vi.fn() }));
- vi.mock("@/lib/provider-http", async (importOriginal) => ({
-@@ -54,3 +54,30 @@ describe("raceOverpass — empty semantics", () => {
-     await expect(raceOverpass("q", { treatEmptyAsFailure: false })).rejects.toThrow(/overpass unavailable/i);
-   });
- });
-+
-+describe("config-driven endpoint pool (task 007)", () => {
-+  afterEach(() => vi.unstubAllEnvs());
-+
-+  it("defaults to today's 3-host pool, deriving rateHost from each URL", async () => {
-+    providerFetch.mockResolvedValue(resp([el]));
-+    await raceOverpass("q", { treatEmptyAsFailure: false });
-+    const urls = providerFetch.mock.calls.map((c) => c[0] as string);
-+    expect(urls).toEqual([
-+      "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-+      "https://overpass-api.de/api/interpreter",
-+      "https://overpass.kumi.systems/api/interpreter",
-+    ]);
-+    const hosts = providerFetch.mock.calls.map((c) => (c[1] as { rateHost: string }).rateHost);
-+    expect(hosts).toEqual(["maps.mail.ru", "overpass-api.de", "overpass.kumi.systems"]);
-+  });
-+
-+  it("uses an OVERPASS_ENDPOINTS override (URL + derived rateHost)", async () => {
-+    vi.stubEnv("OVERPASS_ENDPOINTS", "https://op.internal/api/interpreter");
-+    providerFetch.mockResolvedValue(resp([el]));
-+    await raceOverpass("q", { treatEmptyAsFailure: false });
-+    expect(providerFetch).toHaveBeenCalledTimes(1);
-+    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+    expect(url).toBe("https://op.internal/api/interpreter");
-+    expect(opts.rateHost).toBe("op.internal");
-+  });
-+});
 diff --git a/src/features/amenities/server/overpass-client.ts b/src/features/amenities/server/overpass-client.ts
-index 7f0989c..ad31b0f 100644
+index 7f0989caa52360f71da9c3efdf1ea6efe65dc80b..ad31b0f0ff3954605ab656f17d8c9b0d2377ea99 100644
 --- a/src/features/amenities/server/overpass-client.ts
 +++ b/src/features/amenities/server/overpass-client.ts
 @@ -1,3 +1,4 @@
@@ -308,7 +192,7 @@ index 7f0989c..ad31b0f 100644
    );
    try {
 diff --git a/src/features/amenities/server/route-path.ts b/src/features/amenities/server/route-path.ts
-index afebf91..6786091 100644
+index afebf911462790da80cc5b3e2d04a76b6a1f27f1..678609140184e6b80f0ca9f1cdf745494c678747 100644
 --- a/src/features/amenities/server/route-path.ts
 +++ b/src/features/amenities/server/route-path.ts
 @@ -2,6 +2,7 @@ import { parseRoutePath, type RoutePath } from "@/features/amenities/route-path"
@@ -331,7 +215,7 @@ index afebf91..6786091 100644
    if (hit) return hit.path;
  
 diff --git a/src/features/amenities/server/stop-lines.ts b/src/features/amenities/server/stop-lines.ts
-index 651bcf2..ecb003a 100644
+index 651bcf2166bab785102f63e212e1940e8710b919..ecb003ad95a276f3285c4c3129749292b93f657e 100644
 --- a/src/features/amenities/server/stop-lines.ts
 +++ b/src/features/amenities/server/stop-lines.ts
 @@ -1,6 +1,7 @@
@@ -353,61 +237,8 @@ index 651bcf2..ecb003a 100644
    const hit = await getCachedSafe<StopLine[]>(key);
    if (hit) return hit;
  
-diff --git a/src/features/isochrones/server/ors.test.ts b/src/features/isochrones/server/ors.test.ts
-index 41b60c2..2bf7e09 100644
---- a/src/features/isochrones/server/ors.test.ts
-+++ b/src/features/isochrones/server/ors.test.ts
-@@ -1,9 +1,10 @@
- import { beforeEach, describe, expect, it, vi } from "vitest";
- 
--const { store, providerFetch, serverEnv } = vi.hoisted(() => ({
-+const { store, providerFetch, serverEnv, providerConfig } = vi.hoisted(() => ({
-   store: new Map<string, unknown>(),
-   providerFetch: vi.fn(),
-   serverEnv: vi.fn(() => ({ orsApiKey: "test-key" }) as { orsApiKey?: string }),
-+  providerConfig: vi.fn(() => ({ orsBase: "https://api.openrouteservice.org" }) as { orsBase: string }),
- }));
- 
- vi.mock("@/lib/api-cache", () => ({
-@@ -19,7 +20,11 @@ vi.mock("@/lib/provider-http", async (importOriginal) => ({
-   providerFetch,
- }));
- 
--vi.mock("@/lib/env", () => ({ serverEnv }));
-+vi.mock("@/lib/env", () => ({
-+  serverEnv,
-+  providerConfig,
-+  taggedCacheKey: (key: string) => key, // identity on default config (tag tested in env.test)
-+}));
- 
- import { carTrafficSlot, scaledCarRangesS } from "@/features/isochrones/car-traffic";
- 
-@@ -38,6 +43,7 @@ beforeEach(() => {
-   store.clear();
-   providerFetch.mockReset();
-   serverEnv.mockReturnValue({ orsApiKey: "test-key" });
-+  providerConfig.mockReturnValue({ orsBase: "https://api.openrouteservice.org" });
- });
- 
- describe("walkingIsochrone", () => {
-@@ -212,6 +218,15 @@ describe("drivingIsochrone (car, tasks 053/058)", () => {
-     parsed.range.forEach((v: number, i: number) => expect(v).toBeLessThan(MIDDAY_RANGES[i]!));
-   });
- 
-+  it("routes the request URL and rate-limit host to an ORS_BASE_URL override (task 007)", async () => {
-+    providerConfig.mockReturnValue({ orsBase: "https://ors.internal" });
-+    providerFetch.mockResolvedValue(orsResponse(MIDDAY_RANGES.map(poly)));
-+    await drivingIsochrone(44.4268, 26.1025, midday);
-+    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+    expect(url).toBe("https://ors.internal/v2/isochrones/driving-car");
-+    expect(opts.rateHost).toBe("ors.internal");
-+  });
-+
-   it("relabels the driving rings to 10/20/30 min, ascending regardless of input order", async () => {
-     providerFetch.mockResolvedValue(orsResponse([poly(1200), poly(400), poly(800)]));
-     const result = await drivingIsochrone(44.4268, 26.1025, midday);
 diff --git a/src/features/isochrones/server/ors.ts b/src/features/isochrones/server/ors.ts
-index 5bd7208..12dc2b5 100644
+index 5bd7208d8d09ea81db93b3394ecf4e1103adc6e6..12dc2b58a272c75fb6eb1458ca12d1599274726d 100644
 --- a/src/features/isochrones/server/ors.ts
 +++ b/src/features/isochrones/server/ors.ts
 @@ -5,7 +5,7 @@ import {
@@ -468,39 +299,8 @@ index 5bd7208..12dc2b5 100644
        minIntervalMs: MIN_INTERVAL_MS,
        timeoutMs: TIMEOUT_MS,
        init: {
-diff --git a/src/features/isochrones/server/transit-plan.test.ts b/src/features/isochrones/server/transit-plan.test.ts
-index 62a3320..c7724ef 100644
---- a/src/features/isochrones/server/transit-plan.test.ts
-+++ b/src/features/isochrones/server/transit-plan.test.ts
-@@ -327,6 +327,26 @@ describe("planTrip", () => {
-     expect(url).toContain(`time=${encodeURIComponent(DEP)}`);
-   });
- 
-+  it("defaults to today's public plan host, and a TRANSIT_BASE_URL override moves URL + rateHost (task 007)", async () => {
-+    providerFetch.mockResolvedValue(planResponse([FAST]));
-+    await planTrip(FROM, TO, DEP);
-+    const [defUrl, defOpts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+    expect(defUrl.startsWith("https://api.transitous.org/api/v1/plan?")).toBe(true);
-+    expect(defOpts.rateHost).toBe("api.transitous.org");
-+
-+    vi.stubEnv("TRANSIT_BASE_URL", "https://motis.internal/");
-+    try {
-+      providerFetch.mockClear();
-+      providerFetch.mockResolvedValue(planResponse([FAST]));
-+      await planTrip({ lat: 44.30, lng: 26.05 }, { lat: 44.49, lng: 26.19 }, DEP); // fresh coords
-+      const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+      expect(url.startsWith("https://motis.internal/api/v1/plan?")).toBe(true);
-+      expect(opts.rateHost).toBe("motis.internal");
-+    } finally {
-+      vi.unstubAllEnvs();
-+    }
-+  });
-+
-   it("matches the painted rings' walking contract: raised LAST street leg, default first leg, ring pedestrian params", async () => {
-     providerFetch.mockResolvedValue(planResponse([FAST]));
-     await planTrip(FROM, TO, DEP);
 diff --git a/src/features/isochrones/server/transit-plan.ts b/src/features/isochrones/server/transit-plan.ts
-index fff66b9..f324dcf 100644
+index fff66b9f297f7b6a640100714dbf591db666b31c..f324dcf2aa5a9d5a199bb05077d386b34d1f304b 100644
 --- a/src/features/isochrones/server/transit-plan.ts
 +++ b/src/features/isochrones/server/transit-plan.ts
 @@ -2,6 +2,7 @@ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
@@ -579,39 +379,8 @@ index fff66b9..f324dcf 100644
          if (isTransitAnswer(second)) plan = second;
        } catch {
          // The first response already answers "no transit here" — a failed
-diff --git a/src/features/isochrones/server/transit.test.ts b/src/features/isochrones/server/transit.test.ts
-index 344bbc6..7a486ee 100644
---- a/src/features/isochrones/server/transit.test.ts
-+++ b/src/features/isochrones/server/transit.test.ts
-@@ -276,6 +276,26 @@ describe("transitIsochrone", () => {
-     expect(url).toContain("useRoutedTransfers=true");
-   });
- 
-+  it("defaults to today's public Transitous host, and a TRANSIT_BASE_URL override moves URL + rateHost (task 007)", async () => {
-+    providerFetch.mockResolvedValue(oneToAll([]));
-+    await transitIsochrone(44.4, 26.1);
-+    const [defUrl, defOpts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+    expect(defUrl.startsWith("https://api.transitous.org/api/v6/one-to-all?")).toBe(true);
-+    expect(defOpts.rateHost).toBe("api.transitous.org");
-+
-+    vi.stubEnv("TRANSIT_BASE_URL", "https://motis.internal");
-+    try {
-+      providerFetch.mockClear();
-+      providerFetch.mockResolvedValue(oneToAll([]));
-+      await transitIsochrone(44.41, 26.11); // fresh coords → not cached
-+      const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+      expect(url.startsWith("https://motis.internal/api/v6/one-to-all?")).toBe(true);
-+      expect(opts.rateHost).toBe("motis.internal");
-+    } finally {
-+      vi.unstubAllEnvs();
-+    }
-+  });
-+
-   it("threads SLOW all the way through: MOTIS access speed, egress stamping, and the cache key", async () => {
-     // Task 064: every transit contract test ran at the default
-     // pace, so a broken pace→provider path would have shipped green. Slow must
 diff --git a/src/features/isochrones/server/transit.ts b/src/features/isochrones/server/transit.ts
-index 49661af..41f0a83 100644
+index 49661af325726c607c5dd579cdf7d6f82d5f30b0..41f0a831f241a36298ad1b419b4c0e75e689bbc0 100644
 --- a/src/features/isochrones/server/transit.ts
 +++ b/src/features/isochrones/server/transit.ts
 @@ -17,6 +17,7 @@ import {
@@ -663,46 +432,8 @@ index 49661af..41f0a83 100644
        minIntervalMs: MIN_INTERVAL_MS,
        timeoutMs: TIMEOUT_MS,
        init: { headers: { "User-Agent": USER_AGENT } },
-diff --git a/src/features/search/server/nominatim.test.ts b/src/features/search/server/nominatim.test.ts
-index 6009e1e..9ea5d1b 100644
---- a/src/features/search/server/nominatim.test.ts
-+++ b/src/features/search/server/nominatim.test.ts
-@@ -1,4 +1,4 @@
--import { beforeEach, describe, expect, it, vi } from "vitest";
-+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
- 
- // In-memory cache + a stubbed providerFetch (so the real rate limiter isn't
- // exercised here — that's covered in http.test.ts).
-@@ -91,6 +91,27 @@ describe("reverseGeocode", () => {
-   });
- });
- 
-+describe("config-driven host (task 007)", () => {
-+  afterEach(() => vi.unstubAllEnvs());
-+
-+  it("defaults to today's public Nominatim host, byte-exact (URL + rateHost)", async () => {
-+    providerFetch.mockResolvedValue(jsonResponse([]));
-+    await geocode("default host");
-+    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+    expect(url.startsWith("https://nominatim.openstreetmap.org/search?")).toBe(true);
-+    expect(opts.rateHost).toBe("nominatim.openstreetmap.org");
-+  });
-+
-+  it("routes both the request URL and the rate-limit host to an override", async () => {
-+    vi.stubEnv("NOMINATIM_BASE_URL", "https://nom.example");
-+    providerFetch.mockResolvedValue(jsonResponse([]));
-+    await geocode("override host");
-+    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+    expect(url.startsWith("https://nom.example/search?")).toBe(true);
-+    expect(opts.rateHost).toBe("nom.example");
-+  });
-+});
-+
- describe("error handling", () => {
-   it("wraps a network/fetch failure as ProviderError (→ 502)", async () => {
-     providerFetch.mockImplementation(async () => {
 diff --git a/src/features/search/server/nominatim.ts b/src/features/search/server/nominatim.ts
-index b67b97d..f0abb7d 100644
+index b67b97db29ea35bdf49533db3f1d77e4c9a597a4..f0abb7dc2093c912be63e70f2a246d929caffaf0 100644
 --- a/src/features/search/server/nominatim.ts
 +++ b/src/features/search/server/nominatim.ts
 @@ -1,5 +1,6 @@
@@ -766,44 +497,8 @@ index b67b97d..f0abb7d 100644
 +  const url = `${nominatimBase}/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
 +  return cachedLookup(key, url, new URL(nominatimBase).host);
  }
-diff --git a/src/features/search/server/photon.test.ts b/src/features/search/server/photon.test.ts
-index 73fc422..e2f3aaf 100644
---- a/src/features/search/server/photon.test.ts
-+++ b/src/features/search/server/photon.test.ts
-@@ -1,4 +1,4 @@
--import { beforeEach, describe, expect, it, vi } from "vitest";
-+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
- 
- const { store, providerFetch } = vi.hoisted(() => ({
-   store: new Map<string, unknown>(),
-@@ -120,3 +120,25 @@ describe("photon suggest", () => {
-     await expect(suggest("x")).rejects.toThrow(/request failed/i);
-   });
- });
-+
-+describe("config-driven host (task 007)", () => {
-+  afterEach(() => vi.unstubAllEnvs());
-+
-+  it("defaults to today's public Photon host, byte-exact (URL + rateHost + focus)", async () => {
-+    providerFetch.mockResolvedValue(res([]));
-+    await suggest("default host");
-+    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+    expect(url.startsWith("https://photon.komoot.io/api?")).toBe(true);
-+    expect(url).toContain("lat=44.43&lon=26.10"); // focus kept byte-identical in P1
-+    expect(opts.rateHost).toBe("photon.komoot.io");
-+  });
-+
-+  it("routes both the request URL and the rate-limit host to an override", async () => {
-+    vi.stubEnv("PHOTON_BASE_URL", "https://photon.internal/api");
-+    providerFetch.mockResolvedValue(res([]));
-+    await suggest("override host");
-+    const [url, opts] = providerFetch.mock.calls[0] as [string, { rateHost: string }];
-+    expect(url.startsWith("https://photon.internal/api?")).toBe(true);
-+    expect(opts.rateHost).toBe("photon.internal");
-+  });
-+});
 diff --git a/src/features/search/server/photon.ts b/src/features/search/server/photon.ts
-index 14ab670..2e5ae2d 100644
+index 14ab670ff6686f3369d32a7aa280b07d532f14ae..2e5ae2d35e0014da6fbe6b068f95c9807825d47b 100644
 --- a/src/features/search/server/photon.ts
 +++ b/src/features/search/server/photon.ts
 @@ -1,5 +1,6 @@
@@ -848,103 +543,8 @@ index 14ab670..2e5ae2d 100644
        minIntervalMs: MIN_INTERVAL_MS,
        timeoutMs: TIMEOUT_MS,
        init: { headers: { "User-Agent": USER_AGENT, Accept: "application/json" } },
-diff --git a/src/lib/bounds.test.ts b/src/lib/bounds.test.ts
-index 0392262..420acb6 100644
---- a/src/lib/bounds.test.ts
-+++ b/src/lib/bounds.test.ts
-@@ -1,7 +1,7 @@
- import fc from "fast-check";
--import { describe, expect, it } from "vitest";
-+import { afterEach, describe, expect, it, vi } from "vitest";
- 
--import { BUCHAREST_BBOX, BUCHAREST_MAX_BOUNDS, inBucharest } from "./bounds";
-+import { BUCHAREST_BBOX, BUCHAREST_MAX_BOUNDS, MAX_BBOX_SPAN_DEG, inBucharest, parseBbox } from "./bounds";
- 
- describe("inBucharest", () => {
-   it("accepts every point inside the bbox (property)", () => {
-@@ -49,3 +49,80 @@ describe("BUCHAREST_MAX_BOUNDS", () => {
-     ]);
-   });
- });
-+
-+describe("default extent (byte-identity, task 007)", () => {
-+  // NOT self-referential: pins the DEFAULT box to today's exact literals so the
-+  // config lift cannot silently move the current Bucharest deployment.
-+  it("with NEXT_PUBLIC_MAP_BBOX unset, is exactly Bucharest+Ilfov", () => {
-+    expect(BUCHAREST_BBOX).toEqual({ minLng: 25.8, minLat: 44.2, maxLng: 26.4, maxLat: 44.7 });
-+  });
-+});
-+
-+describe("parseBbox (task 007)", () => {
-+  it("parses a well-formed single-city box", () => {
-+    expect(parseBbox("23.4,46.6,23.7,46.9")).toEqual({
-+      minLng: 23.4,
-+      minLat: 46.6,
-+      maxLng: 23.7,
-+      maxLat: 46.9,
-+    });
-+  });
-+
-+  it("tolerates surrounding whitespace", () => {
-+    expect(parseBbox(" 25.8 , 44.2 , 26.4 , 44.7 ")).toEqual({
-+      minLng: 25.8,
-+      minLat: 44.2,
-+      maxLng: 26.4,
-+      maxLat: 44.7,
-+    });
-+  });
-+
-+  it("returns null for every malformed shape", () => {
-+    expect(parseBbox(null)).toBeNull();
-+    expect(parseBbox(undefined)).toBeNull();
-+    expect(parseBbox("")).toBeNull();
-+    expect(parseBbox("25.8,44.2,26.4")).toBeNull(); // wrong arity
-+    expect(parseBbox("25.8,44.2,26.4,44.7,extra")).toBeNull();
-+    expect(parseBbox("a,b,c,d")).toBeNull(); // non-finite
-+    expect(parseBbox("26.4,44.2,25.8,44.7")).toBeNull(); // minLng >= maxLng
-+    expect(parseBbox("25.8,44.7,26.4,44.2")).toBeNull(); // minLat >= maxLat
-+    expect(parseBbox("-181,44.2,26.4,44.7")).toBeNull(); // out of world range
-+  });
-+
-+  it("rejects a span beyond the single-city cap (all-Romania guard)", () => {
-+    // ~7° wide — an all-country extent that would OOM the transit grid.
-+    expect(parseBbox("20,44,27,48")).toBeNull();
-+    expect(MAX_BBOX_SPAN_DEG).toBe(2);
-+  });
-+
-+  it("rejects empty interior tokens (Number('') is 0, must not slip through)", () => {
-+    expect(parseBbox("-1,,1,1")).toBeNull();
-+    expect(parseBbox("25.8,44.2,,44.7")).toBeNull();
-+  });
-+});
-+
-+describe("resolveBbox via NEXT_PUBLIC_MAP_BBOX (task 007, fresh module load)", () => {
-+  afterEach(() => {
-+    vi.unstubAllEnvs();
-+    vi.resetModules();
-+  });
-+
-+  it("a valid override moves BUCHAREST_BBOX, inBucharest, and BUCHAREST_MAX_BOUNDS", async () => {
-+    vi.resetModules();
-+    vi.stubEnv("NEXT_PUBLIC_MAP_BBOX", "23.4,46.6,23.7,46.9"); // Cluj-ish
-+    const fresh = await import("./bounds");
-+    expect(fresh.BUCHAREST_BBOX).toEqual({ minLng: 23.4, minLat: 46.6, maxLng: 23.7, maxLat: 46.9 });
-+    expect(fresh.inBucharest(46.7, 23.5)).toBe(true); // inside the override
-+    expect(fresh.inBucharest(44.4, 26.1)).toBe(false); // old Bucharest point now outside
-+    expect(fresh.BUCHAREST_MAX_BOUNDS).toEqual([
-+      [23.4, 46.6],
-+      [23.7, 46.9],
-+    ]);
-+  });
-+
-+  it("FAILS CLOSED at import on a set-but-invalid extent (no silent Bucharest fallback)", async () => {
-+    vi.resetModules();
-+    vi.stubEnv("NEXT_PUBLIC_MAP_BBOX", "not,a,bbox,really");
-+    await expect(import("./bounds")).rejects.toThrow(/Invalid NEXT_PUBLIC_MAP_BBOX/);
-+  });
-+});
 diff --git a/src/lib/bounds.ts b/src/lib/bounds.ts
-index 1e4dd26..08ca2e5 100644
+index 1e4dd26617d8892351b62c7c13fcadc6f67664f8..08ca2e5420af4595a3912657e8e7ed8ab4ef72e3 100644
 --- a/src/lib/bounds.ts
 +++ b/src/lib/bounds.ts
 @@ -1,18 +1,85 @@
@@ -1039,165 +639,8 @@ index 1e4dd26..08ca2e5 100644
  
  export function inBucharest(lat: number, lng: number): boolean {
    return (
-diff --git a/src/lib/env.test.ts b/src/lib/env.test.ts
-index 05d575c..7cdba66 100644
---- a/src/lib/env.test.ts
-+++ b/src/lib/env.test.ts
-@@ -1,6 +1,14 @@
- import { afterEach, describe, expect, it, vi } from "vitest";
- 
--import { EnvError, parseServerEnv } from "./env";
-+import {
-+  EnvError,
-+  PROVIDER_DEFAULTS,
-+  configCacheTag,
-+  parseProviderConfig,
-+  parseServerEnv,
-+  taggedCacheKey,
-+  tilesPmtilesPath,
-+} from "./env";
- 
- const valid = {
-   DATABASE_URL: "postgresql://user:pass@localhost:5433/howfar",
-@@ -71,3 +79,136 @@ describe("serverEnv (memoized process.env accessor)", () => {
-     expect(second.authSecret).toBe("first-value");
-   });
- });
-+
-+describe("parseProviderConfig (region/self-host config lift)", () => {
-+  it("defaults to today's exact public hosts when nothing is set (byte-identity)", () => {
-+    const cfg = parseProviderConfig({});
-+    expect(cfg.nominatimBase).toBe("https://nominatim.openstreetmap.org");
-+    expect(cfg.photonBase).toBe("https://photon.komoot.io/api");
-+    expect(cfg.orsBase).toBe("https://api.openrouteservice.org");
-+    expect(cfg.transitBase).toBe("https://api.transitous.org");
-+    expect(cfg.overpassEndpoints).toEqual([
-+      "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-+      "https://overpass-api.de/api/interpreter",
-+      "https://overpass.kumi.systems/api/interpreter",
-+    ]);
-+    expect(cfg.bulkOverpassEndpoints).toEqual([
-+      "https://overpass-api.de/api/interpreter",
-+      "https://overpass.kumi.systems/api/interpreter",
-+    ]);
-+  });
-+
-+  it("the returned default lists are copies, not the frozen PROVIDER_DEFAULTS arrays", () => {
-+    const cfg = parseProviderConfig({});
-+    expect(cfg.overpassEndpoints).not.toBe(PROVIDER_DEFAULTS.overpassEndpoints);
-+    expect(() => cfg.overpassEndpoints.push("x")).not.toThrow();
-+  });
-+
-+  it("honors a single-base override and strips a trailing slash", () => {
-+    const cfg = parseProviderConfig({ NOMINATIM_BASE_URL: "https://nom.example/" });
-+    expect(cfg.nominatimBase).toBe("https://nom.example");
-+    expect(cfg.photonBase).toBe(PROVIDER_DEFAULTS.photonBase); // others untouched
-+  });
-+
-+  it("splits an endpoint pool on commas and whitespace, dropping empties", () => {
-+    const cfg = parseProviderConfig({
-+      OVERPASS_ENDPOINTS: "https://a.example/api ,  https://b.example/api\n",
-+    });
-+    expect(cfg.overpassEndpoints).toEqual(["https://a.example/api", "https://b.example/api"]);
-+  });
-+
-+  it("treats an empty/whitespace override as absent (falls back to default)", () => {
-+    expect(parseProviderConfig({ ORS_BASE_URL: "   " }).orsBase).toBe(PROVIDER_DEFAULTS.orsBase);
-+  });
-+
-+  it("FAILS CLOSED on a set-but-invalid URL", () => {
-+    expect(() => parseProviderConfig({ ORS_BASE_URL: "not-a-url" })).toThrowError(EnvError);
-+    expect(() => parseProviderConfig({ ORS_BASE_URL: "not-a-url" })).toThrowError(/ORS_BASE_URL/);
-+  });
-+
-+  it("FAILS CLOSED on a non-http(s) scheme", () => {
-+    expect(() => parseProviderConfig({ PHOTON_BASE_URL: "ftp://x.example" })).toThrowError(
-+      /http:\/\/ or https:\/\//,
-+    );
-+  });
-+
-+  it("FAILS CLOSED on a base URL carrying a query string or fragment (path-concat would break)", () => {
-+    expect(() => parseProviderConfig({ NOMINATIM_BASE_URL: "https://nom.example?x=1" })).toThrowError(
-+      /query string or fragment/,
-+    );
-+    expect(() => parseProviderConfig({ ORS_BASE_URL: "https://ors.example#frag" })).toThrowError(
-+      /query string or fragment/,
-+    );
-+  });
-+
-+  it("allows a path prefix on the base (self-host under a subpath)", () => {
-+    expect(parseProviderConfig({ ORS_BASE_URL: "https://osm.internal/ors" }).orsBase).toBe(
-+      "https://osm.internal/ors",
-+    );
-+  });
-+
-+  it("FAILS CLOSED on an endpoint pool whose members are all empty", () => {
-+    expect(() => parseProviderConfig({ OVERPASS_ENDPOINTS: " , , " })).toThrowError(
-+      /at least one endpoint/,
-+    );
-+  });
-+
-+  it("FAILS CLOSED when one endpoint in a pool is invalid", () => {
-+    expect(() =>
-+      parseProviderConfig({ OVERPASS_ENDPOINTS: "https://ok.example/api, nope" }),
-+    ).toThrowError(EnvError);
-+  });
-+});
-+
-+describe("tilesPmtilesPath", () => {
-+  it("defaults to <cwd>/data/tiles/bucharest.pmtiles", () => {
-+    expect(tilesPmtilesPath({})).toBe(`${process.cwd()}/data/tiles/bucharest.pmtiles`);
-+  });
-+  it("uses an absolute override verbatim", () => {
-+    expect(tilesPmtilesPath({ TILES_PMTILES_PATH: "/srv/tiles/cluj.pmtiles" })).toBe(
-+      "/srv/tiles/cluj.pmtiles",
-+    );
-+  });
-+  it("resolves a relative override against cwd", () => {
-+    expect(tilesPmtilesPath({ TILES_PMTILES_PATH: "data/tiles/cluj.pmtiles" })).toBe(
-+      `${process.cwd()}/data/tiles/cluj.pmtiles`,
-+    );
-+  });
-+});
-+
-+describe("configCacheTag + taggedCacheKey", () => {
-+  it("is the empty string on default config, so keys stay byte-identical", () => {
-+    expect(configCacheTag({})).toBe("");
-+    expect(taggedCacheKey("iso:foot:v4:normal:44.4,26.1", {})).toBe("iso:foot:v4:normal:44.4,26.1");
-+  });
-+
-+  it("produces a stable non-empty tag once any provider host is overridden", () => {
-+    const src = { ORS_BASE_URL: "https://ors.internal" };
-+    const tag = configCacheTag(src);
-+    expect(tag).not.toBe("");
-+    expect(tag).toBe(configCacheTag(src)); // stable
-+    expect(taggedCacheKey("k", src)).toBe(`${tag}:k`);
-+  });
-+
-+  it("re-namespaces when the resolved extent changes (via a fresh module load)", async () => {
-+    // The bbox component comes from the RESOLVED BUCHAREST_BBOX (build-consistent),
-+    // not a raw runtime env read — so exercise it by re-importing with a stubbed
-+    // extent, which also proves the tag tracks the geofence rather than a var that
-+    // may be absent at runtime in a build-ARG container.
-+    vi.resetModules();
-+    vi.stubEnv("NEXT_PUBLIC_MAP_BBOX", "23.4,46.6,23.7,46.9");
-+    try {
-+      const fresh = await import("./env");
-+      expect(fresh.configCacheTag({})).not.toBe("");
-+    } finally {
-+      vi.unstubAllEnvs();
-+      vi.resetModules();
-+    }
-+  });
-+
-+  it("gives different configs different tags (no collision)", () => {
-+    expect(configCacheTag({ ORS_BASE_URL: "https://a.example" })).not.toBe(
-+      configCacheTag({ ORS_BASE_URL: "https://b.example" }),
-+    );
-+  });
-+});
 diff --git a/src/lib/env.ts b/src/lib/env.ts
-index ae38cdf..b139d16 100644
+index ae38cdf3a4819e9eeb9c19e56509f891718d6b7b..b139d1697b19abd9a2def3e7fc7266f50d4d6d58 100644
 --- a/src/lib/env.ts
 +++ b/src/lib/env.ts
 @@ -6,6 +6,11 @@

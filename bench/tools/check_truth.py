@@ -55,6 +55,35 @@ def check_case(case, repo: Path, max_chars: int, max_bytes: int) -> dict:
     if not sep:
         fails.append(f"diff_of {case.meta['diff_of']!r} is not '<base>..<reviewed>' — cannot re-derive")
     else:
+        # The judge's snapshot is repo_base_sha; the diff must END there (impl-panel r1 sol #3 / terra #2).
+        r_full = git(repo, "rev-parse", f"{reviewed}^{{commit}}", check=False).strip() if git_ok(repo, "cat-file", "-e", f"{reviewed}^{{commit}}") else ""
+        if r_full != sha:
+            fails.append(f"diff_of right endpoint {short(reviewed)} != repo_base_sha {short(sha)} — the snapshot "
+                         f"and the diff would disagree")
+        if not git_ok(repo, "cat-file", "-e", f"{parent}^{{commit}}") or \
+                not git_ok(repo, "merge-base", "--is-ancestor", parent, sha):
+            fails.append(f"diff_of base {short(parent)} is not an ancestor of the reviewed commit {short(sha)}")
+    excluded = set(case.meta.get("diff_excludes") or [])
+    mapping = case.meta.get("mapping")
+    truth_fixes = {f.get("fix_commit") for f in case.truth.get("findings", []) if f.get("fix_commit")}
+    if not isinstance(mapping, dict):
+        fails.append("case.json has no `mapping` object (round, rounds_total, fix_commits, evidence) — the "
+                     "round↔commit decision must be recorded, not implied")
+    else:
+        rnd, tot = mapping.get("round"), mapping.get("rounds_total")
+        if not isinstance(rnd, int) or rnd < 1:
+            fails.append(f"mapping.round must be an int >= 1, got {rnd!r}")
+        if not isinstance(tot, int) or (isinstance(rnd, int) and tot < rnd):
+            fails.append(f"mapping.rounds_total must be an int >= round, got {tot!r} (round {rnd!r})")
+        if not isinstance(mapping.get("evidence"), str) or not mapping["evidence"].strip():
+            fails.append("mapping.evidence must be a non-empty sentence")
+        mfix = {git(repo, "rev-parse", f"{c}^{{commit}}", check=False).strip() for c in (mapping.get("fix_commits") or [])
+                if git_ok(repo, "cat-file", "-e", f"{c}^{{commit}}")}
+        tfix = {git(repo, "rev-parse", f"{c}^{{commit}}", check=False).strip() for c in truth_fixes
+                if git_ok(repo, "cat-file", "-e", f"{c}^{{commit}}")}
+        if tfix - mfix:
+            fails.append(f"mapping.fix_commits does not list every fix commit the truth cites: "
+                         f"{sorted(short(c) for c in tfix - mfix)}")
         try:
             expected = derive_diff(repo, parent, reviewed, list(case.meta.get("diff_excludes") or []))
             actual = case.diff_path.read_text(encoding="utf-8", errors="replace")
@@ -71,6 +100,10 @@ def check_case(case, repo: Path, max_chars: int, max_bytes: int) -> dict:
                      + ", ".join(f"{f}:{s}" for f, s in collisions))
     for f in case.truth.get("findings", []):
         fid, path, symbol = f["id"], f["file"], f.get("symbol")
+        if path in excluded:
+            # A judge is scored on the DIFF UNDER REVIEW; a truth file stripped from it is
+            # unfair recall (impl-panel r1 grok #3). Keep the path in the diff or drop the entry.
+            fails.append(f"finding {fid}: file {path} is in diff_excludes — a truth file must be in diff.patch")
         if not _blob_exists(repo, sha, path):
             fails.append(f"finding {fid}: file {path} does not exist at {short(sha)}")
             continue
@@ -104,6 +137,11 @@ def check_case(case, repo: Path, max_chars: int, max_bytes: int) -> dict:
             if not _blob_exists(repo, fix_full, path) or evidence not in git(repo, "show", f"{fix_full}:{path}"):
                 fails.append(f"finding {fid}: fix_evidence {evidence[:50]!r} not found in {path} at fix_commit "
                              f"{short(fix)}")
+                continue
+            # The named commit must INTRODUCE the evidence (impl-panel r1 terra #3): absent at its parent.
+            if _blob_exists(repo, f"{fix_full}^", path) and evidence in git(repo, "show", f"{fix_full}^:{path}"):
+                fails.append(f"finding {fid}: fix_evidence {evidence[:50]!r} is already present at the fix commit's "
+                             f"parent {short(fix)}^ — the fix landed earlier than the named commit")
         elif fix and not git_ok(repo, "cat-file", "-e", f"{fix}^{{commit}}"):
             fails.append(f"finding {fid}: fix_commit {fix} does not resolve")
     for r in case.truth.get("known_rejects", []):
