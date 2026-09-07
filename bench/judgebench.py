@@ -59,8 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="validate corpus.json + every case dir")
     val.add_argument("--transport", action="store_true",
                      help="also render every prompt and report per-seat transport fit (exit 1 if any case fails a seat)")
-    val.add_argument("--platform", choices=("posix", "windows"), default=None,
-                     help="simulate the argv caps of this platform (default: the host's)")
+    val.add_argument("--platform", choices=("posix", "windows"), default="posix",
+                     help="simulate the argv caps of this platform (default posix — Test B's host; windows is informational)")
+    val.add_argument("--soft-timeout", type=int, default=900, help="render with run's time-budget clause (default 900)")
+    val.add_argument("--timeout", type=int, default=1200, help="hard timeout for the clause (default 1200)")
     val.add_argument("--spec-mode", choices=("full", "compact"), default="full",
                      help="render the transport report with this spec mode")
     show = csub.add_parser("show", parents=[common],
@@ -137,10 +139,11 @@ def cmd_corpus(args) -> int:
         if getattr(args, "transport", False):
             from bench.lib import REPO_ROOT, runner as _runner, transport as _transport
             cands = _runner.parse_candidates("sol-med,sol-high,grok-med,grok-high")
-            nt = None if args.platform is None else (args.platform == "windows")
+            nt = args.platform == "windows"
             rows = _transport.transport_rows(corpus.cases, cands, repo_root=REPO_ROOT, platform_nt=nt,
-                                             spec_mode=getattr(args, "spec_mode", "full"))
-            label = args.platform or ("windows" if __import__("os").name == "nt" else "posix")
+                                             spec_mode=getattr(args, "spec_mode", "full"),
+                                             soft_timeout=args.soft_timeout, hard_timeout=args.timeout)
+            label = args.platform
             print(_transport.render_rows(rows, cands, f"platform={label}, spec_mode={getattr(args, 'spec_mode', 'full')}"))
             if not all(r["fits_all"] for r in rows):
                 return EXIT_DNF
