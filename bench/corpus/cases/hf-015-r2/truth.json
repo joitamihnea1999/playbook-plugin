@@ -1,0 +1,112 @@
+{
+  "findings": [
+    {
+      "id": "C1",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Pan/zoom has no proof the synthetic gesture moved the map: a no-op touch reads ~60 fps idle as a PASS (opus2#1).",
+      "fix_commit": "d573731",
+      "fix_evidence": "Hash the composited map canvas region"
+    },
+    {
+      "id": "C2",
+      "file": "scripts/perf/analyze-bundle.mjs",
+      "symbol": null,
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The claim 'turf & d3-contour absent from the client bundle' is untested and FALSE: reach.ts statically imports @turf/boolean-point-in-polygon, name-mangled by minification so a name grep misses it (opus2#2).",
+      "fix_commit": "d573731",
+      "fix_evidence": "turf/d3 detection by name is BEST-EFFORT"
+    },
+    {
+      "id": "I1",
+      "file": "scripts/perf/run-api-latency.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The cold 'p95' at n=12 is literally the max sample (ceil(0.95*12)-1 = 11) (opus2#3, sonnet2#1, sol2#5, terra).",
+      "fix_commit": "d573731",
+      "fix_evidence": "const SAMPLES = Number(process.env.PERF_API_SAMPLES ?? 30);"
+    },
+    {
+      "id": "I2",
+      "file": "docs/PERF_AUDIT.md",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Gap #8's call-chain citation is wrong: for mode=walk resolveClip returns rings:null; the ORS call is in clipRingsFor on the amenities cache miss (opus2#4).",
+      "fix_commit": "d573731",
+      "fix_evidence": "on an amenities cache miss"
+    },
+    {
+      "id": "I3",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "'Median of 5' reuses one page with the HTTP cache on, so runs 2-5 are warm (opus2#5).",
+      "fix_commit": "d573731",
+      "fix_evidence": "Network.setCacheDisabled"
+    },
+    {
+      "id": "I4",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Render-free is judged on raw commit counts over unequal windows instead of a commit RATE over an idle window sized to the gesture (sonnet2#2, re-raised from round 1).",
+      "fix_commit": "d573731",
+      "fix_evidence": "commitRate"
+    },
+    {
+      "id": "I5",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The worst-frame verdict uses the MEDIAN of per-run worsts; an absolute 'no frame > 32 ms' budget must use the MAX across all runs (sol2#2).",
+      "fix_commit": "d573731",
+      "fix_evidence": "worstFrameAllRunsMs"
+    },
+    {
+      "id": "I6",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Isochrone/car request failures are swallowed and followed by a fixed wait, so a failed flow is reported as a successful measurement (sol2#3, terra2#2).",
+      "fix_commit": "d573731",
+      "fix_evidence": "refusing to report a failed ring-reveal"
+    },
+    {
+      "id": "I7",
+      "file": "scripts/perf/run-api-latency.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Failed API samples are discarded and a passing p95 is computed from the surviving subset instead of failing closed (terra2#3, sol2#4).",
+      "fix_commit": "d573731",
+      "fix_evidence": "let coldFail = 0;"
+    },
+    {
+      "id": "I8",
+      "file": "scripts/perf/README.md",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The real-device path measures over adb reverse (USB), not a real 4G RTT, while the doc implies real-radio latency (sol2#1, terra2#1).",
+      "fix_commit": "d573731",
+      "fix_evidence": "`adb reverse` is a USB tunnel"
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "RJ1",
+      "claim": "transferSize should exclude response headers",
+      "why_rejected": "A known small overcount that does not move the 470.7 KB verdict; dropped by the judges' own caps.",
+      "file": "scripts/perf/analyze-bundle.mjs"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "id": "hf-014-r3",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "014",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "d6bdc5b81a2e88de3352ac05f1af8faff33774b1",
+  "diff_of": "a45bd3e726589e7991e23d193441ce7705563ac0..d6bdc5b81a2e88de3352ac05f1af8faff33774b1",
+  "diff_excludes": [],
+  "spec_source_sha256": "7d82904d44512084d9a7fc2d82805a5748065ba0fdeb05863ff2dee6cf2a9b02",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Never born checked:** write each gate BEFORE you do its step, then check it — a gate may never be born checked. To record work you already finished, add the gate unchecked, then check it in a SEPARATE edit with its outcome note.\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "docs",
+  "area": "docs",
+  "difficulty": "medium",
+  "truth_version": 1,
+  "notes": "Docs/assertive case: the retired-hosting ('Railway') claim class in public docs + dev-script hardening. The CRITICAL 'node[0] falsely claims self-host is unpushed' is about the OUTER workspace's MIND_MAP.md (not in this repo) and is omitted; the 'stale-panelled' REJECT is about the task record itself (no repo file) and is omitted. Accumulated diff from the task base 368fe16^. Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 3,
+    "rounds_total": 4,
+    "fix_commits": [
+      "2a23405"
+    ],
+    "evidence": "Deterministic: judge.md round with Panel-snapshot HowFar=d6bdc5b = 'Impl panel #3 (fresh, over commit d6bdc5b)'; its accepts → 2a23405 'Correct stale hosting/branch claims and strengthen dev:selfhost checks' (00:48), the panel-#4 snapshot commit."
+  }
+}

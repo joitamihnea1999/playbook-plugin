@@ -1,0 +1,1197 @@
+diff --git a/plugins/playbook/tasks/audit.py b/plugins/playbook/tasks/audit.py
+index 8bc2984..e78f9ec 100644
+--- a/plugins/playbook/tasks/audit.py
++++ b/plugins/playbook/tasks/audit.py
+@@ -690,21 +690,27 @@ def _recorded_verify_commands(project_path) -> "tuple[dict, str | None]":
+         # receipt (fail closed, panel round-8). Treat EVERY
+         # `## Verification Receipt` section in the file (not just the first),
+         # attributing each `### … · risk …` entry's command lines to its risk.
+-        from tasks.core import _closed_fence_line_indices
++        from tasks.core import _atx_h2_text, _closed_fence_line_indices
+         skip = _closed_fence_line_indices(lines)   # ONE shared CommonMark scanner
+         in_receipt = False
+         cur_risk = None
+         for i, ln in enumerate(lines):
+             if i in skip:
+                 continue
+-            # Match on the STRIPPED line everywhere (heading, entry, and command
+-            # bullet), so a legally 1-3-space-indented `### \u2026 \u00b7 risk \u2026` entry is
+-            # not orphaned from its command bullets (panel round-10 grok).
+-            s = ln.strip().lstrip("\ufeff")
+-            if s.startswith("## "):
+-                in_receipt = (s == "## Verification Receipt")
++            # H2 boundary via the strict shared ATX matcher (V10, round-3 codex-terra):
++            # a valid `## Verification Receipt ##` / `##\tVerification Receipt` must be
++            # recognized here exactly as the receipt writer and reader do, else a
++            # closing-hash/tab-separated receipt heading is missed and its entries
++            # are attributed to the wrong (or no) section \u2014 defeating the drift baseline.
++            h2 = _atx_h2_text(ln)
++            if h2 is not None:
++                in_receipt = (h2 == "## Verification Receipt")
+                 cur_risk = None
+                 continue
++            # Match entries/command bullets on the STRIPPED line, so a legally
++            # 1-3-space-indented `### \u2026 \u00b7 risk \u2026` entry is not orphaned from its
++            # command bullets (panel round-10 grok).
++            s = ln.strip().lstrip("\ufeff")
+             if not in_receipt:
+                 continue
+             em = _VC_ENTRY_RE.match(s)
+diff --git a/plugins/playbook/tasks/core.py b/plugins/playbook/tasks/core.py
+index d1e2e56..6aa1a0f 100644
+--- a/plugins/playbook/tasks/core.py
++++ b/plugins/playbook/tasks/core.py
+@@ -912,69 +912,269 @@ _RISK_HEADING_RE = re.compile(
+     r"^##[ \t]+Risk[ \t]*(?::.*)?$", re.IGNORECASE
+ )
+ _RISK_FIELD_RE = re.compile(r"^##[ \t]+Risk[ \t]*$", re.IGNORECASE)
++# A CommonMark ATX closing-hash sequence: ` ##` (spaces/tabs + hashes) at EOL.
++_ATX_CLOSING_HASHES_RE = re.compile(r"[ \t]+#+[ \t]*$")
+ 
+ 
+ def _risk_heading_lines(lines: "list[str]") -> "list[tuple[int, str]]":
+-    """Risk headings outside Markdown fences as ``(index, stripped_line)``.
++    """LIVE `## Risk` headings as ``(index, normalized_heading)``.
++
++    Uses the strict shared ATX matcher `_atx_h2_text` on the RAW line (V8), not a
++    regex on the fence-scanner's indentation-stripped output: so a heading is a
++    live risk field ONLY when it is a genuine ATX H2 \u2014 at most 3 leading spaces,
++    ASCII whitespace (a NBSP-led line is not a heading), `## ` or `##\\t`, not
++    `###` \u2014 with a CommonMark closing-hash sequence normalized away by
++    `_atx_h2_text` itself (V9 \u2014 central, so every section consumer agrees). This
++    closes the risk-path holes the first impl panel found (opus + codex-sol
++    #1/#2/#3): an indented (>=4-col) or NBSP-led `## Risk` is no longer read as a
++    live value, and `## Risk ##` is recognized. Fenced/indented-code examples are
++    already hidden by `_iter_nonfenced` (fail closed). Duplicates are returned
++    deliberately: callers treat more than one field as malformed rather than
++    letting an attacker choose which duplicate wins.
++    """
++    out: "list[tuple[int, str]]" = []
++    for i, _s in _iter_nonfenced(lines):
++        norm = _atx_h2_text(lines[i])
++        if norm is not None and _RISK_HEADING_RE.match(norm):
++            out.append((i, norm))
++    return out
++
++
++def _any_risk_heading_offered(lines: "list[str]") -> bool:
++    """LIBERAL presence test for `has_risk_section` (V8): does ANY line look like a
++    `## Risk` heading once leading/trailing whitespace (incl. NBSP via str.strip),
++    BOM, and a closing-hash sequence are removed \u2014 EXCLUDING only lines inside a
++    properly CLOSED code fence (an explicit ``` example is documentation)?
++
++    Fails STRICT: a `## Risk` hidden by a >=4-col indent, a NBSP, a closing-hash,
++    or an UNCLOSED fence still means the gate was OFFERED, so the close is held to
++    the high bar (extract_risk degrades such a hidden heading to unclassified \u2192
++    block) rather than the pre-1.5.0 lenient path (opus CRITICAL: V4 had let an
++    indented real `## Risk` read as legacy-absent). The fence-only view
++    (`track_indented_code=False`) is deliberate: a closed FENCE example stays
++    documentation (lenient, test_fenced_risk_example_does_not_block_a_legacy_close),
++    but an indented heading is an ambiguous hide and must block."""
++    fenced_only = {i for i, f in enumerate(
++        _iter_fenced_flags(lines, unclosed_is_live=True, track_indented_code=False))
++        if f}
++    for i, line in enumerate(lines):
++        if i in fenced_only:
++            continue
++        s = _ATX_CLOSING_HASHES_RE.sub("", line.lstrip("\ufeff").strip())
++        if _RISK_HEADING_RE.match(s):
++            return True
++    return False
++
+ 
+-    A task may quote the template in a fenced review/example.  Such text is not
+-    metadata.  BOMs are ignored at line starts (not just at file start), and
+-    heading case/tabs follow Markdown's ordinary permissiveness.  Duplicates are
+-    returned deliberately: callers treat more than one field as malformed
+-    rather than letting an attacker choose which duplicate wins.
++# A fence CLOSER's tail must be ASCII whitespace only (V6). `str.strip()` eats
++# U+00A0 and other Unicode whitespace, so a ```+NBSP line falsely closed a fence
++# and exposed an interior `## Risk`/reversible decoy (P-A). A tab still closes.
++_ASCII_WS_ONLY_RE = re.compile(r"[ \t]*\Z")
++
++
++def _iter_fenced_flags(lines: "list[str]", *, unclosed_is_live: bool,
++                       track_indented_code: bool = True) -> "list[bool]":
++    """The ONE strict CommonMark fence scanner for task.md (task 039). Returns a
++    ``list[bool]`` parallel to ``lines``: index ``i`` is True when line ``i`` is
++    a code-fence opener, closer, or interior line — i.e. NOT a live heading or
++    section boundary.
++
++    Opener/closer rules (identical for every consumer):
++      * opener = <=3 leading spaces + a run of >=3 backticks/tildes
++        (`_FENCE_OPEN_RE`); a BACKTICK opener whose info string contains a
++        backtick is inline code, not a fence, and stays live;
++      * closer = <=3 spaces + a run of the SAME char at least as long as the
++        opener, followed by ASCII whitespace only (`_ASCII_WS_ONLY_RE`, V6 — NOT
++        `str.strip()`, which eats U+00A0 so a ```+NBSP falsely closed a fence).
++
++    ``unclosed_is_live`` is the ONE deliberate per-consumer difference — the fail
++    direction for a fence opener never closed before EOF:
++      * False → the opener and its remainder are fenced THROUGH EOF (fail
++        CLOSED). The section-locating DELETE/replace writers and the risk/section
++        readers that must never treat content after a malformed fence as live
++        pass False, so a malformed unclosed fence never lets a delete run past it.
++      * True → an unclosed opener contributes NOTHING; the opener and remainder
++        stay live (fail OPEN). The receipt WRITER (only inserts) and the pure
++        bootstrap/handoff READERS pass True, so a malformed fence never refuses
++        an insert nor hides a real `## Blocked`/`## Handoff`/receipt.
++
++    Indented code blocks (V4): a non-blank line indented >=4 COLUMNS (space or
++    tab, a tab counting to the next 4-column stop per CommonMark) that begins
++    after a blank line — or continues a run already begun — is an indented code
++    block, so a `## Risk`/`## Blocked` decoy inside one is content, not a live
++    heading (codex-sol #2 Critical). CommonMark's "an indented code block cannot
++    interrupt a paragraph" is honored by the after-a-blank start rule; a >=4-column
++    heading that is NOT inside such a block is instead rejected as a boundary by
++    the strict ATX matcher (V5), since ATX headings allow at most 3 leading spaces.
++
++    ``track_indented_code`` (default True) turns the V4 indented-code tracking on.
++    The risk PRESENCE test (`_any_risk_heading_offered`, V8) passes False to get a
++    FENCE-ONLY view: a properly-closed fenced `## Risk` example is documentation
++    (stays lenient), but an INDENTED `## Risk` is a malformed/ambiguous hide that
++    must fail STRICT (offered → block) — so the presence scan must NOT treat an
++    indented heading as skippable code the way extract_risk's fail-closed reader
++    (which correctly ignores it as a value) does.
++
++    This is the shared engine for `_iter_nonfenced` (fail closed) and
++    `_closed_fence_line_indices` (fail open).
+     """
+-    # Fence detection reuses `_iter_nonfenced` \u2014 the shared strict CommonMark
+-    # scanner. The prior hand-rolled loop treated a ```lang line (and a >=4-space
+-    # marker) as a closer, so a fenced `## Risk` example could "close" early and be
+-    # read as live metadata \u2014 shadowing the real class and letting an assertive
+-    # task close on the reversible bar (panel: codex-sol Critical, task 032).
+-    # Sharing the scanner closes that gate bypass and inherits its fail-closed
+-    # handling of an unclosed fence.
+-    return [(i, s) for i, s in _iter_nonfenced(lines) if _RISK_HEADING_RE.match(s)]
+-
+-
+-def _iter_nonfenced(lines: "list[str]"):
+-    """Yield ``(index, stripped_line)`` for every line OUTSIDE a Markdown code
+-    fence, so section writers/readers never treat a heading quoted inside a fenced
+-    example as a live section — the #09 hazard, re-raised for the handoff/blocked
+-    writers by the C1/P1 impl panels (a fenced `## Handoff`/`## Blocked`/`##
+-    Verification Receipt` must not corrupt the file or fake bootstrap/handoff
+-    state).
+-
+-    Applies the SAME CommonMark opener/closer rules as `_closed_fence_line_indices`
+-    (<=3-space indent — `_FENCE_OPEN_RE`; a backtick opener whose info string holds
+-    a backtick is not a fence; a closer is the same char, >= the opener's length,
+-    and whitespace-only after the run), so a ```lang line or a >=4-space marker
+-    inside a fence is content, not a boundary. This is the shared source for the
+-    blocked/handoff writers AND `_risk_heading_lines`.
+-
+-    It differs from `_closed_fence_line_indices` in ONE deliberate direction: an
+-    UNCLOSED opener fences everything through EOF (fail CLOSED). These consumers
+-    DELETE/replace sections, so on a malformed unclosed fence the safe choice is to
+-    treat the remainder as fenced and never delete it — the opposite of the receipt
+-    writer's fail-open, which only ever INSERTS (panel round-3: codex found the
+-    fail-open delegation let set_task_blocked delete a decoy after an unclosed
+-    fence). The stricter of the two on every axis; never the more destructive."""
++    n = len(lines)
++    flags = [False] * n
+     fence_char = ""
+     fence_len = 0
++    open_i = -1
++    prev_blank = True                           # start-of-doc counts as a blank
++    in_indented_code = False
+     for i, line in enumerate(lines):
+-        raw = line.lstrip("﻿")                 # keep indentation, drop BOM
++        # keep indentation, drop BOM, and drop the trailing line ending: callers
++        # may pass keepends/newline='' lines (compact preserves a Windows file's
++        # CRLF), so a closer `` ```\r\n `` must still count — the old str.strip()
++        # ate the `\r`; the ASCII-only closer (V6) would otherwise miss it and a
++        # fence would never close on Windows (Windows-only CI regression).
++        raw = line.lstrip("﻿").rstrip("\r\n")
+         fm = _FENCE_OPEN_RE.match(raw)
+         if fence_char:
+             if (fm and fm.group(1)[0] == fence_char
+                     and len(fm.group(1)) >= fence_len
+-                    and fm.group(2).strip() == ""):
+-                fence_char = ""
+-                fence_len = 0
+-            continue                            # inside fence (incl. unclosed→EOF)
+-        if fm:
++                    and _ASCII_WS_ONLY_RE.match(fm.group(2))):
++                for j in range(open_i, i + 1):
++                    flags[j] = True            # opener..closer inclusive
++                fence_char, fence_len, open_i = "", 0, -1
++            prev_blank = False                  # fence content is non-blank context
++            continue                            # interior (marked at close / EOF)
++        if fm:                                  # <=3-space fence opener wins
++            in_indented_code = False
++            prev_blank = False
+             if fm.group(1)[0] == "`" and "`" in fm.group(2):
+-                yield i, raw.strip()
+-                continue
++                continue                        # inline-code opener stays live
+             fence_char = fm.group(1)[0]
+             fence_len = len(fm.group(1))
++            open_i = i
++            continue
++        stripped = raw.strip()
++        if stripped == "":                      # blank line: never a heading
++            prev_blank = True                   # keeps an indented run alive
+             continue
+-        yield i, raw.strip()
++        if track_indented_code:
++            if in_indented_code:
++                if _indent_columns(raw) >= 4:
++                    flags[i] = True             # still inside the indented block
++                    prev_blank = False
++                    continue
++                in_indented_code = False        # de-indented → block ended
++            if prev_blank and _indent_columns(raw) >= 4:
++                in_indented_code = True          # starts after a blank (not a para)
++                flags[i] = True
++        prev_blank = False
++    if fence_char and not unclosed_is_live:     # unclosed opener, fail CLOSED
++        for j in range(open_i, n):
++            flags[j] = True
++    return flags
++
++
++def _indent_columns(raw: str) -> int:
++    """Leading-whitespace width in COLUMNS, a tab expanding to the next multiple
++    of 4 (CommonMark's tab stop for indented code blocks). `raw` is already
++    BOM-stripped. Counts space/tab only, stopping at the first other character."""
++    col = 0
++    for ch in raw:
++        if ch == " ":
++            col += 1
++        elif ch == "\t":
++            col += 4 - (col % 4)
++        else:
++            break
++    return col
++
++
++def _has_unclosed_fence(lines: "list[str]") -> bool:
++    """True when a code-fence opener is never closed before EOF — i.e. the fence
++    parse is UNCERTAIN. The two fail directions disagree exactly here: the
++    fail-closed pass fences the opener's remainder through EOF, the fail-open pass
++    does not, so any divergence between them is an unclosed fence. Used by the
++    risk close-gate (V2) to fail toward STRICT on a malformed task.md rather than
++    letting a buried `## Risk` masquerade as a pre-1.5.0 legacy task."""
++    closed = _iter_fenced_flags(lines, unclosed_is_live=True)
++    strict = _iter_fenced_flags(lines, unclosed_is_live=False)
++    return closed != strict
++
++
++def _unclosed_fence_hides_risk(lines: "list[str]") -> bool:
++    """True when an UNCLOSED fence's hidden remainder contains a `## Risk`-shaped
++    heading (V10, round-3 opus F1). This is the PRECISE condition under which
++    extract_risk must not trust a classification: a higher class hidden after a
++    malformed opener could be shadowed by a lower one read clean above it
++    (codex-terra's round-2 Critical). A STRAY unbalanced fence with NO `## Risk`
++    inside it (e.g. an unclosed snippet in a receipt/notes section below the risk
++    field) does NOT hide the classification, so it must not force `unclassified`
++    and over-block an otherwise-clean reversible close.
++
++    The hidden region is exactly the lines the fail-CLOSED scanner fences but the
++    fail-OPEN scanner leaves live (the unclosed opener through EOF)."""
++    closed = _iter_fenced_flags(lines, unclosed_is_live=True)   # fail open
++    strict = _iter_fenced_flags(lines, unclosed_is_live=False)  # fail closed
++    for i in range(len(lines)):
++        if strict[i] and not closed[i]:        # inside the unclosed-fence remainder
++            s = _ATX_CLOSING_HASHES_RE.sub("", lines[i].lstrip("﻿").strip())
++            if _RISK_HEADING_RE.match(s):
++                return True
++    return False
++
++
++def _iter_nonfenced(lines: "list[str]", *, unclosed_is_live: bool = False):
++    """Yield ``(index, stripped_line)`` for every line OUTSIDE a code fence, so
++    section writers/readers never treat a heading quoted inside a fenced example
++    as a live section — the #09 hazard, re-raised for the handoff/blocked writers
++    by the C1/P1 impl panels (a fenced `## Handoff`/`## Blocked`/`## Verification
++    Receipt` must not corrupt the file or fake bootstrap/handoff state).
++
++    Thin wrapper over the shared strict scanner `_iter_fenced_flags`. The default
++    ``unclosed_is_live=False`` (fail CLOSED) is for the section-locating
++    DELETE/replace WRITERS and the risk reader: an UNCLOSED opener fences
++    everything through EOF, so a malformed fence never lets a delete run past it
++    (panel round-3: codex found the fail-open delegation let set_task_blocked
++    delete a decoy after an unclosed fence).
++
++    ``unclosed_is_live=True`` (fail OPEN) is for the PURE bootstrap/handoff READERS
++    (`_extract_block_reason`, `_latest_receipt_line`, `find_unconsumed_handoff` via
++    the first) — V3: a reader can't corrupt the file, and hiding a real
++    `## Blocked`/`## Handoff`/receipt under a malformed unclosed fence silently
++    loses a real handoff at bootstrap. A properly CLOSED fenced decoy is still
++    skipped in both directions (only the UNCLOSED case differs)."""
++    flags = _iter_fenced_flags(lines, unclosed_is_live=unclosed_is_live)
++    for i, line in enumerate(lines):
++        if not flags[i]:
++            yield i, line.lstrip("﻿").strip()
++
++
++_ATX_H2_RE = re.compile(r"^ {0,3}##[ \t]+(.*?)[ \t]*$")
++
++
++def _atx_h2_text(raw: str) -> "str | None":
++    """The strict ATX level-2 heading matcher shared by every task.md section
++    WRITER and READER (V5, P-D). Returns the NORMALIZED heading `"## <title>"`
++    (separator collapsed to one space, trailing whitespace trimmed) when `raw` is
++    a valid H2, else None. `raw` is BOM-tolerant.
++
++    CommonMark rules the old `startswith("## ")`/`== title` tests got wrong:
++      * at most 3 leading spaces — a >=4-column indent is code/text, NOT a heading
++        (so a `>=4-space ## X` decoy no longer over-matches as a section boundary);
++      * the `##` may be followed by a TAB, not only a space (`##\\tX` IS a heading —
++        `startswith("## ")` missed it, so a tab-titled section was invisible to the
++        writer and could be duplicated or mis-spliced);
++      * `###…` is level-3, never an H2 (the required `[ \\t]+` after `##` excludes
++        `###`, whose next char is `#`);
++      * a CommonMark CLOSING-HASH sequence (whitespace + a run of `#` at EOL, e.g.
++        `## Blocked ##`) is not title text — it is stripped, so `## Blocked ##`
++        normalizes to `## Blocked` and is found by every section writer/reader (V9,
++        round-2 panel: it was previously normalized only on the risk path, so a
++        valid `## Blocked ##`/`## Handoff ##` was invisible to the block/handoff
++        writers and readers). `## Blocked##` (no space before the run) is content,
++        per CommonMark, and is left intact."""
++    m = _ATX_H2_RE.match(raw.lstrip("﻿").rstrip("\r\n"))
++    if not m:
++        return None
++    return f"## {_ATX_CLOSING_HASHES_RE.sub('', m.group(1))}"
+ 
+ 
+ def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | None":
+@@ -987,13 +1187,13 @@ def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | Non
+     WRITER on the task.md path must be fence-aware so a fenced `## Blocked` /
+     `## Handoff` example (documentation of the ritual) can never be treated as the
+     live section and delete or mis-splice the real record (the #09 hazard; P1
+-    parked by the 1.5.39 panel)."""
+-    nf = list(_iter_nonfenced(lines))
+-    start = next((i for i, s in nf if s == title), None)
++    parked by the 1.5.39 panel). Boundary detection uses the strict ATX matcher on
++    the RAW line (V5) so `##\\tX` is a boundary and a >=4-space `## X` is not."""
++    nf = [i for i, _s in _iter_nonfenced(lines)]
++    start = next((i for i in nf if _atx_h2_text(lines[i]) == title), None)
+     if start is None:
+         return None
+-    end = next((i for i, s in nf
+-                if i > start and s.startswith("## ") and not s.startswith("### ")),
++    end = next((i for i in nf if i > start and _atx_h2_text(lines[i]) is not None),
+                len(lines))
+     return (start, end)
+ 
+@@ -1006,6 +1206,16 @@ def extract_risk(task_file) -> str:
+         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
+     except OSError:
+         return DEFAULT_RISK
++    # V9 (round-2 codex-terra CRITICAL) + V10 (round-3 opus F1): an unclosed fence
++    # that HIDES a `## Risk`-shaped heading makes the parse untrustworthy — a higher
++    # class hidden after the opener could be shadowed by a lower one read clean
++    # above it. Degrade to unclassified ONLY in that precise case (not on any stray
++    # unbalanced fence, which V9 over-did — that punished a clean reversible whose
++    # long task.md merely had a stray ``` below the risk field). has_risk_section
++    # still returns True (presence), so present + unclassified = BLOCK (recoverable
++    # by fixing the fence / --force --reason). Value-side twin of V2's presence rule.
++    if _unclosed_fence_hides_risk(lines):
++        return DEFAULT_RISK
+     headings = _risk_heading_lines(lines)
+     if len(headings) != 1:
+         return DEFAULT_RISK
+@@ -1049,7 +1259,17 @@ def has_risk_section(task_file) -> bool:
+         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
+     except OSError:
+         return False
+-    return bool(_risk_heading_lines(lines))
++    # V2 + V8 (task 039, impl panel): fail toward STRICT on an uncertain parse.
++    # `_any_risk_heading_offered` is the LIBERAL presence test — a `## Risk` hidden
++    # by a >=4-col indent, a NBSP, a closing-hash, an UNCLOSED fence, or simply
++    # live all count as "the gate was OFFERED" (only a properly CLOSED fenced
++    # example is excluded as documentation). extract_risk still fails closed on the
++    # VALUE (returns unclassified for anything not a genuine live ATX heading), so
++    # present + unclassified = BLOCK: a malformed task.md is held to the
++    # high-consequence bar, recoverable by fixing the markdown, classifying,
++    # supplying review evidence, or `--force --reason`. The `_has_unclosed_fence`
++    # term also covers an unclosed fence with NO `## Risk`-shape at all (V2).
++    return _any_risk_heading_offered(lines) or _has_unclosed_fence(lines)
+ 
+ 
+ # Per-file ceiling for hashing UNTRACKED content in the freshness fingerprint
+@@ -2431,14 +2651,19 @@ def extract_parked_items(task_md_text: str) -> "list[str]":
+     agent (or a receipt upsert reordering the file) can easily produce a second
+     one — and a first-match read makes every later section invisible. Found live
+     by the 1.5.3 gauntlet; the multi-heading hazard, same family as #09."""
++    # Fence-aware (task 039): a fenced `## Parked` example must not mint phantom
++    # debt items. Pure reader → fail OPEN (unclosed_is_live=True): a real ## Parked
++    # under an unclosed fence must still surface. H2 via the strict ATX matcher.
++    lines = task_md_text.splitlines()
+     in_section = False
+     body: "list[str]" = []
+-    for line in task_md_text.splitlines():
+-        if line.strip() == "## Parked":
++    for i, _s in _iter_nonfenced(lines, unclosed_is_live=True):
++        line = lines[i]
++        if _atx_h2_text(line) == "## Parked":
+             in_section = True
+             continue
+         if in_section:
+-            if line.startswith("## "):
++            if _atx_h2_text(line) is not None:
+                 in_section = False  # keep scanning — there may be another section
+                 continue
+             body.append(line)
+@@ -2759,17 +2984,20 @@ def _extract_problem(task_file: Path) -> str:
+     """Extract first line of Problem/Intent section from task file."""
+     try:
+         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
++        # Fence-aware (task 039): a fenced `## Intent`/`## Problem` example must
++        # not be read as the live summary. Pure reader → fail OPEN.
+         in_section = False
+-        for line in lines:
+-            if line.strip() in ("## Problem", "## Intent"):
++        for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
++            h2 = _atx_h2_text(lines[i])
++            if h2 in ("## Problem", "## Intent"):
+                 in_section = True
+                 continue
+             if in_section:
+-                if not line.strip():
++                if not s:
+                     continue
+-                if line.startswith("##"):
++                if h2 is not None or s.startswith("##"):
+                     break
+-                text = line.strip()
++                text = s
+                 if text.startswith("(") and text.endswith(")"):
+                     text = text[1:-1]
+                 return text
+@@ -2837,37 +3065,15 @@ _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+ 
+ 
+ def _closed_fence_line_indices(lines: "list[str]") -> set:
+-    """Line indices inside a properly CLOSED CommonMark code fence — the ONE
+-    scanner shared by the receipt WRITER (upsert_task_section) and the audit
+-    READER (verify-contract drift sweep) so they can never disagree on what a
+-    fence is (panel rounds 8-10). Rules: opener = <=3 leading spaces + a run of
+-    >=3 backticks/tildes, and a BACKTICK opener's info string may not contain a
+-    backtick (else it is not a fence). Closer = <=3 spaces + a run of the SAME
+-    char at least as long, followed by WHITESPACE ONLY. An UNCLOSED fence
+-    contributes nothing (fail closed for the reader: a malformed fence never
+-    hides a receipt; fail open for the writer: it never treats a live heading as
+-    fenced)."""
+-    skip: set = set()
+-    fence_char = ""
+-    fence_len = 0
+-    open_i = -1
+-    for i, ln in enumerate(lines):
+-        s = ln.lstrip("﻿")
+-        m = _FENCE_OPEN_RE.match(s)
+-        if fence_char:
+-            if (m and m.group(1)[0] == fence_char
+-                    and len(m.group(1)) >= fence_len
+-                    and m.group(2).strip() == ""):
+-                skip.update(range(open_i, i + 1))
+-                fence_char, fence_len, open_i = "", 0, -1
+-            continue
+-        if m:
+-            char = m.group(1)[0]
+-            info = m.group(2)
+-            if char == "`" and "`" in info:
+-                continue
+-            fence_char, fence_len, open_i = char, len(m.group(1)), i
+-    return skip
++    """Line indices inside a properly CLOSED CommonMark code fence — used by the
++    receipt WRITER (upsert_task_section) and the audit READER (verify-contract
++    drift sweep) so they can never disagree on what a fence is (panel rounds
++    8-10). Thin wrapper over the shared strict scanner `_iter_fenced_flags` with
++    ``unclosed_is_live=True``: an UNCLOSED fence contributes nothing (fail closed
++    for the reader — a malformed fence never hides a receipt; fail open for the
++    writer — it never treats a live heading as fenced)."""
++    flags = _iter_fenced_flags(lines, unclosed_is_live=True)
++    return {i for i, fenced in enumerate(flags) if fenced}
+ 
+ 
+ def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
+@@ -2889,10 +3095,12 @@ def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
+     # must agree on what counts as a real heading (panel round-9 grok/codex).
+     fenced = _closed_fence_line_indices(lines)
+     for i, ln in enumerate(lines):
+-        # strip + lstrip BOM exactly like the audit reader (str.strip does NOT
+-        # remove a BOM), so writer and reader normalize a heading identically
+-        # and cannot disagree on which line is the section (panel round-12 opus).
+-        if i not in fenced and ln.strip().lstrip("\ufeff") == marker:
++        # Match the heading through the strict shared ATX matcher (V10, round-3
++        # opus F2 + codex-terra), exactly like the readers (_latest_receipt_line,
++        # the audit drift sweep): so a valid `## {heading} ##` / `##\t{heading}` is
++        # found by the WRITER too and not appended as a duplicate the reader then
++        # reads stale \u2014 writer and reader must agree on what a real heading is.
++        if i not in fenced and _atx_h2_text(ln) == marker:
+             new = lines[:i + 1] + ["", *entry.rstrip("\n").splitlines()] + lines[i + 1:]
+             _atomic_write(p, "\n".join(new) + "\n")
+             return
+@@ -2994,12 +3202,14 @@ def _latest_receipt_line(task_file: Path) -> "str | None":
+     except OSError:
+         return None
+     in_receipt = False
+-    for _i, s in _iter_nonfenced(lines):   # fence-aware (impl-panel C1)
+-        if s == "## Verification Receipt":
++    # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real receipt.
++    # H2 detection via the strict ATX matcher (V5).
++    for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
++        if _atx_h2_text(lines[i]) == "## Verification Receipt":
+             in_receipt = True
+             continue
+         if in_receipt:
+-            if s.startswith("## ") and not s.startswith("### "):
++            if _atx_h2_text(lines[i]) is not None:
+                 break
+             if s.startswith("### "):
+                 return s[4:].strip()
+@@ -3087,13 +3297,14 @@ def write_handoff(task_file: Path, section: str) -> None:
+     def _section_span(title: str) -> "tuple[int, int] | None":
+         # [start, end) of a non-fenced level-2 section, or None. `end` is the
+         # first non-fenced H2 strictly after start (a fenced heading, or the
+-        # section's own H3s, never end it).
+-        nf = list(_iter_nonfenced(lines))
+-        start = next((i for i, s in nf if s == title), None)
++        # section's own H3s, never end it). Strict ATX matcher on the raw line
++        # (V5): `##\tX` is a boundary, a >=4-space `## X` is not — writer and
++        # reader must agree so no splice runs into the wrong heading.
++        nf = [i for i, _s in _iter_nonfenced(lines)]
++        start = next((i for i in nf if _atx_h2_text(lines[i]) == title), None)
+         if start is None:
+             return None
+-        end = next((i for i, s in nf
+-                    if i > start and s.startswith("## ") and not s.startswith("### ")),
++        end = next((i for i in nf if i > start and _atx_h2_text(lines[i]) is not None),
+                    len(lines))
+         return (start, end)
+ 
+@@ -3139,12 +3350,15 @@ def _extract_block_reason(task_file: Path) -> "str | None":
+     except OSError:
+         return None
+     in_blocked = False
+-    for _i, s in _iter_nonfenced(lines):
+-        if s == "## Blocked":
++    # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real
++    # `## Blocked` (find_unconsumed_handoff → bootstrap depends on this).
++    # H2 detection via the strict ATX matcher (V5): `##\tBlocked` is the section.
++    for i, s in _iter_nonfenced(lines, unclosed_is_live=True):
++        if _atx_h2_text(lines[i]) == "## Blocked":
+             in_blocked = True
+             continue
+         if in_blocked:
+-            if s.startswith("## ") and not s.startswith("### "):
++            if _atx_h2_text(lines[i]) is not None:
+                 break
+             if s.startswith(">"):
+                 body = s.lstrip(">").strip()
+diff --git a/scripts/guarantee_ledger.py b/scripts/guarantee_ledger.py
+index 4447be8..d67a58d 100644
+--- a/scripts/guarantee_ledger.py
++++ b/scripts/guarantee_ledger.py
+@@ -961,6 +961,18 @@ def coverage_summary(data: dict[str, Any]) -> str:
+ 
+ 
+ def main(argv: list[str] | None = None) -> int:
++    # Portability (task 039): the ledger legitimately contains non-ASCII (em-dashes
++    # and, going forward, any Unicode a limitation needs). On Windows the default
++    # stdout codec is cp1252, which raises UnicodeEncodeError on a character it
++    # cannot map (e.g. U+2192 '->') and fails the whole verify lane — a break a
++    # Linux/macOS run never surfaces. Force UTF-8 so `--summary` prints the same on
++    # every platform; guarded because a redirected/replaced stream may not be
++    # reconfigurable. (The project's hard constraint is Linux/macOS/Windows parity.)
++    for _stream in (sys.stdout, sys.stderr):
++        try:
++            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
++        except (AttributeError, ValueError, OSError):
++            pass
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--ledger", type=Path, default=LEDGER)
+     parser.add_argument("--schema", type=Path, default=SCHEMA)
+diff --git a/tests/test_fence_scanner.py b/tests/test_fence_scanner.py
+new file mode 100644
+index 0000000..9d311e0
+--- /dev/null
++++ b/tests/test_fence_scanner.py
+@@ -0,0 +1,396 @@
++#!/usr/bin/env python3
++"""One strict shared CommonMark fence scanner for task.md (task 039).
++
++The two hand-rolled scanners `_iter_nonfenced` (fail CLOSED — an unclosed opener
++fences to EOF, so the DELETE-writers never delete past a malformed fence) and
++`_closed_fence_line_indices` (fail OPEN — an unclosed opener contributes nothing,
++so the receipt writer never refuses an insert) shared opener/closer rules but were
++two implementations. This suite pins the single engine `_iter_fenced_flags` and
++its two policy directions, then the vector-specific behaviors layered on it:
++
++  V1 — one engine, per-consumer `unclosed_is_live` fail direction (this file's core)
++  V4 — indented (>=4-column) code-block awareness
++  V6 — NBSP / non-ASCII-whitespace fence closers are NOT closers
++  V5 — strict ATX-H2 boundary (`##\\tX` is a boundary; `>=4-space ## X` is not)
++
++Run: python3 tests/test_fence_scanner.py
++"""
++from __future__ import annotations
++
++import sys
++import unittest
++from pathlib import Path
++
++_HERE = Path(__file__).resolve().parent
++PLUGIN = _HERE.parent / "plugins/playbook"
++sys.path.insert(0, str(PLUGIN))
++
++import tempfile  # noqa: E402
++
++from tasks.core import (  # noqa: E402
++    _atx_h2_text,
++    _closed_fence_line_indices,
++    _extract_block_reason,
++    _extract_problem,
++    _iter_fenced_flags,
++    _iter_nonfenced,
++    _latest_receipt_line,
++    _live_section_span,
++    extract_parked_items,
++    find_unconsumed_handoff,
++)
++
++
++def _nonfenced_texts(text: str) -> "list[str]":
++    return [s for _i, s in _iter_nonfenced(text.splitlines())]
++
++
++class SharedEngineFailDirections(unittest.TestCase):
++    """V1 — the ONE engine, two deliberate fail directions on an UNCLOSED fence."""
++
++    def test_closed_fence_is_fenced_in_both_directions(self):
++        lines = [
++            "live before",
++            "```",
++            "## Risk",
++            "reversible",
++            "```",
++            "live after",
++        ]
++        for policy in (True, False):
++            flags = _iter_fenced_flags(lines, unclosed_is_live=policy)
++            # opener(1), interior(2,3), closer(4) fenced; live lines(0,5) not
++            self.assertEqual(
++                flags, [False, True, True, True, True, False],
++                f"closed fence must mark opener..closer inclusive (policy={policy})")
++
++    def test_unclosed_fence_fails_closed_when_unclosed_is_live_false(self):
++        # Delete-writers: an unclosed opener fences THROUGH EOF, so a heading
++        # after it is treated as fenced (never deleted past).
++        lines = ["live", "```", "## Risk", "reversible", "still inside"]
++        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
++        self.assertEqual(flags, [False, True, True, True, True])
++
++    def test_unclosed_fence_stays_live_when_unclosed_is_live_true(self):
++        # Receipt writer / pure readers: an unclosed opener contributes nothing,
++        # so the remainder (incl. the opener line) stays LIVE.
++        lines = ["live", "```", "## Risk", "reversible", "still after"]
++        flags = _iter_fenced_flags(lines, unclosed_is_live=True)
++        self.assertEqual(flags, [False, False, False, False, False])
++
++    def test_backtick_info_with_backtick_is_not_a_fence(self):
++        # A backtick opener whose info string holds a backtick is inline code,
++        # not a fence — the line stays live in both directions.
++        lines = ["```py `x`", "## Risk", "reversible"]
++        for policy in (True, False):
++            flags = _iter_fenced_flags(lines, unclosed_is_live=policy)
++            self.assertEqual(flags, [False, False, False],
++                             f"inline-code opener must not open a fence (policy={policy})")
++
++
++class PublicScannersMatchEngine(unittest.TestCase):
++    """The two public functions are thin wrappers with their documented policy —
++    the refactor safety net (existing fence suites are the wider control)."""
++
++    def test_iter_nonfenced_fails_closed_on_unclosed_fence(self):
++        text = "live\n```\n## Risk\nreversible\n"
++        self.assertEqual(_nonfenced_texts(text), ["live"],
++                         "_iter_nonfenced must hide a heading under an unclosed fence")
++
++    def test_closed_indices_fail_open_on_unclosed_fence(self):
++        # An unclosed fence contributes NOTHING to the closed-index set.
++        lines = "live\n```\n## Risk\nreversible\n".splitlines()
++        self.assertEqual(_closed_fence_line_indices(lines), set(),
++                         "unclosed fence must contribute no closed indices (fail open)")
++
++    def test_closed_indices_mark_a_closed_fence(self):
++        lines = "a\n```\nx\n```\nb\n".splitlines()
++        self.assertEqual(_closed_fence_line_indices(lines), {1, 2, 3})
++
++
++class IndentedCodeBlocks(unittest.TestCase):
++    """V4 — a heading inside a bare indented code block (>=4 columns, no fence,
++    after a blank line) is content, not a live section (codex-sol #2 Critical,
++    P-B). CommonMark: an indented code block starts on a >=4-column line after a
++    blank line and cannot interrupt a paragraph."""
++
++    def _nf(self, text: str) -> "list[str]":
++        return _nonfenced_texts(text)
++
++    def test_four_space_indented_heading_after_blank_is_code(self):
++        text = "## Docs\n\n    ## Risk\n    reversible\n"
++        self.assertNotIn("## Risk", self._nf(text),
++                         "a 4-space-indented ## Risk after a blank must be code")
++
++    def test_tab_indented_heading_after_blank_is_code(self):
++        text = "## Docs\n\n\t## Risk\n\treversible\n"
++        self.assertNotIn("## Risk", self._nf(text),
++                         "a tab-indented ## Risk (tab=4 cols) must be code")
++
++    def test_heading_deep_in_a_multiline_indented_block_is_code(self):
++        # The heading is NOT the first line of the block — proper state tracking,
++        # not just "line after a blank".
++        text = "## Docs\n\n    some code\n    ## Risk\n    reversible\n"
++        self.assertNotIn("## Risk", self._nf(text),
++                         "a ## Risk inside a running indented block must be code")
++
++    def test_three_space_indent_is_still_a_live_heading(self):
++        # Control: <4 columns is NOT an indented code block.
++        text = "## Docs\n\n   ## Risk\nreversible\n"
++        self.assertIn("## Risk", self._nf(text),
++                      "a 3-space indent must remain a live heading")
++
++    def test_indented_line_continuing_a_paragraph_is_not_code(self):
++        # Control: an indented code block cannot INTERRUPT a paragraph (no blank
++        # line before the indent) — so a real column-0 heading right after stays
++        # a live boundary and the paragraph's own indented tail is not spuriously
++        # treated as opening code that swallows it.
++        text = "a paragraph line\n    ## Risk\n\n## Work Plan\n"
++        nf = self._nf(text)
++        self.assertIn("## Work Plan", nf,
++                      "a real heading after a paragraph must stay live")
++
++    def test_indented_risk_decoy_does_not_become_the_classification(self):
++        from tasks.core import extract_risk, has_risk_section
++        d = Path(tempfile.mkdtemp())
++        p = d / "task.md"
++        # Indented decoy `reversible` + a real column-0 `assertive`.
++        p.write_text("# T\n\n## Docs\n\n    ## Risk\n    reversible\n\n"
++                     "## Risk\nassertive\n\n## Work Plan\n- [ ] g\n", encoding="utf-8")
++        self.assertEqual(extract_risk(p), "assertive",
++                         "an indented ## Risk decoy must not shadow the real class")
++        self.assertTrue(has_risk_section(p))
++
++
++class NbspFenceCloser(unittest.TestCase):
++    """V6 — a fence closer's tail must be ASCII whitespace only. `str.strip()`
++    eats U+00A0/other Unicode whitespace, so a ```+NBSP line falsely CLOSED a
++    fence and exposed an interior `## Risk` decoy as live (P-A). A tab after the
++    run still closes (tab is valid ASCII whitespace)."""
++
++    def _md(self, body: str) -> Path:
++        d = Path(tempfile.mkdtemp())
++        p = d / "task.md"
++        p.write_text(body, encoding="utf-8")
++        return p
++
++    def test_nbsp_after_the_run_does_not_close_the_fence(self):
++        lines = ["## Docs", "```", "hidden", "``` ", "## Risk", "reversible"]
++        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
++        self.assertTrue(flags[4] and flags[5],
++                        "a ```+NBSP must NOT close the fence and expose the decoy")
++
++    def test_tab_after_the_run_still_closes(self):
++        # Control: a tab is ASCII whitespace, so ```+tab is a real closer.
++        lines = ["```", "x", "```\t", "## Risk"]
++        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
++        self.assertFalse(flags[3], "```+tab is a valid closer; the heading is live")
++
++    def test_nbsp_false_closer_does_not_leak_a_risk_decoy(self):
++        from tasks.core import extract_risk
++        p = self._md("# T\n\n## Docs\n```\nhidden\n``` \n## Risk\nreversible\n")
++        self.assertEqual(extract_risk(p), "unclassified",
++                         "an NBSP false-closer leaked a reversible decoy")
++
++
++class StrictAtxH2Matcher(unittest.TestCase):
++    """V5 — one strict ATX-H2 matcher (<=3 leading spaces; `## ` OR `##\\t`), so
++    the section WRITERS and READERS agree on what a boundary is (P-D)."""
++
++    def test_space_separator_matches(self):
++        self.assertEqual(_atx_h2_text("## Blocked"), "## Blocked")
++
++    def test_up_to_three_leading_spaces_matches(self):
++        self.assertEqual(_atx_h2_text("   ## Blocked"), "## Blocked")
++
++    def test_tab_after_hash_is_a_boundary(self):
++        # `##\tX` was missed by startswith("## ") — it must normalize to `## X`.
++        self.assertEqual(_atx_h2_text("##\tBlocked"), "## Blocked")
++
++    def test_four_leading_spaces_is_not_a_heading(self):
++        self.assertIsNone(_atx_h2_text("    ## Blocked"))
++
++    def test_h3_is_not_an_h2(self):
++        self.assertIsNone(_atx_h2_text("### Entry"))
++
++    def test_no_separator_is_not_an_h2(self):
++        self.assertIsNone(_atx_h2_text("##Blocked"))
++
++    def test_bom_prefix_is_tolerated(self):
++        self.assertEqual(_atx_h2_text("﻿## Blocked"), "## Blocked")
++
++    def test_live_section_span_finds_a_tab_separated_title(self):
++        lines = ["# T", "", "##\tBlocked", "> reason", "", "## Work Plan", "- [ ] g"]
++        span = _live_section_span(lines, "## Blocked")
++        self.assertIsNotNone(span, "a tab-after-hash ## Blocked must be locatable")
++        self.assertEqual(span, (2, 5))
++
++    def test_live_section_span_boundary_stops_at_tab_heading(self):
++        # The section must END at a `##\tNext` boundary, not run through it.
++        lines = ["## Blocked", "> r", "##\tNext", "body"]
++        self.assertEqual(_live_section_span(lines, "## Blocked"), (0, 2))
++
++    # V9 (round-2 panel, convergent sonnet/codex-sol/codex-terra): the CommonMark
++    # closing-hash normalization must live in _atx_h2_text so EVERY section
++    # consumer (not just the risk path) finds `## Blocked ##` / `## Handoff ##`.
++    def test_closing_hash_sequence_is_normalized(self):
++        self.assertEqual(_atx_h2_text("## Blocked ##"), "## Blocked")
++        self.assertEqual(_atx_h2_text("## Handoff ###"), "## Handoff")
++        self.assertEqual(_atx_h2_text("##\tRisk ##"), "## Risk")
++
++    def test_no_space_before_hashes_is_not_a_closing_sequence(self):
++        # CommonMark requires whitespace before the closing run: `## Blocked##`
++        # keeps the hashes as content.
++        self.assertEqual(_atx_h2_text("## Blocked##"), "## Blocked##")
++
++    def test_live_section_span_finds_a_closing_hash_title(self):
++        lines = ["## Blocked ##", "> r", "", "## Work Plan"]
++        self.assertEqual(_live_section_span(lines, "## Blocked"), (0, 3),
++                         "a valid `## Blocked ##` must be locatable by the writers")
++
++    def test_block_reason_reader_finds_a_closing_hash_heading(self):
++        d = Path(tempfile.mkdtemp())
++        p = d / "task.md"
++        p.write_text("# T\n\n## Status\nblocked\n\n## Blocked ##\n"
++                     "> handoff  (since 2026-01-01T00:00+00:00)\n", encoding="utf-8")
++        self.assertEqual(_extract_block_reason(p), "handoff",
++                         "a `## Blocked ##` handoff must not be lost by the reader")
++
++    def test_receipt_writer_agrees_with_reader_on_closing_hash_heading(self):
++        # V10/opus F2 + codex-terra: upsert_task_section (writer) must match the
++        # reader on a valid `## Verification Receipt ##` — else it appends a
++        # DUPLICATE section and the reader keeps reporting the stale first entry.
++        from tasks.core import upsert_task_section, _latest_receipt_line
++        d = Path(tempfile.mkdtemp())
++        p = d / "task.md"
++        p.write_text("# T\n\n## Verification Receipt ##\n\n### old entry\n",
++                     encoding="utf-8")
++        upsert_task_section(p, "Verification Receipt", "### new entry")
++        body = p.read_text(encoding="utf-8")
++        self.assertEqual(body.count("Verification Receipt"), 1,
++                         "writer appended a duplicate receipt section (writer≠reader)")
++        self.assertEqual(_latest_receipt_line(p), "new entry")
++
++
++class ReadersFailOpen(unittest.TestCase):
++    """V3 — the PURE readers surface a real section even under an unclosed fence.
++
++    A reader can't corrupt the file, and hiding a real `## Blocked`/`## Handoff`/
++    receipt under a malformed unclosed fence breaks bootstrap (a real handoff is
++    silently lost). So the pure readers fail OPEN. A properly CLOSED fenced decoy
++    is still ignored (that protection is unchanged — only the UNCLOSED case flips).
++    """
++
++    def _md(self, body: str) -> Path:
++        d = Path(tempfile.mkdtemp())
++        p = d / "task.md"
++        p.write_text(body, encoding="utf-8")
++        return p
++
++    def test_extract_block_reason_surfaces_under_unclosed_fence(self):
++        p = self._md("# T\n\n## Status\nblocked\n\n## Docs\n```\nquoted\n\n"
++                     "## Blocked\n> handoff  (since 2026-01-01T00:00+00:00)\n")
++        self.assertEqual(_extract_block_reason(p), "handoff",
++                         "an unclosed fence hid a real ## Blocked from bootstrap")
++
++    def test_closed_fenced_blocked_decoy_is_still_ignored(self):
++        # Control: a properly CLOSED fenced `## Blocked` example is NOT live, and
++        # there is no real block → None (the C1 protection is preserved).
++        p = self._md("# T\n\n## Status\nin_progress\n\n## Docs\n```\n"
++                     "## Blocked\n> not a real block\n```\n\nplain body\n")
++        self.assertIsNone(_extract_block_reason(p))
++
++    def test_latest_receipt_surfaces_under_unclosed_fence(self):
++        p = self._md("# T\n\n## Docs\n```\nquoted example\n\n"
++                     "## Verification Receipt\n\n### close · risk reversible · commit abc\n")
++        self.assertEqual(_latest_receipt_line(p), "close · risk reversible · commit abc",
++                         "an unclosed fence hid a real receipt entry")
++
++    def test_reader_open_writer_closed_asymmetry_under_unclosed_fence(self):
++        # V9/opus #2: pin the DELIBERATE, disclosed asymmetry on a `## Blocked`
++        # sitting below an UNCLOSED fence (a malformed committed task.md). The pure
++        # READER fails OPEN and surfaces it; the section-locating WRITER fails
++        # CLOSED and cannot see it (so it never deletes past a malformed fence —
++        # it no-ops / would append fresh instead). This is the safe pair, pinned so
++        # the asymmetry is an invariant, not an accident.
++        d = Path(tempfile.mkdtemp())
++        p = d / "task.md"
++        p.write_text("# T\n\n## Status\nblocked\n\n## Docs\n```\nquoted\n\n"
++                     "## Blocked\n> handoff  (since 2026-01-01T00:00+00:00)\n",
++                     encoding="utf-8")
++        # reader (fail open) surfaces it:
++        self.assertEqual(_extract_block_reason(p), "handoff")
++        # writer's locator (fail closed) does NOT see it (unclosed fence hides it):
++        lines = p.read_text(encoding="utf-8").splitlines()
++        self.assertIsNone(_live_section_span(lines, "## Blocked"),
++                          "the delete-writer must fail CLOSED under an unclosed fence")
++
++    def test_find_unconsumed_handoff_finds_it_under_unclosed_fence(self):
++        proj = Path(tempfile.mkdtemp())
++        td = proj / ".agent" / "tasks" / "007-x"
++        td.mkdir(parents=True)
++        (td / "task.md").write_text(
++            "# 007 - X\n\n## Status\nblocked\n\n## Docs\n```\nquoted\n\n"
++            "## Blocked\n> handoff  (since 2026-01-01T00:00+00:00)\n",
++            encoding="utf-8")
++        found = find_unconsumed_handoff(proj)
++        self.assertIsNotNone(found, "a real handoff under an unclosed fence was lost")
++        self.assertEqual(found[0], 7)
++
++
++class CrlfLineEndings(unittest.TestCase):
++    """The scanner must tolerate CRLF/keepends line endings. `compact` opens the
++    task.md with newline='' and splits with keepends=True to preserve a Windows
++    file's real endings, so `_closed_fence_line_indices` receives lines ending in
++    `\\r\\n`. The old `str.strip()` closer test ate the `\\r`; the V6 ASCII-only
++    closer must still treat `` ```\\r\\n `` as a valid closer (the `\\r` is a line
++    ending, not content) — else a fence never closes on Windows and the compact
++    protected-span scan is wrong (the Windows-only CI failure this guards)."""
++
++    def test_crlf_fence_closer_still_closes(self):
++        lines = ["a\r\n", "```\r\n", "x\r\n", "```\r\n", "## Risk\r\n"]
++        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
++        self.assertEqual(flags, [False, True, True, True, False],
++                         "```+CRLF must close the fence; the heading stays live")
++
++    def test_crlf_closed_indices_match(self):
++        lines = ["a\r\n", "```\r\n", "x\r\n", "```\r\n", "b\r\n"]
++        self.assertEqual(_closed_fence_line_indices(lines), {1, 2, 3})
++
++    def test_lf_keepends_fence_closer_still_closes(self):
++        lines = ["a\n", "```\n", "x\n", "```\n", "## Risk\n"]
++        flags = _iter_fenced_flags(lines, unclosed_is_live=False)
++        self.assertEqual(flags, [False, True, True, True, False])
++
++    def test_atx_matcher_tolerates_crlf(self):
++        self.assertEqual(_atx_h2_text("## Blocked\r\n"), "## Blocked")
++        self.assertEqual(_atx_h2_text("##\tBlocked\r\n"), "## Blocked")
++
++
++class NonCorruptingReadersFenceAware(unittest.TestCase):
++    """Side-effect cleanup: the pure display readers route through the shared
++    scanner so a fenced example is not misread. They never rewrite the file, so
++    they fail OPEN (surface a real section under an unclosed fence)."""
++
++    def test_parked_ignores_a_closed_fenced_example(self):
++        text = ("## Parked\n- real debt item\n\n## Docs\n```\n## Parked\n"
++                "- phantom from a fenced example\n```\n")
++        items = extract_parked_items(text)
++        self.assertIn("real debt item", items)
++        self.assertNotIn("phantom from a fenced example", items,
++                         "a fenced ## Parked example produced a phantom debt item")
++
++    def test_parked_surfaces_under_an_unclosed_fence(self):
++        text = "## Docs\n```\nquoted\n\n## Parked\n- real debt under an unclosed fence\n"
++        self.assertIn("real debt under an unclosed fence", extract_parked_items(text))
++
++    def test_extract_problem_ignores_a_fenced_intent_example(self):
++        d = Path(tempfile.mkdtemp())
++        p = d / "task.md"
++        p.write_text("# T\n\n## Docs\n```\n## Intent\nfenced example intent\n```\n\n"
++                     "## Intent\nthe real intent\n", encoding="utf-8")
++        self.assertEqual(_extract_problem(p), "the real intent")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_guarantee_ledger.py b/tests/test_guarantee_ledger.py
+index f857ea4..2c56973 100644
+--- a/tests/test_guarantee_ledger.py
++++ b/tests/test_guarantee_ledger.py
+@@ -6,8 +6,10 @@ import copy
+ import datetime
+ import importlib.util
+ import json
++import os
+ import re
+ import subprocess
++import sys
+ import tempfile
+ import unittest
+ from contextlib import redirect_stderr, redirect_stdout
+@@ -323,6 +325,28 @@ class GuaranteeLedgerValidation(_LedgerFixture):
+             self.assertEqual(1, rc)
+             self.assertIn("canonical YYYY-MM-DD date", stderr.getvalue())
+ 
++    def test_summary_does_not_crash_under_cp1252_stdout(self):
++        # Portability regression (task 039): a non-ASCII limitation must not crash
++        # `--summary` on a Windows-style cp1252 stdout. U+2192 ('->') in a ledger
++        # limitation raised UnicodeEncodeError and failed the whole verify lane on
++        # Windows (a break no Linux/macOS run surfaces). main() reconfigures stdout
++        # to UTF-8. Reproduced via PYTHONIOENCODING=cp1252 in a SUBPROCESS — the
++        # in-process StringIO path cannot exercise a real stdout codec.
++        ledger = self.mutated()
++        ledger["guarantees"][0]["missing_evidence_or_limitation"].append(
++            "cp1252 canary: an arrow → and a bidir ↔ must not crash --summary")
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / "arrow-ledger.json"
++            path.write_text(json.dumps(ledger), encoding="utf-8")
++            env = dict(os.environ, PYTHONIOENCODING="cp1252")
++            proc = subprocess.run(
++                [sys.executable, str(ROOT / "scripts" / "guarantee_ledger.py"),
++                 "--summary", "--ledger", str(path),
++                 "--schema", str(ROOT / "docs" / "guarantee-ledger.schema.json")],
++                capture_output=True, text=True, env=env)
++        self.assertEqual(proc.returncode, 0,
++                         f"--summary crashed under cp1252 stdout:\n{proc.stderr}")
++
+     def test_ledger_version_must_be_a_real_canonical_date(self):
+         for bad in ("soon", "2026-8-18", "2026-02-30", "2026-08-18T00:00:00"):
+             with self.subTest(value=bad):
+diff --git a/tests/test_unclassified_fails_closed.py b/tests/test_unclassified_fails_closed.py
+index ef422a6..a9727d3 100644
+--- a/tests/test_unclassified_fails_closed.py
++++ b/tests/test_unclassified_fails_closed.py
+@@ -127,6 +127,47 @@ class RiskSectionDetection(unittest.TestCase):
+         p = self._md("# 001 - T\n\n## Status\npending\n\n## Work Plan\n- [x] G1\n")
+         self.assertFalse(has_risk_section(p))
+ 
++    # ── V8 (task 039 impl-panel): the risk path must use the strict shared
++    # machinery, and PRESENCE must fail STRICT so a hidden/malformed `## Risk`
++    # blocks rather than reading as pre-1.5.0 legacy-absent (lenient). ──────────
++
++    def test_indented_sole_risk_after_blank_still_counts_as_offered(self):
++        # opus CRITICAL: V4 marked the >=4-indent heading as code → hidden →
++        # has_risk_section=False → lenient legacy close of an assertive task
++        # (a regression V4 introduced). Presence must fail STRICT.
++        p = self._md("# T\n\n## Docs\n\n    ## Risk\n    assertive\n")
++        self.assertTrue(has_risk_section(p),
++                        "an indented (hidden) ## Risk must still count as offered")
++        self.assertEqual(extract_risk(p), "unclassified",
++                         "an indented ## Risk is not a live classification (>=4 = code)")
++
++    def test_indented_risk_no_blank_is_not_read_as_live(self):
++        # codex-sol #1: `## Docs\n    ## Risk\n    reversible` read as reversible;
++        # a >=4-indent heading is code per CommonMark, never a live value.
++        p = self._md("# T\n\n## Docs\n    ## Risk\n    reversible\n")
++        self.assertEqual(extract_risk(p), "unclassified")
++        self.assertTrue(has_risk_section(p))
++
++    def test_nbsp_led_risk_is_not_read_as_live_but_counts_as_offered(self):
++        # codex-sol #2: a NBSP-led `## Risk` was read as a live reversible value
++        # (NBSP-led is not an ATX heading). Value must not leak; presence blocks.
++        p = self._md("# T\n\n ## Risk\nreversible\n")
++        self.assertEqual(extract_risk(p), "unclassified")
++        self.assertTrue(has_risk_section(p))
++
++    def test_closing_hash_risk_heading_is_recognized(self):
++        # codex-sol #3: `## Risk ##` (CommonMark closing sequence) is a valid H2;
++        # it must be recognized so an assertive task is NOT legacy-lenient-closed.
++        p = self._md("# T\n\n## Risk ##\nassertive\n")
++        self.assertTrue(has_risk_section(p))
++        self.assertEqual(extract_risk(p), "assertive")
++
++    def test_nbsp_led_decoy_does_not_shadow_the_real_classification(self):
++        # A NBSP-led decoy `reversible` must not turn the real col-0 `assertive`
++        # into a duplicate-unclassified; the real class wins.
++        p = self._md("# T\n\n ## Risk\nreversible\n\n## Risk\nassertive\n")
++        self.assertEqual(extract_risk(p), "assertive")
++
+     def test_a_mention_in_prose_is_not_a_section(self):
+         """Negative control: the word must be a heading, not narrative — else
+         every task that discusses risk gets silently promoted to strict."""
+@@ -198,20 +239,61 @@ class RiskSectionDetection(unittest.TestCase):
+                 self.assertEqual(extract_risk(p), "assertive",
+                                  "a fenced Risk decoy must not shadow the real class")
+ 
+-    def test_unclosed_fence_hides_a_risk_decoy_fail_closed(self):
+-        # Panel round-3: the risk classifier must fail CLOSED on an unclosed fence
+-        # — a `## Risk` quoted after an unclosed opener is fenced-through-EOF, not
+-        # live metadata, so it cannot become the classification. (Fail-open reads
+-        # the decoy and returns `reversible`.)
++    def test_unclosed_fence_value_fails_closed_never_leaks_a_decoy(self):
++        # Panel round-3: the risk VALUE must fail CLOSED on an unclosed fence — a
++        # `## Risk` quoted after an unclosed opener is fenced-through-EOF, not live
++        # metadata, so it can never BECOME the classification. (Fail-open reads the
++        # decoy and returns `reversible`.) extract_risk stays fail-closed.
+         p = self._md("# T\n\n## Docs\n```\n## Risk\nreversible\n> still quoted\n")
+-        self.assertFalse(has_risk_section(p))
+         self.assertEqual(extract_risk(p), "unclassified")
+ 
++    def test_unclosed_fence_counts_as_offered_and_is_strict(self):
++        # V2 (task 039, codex-sol #1 Critical): an unclosed fence makes the parse
++        # UNCERTAIN. has_risk_section must fail toward STRICT ("offered") — True —
++        # so the close is held to the high-consequence bar, not the lenient legacy
++        # path. Previously this returned False, so burying the real `## Risk` under
++        # an unclosed fence bought a pre-1.5.0 lenient close (the P-C bypass).
++        # Value still fails closed (unclassified); present=True + unclassified =
++        # BLOCK in close_decision.
++        buried = self._md("# T\n\n## Docs\n```\n## Risk\nassertive\n> real class hidden\n")
++        self.assertTrue(has_risk_section(buried),
++                        "an unclosed fence must count as an offered (uncertain) risk gate")
++        self.assertEqual(extract_risk(buried), "unclassified")
++        # Negative control: a well-formed file with NO risk heading and no unclosed
++        # fence is still legacy (present=False) — V2 does not over-block clean files.
++        clean_legacy = self._md("# T\n\n## Docs\nplain paragraph, no fence, no risk\n")
++        self.assertFalse(has_risk_section(clean_legacy))
++
+     def test_unreadable_file_is_treated_as_legacy(self):
+         """Fail toward the documented old behavior, never toward inventing a
+         block from an I/O error."""
+         self.assertFalse(has_risk_section(self.d / "does-not-exist.md"))
+ 
++    def test_unclosed_fence_forces_unclassified_even_with_a_read_value(self):
++        # V9/codex-terra CRITICAL (round-2 panel): an unclosed fence = UNCERTAIN
++        # parse. `## Risk\nreversible` shown at top with `## Risk\nassertive` HIDDEN
++        # under an unclosed fence would otherwise read reversible (the assertive
++        # silently shadowed) and close on the low bar. extract_risk must degrade to
++        # unclassified when the parse is uncertain → present+unclassified → BLOCK.
++        p = self._md("# T\n\n## Risk\nreversible\n\n## Docs\n```\n## Risk\nassertive\n")
++        self.assertEqual(extract_risk(p), "unclassified")
++        self.assertTrue(has_risk_section(p))
++
++    def test_stray_unclosed_fence_below_a_classified_risk_does_not_over_block(self):
++        # V10/opus F1 (round-3 panel): V9 degraded on ANY unclosed fence, which
++        # over-blocked a clean `reversible` whose long task.md merely has a stray
++        # unbalanced ``` BELOW the risk (a receipt/notes snippet) that cannot hide
++        # a `## Risk`. Refined: degrade ONLY when the unclosed-fence region hides a
++        # `## Risk`-shape. A stray fence with no hidden risk keeps the real value.
++        p = self._md("# T\n\n## Risk\nreversible\n\n## Notes\n```\nstray, no risk here\n")
++        self.assertEqual(extract_risk(p), "reversible",
++                         "a stray fence with no hidden ## Risk must not over-block")
++
++    def test_balanced_fences_classified_risk_reads_its_class(self):
++        # opus F3: a normal classified task with BALANCED fences reads its class.
++        p = self._md("# T\n\n## Risk\nreversible\n\n## Docs\n```\nexample\n```\n")
++        self.assertEqual(extract_risk(p), "reversible")
++
+ 
+ class CloseEndToEnd(unittest.TestCase):
+     """Through the real CLI, because the wiring is the half that broke."""
+@@ -297,6 +379,22 @@ class CloseEndToEnd(unittest.TestCase):
+         _, r = self._work_then_close(body)
+         self.assertEqual(r.returncode, 0, r.stderr)
+ 
++    def test_unclosed_fence_hiding_the_real_risk_blocks_the_close(self):
++        # V2 (task 039, codex-sol #1 Critical): burying the real `## Risk` under an
++        # UNCLOSED fence used to make has_risk_section=False → the pre-1.5.0 lenient
++        # legacy close, defeating the review requirement (P-C bypass). Now the
++        # uncertain parse is strict: the close must BLOCK (no review evidence).
++        body = ("# 001 - T\n\n## Status\npending\n\n"
++                "## Docs\n```\n## Risk\nassertive\n> real class hidden below an "
++                "unclosed fence\n\n## Work Plan\n- [x] G1: do it\n")
++        d, r = self._work_then_close(body)
++        self.assertNotEqual(r.returncode, 0,
++                            f"an unclosed fence bought a lenient close:\n{r.stdout}")
++        self.assertNotIn("Task 001 done.", r.stdout)
++        # Recoverable the same way any strict block is: --force --reason.
++        r2 = self._cli(d, "work", "done", "--force", "--reason", "malformed import")
++        self.assertEqual(r2.returncode, 0, r2.stderr)
++
+ 
+ if __name__ == "__main__":
+     unittest.main(verbosity=2)

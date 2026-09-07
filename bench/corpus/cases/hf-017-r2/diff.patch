@@ -1,0 +1,673 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index cd751b9..1954215 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -30,6 +30,14 @@ jobs:
+       # Coverage thresholds (vitest.config.ts) gate the merge, not just tests.
+       - run: npm run test:coverage
+       - run: npm run build
++      # Perf budget (task 017): initial-route JS ≤ 350 KB gz with MapLibre deferred (lazy).
++      # The perf harness deps are intentionally isolated from the app tree, so install them
++      # here; the runner's pre-installed Chrome serves chrome-launcher. Serves a PLAIN
++      # `next start` (no provider stack) — a /api/tiles 404 does not change JS byte counts.
++      # The pure classifier is unit-tested with the built-in node:test (zero deps) first.
++      - run: npm run perf:budget:test
++      - run: cd scripts/perf && npm ci
++      - run: PERF_BUDGET_SKIP_BUILD=1 npm run perf:budget # build just ran above
+       # Hermetic geometry-instrument self-test (no Docker/stack needed): guards the
+       # parity harness's area/residual/verdict math so a refactor can't silently break it.
+       - run: npm run selfhost:harness-selftest
+diff --git a/package.json b/package.json
+index 8757db3..b90fb74 100644
+--- a/package.json
++++ b/package.json
+@@ -20,8 +20,12 @@
+     "test:e2e": "playwright test",
+     "selfhost:harness-selftest": "node docker/selfhost/parity-check.mjs --self-test",
+     "selfhost:script-check": "bash docker/selfhost/script-check.sh",
+-    "check": "npm run security:google-keys && npm run lint && npm run typecheck && npm test && npm run selfhost:harness-selftest && npm run selfhost:script-check",
+-    "check:ci": "npm run security:google-keys && npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run selfhost:harness-selftest && npm run selfhost:script-check"
++    "perf:budget:test": "node --test scripts/perf/bundle-classify.test.mjs",
++    "perf:budget": "bash scripts/perf/check-perf-budget.sh",
++    "perf:lighthouse": "node scripts/perf/run-lighthouse.mjs",
++    "perf:shell": "node scripts/perf/measure-shell-interactive.mjs",
++    "check": "npm run security:google-keys && npm run lint && npm run typecheck && npm test && npm run perf:budget:test && npm run selfhost:harness-selftest && npm run selfhost:script-check",
++    "check:ci": "npm run security:google-keys && npm run lint && npm run typecheck && npm run test:coverage && npm run build && PERF_BUDGET_SKIP_BUILD=1 npm run perf:budget && npm run selfhost:harness-selftest && npm run selfhost:script-check"
+   },
+   "dependencies": {
+     "@auth/prisma-adapter": "^2.11.2",
+diff --git a/src/features/amenities/server/catalogue-query.ts b/src/features/amenities/server/catalogue-query.ts
+index e91038e..8f7df52 100644
+--- a/src/features/amenities/server/catalogue-query.ts
++++ b/src/features/amenities/server/catalogue-query.ts
+@@ -173,7 +173,23 @@ export async function queryCatalogueSummaryInRing(
+         ST_SetSRID(ST_GeomFromGeoJSON(${JSON.stringify(midRing)}), 4326) AS ring_mid,
+         ST_SetSRID(ST_GeomFromGeoJSON(${JSON.stringify(outerRing)}), 4326) AS ring_outer,
+         ST_SetSRID(ST_Point(${origin.lng}, ${origin.lat}), 4326) AS origin
+-    ), intersections AS (
++    ), intersections AS MATERIALIZED (
++      -- MATERIALIZED (task 017, gap #8) — the load-bearing perf fix, EXPLAIN-justified. The band
++      -- column is a nested ST_Intersects(geom, ring_inner/mid) CASE. Without materialization
++      -- Postgres INLINES this CTE, so band (and the geography ST_Distance downstream) get
++      -- re-evaluated inside every window-function sort key (bucketed/stratified/ranked all
++      -- PARTITION/ORDER on category, band, distance). Measured on the real 8.7k-place dataset:
++      -- inlined 457 ms vs materialized 100 ms (3-4.5x), ALL from cutting recomputation — the
++      -- buffers were already shared-hit (warm), so this is CPU, not I/O (a startup warmup that
++      -- only warmed shared_buffers did NOT move it — the incomplete first EXPLAIN missed this).
++      -- Materializing intersections computes band+geom once; clipped_rows below holds the
++      -- ST_Intersection result once. Output is IDENTICAL (a plan hint) — proven by diffing the
++      -- returned rows with/without the hint (942==942) and by the catalogue integration test.
++      --
++      -- The rings + origin from params are USED here (band) but NOT projected forward, and
++      -- clipped_rows/measured re-CROSS JOIN the 1-row params for what they need — so the
++      -- materialized tuplestore never stores the 3 ring polygons per row (which would be ~2× the
++      -- reach's ring bytes × N rows, spilling to temp files on a big car/transit reach).
+       SELECT
+         place.id,
+         place.name,
+@@ -182,10 +198,6 @@ export async function queryCatalogueSummaryInRing(
+         place."sourceId",
+         place."sourceTags",
+         place.geom,
+-        params.ring_inner,
+-        params.ring_mid,
+-        params.ring_outer,
+-        params.origin,
+         -- The band is decided on the FULL stored geometry, so a park straddling a
+         -- ring boundary is attributed to the innermost band it reaches into.
+         (CASE
+@@ -197,7 +209,10 @@ export async function queryCatalogueSummaryInRing(
+       CROSS JOIN params
+       WHERE place."datasetId" = ${datasetId}
+         AND ST_Intersects(place.geom, params.ring_outer)
+-    ), clipped_rows AS (
++    ), clipped_rows AS MATERIALIZED (
++      -- MATERIALIZED with intersections above (task 017) — holds the per-row ST_Intersection
++      -- clip once so the downstream ST_PointOnSurface/window sorts don't re-run it. Re-joins the
++      -- 1-row params for the band's ring rather than carrying it forward from intersections.
+       SELECT
+         intersections.*,
+         -- Clip to the ring of the band this row was ATTRIBUTED to — not to the outer
+@@ -214,11 +229,12 @@ export async function queryCatalogueSummaryInRing(
+         -- computing a polygon intersection for each was measurable dead work.
+         CASE
+           WHEN GeometryType(geom) = 'POINT' THEN geom
+-          WHEN band = ${innerBand} THEN ST_Intersection(geom, ring_inner)
+-          WHEN band = ${midBand} THEN ST_Intersection(geom, ring_mid)
+-          ELSE ST_Intersection(geom, ring_outer)
++          WHEN band = ${innerBand} THEN ST_Intersection(geom, params.ring_inner)
++          WHEN band = ${midBand} THEN ST_Intersection(geom, params.ring_mid)
++          ELSE ST_Intersection(geom, params.ring_outer)
+         END AS clipped
+       FROM intersections
++      CROSS JOIN params
+     ), display_points AS (
+       SELECT clipped_rows.*, ST_PointOnSurface(clipped) AS display_point
+       FROM clipped_rows
+@@ -236,14 +252,16 @@ export async function queryCatalogueSummaryInRing(
+         CASE WHEN category = 'transit' THEN "sourceTags" ELSE NULL END AS "transitTags",
+         ST_Y(display_point)::double precision AS lat,
+         ST_X(display_point)::double precision AS lng,
+-        ST_Distance(display_point::geography, origin::geography)::double precision AS distance,
++        ST_Distance(display_point::geography, params.origin::geography)::double precision AS distance,
+         ST_SnapToGrid(display_point, ${AMENITY_STRATIFY_GRID_DEG}) AS bucket
+       FROM display_points
++      -- Re-join the 1-row params for origin + the band ring (not carried through the tuplestore).
++      CROSS JOIN params
+       -- Belt-and-braces: the display point must sit inside the ring of its own band,
+       -- which is what makes "no marker outside the shading" true at EVERY filter, not
+       -- only at "all".
+       WHERE ST_Covers(
+-        CASE WHEN band = ${innerBand} THEN ring_inner WHEN band = ${midBand} THEN ring_mid ELSE ring_outer END,
++        CASE WHEN band = ${innerBand} THEN params.ring_inner WHEN band = ${midBand} THEN params.ring_mid ELSE params.ring_outer END,
+         display_point
+       )
+     ), bucketed AS (
+diff --git a/src/features/amenities/server/catalogue.ts b/src/features/amenities/server/catalogue.ts
+index f30953b..8d04fd2 100644
+--- a/src/features/amenities/server/catalogue.ts
++++ b/src/features/amenities/server/catalogue.ts
+@@ -411,7 +411,15 @@ async function computeNearbyAmenities(
+   }
+ 
+   // Miss path: the reach rings bound AND band the query, then a pinned dataset read.
++  // Server-side spans (task 017, gap #8) attribute the cold cost between the ORS reach-ring
++  // fetch and the PostGIS intersect — the audit could only INFER the split by subtracting two
++  // independently-sampled p95s (which don't subtract). Gated on AMENITY_SPANS so it's a
++  // diagnostic, not always-on log noise. `clip.rings` is already present for transit (resolveClip
++  // fetched them), so this ORS span is walk/car only — exactly the cold-cold probe's path.
++  const spansOn = !!process.env.AMENITY_SPANS;
++  const tStart = spansOn ? performance.now() : 0;
+   const rings = clip.rings ?? (await clipRingsFor(latRaw, lngRaw, mode, pace, timeContext));
++  const tAfterRings = spansOn ? performance.now() : 0;
+ 
+   let summary: {
+     datasetId: string;
+@@ -447,9 +455,17 @@ async function computeNearbyAmenities(
+     throw new CatalogueUnavailableError("Amenity catalogue query failed", { cause: error });
+   }
+   if (!summary) throw new CatalogueUnavailableError("No active amenity catalogue");
++  const tAfterQuery = spansOn ? performance.now() : 0;
+ 
+   // Fuse coincident transit stops into single markers (task 047). Read-time only.
+   const merged = mergeCoincidentTransitStops(summary.amenities);
++  if (spansOn) {
++    const orsMs = (tAfterRings - tStart).toFixed(0);
++    const pgMs = (tAfterQuery - tAfterRings).toFixed(0);
++    const mergeMs = (performance.now() - tAfterQuery).toFixed(0);
++    // One line, no payloads (the [api:*] boundary-log convention, node [19]).
++    console.log(`[amenities:spans] mode=${mode} ors_rings=${orsMs}ms postgis=${pgMs}ms merge=${mergeMs}ms places=${summary.amenities.length}`);
++  }
+   // `modes` is a server-only merge input; drop it so it never enters the client
+   // payload/cache contract (a merged marker carries everything the popup needs in
+   // `members`). (impl-panel finding F5.)
+diff --git a/src/features/amenities/server/warmup.ts b/src/features/amenities/server/warmup.ts
+new file mode 100644
+index 0000000..5d023e9
+--- /dev/null
++++ b/src/features/amenities/server/warmup.ts
+@@ -0,0 +1,106 @@
++import { LAUNCH_BBOX } from "@/lib/bounds";
++import { db } from "@/lib/db";
++import { withTimeout } from "@/lib/timeout";
++import { carTrafficSlotFor } from "@/features/isochrones/car-traffic";
++import { DEFAULT_PACE } from "@/features/isochrones/pace";
++import { DEFAULT_TIME_CONTEXT } from "@/features/isochrones/time-context";
++import { drivingIsochrone, walkingIsochrone } from "@/features/isochrones/server/ors";
++
++/**
++ * Process-start provider warmup (task 017, gap #8).
++ *
++ * WHY, measured: this warms the two PROVIDER cold-start tails the owner named (gap #8 / #5,#6).
++ * The dominant AMENITIES cold cost was NOT I/O and is NOT what this fixes — it was the query
++ * re-evaluating geometry in un-materialized CTEs (fixed in catalogue-query.ts with MATERIALIZED,
++ * 457→100 ms; that was the real lever). What warmup covers instead: (a) the ORS engine's first
++ * foot/car request pays a JVM/graph-load tail (isochrone cold p95 ~485 ms first-touch, dropping
++ * as it warms) — priming one of each warms it, so the first real user's rings are fast; (b) a
++ * cheap read of the whole active catalogue geom (~14 MB, fits the 128 MB shared_buffers) pulls it
++ * into cache, trimming the first amenities query's heap-fetch I/O (a minor complement to the query
++ * fix, not the main win). suggest/geocode warmth is deliberately NOT primed: at n=30 those p95s
++ * were only marginally over and gap #5's cause — prefix-search cost vs JVM warmth — is unconfirmed,
++ * so warming them would be an unproven fix, not a measured one.
++ *
++ * SAFETY: this is a PROCESS-START, fire-and-forget task. It is NEVER awaited by `/api/ready`
++ * (readiness stays a bounded local probe), it is single-flighted (module-level promise, so it runs
++ * at most once per worker), every provider call is time-bounded, and it swallows all errors —
++ * a warmup failure must never surface. It only READS (a geometry aggregate + two provider calls);
++ * it writes nothing except the ApiCache entries the provider clients populate themselves.
++ */
++let warmupPromise: Promise<void> | null = null;
++
++/**
++ * Idempotent, single-flight. Returns the in-flight/settled warmup promise; safe to call anywhere.
++ *
++ * Single-flight, but NOT "done-forever on failure": if a warmup run does not actually succeed
++ * (e.g. ORS was down at boot), the cached promise is cleared once it settles, so a later call can
++ * retry rather than being permanently suppressed. Only a SUCCESSFUL run keeps the promise cached.
++ */
++export function warmupProviders(): Promise<void> {
++  if (!warmupPromise) {
++    warmupPromise = runWarmup()
++      .then((ok) => {
++        if (!ok) warmupPromise = null; // let a later call retry a failed warmup
++      })
++      .catch((error) => {
++        // runWarmup should never reject (it is best-effort internally), but guard anyway.
++        console.error(`[warmup] provider warmup failed (non-fatal): ${(error as Error)?.message ?? error}`);
++        warmupPromise = null;
++      });
++  }
++  return warmupPromise;
++}
++
++/** Test-only reset so a suite can exercise the single-flight without cross-contamination. */
++export function __resetWarmupForTest(): void {
++  warmupPromise = null;
++}
++
++/** Runs the warmup best-effort. Returns true only if EVERY component succeeded (so a partial or
++ *  total failure leaves the single-flight clearable for a retry). Never throws. */
++async function runWarmup(): Promise<boolean> {
++  const started = Date.now();
++  const centerLat = (LAUNCH_BBOX.minLat + LAUNCH_BBOX.maxLat) / 2;
++  const centerLng = (LAUNCH_BBOX.minLng + LAUNCH_BBOX.maxLng) / 2;
++
++  // (1) The decisive one: pull the entire active-catalogue geom into shared_buffers, so the first
++  // real amenities query for ANY origin hits warm cache (~100 ms) instead of cold disk (~650 ms).
++  const buffer = await withTimeout(warmCatalogueBuffer(), 15_000);
++  // (2) Prime the ORS foot + car engines (JVM/graph load) at the launch centre. allSettled: one
++  // failing must not abort the other, and neither can reject into the caller.
++  const providers = await withTimeout(
++    Promise.allSettled([
++      walkingIsochrone(centerLat, centerLng, DEFAULT_PACE),
++      drivingIsochrone(centerLat, centerLng, carTrafficSlotFor(DEFAULT_TIME_CONTEXT)),
++    ]),
++    20_000,
++  );
++
++  const bufferOk = buffer.ok ? "ok" : buffer.reason;
++  const orsResults = providers.ok ? providers.value : [];
++  const orsOk = providers.ok
++    ? orsResults.map((r) => (r.status === "fulfilled" ? "ok" : "err")).join("/")
++    : providers.reason;
++  console.log(`[warmup] done in ${Date.now() - started}ms — catalogue-buffer=${bufferOk} ors(foot/car)=${orsOk}`);
++  // Success = the buffer read completed AND both ORS profiles resolved. Anything else (a timeout or
++  // a rejected provider) returns false so `warmupProviders` clears the promise and a later call retries.
++  return buffer.ok && providers.ok && orsResults.every((r) => r.status === "fulfilled");
++}
++
++/**
++ * Read every row's geometry for the active dataset so PostgreSQL caches the catalogue's `geom`
++ * pages. `ST_NPoints` forces the planner to actually fetch the full geometry (a bare `count(*)`
++ * would not touch the geom heap). Scoped to the active dataset; a missing catalogue is a no-op.
++ */
++async function warmCatalogueBuffer(): Promise<void> {
++  const active = await db().amenityDataset.findUnique({
++    where: { activeKey: 1 },
++    select: { id: true },
++  });
++  if (!active) return;
++  await db().$queryRaw`
++    SELECT sum(ST_NPoints(geom)) AS n
++    FROM "osm_catalogue"."AmenityPlace"
++    WHERE "datasetId" = ${active.id}
++  `;
++}
+diff --git a/src/features/map/AppMap.tsx b/src/features/map/AppMap.tsx
+index 02d7b2e..f839727 100644
+--- a/src/features/map/AppMap.tsx
++++ b/src/features/map/AppMap.tsx
+@@ -1,7 +1,7 @@
+ "use client";
+ 
+-import maplibregl from "maplibre-gl";
+-import { Protocol } from "pmtiles";
++import type maplibregl from "maplibre-gl";
++import type { Protocol as PmtilesProtocol } from "pmtiles";
+ import type { ReactNode } from "react";
+ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+ 
+@@ -53,6 +53,7 @@ import { createHoverController } from "@/features/map/hover-controller";
+ import { deriveShell, type ShellState } from "@/features/map/shell-state";
+ import StatePill from "@/features/map/StatePill";
+ import { createLoadState } from "@/features/map/load-state";
++import { setMapGl, type MapGl } from "@/features/map/map-runtime";
+ import { createPopupController } from "@/features/map/popup-controller";
+ import {
+   createReachDirectionsController,
+@@ -161,6 +162,10 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+   // The most recent user SelectInput, so a pace/time change before the first
+   // selection resolves can re-issue it rather than lose the change (finding G).
+   const pendingInputRef = useRef<SelectInput | null>(null);
++  // A user selection made while the deferred map engine is still loading (task 017). The search
++  // box is interactive in the eager shell before the map exists, so a submit before `selectRef`
++  // is wired is buffered here and replayed once the map is ready — never dropped.
++  const pendingSelectRef = useRef<SelectInput | null>(null);
+   const abortRef = useRef<AbortController | null>(null);
+   // The rings + mode of the last resolved selection, stashed so a right-click
+   // ("how do I get there?") can classify a clicked point against the EXACT
+@@ -345,16 +350,80 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+     return () => controller.dispose();
+   }, []);
+ 
++  // Defer the MapLibre engine (327 KB gz) off the first-load critical path (task 017): the eager
++  // shell above (search, header, controls) is already interactive; only the map canvas waits.
++  // `hf:interactive` marks the split the bundle instrument reads (JS requested AFTER it is LAZY);
++  // the engine is dynamically imported on the first idle slot after that mark, so it lands in a
++  // lazy chunk and never blocks TTI. The map then fades in behind the shell.
++  const [mapEngine, setMapEngine] = useState<{ gl: MapGl; Protocol: typeof PmtilesProtocol } | null>(null);
++  // A deferred dynamic import CAN fail in ways the old eager bundle could not — a flaky mobile
++  // network, or (routinely) a stale client whose cached HTML points at a hashed chunk a redeploy
++  // has purged (ChunkLoadError). Without handling, `mapEngine` stays null forever: the shell looks
++  // fully interactive but the map — the headline surface — never appears, which violates the
++  // "core flow survives degradation" invariant [node 1]. So: one silent auto-retry, then surface a
++  // retryable error. `mapReloadToken` re-runs this effect for the manual retry.
++  const [mapLoadFailed, setMapLoadFailed] = useState(false);
++  const [mapReloadToken, setMapReloadToken] = useState(0);
+   useEffect(() => {
++    let cancelled = false;
++    if (mapReloadToken === 0 && typeof performance !== "undefined" && performance.mark) {
++      performance.mark("hf:interactive");
++    }
++    let attempts = 0;
++    let retry: ReturnType<typeof setTimeout> | null = null;
++    const load = () => {
++      Promise.all([import("maplibre-gl"), import("pmtiles")])
++        .then(([gl, pm]) => {
++          if (cancelled) return;
++          setMapLoadFailed(false);
++          setMapGl(gl);
++          setMapEngine({ gl, Protocol: pm.Protocol });
++        })
++        .catch((error: unknown) => {
++          if (cancelled) return;
++          console.error(`[map] engine chunk failed to load: ${(error as Error)?.message ?? error}`);
++          attempts += 1;
++          if (attempts < 2) {
++            retry = setTimeout(load, 1500); // one silent retry (transient network / CDN blip)
++          } else {
++            setMapLoadFailed(true); // give the user a visible, retryable error instead of a blank map
++          }
++        });
++    };
++    const win = window as typeof window & {
++      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
++      cancelIdleCallback?: (handle: number) => void;
++    };
++    let idleHandle: number | null = null;
++    let timer: ReturnType<typeof setTimeout> | null = null;
++    if (typeof win.requestIdleCallback === "function") {
++      idleHandle = win.requestIdleCallback(load, { timeout: 2000 });
++    } else {
++      timer = setTimeout(load, 200);
++    }
++    return () => {
++      cancelled = true;
++      if (idleHandle !== null && typeof win.cancelIdleCallback === "function") win.cancelIdleCallback(idleHandle);
++      if (timer !== null) clearTimeout(timer);
++      if (retry !== null) clearTimeout(retry);
++    };
++  }, [mapReloadToken]);
++
++  useEffect(() => {
++    if (!mapEngine) return;
++    // The engine, dynamically imported off the critical path (effect above). `gl` is the loaded
++    // runtime namespace; the type-only `maplibregl` module import still serves every TYPE use.
++    const gl = mapEngine.gl;
++    const Protocol = mapEngine.Protocol;
+     const container = containerRef.current;
+     if (!container) return;
+     // Non-null capture so nested closures (renderSelection, load) keep the type.
+     const el: HTMLDivElement = container;
+ 
+     const protocol = new Protocol();
+-    maplibregl.addProtocol("pmtiles", protocol.tile);
++    gl.addProtocol("pmtiles", protocol.tile);
+ 
+-    const map = new maplibregl.Map({
++    const map = new gl.Map({
+       container,
+       style: createMapStyle(`${window.location.origin}/api/tiles`),
+       center: BUCHAREST_CENTER,
+@@ -375,7 +444,7 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+     // (which can false-pass). Harmless in prod (a handle
+     // to the already-visible map); cleared on teardown.
+     (window as unknown as { __hfMap?: maplibregl.Map }).__hfMap = map;
+-    map.addControl(new maplibregl.NavigationControl({ showCompass: true, showZoom: true }), "bottom-right");
++    map.addControl(new gl.NavigationControl({ showCompass: true, showZoom: true }), "bottom-right");
+ 
+     // Shared lifecycle cell replayed at `load` (see load-state.ts). Buffers a
+     // selection / amenities response that arrived before the style existed.
+@@ -622,6 +691,14 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+       renderSelection: renderSelectionStash,
+     });
+     selectRef.current = selectFlow.select;
++    // Replay a selection the user made while the engine was still loading (task 017): the shell's
++    // search was interactive before this point, so an early submit was buffered — apply it now.
++    // load-state's pre-`load` replay buffer handles rendering if the style hasn't settled yet.
++    if (pendingSelectRef.current) {
++      const buffered = pendingSelectRef.current;
++      pendingSelectRef.current = null;
++      selectFlow.select(buffered);
++    }
+ 
+     map.on("load", () => {
+       // Source + layer specs live in map-setup (unit-tested). Add order = draw
+@@ -685,6 +762,10 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+       // dock open (review/review). No-op when nothing was drawn.
+       reachDirections.reframe();
+       el.dataset.mapLoaded = "true";
++      // Symmetric with `hf:interactive` (task 017): marks when the deferred engine has finished
++      // loading and the map is visible unprompted — the perf harness reports both, so shell-
++      // interactive vs map-visible are separable on the emulator AND a real device.
++      if (typeof performance !== "undefined" && performance.mark) performance.mark("hf:map-ready");
+       const center = map.getCenter();
+       el.dataset.cameraCenter = `${center.lng.toFixed(5)},${center.lat.toFixed(5)}`;
+     });
+@@ -975,11 +1056,16 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+             delete (window as unknown as { __hfMap?: maplibregl.Map }).__hfMap;
+           }
+           map.remove();
+-          maplibregl.removeProtocol("pmtiles");
++          gl.removeProtocol("pmtiles");
+           mapRef.current = null;
+         },
+       );
+-  }, []);
++    // Runs once, when the deferred engine finishes loading (mapEngine: null → set, never back).
++    // Deliberately depends ONLY on mapEngine: this builds the map + all controllers exactly once.
++    // `switchMode` (a non-memoized component function) is called inside but must NOT be a dep —
++    // it changes identity every render, and re-running would tear down and rebuild the whole map.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [mapEngine]);
+ 
+   // Combobox autocomplete wiring: the debounce timer + AbortController live in
+   // search-suggest-controller; these handlers only dispatch reducer transitions
+@@ -997,7 +1083,15 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+   function pickSuggestion(s: Suggestion) {
+     suggestRef.current?.cancel();
+     dispatchCombo({ type: "pick", suggestion: s });
+-    selectRef.current?.({ kind: "point", lat: s.lat, lng: s.lng, label: s.label });
++    runUserSelect({ kind: "point", lat: s.lat, lng: s.lng, label: s.label });
++  }
++
++  // Route a user-initiated selection so it survives the deferred-map window (task 017): if the
++  // map engine has not finished loading yet, `selectRef` is null — buffer the input and replay it
++  // on map-ready (effect above) instead of dropping the user's search.
++  function runUserSelect(input: SelectInput) {
++    if (selectRef.current) selectRef.current(input);
++    else pendingSelectRef.current = input;
+   }
+ 
+   function switchMode(next: Mode) {
+@@ -1078,7 +1172,7 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+     const q = combo.query.trim();
+     if (q) {
+       closeSuggest();
+-      selectRef.current?.({ kind: "search", query: q });
++      runUserSelect({ kind: "search", query: q });
+     }
+   }
+ 
+@@ -1447,6 +1541,29 @@ export default function AppMap({ utilityHeader }: AppMapProps) {
+         className="h-full w-full outline-none"
+       />
+ 
++      {/* Deferred map engine failed to load (task 017): the shell stays usable, but rather than
++          leave the headline canvas silently blank we surface a retryable message. Retry re-runs
++          the load effect via mapReloadToken. */}
++      {mapLoadFailed && (
++        <div
++          role="alert"
++          data-testid="map-load-error"
++          className="pointer-events-auto absolute inset-x-0 bottom-24 z-30 mx-auto flex w-fit max-w-[90%] items-center gap-3 rounded-xl border border-white/10 bg-[#111614]/95 px-4 py-3 text-sm text-[#f4f7f2] shadow-lg"
++        >
++          <span>The map couldn’t load. Your search still works.</span>
++          <button
++            type="button"
++            className="shrink-0 rounded-lg border border-[#d8ff87]/25 bg-[#c7f36b] px-3 py-1.5 font-medium text-[#172008]"
++            onClick={() => {
++              setMapLoadFailed(false);
++              setMapReloadToken((t) => t + 1);
++            }}
++          >
++            Retry
++          </button>
++        </div>
++      )}
++
+       <AttributionBadge elevated={hasResults} />
+     </div>
+   );
+diff --git a/src/features/map/amenity-cluster-controller.ts b/src/features/map/amenity-cluster-controller.ts
+index af4bc8d..9058077 100644
+--- a/src/features/map/amenity-cluster-controller.ts
++++ b/src/features/map/amenity-cluster-controller.ts
+@@ -1,4 +1,5 @@
+-import maplibregl from "maplibre-gl";
++import type maplibregl from "maplibre-gl";
++import { mapGl } from "@/features/map/map-runtime";
+ 
+ import { amenityCategoryLabel, type AmenityCategoryKey } from "@/features/amenities/amenities";
+ import {
+@@ -682,7 +683,7 @@ export function createAmenityClusterController({
+           keyboard,
+         );
+       });
+-      const marker = new maplibregl.Marker({ element: button }).setLngLat(anchor).addTo(map);
++      const marker = new (mapGl().Marker)({ element: button }).setLngLat(anchor).addTo(map);
+       const entry: Entry = {
+         key,
+         marker,
+diff --git a/src/features/map/amenity-spider-controller.ts b/src/features/map/amenity-spider-controller.ts
+index 4309367..f67f820 100644
+--- a/src/features/map/amenity-spider-controller.ts
++++ b/src/features/map/amenity-spider-controller.ts
+@@ -1,4 +1,5 @@
+-import maplibregl from "maplibre-gl";
++import type maplibregl from "maplibre-gl";
++import { mapGl } from "@/features/map/map-runtime";
+ 
+ import {
+   AMENITY_CATEGORIES,
+@@ -183,7 +184,7 @@ export function createAmenitySpiderController({
+       event.preventDefault();
+       close();
+     });
+-    hubMarker = new maplibregl.Marker({ element: button }).setLngLat(nextHub).addTo(map);
++    hubMarker = new (mapGl().Marker)({ element: button }).setLngLat(nextHub).addTo(map);
+ 
+     el.dataset.amenitySpider = String(leaves.length);
+     onActiveChange(true);
+diff --git a/src/features/map/map-runtime.ts b/src/features/map/map-runtime.ts
+new file mode 100644
+index 0000000..1e65f19
+--- /dev/null
++++ b/src/features/map/map-runtime.ts
+@@ -0,0 +1,38 @@
++// Lazy holder for the MapLibre runtime (task 017 — keep the 327 KB gz engine off the
++// first-load critical path). AppMap dynamically `import("maplibre-gl")`s the engine on idle,
++// AFTER the shell is interactive, then calls `setMapGl` with the loaded module; the map
++// controllers reach the runtime constructors (`Marker`, `Popup`, …) through `mapGl()`.
++//
++// The load-bearing property: NOTHING here — and nothing that imports only this + `import type
++// maplibre-gl` — statically imports the maplibre-gl VALUE. So the whole map-controller subtree
++// stays maplibre-free in the initial bundle, and the engine lands in a lazy chunk reached only
++// by AppMap's runtime `import()`. The `import(...)` in the type below is a TYPE query only
++// (erased at build time — it creates no runtime import edge).
++
++/** The maplibre-gl module namespace — the runtime constructors (`Map`, `Marker`, `Popup`,
++ * `NavigationControl`, `addProtocol`, …) are its named exports. */
++export type MapGl = typeof import("maplibre-gl");
++
++let gl: MapGl | null = null;
++
++/** Called once by AppMap right after `await import("maplibre-gl")`, before any controller runs. */
++export function setMapGl(loaded: MapGl): void {
++  gl = loaded;
++}
++
++/**
++ * The loaded MapLibre runtime. Throws if called before `setMapGl` — which cannot happen in the
++ * real flow (controllers are constructed inside AppMap's init effect, strictly after the engine
++ * import resolves and `setMapGl` runs), so the throw is a loud invariant guard, not a code path.
++ */
++export function mapGl(): MapGl {
++  if (!gl) {
++    throw new Error("MapLibre runtime not loaded — setMapGl(...) must run before map controllers");
++  }
++  return gl;
++}
++
++/** Test-only reset so a suite that installs a fake runtime does not leak into the next. */
++export function __resetMapGlForTest(): void {
++  gl = null;
++}
+diff --git a/src/features/map/popup-controller.ts b/src/features/map/popup-controller.ts
+index 6dbced0..ab25f1e 100644
+--- a/src/features/map/popup-controller.ts
++++ b/src/features/map/popup-controller.ts
+@@ -1,4 +1,5 @@
+-import maplibregl from "maplibre-gl";
++import type maplibregl from "maplibre-gl";
++import { mapGl } from "@/features/map/map-runtime";
+ 
+ import {
+   AMENITY_CATEGORIES,
+@@ -195,7 +196,7 @@ export function createPopupController({
+     const props = feature.properties ?? {};
+     const name = typeof props.name === "string" ? props.name.trim() : "";
+     const category = typeof props.category === "string" ? props.category : "";
+-    const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false, maxWidth: "280px" })
++    const popup = new (mapGl().Popup)({ closeButton: true, closeOnClick: false, maxWidth: "280px" })
+       .setLngLat(coords)
+       .setDOMContent(renderPoiPopup(name, category))
+       .addTo(map);
+@@ -523,7 +524,7 @@ export function createPopupController({
+     note.textContent = "Details could not be loaded. Try again in a moment.";
+     root.appendChild(heading);
+     root.appendChild(note);
+-    const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false, maxWidth: "268px" })
++    const popup = new (mapGl().Popup)({ closeButton: true, closeOnClick: false, maxWidth: "268px" })
+       .setLngLat(coords)
+       .setDOMContent(root)
+       .addTo(map);
+@@ -549,7 +550,7 @@ export function createPopupController({
+       // Route into the normal detail path; it replaces this popup in the shared slot.
+       inspectAmenity(item);
+     });
+-    const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false, maxWidth: "268px" })
++    const popup = new (mapGl().Popup)({ closeButton: true, closeOnClick: false, maxWidth: "268px" })
+       .setLngLat(coords)
+       .setDOMContent(content)
+       .addTo(map);
+@@ -741,7 +742,7 @@ export function createPopupController({
+     const controller = new AbortController();
+     stopLinesAbort = controller;
+ 
+-    const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false, maxWidth: "280px" })
++    const popup = new (mapGl().Popup)({ closeButton: true, closeOnClick: false, maxWidth: "280px" })
+       .setLngLat(coords)
+       .setDOMContent(renderStopPopup(buildStopPopupModel(title, "loading"), coords))
+       .addTo(map);
+diff --git a/src/features/map/selection-render.ts b/src/features/map/selection-render.ts
+index b609664..73a6988 100644
+--- a/src/features/map/selection-render.ts
++++ b/src/features/map/selection-render.ts
+@@ -1,4 +1,5 @@
+-import maplibregl from "maplibre-gl";
++import type maplibregl from "maplibre-gl";
++import { mapGl } from "@/features/map/map-runtime";
+ 
+ import { buildIsochroneFeatures, MARKER_COLOR } from "@/features/isochrones/isochrone-view";
+ import type { LoadState } from "@/features/map/load-state";
+@@ -64,7 +65,7 @@ export function createSelectionRender({
+     const core = document.createElement("span");
+     core.className = "hf-origin-marker__core";
+     markerElement.append(aura, core);
+-    marker = new maplibregl.Marker({ element: markerElement, anchor: "center" });
++    marker = new (mapGl().Marker)({ element: markerElement, anchor: "center" });
+     // Pointer-transparent: the origin pin is display-only, so it must never
+     // swallow a click/hover meant for an amenity marker underneath (task 024
+     // — closes the exact-origin transit stop limitation parked in task 021).
+diff --git a/src/instrumentation.ts b/src/instrumentation.ts
+new file mode 100644
+index 0000000..a6bfdf3
+--- /dev/null
++++ b/src/instrumentation.ts
+@@ -0,0 +1,15 @@
++// Next.js instrumentation hook — runs ONCE when the server process starts (task 017, gap #8).
++// This is the correct home for provider warmup: process-start, not a request handler, and in
++// particular NOT `/api/ready` (readiness must stay a bounded local probe).
++export async function register() {
++  // Node runtime only — the warmup touches the DB + ORS (server-only) and must never load into
++  // the edge runtime. `register` also fires for the edge runtime, so guard on NEXT_RUNTIME.
++  if (process.env.NEXT_RUNTIME !== "nodejs") return;
++  // Opt-out for environments that must not make provider calls at boot (kept simple: any truthy
++  // value disables). Best-effort by default.
++  if (process.env.HOWFAR_DISABLE_WARMUP) return;
++  const { warmupProviders } = await import("@/features/amenities/server/warmup");
++  // Fire-and-forget: warmup runs in the background and never blocks the server from becoming
++  // ready, and `warmupProviders` swallows all errors internally, so nothing here can reject.
++  void warmupProviders();
++}

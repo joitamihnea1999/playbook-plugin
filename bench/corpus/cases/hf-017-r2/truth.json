@@ -1,0 +1,54 @@
+{
+  "findings": [
+    {
+      "id": "C1",
+      "file": "src/features/map/AppMap.tsx",
+      "symbol": "AppMap",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The deferred map-engine import has no failure path: a chunk-load failure (flaky network, or a redeploy purging the hashed chunk — a NEW failure mode created by lazy-loading) leaves the headline map permanently blank with no honest error and no recovery that can actually fetch a fresh chunk (opus, sonnet, codex:sol, codex:terra convergent).",
+      "fix_commit": "6963f1a",
+      "fix_evidence": "window.location.reload()"
+    },
+    {
+      "id": "P1",
+      "file": "src/features/amenities/server/warmup.ts",
+      "symbol": "warmupProviders",
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "Warmup emits real third-party provider traffic on EVERY server boot in every environment, guarded only by an env flag (opus#5; parked)."
+    },
+    {
+      "id": "P2",
+      "file": "src/features/amenities/server/warmup.ts",
+      "symbol": "warmupProviders",
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "The 'retry on failure' path is unreachable in production: the only caller is instrumentation.ts at process start, once (opus#4, codex:sol#2; parked)."
+    },
+    {
+      "id": "P3",
+      "file": "src/features/amenities/server/catalogue-query.ts",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "MATERIALIZED CTEs project columns not read downstream into the work_mem-bound tuplestore; transit mode unmeasured (opus#3, sonnet#4; parked)."
+    },
+    {
+      "id": "P4",
+      "file": "src/features/map/AppMap.tsx",
+      "symbol": null,
+      "severity": "Minor",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "The eager maplibre-gl CSS import sits outside the lazy-boundary claim and test; the bundle instrument measures JS only (sonnet#1; parked)."
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "RJ1",
+      "claim": "public app code leaks task/owner provenance ('task 017', 'gap #8', 'the owner' in ci.yml, AppMap.tsx, warmup.ts)",
+      "why_rejected": "Not a hygiene breach by the project's binding standard (hygiene_check.py explicitly permits these strings).",
+      "file": ".github/workflows/ci.yml"
+    }
+  ]
+}

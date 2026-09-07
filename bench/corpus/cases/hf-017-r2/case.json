@@ -1,0 +1,52 @@
+{
+  "id": "hf-017-r2",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "017",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "4bb692354b4c70a1fad519b32aef3102bd3247c4",
+  "diff_of": "f01d864b2fbe1b678918b6d5c8d8083027ae9fce..4bb692354b4c70a1fad519b32aef3102bd3247c4",
+  "diff_excludes": [
+    "README.md",
+    "docs/PERF_AUDIT.md",
+    "e2e/map-defer.spec.ts",
+    "scripts/perf/analyze-bundle.mjs",
+    "scripts/perf/bundle-classify.mjs",
+    "scripts/perf/bundle-classify.test.mjs",
+    "scripts/perf/check-perf-budget.sh",
+    "scripts/perf/config.mjs",
+    "scripts/perf/measure-shell-interactive.mjs",
+    "scripts/perf/package.json",
+    "scripts/perf/perf-budget.mjs",
+    "scripts/perf/run-api-latency.mjs",
+    "src/features/amenities/server/warmup.test.ts",
+    "src/features/map/amenity-cluster-controller.test.ts",
+    "src/features/map/amenity-spider-controller.test.ts"
+  ],
+  "spec_source_sha256": "10cce6bfdf1de9593b711d78f611491399a00d12d40ab6fbe3bf61f53224aa77",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Never born checked:** write each gate BEFORE you do its step, then check it — a gate may never be born checked. To record work you already finished, add the gate unchecked, then check it in a SEPARATE edit with its outcome note.\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    },
+    {
+      "replace": [
+        "(DONE before triage",
+        "(DONE before the panel"
+      ]
+    }
+  ],
+  "kind": "perf",
+  "area": "ui",
+  "difficulty": "medium",
+  "truth_version": 1,
+  "notes": "The UI-code half of the diff only: scripts/perf/*, e2e/*, *.test.ts, docs/PERF_AUDIT.md and README.md are excluded from diff.patch for the 90k budget (raw diff 103 KB); all are in the snapshot tree. The truth Critical is in src/features/map/AppMap.tsx (in the diff); the parked P1-P5 are about src/ files in the diff plus scripts/perf/run-api-latency.mjs (tree only). Dropped non-template H2: 'Fresh impl panel on the final committed tree (…)' (a review section — correctly dropped). Spec edits: template preamble deleted; one Work Plan H3 title '(DONE before triage' → '(DONE before the panel' (a pre-review heading that trips the review-heading regex).",
+  "mapping": {
+    "round": 2,
+    "rounds_total": 2,
+    "fix_commits": [
+      "6963f1a"
+    ],
+    "evidence": "Deterministic: the newest impl round's Panel-snapshot names HowFar=4bb6923 (clean; audit 22:34) = the 'Fresh impl panel on the final committed tree (HowFar @ 4bb6923)' section; the earlier round ran on the dirty pre-commit tree (snapshot f01d864*) and its I1-I8 fixes are inside 4bb6923. The fresh panel's one accepted Critical → 6963f1a 'Recover a failed map-engine load with a page reload' (23:02)."
+  }
+}

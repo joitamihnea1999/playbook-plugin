@@ -1,0 +1,30 @@
+{
+  "id": "pb-039-r4",
+  "source": {
+    "workspace": "playbook-plugin-dev",
+    "task": "039",
+    "repo": "playbook-plugin"
+  },
+  "repo_base_sha": "8d58d230073eec25ca1ceeb2d95bce165efd3114",
+  "diff_of": "861b400ecf31e76b2cc909b285e035f234d81f6a..8d58d230073eec25ca1ceeb2d95bce165efd3114",
+  "diff_excludes": [
+    "docs/guarantee-ledger.json"
+  ],
+  "spec_source_sha256": "7a8c3c5fadcd717180c8b95f8cb3020ecf7691a61ddbeb9eaf3a7f7cebe52917",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "refactor",
+  "area": "enforcement",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "BAIT (near-clean): the converged tree after V10; the panel fixed nothing. The two compact.py items split to task 044 are recorded as accepted+parked (a judge who finds them is credited, not penalized); codex-sol's three re-raised claims are known_rejects. docs/guarantee-ledger.json is excluded from diff.patch for the budget (in the snapshot tree). Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 4,
+    "rounds_total": 4,
+    "fix_commits": [],
+    "evidence": "Deterministic: the newest judge.md round's Panel-snapshot names playbook-plugin=8d58d23 (V10, clean) = '### Re-panel (round 4) triage — the convergence stop': opus + sonnet + codex-terra CONFIRM CLEAN; codex-sol's re-raised items KEEP PARKED (rejected earlier with rationale); two NEW legitimate compact.py items were SPLIT to task 044 (not fixed in this task)."
+  }
+}

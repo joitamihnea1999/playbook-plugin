@@ -1,0 +1,30 @@
+{
+  "id": "hf-014-r4",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "014",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "2a23405b7f6ed50aae32eef1c5b13e32f421f131",
+  "diff_of": "a45bd3e726589e7991e23d193441ce7705563ac0..2a23405b7f6ed50aae32eef1c5b13e32f421f131",
+  "diff_excludes": [],
+  "spec_source_sha256": "7d82904d44512084d9a7fc2d82805a5748065ba0fdeb05863ff2dee6cf2a9b02",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Never born checked:** write each gate BEFORE you do its step, then check it — a gate may never be born checked. To record work you already finished, add the gate unchecked, then check it in a SEPARATE edit with its outcome note.\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "docs",
+  "area": "docs",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "Docs/assertive case, final round: the last of the retired-hosting class in src/ comments, README and BRIEF, plus a positive control for the script check. opus#2 'the happy path had never been RUN' is a process finding (no repo file) and is omitted. Accumulated diff from the task base. Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 4,
+    "rounds_total": 4,
+    "fix_commits": [
+      "6208fe6"
+    ],
+    "evidence": "Deterministic: the newest judge.md round's Panel-snapshot names HowFar=2a23405 = 'Impl panel #4 (fresh, over commit 2a23405)'; its accepts → 6208fe6 'Neutralize retired-platform references and harden dev:selfhost preflight' (01:03), committed 3 min before the verification receipt."
+  }
+}

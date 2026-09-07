@@ -1,0 +1,41 @@
+{
+  "id": "hf-007-r6",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "007",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "f5f65a10988dd36543999051ec8bca128d30cf59",
+  "diff_of": "ff904f32c1e64dbb8848d0d981b15560fdc0cb73..f5f65a10988dd36543999051ec8bca128d30cf59",
+  "diff_excludes": [
+    "src/app/api/ready/route.test.ts",
+    "src/features/amenities/server/bulk-overpass.test.ts",
+    "src/features/amenities/server/catalogue.test.ts",
+    "src/features/amenities/server/overpass-client.test.ts",
+    "src/features/isochrones/server/ors.test.ts",
+    "src/features/isochrones/server/transit-plan.test.ts",
+    "src/features/isochrones/server/transit.test.ts",
+    "src/features/search/server/nominatim.test.ts",
+    "src/features/search/server/photon.test.ts",
+    "src/lib/api-util.test.ts",
+    "src/lib/bounds.test.ts",
+    "src/lib/env.test.ts"
+  ],
+  "spec_source_sha256": "64215cb1a98538e5dda997ca9aad9e8a0eb2ee22faa5f56a505e2f384ec77161",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "feature",
+  "area": "server",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "BAIT: the fully fixed feature tree after five fix-forward rounds; the historical panel accepted no code finding. Tests/e2e are excluded from diff.patch for the budget (raw accumulated diff 80 KB; the excluded files are in the snapshot tree). Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 6,
+    "rounds_total": 6,
+    "fix_commits": [],
+    "evidence": "Audit 14:23:36 follows f5f65a1 (14:23:22) = the fifth and final impl panel; the triage says 'The final (5th) panel post-dates all code; only later-phase parks + record nits remained' — the sonnet trace-fidelity item was fixed in the task record (not the repo) and the r5 sonnet#2 build-time note was 'no code change'. No later commit belongs to this task (cb9c523 at 17:33 is task 009)."
+  }
+}

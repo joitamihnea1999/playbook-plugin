@@ -1,0 +1,36 @@
+{
+  "findings": [
+    {
+      "id": "P1",
+      "file": "src/features/isochrones/server/transit.ts",
+      "symbol": null,
+      "severity": "Minor",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "The H3 comment claims the budget 'bounds the WHOLE /api/transit response' but post-fetch buildRings/geometry/setCachedSafe run after the budget clears — an imprecise comment, correct clamp (opus#1, terra#2; accepted as imprecision)."
+    },
+    {
+      "id": "P2",
+      "file": "src/features/isochrones/server/transit.ts",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "A clamped walk wait can cache the radial-fallback (degraded) rings for 7 days (opus#2; pre-existing, parked)."
+    },
+    {
+      "id": "P3",
+      "file": "src/lib/dev-origins.ts",
+      "symbol": null,
+      "severity": "Minor",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "dev-origins mishandles bare/bracketed IPv6 (fe80::1 → fe80:) (sonnet#1, terra#1; parked P9)."
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "RJ1",
+      "claim": "abort timeouts are not retried",
+      "why_rejected": "The deliberately resolved design decision (rounds 2→3): a single modestly long attempt catches the slow remote by prevention.",
+      "file": "src/features/isochrones/server/transit.ts"
+    }
+  ]
+}

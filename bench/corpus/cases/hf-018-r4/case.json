@@ -1,0 +1,37 @@
+{
+  "id": "hf-018-r4",
+  "source": {
+    "workspace": "HowFarAI-v2",
+    "task": "018",
+    "repo": "HowFar"
+  },
+  "repo_base_sha": "5198fcc55dc8d92bdb472d56220ac3bcec081007",
+  "diff_of": "6963f1a9532b89d120122f6ad9495015f79c33a4..5198fcc55dc8d92bdb472d56220ac3bcec081007",
+  "diff_excludes": [
+    "src/features/isochrones/server/transit-plan.test.ts",
+    "src/features/isochrones/server/transit.test.ts",
+    "src/features/map/hover-controller.test.ts",
+    "src/features/map/query-features.test.ts",
+    "src/features/map/reach-directions-controller.test.ts",
+    "src/features/map/reach-journey-controller.test.ts",
+    "src/lib/dev-origins.test.ts",
+    "src/lib/provider-http.test.ts"
+  ],
+  "spec_source_sha256": "38ec3d47fbf35c6ececf1cd9854609ccbfd2ec023b3913db1534f0f35daf4098",
+  "spec_edits": [
+    {
+      "delete": "\n> **Gate discipline:** One gate → do work → check box → next gate.\n> Never backfill. The document IS the execution trace. Closing several ALREADY-DONE gates in one edit is allowed ONLY when each line carries its own outcome note (hook-enforced, max 5; a bare batch tick is blocked; where no hook runs, keep to one gate at a time).\n> **Never born checked:** write each gate BEFORE you do its step, then check it — a gate may never be born checked. To record work you already finished, add the gate unchecked, then check it in a SEPARATE edit with its outcome note.\n> **Closing a gate:** check the box, append your outcome. Never replace the original text.\n> **Sanctioned compaction (the one exception):** when this file grows past the review context budget, old *Plan Review / Implementation Review triage narrative* may move VERBATIM to `task-archive.md` (same dir). Never gates, never Intent/Design/Parked/receipts — moving history is not deleting it. Do it mechanically: wrap each cold block in `<!-- archive:start -->` … `<!-- archive:end -->` then run `.claude/bin/tasks compact <N>` (it refuses to move a gate, a pin, or a protected heading, so a mismark fails loud).\n> Design Phase = orientation (one gate, brief answer). Work Plan = real work (one gate, full effort).\n> If you see the same gate 5+ times in the hook echo, you're drifting — STOP and update.\n\n"
+    }
+  ],
+  "kind": "bugfix",
+  "area": "ui",
+  "difficulty": "hard",
+  "truth_version": 1,
+  "notes": "A near-clean case: the final round on the finished tree fixed nothing; its parked Importants are recorded as accepted+parked so a judge who finds them is credited, and the one explicit REJECT is a known_reject. Tests/e2e excluded from diff.patch for the budget (in the snapshot tree). Spec edits: template preamble deleted.",
+  "mapping": {
+    "round": 4,
+    "rounds_total": 4,
+    "fix_commits": [],
+    "evidence": "All four impl rounds ran on the dirty tree above 6963f1a (snapshots HowFar=6963f1a*); the fix-forward rounds 1-3 folded into the single commit 5198fcc (09-02 09:29), and the task.md close basis says 'No code changed after the panel' for round 4 — so the round-4 tree IS 5198fcc. Round 4 accepted nothing behavioral: Importants parked (P4-P9) or rejected."
+  }
+}

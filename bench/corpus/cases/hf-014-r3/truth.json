@@ -1,0 +1,55 @@
+{
+  "findings": [
+    {
+      "id": "D1",
+      "file": "docs/SELFHOST.md",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The retired-platform (Railway) claim class survives in SELFHOST.md: the runbook still describes the retired public preview as current (opus#4, sonnet).",
+      "fix_commit": "2a23405",
+      "fix_evidence": "what the retired public preview ran"
+    },
+    {
+      "id": "D2",
+      "file": "docker/selfhost/env.selfhost.example",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The self-host env example still frames the Bucharest configuration as the live public deployment (Railway class).",
+      "fix_commit": "2a23405",
+      "fix_evidence": "what the retired public preview ran"
+    },
+    {
+      "id": "I1",
+      "file": ".github/workflows/ci.yml",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "selfhost:script-check never runs in CI: ci.yml enumerates steps and calls neither check:ci nor script-check (opus#2).",
+      "fix_commit": "2a23405",
+      "fix_evidence": "- run: npm run selfhost:script-check"
+    },
+    {
+      "id": "I2",
+      "file": "docker/selfhost/script-check.sh",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "script-check does not watch each guard on its own diagnostic and has no OSM-extract-absent case, so a regressed guard still 'passes' via a shared exit 2 (opus#4, codex-terra).",
+      "fix_commit": "2a23405",
+      "fix_evidence": "assert() {"
+    },
+    {
+      "id": "I3",
+      "file": "docker/selfhost/dev-selfhost.sh",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "SELF_PROJECT is hardcoded; COMPOSE_PROJECT_NAME overrides the compose project name, so the volume guard can inspect the wrong project (opus#5).",
+      "fix_commit": "2a23405",
+      "fix_evidence": "SELF_PROJECT=\"${COMPOSE_PROJECT_NAME:-howfar-selfhost}\""
+    }
+  ],
+  "known_rejects": []
+}

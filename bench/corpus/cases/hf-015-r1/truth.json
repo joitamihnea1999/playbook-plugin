@@ -1,0 +1,105 @@
+{
+  "findings": [
+    {
+      "id": "C1",
+      "file": "scripts/perf/browser.mjs",
+      "symbol": "openBrowser",
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Software-WebGL confound: Chrome is launched with --disable-gpu, so every runtime number is measured under SwiftShader software rasterization without the report recording or disclosing the renderer (opus#1, sol#1).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "export async function webglRenderer(page) {"
+    },
+    {
+      "id": "C2",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Critical",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The runtime profile is n=1, not the median-of-N the task's own declared strategy requires (opus#2, sol#2, terra#1).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "MEDIAN across PERF_RUNS runs"
+    },
+    {
+      "id": "I1",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Pan/zoom is driven by mouse/wheel events, a different MapLibre handler than a real phone's touch gestures (opus#5, sol#2).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "Input.dispatchTouchEvent"
+    },
+    {
+      "id": "I2",
+      "file": "docs/PERF_AUDIT.md",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The 865 ms amenities p95 is attributed wholly to PostGIS although the endpoint first makes a cold ORS isochrone call (~180 ms) (opus#4).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "**Compound**, not pure PostGIS"
+    },
+    {
+      "id": "I3",
+      "file": "scripts/perf/run-all.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "run-all reports stale result files when a sub-runner fails instead of deleting old results and exiting non-zero (opus#3, sol#4, terra#3).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "rejecting stale"
+    },
+    {
+      "id": "I4",
+      "file": "scripts/perf/run-api-latency.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "api-latency.json's note says 'warm p95' while the verdict uses the cold p95 (sonnet#1, opus).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "not load-tested. Re-running the harness without flushing"
+    },
+    {
+      "id": "I5",
+      "file": "scripts/perf/config.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "Cold suggest/geocode use fixed keys while ApiCache persists, so re-runs silently measure warm hits unless the cache is flushed (sol#3, terra#2).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "flush first:  docker exec howfar-postgis psql"
+    },
+    {
+      "id": "I6",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The mode-toggle and canvas-point steps silently continue when the toggle did not flip or no canvas point resolved, so a bogus interaction can be reported (terra#4).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "aria-pressed"
+    },
+    {
+      "id": "I7",
+      "file": "docs/PERF_AUDIT.md",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The proposed next/dynamic 143 KB saving is asserted, but a dynamic import that renders immediately stays 'initial' under networkidle0; the win needs a real deferral boundary and a re-measure (sol#5).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "not just a `next/dynamic` that renders immediately"
+    },
+    {
+      "id": "M1",
+      "file": "scripts/perf/run-runtime-profile.mjs",
+      "symbol": null,
+      "severity": "Minor",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The frame filter drops intervals ≥1000 ms, discarding exactly the real stalls the worst-frame budget targets (opus note).",
+      "fix_commit": "11341d6",
+      "fix_evidence": "x < 5000"
+    }
+  ],
+  "known_rejects": []
+}

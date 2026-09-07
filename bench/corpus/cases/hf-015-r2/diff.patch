@@ -1,0 +1,1037 @@
+diff --git a/docs/PERF_AUDIT.md b/docs/PERF_AUDIT.md
+new file mode 100644
+index 0000000..e1657e3
+--- /dev/null
++++ b/docs/PERF_AUDIT.md
+@@ -0,0 +1,134 @@
++# Mobile performance audit — map flow
++
++**Measurement only. No optimization changes were made in this audit** — the fixes are the
++follow-up task; the gap list below is that task's work plan.
++
++- **Date:** 2026-08-29
++- **Build:** production (`next build`, Turbopack) served with `next start` (NOT `next dev`).
++- **Providers:** local self-host stack (Nominatim / Photon / ORS / self-built pmtiles) via
++  the `docker/selfhost` overlay; catalogue = **8,774 places** imported from Overpass.
++- **Emulated device:** Lighthouse "mobile" preset — Moto G-class, **4× CPU** slowdown +
++  **Slow 4G** (simulated). Runtime profile uses the same 4× CPU + 4G via CDP, median of 5
++  runs, with **real touch gestures** (one-finger pan + two-finger pinch via CDP touch events).
++- **⚠ WebGL renderer:** `SwiftShader` (software rasterization) — this measurement host has no
++  GPU, so all WebGL is CPU-rendered. This **inflates GL-bound metrics**, the pan/zoom fps
++  above all (and, more mildly, LCP/TBT). It is an additional confound stacked on the 4× CPU
++  throttle. **A real Android has a real GPU**, so the on-device numbers will be materially
++  better — real-device re-measurement is therefore **mandatory**, not advisory, for pan/zoom.
++- **Tooling:** Lighthouse 12.8.2, puppeteer-core 24.43.1, chrome-launcher 1.2.1, Chrome 150.
++- **Harness:** `scripts/perf/` (re-runnable; one command re-measures on a real Android — see
++  §"Re-measure on a real device"). Raw results: `scripts/perf/results/*.json` (gitignored).
++
++> **[EMU] = emulation-based.** Every number tagged `[EMU]` was taken on a throttled,
++> **software-WebGL** desktop emulator and **must be re-measured on a real Android** before it
++> is treated as the shipping number. The pan/zoom fps number is the most emulation-sensitive
++> — it is hit by BOTH the 4× CPU throttle AND software rasterization, so treat 15 fps as a
++> pessimistic floor, not the real-device figure. Bundle-size numbers are device-independent
++> and firm; API-latency numbers are not device-emulated (still need real-network RTT added).
++
++---
++
++## Gap list vs owner budgets
++
++| # | Budget | Measured | Verdict | Suspected cause | Proposed fix | Effort |
++|---|--------|----------|---------|-----------------|--------------|--------|
++| 1 | **TTI ≤ 2.5 s** (mid-range, 4G) | **7.72 s** `[EMU]` | ❌ FAIL (~3×) | 470 KB gz JS (mostly MapLibre) parsed + executed on the main thread before the map is interactive; MapLibre is eagerly loaded on first paint | Defer MapLibre off the critical path: `next/dynamic(AppMap, { ssr:false })` behind a lightweight map skeleton, so first interactive doesn't wait on the 327 KB engine chunk | **M** |
++| 2 | **Initial JS ≤ 350 KB gz** (incl. MapLibre) | **470.7 KB gz** | ❌ FAIL (+34%) | MapLibre+pmtiles **327 KB gz** (statically imported), react-dom 70 KB, app+vendor 74 KB; **nothing lazy-loaded** | Same root fix as #1. **Caveat:** a naive `next/dynamic` that still renders the map immediately keeps MapLibre in the initial download (this audit counts everything fetched at `networkidle0` as "initial"), so the ~143 KB figure only holds if MapLibre is deferred behind a real boundary (idle/interaction/skeleton-then-hydrate) — the follow-up task must re-measure, not assume | **M** |
++| 3 | **Lighthouse mobile ≥ 90** | **67** `[EMU]` | ❌ FAIL | Composite of #1/#2 — TBT **2386 ms** dominates the score (main-thread blocked by JS parse/exec) | Fixing #1/#2 lifts TBT and TTI together; expect the score to move most from the MapLibre-defer alone | **M** (same work as #1) |
++| 4 | **Pan/zoom ≥ 55 fps median, no frame > 32 ms** | **15 fps median [15–15], worst 150 ms [133–150]** `[EMU, SOFTWARE-GL]` (touch, median of 5) | ❌ FAIL — but instrument-confounded, see cause | Two stacked confounds inflate this: **(a) software WebGL (SwiftShader)** — no GPU on the host, so every frame is CPU-rasterized; **(b) 4× CPU throttle**. The residual real cost is MapLibre GL scene repaint (ring fill/line + amenity symbol/label layers). **Not React** (0 commits during the gesture, every run — the controller architecture keeps gestures render-free ✓) and **not DOM markers** (amenities are a GeoJSON GL layer). Idle is a clean 60 fps | **Re-measure on a real device (real GPU) FIRST — the software-GL confound likely explains most of the gap and this row may PASS on-device.** Only if it still fails: reduce per-frame GL work (simplify ring geometry / label density, `symbol-sort-key`, cap amenity symbols by zoom) | **Re-measure (S), then L only if it still fails** |
++| 5 | **API p95 — suggest ≤ 150 ms** | cold **393 ms** / warm 4 ms | ❌ FAIL (tail) | Photon cold-query **tail** spikes (p50 is 52 ms — fine); warm is a cache hit. **Open question:** cold uses partial 3–6 char prefixes (real typing) while warm uses a full string — the tail may be prefix-search cost (broader index scan), which is orthogonal to cache/JVM warmth and would not be fixed by warming | Confirm the cause (prefix cost vs JVM warmup) with server-side Photon timing before choosing a fix; low user impact (p50 fine) | **S/M** |
++| 6 | **API p95 — geocode ≤ 300 ms** | cold **149 ms** / warm 2 ms | ✅ PASS¹ | — | — | — |
++| 7 | **API p95 — isochrone ≤ 800 ms** | cold **183 ms** / warm 3 ms | ✅ PASS¹ | — | — | — |
++| 8 | **API p95 — amenities ≤ 400 ms** | cold **865 ms** / warm 6 ms | ❌ FAIL (2.2×) | **Compound**, not pure PostGIS: the endpoint first makes a cold ORS isochrone call (`resolveClip`→`walkingIsochrone`, ~180 ms cold, see #7) and only then runs the PostGIS spatial intersect of the reach polygon against **8,774 places** — so the PostGIS portion is ≈ 865−180 ≈ **~685 ms** (still over budget) | Decompose with server-side timing first; then on the PostGIS term: `EXPLAIN ANALYZE`, verify the GiST index is used, simplify the reach polygon before the intersect, a `representativePoint` pre-filter, or cache per (mode,pace,cell). The shared cold-isochrone cost also argues for reusing the mode's already-computed rings | **M** |
++
++¹ **PASS = single-request, serial, local-stack latency** — not load-tested. Under real concurrent multi-user load (or with real-network RTT added) these could differ; the follow-up work should not treat them as headroom-proven.
++
++**Additional measured metrics (context, not owner budgets):**
++
++| Metric | Measured | Note |
++|--------|----------|------|
++| LCP | 2368 ms `[EMU]` | Borderline (>2.5 s is "poor"); coupled to the JS-blocked main thread — the #1 fix should help |
++| CLS | 0.098 `[EMU]` | ✅ under the 0.1 "good" threshold — no fix needed, monitor |
++| FCP | 904 ms `[EMU]` | Good |
++| Speed Index | 2349 ms `[EMU]` | — |
++| API reverse | cold 48 ms / warm 3 ms | ✅ (budget 300, treated as geocode sibling) |
++| API car | cold 188 ms / warm 2 ms | ✅ (budget 800, treated as isochrone sibling) |
++
++---
++
++## The single highest-leverage fix
++
++Gaps **#1, #2, #3** (and much of LCP) are **one root cause**: MapLibre GL (327 KB gz) is on
++the initial critical path and blocks the main thread. Deferring it off first-load — behind a
++real idle/interaction boundary, not just a `next/dynamic` that renders immediately (see gap
++#2's caveat) — should move all three budgets at once and is the recommended first move for
++the follow-up task, which must **re-measure** rather than assume the projected numbers. Gaps
++**#4** (pan/zoom — re-measure on real GPU first) and **#8** (amenities cold) are independent.
++
++## Detail
++
++### Bundle (initial / critical-path JS, gzipped)
++- Total **470.7 KB gz** (raw 1704.7 KB). Budget 350 → **FAIL**.
++- MapLibre+pmtiles **327.1 KB gz** (one 1.20 MB-raw chunk) · react-dom **69.6 KB** · app+vendor **74 KB**.
++- **Lazy-loaded: 0 KB.** turf & d3-contour are **absent** from the client bundle (isochrone
++  geometry is computed server-side in `server/` modules) — correct, no client cost.
++- Method: Turbopack (Next 16) prints no per-route sizes, so the ground truth is the JS the
++  browser pulls over the wire (`transferSize` == gz), cross-checked against `gzip` of each
++  on-disk chunk. They agree.
++
++### Runtime profile (three hot interactions — median of 5 runs, real touch gestures)
++- **Address select → ring reveal:** 17 React commits, ~680 ms main-thread long-task.
++- **Mode toggle (walk→car):** 3 commits, ~2860 ms long-task (car ring render + amenity re-placement).
++- **Pan/zoom (touch pan + pinch):** 15 fps median [15–15 across runs], worst frame 150 ms
++  [133–150], **0 React commits every run**. Measured with SwiftShader software WebGL — treat
++  as a pessimistic floor (see the WebGL-renderer note at the top).
++- **Idle baseline:** 60 fps, 0 commits, 0 ms long-task.
++- **Render-free gesture claim: HOLDS** — pan/zoom adds no React commits over idle (0 vs 0,
++  every run). The frame-rate gap is MapLibre GL repaint under software-GL + CPU throttle, not
++  re-renders. Gestures are driven as real touch events (CDP `Input.dispatchTouchEvent`), so
++  MapLibre's `Touch*` handlers (the actual mobile path), not the mouse/wheel handlers.
++
++### API latency (browser → local stack, 12 samples/cell, unthrottled)
++- Cold = fresh ApiCache key (real varied Bucharest inputs) → provider/PostGIS round trip.
++  Warm = repeat → ApiCache hit. Budget compared against **cold p95** (first-touch).
++- **Warm is 2–6 ms across the board** (ApiCache hits) — returning-user latency is a non-issue.
++- **Real-device caveat:** these are local/unthrottled; a real phone on 4G adds ~50–150 ms
++  network RTT **per request** on top — which alone would push suggest/geocode/reverse near
++  their budgets. Re-measure on-device.
++- Transit / reach are **excluded**: not self-hosted (MOTIS/GTFS gate), they hit the public
++  network under the overlay, so their latency is not a property of the local stack.
++
++---
++
++## Re-measure on a real device
++
++The harness re-runs unchanged against a real Android over Chrome remote debugging — one
++command per metric. See `scripts/perf/README.md` for the full runbook. In short:
++
++```bash
++# On the phone: enable USB debugging, open Chrome, then on the host:
++adb reverse tcp:3000 tcp:3000          # phone reaches the host's prod server
++adb forward tcp:9222 localabstract:chrome_devtools_remote   # host reaches the phone's Chrome
++# then, from scripts/perf/ (deps installed once with `npm install`):
++PERF_DEVICE=real PERF_URL=http://localhost:3000/ npm run lighthouse
++PERF_DEVICE=real npm run profile
++PERF_DEVICE=real npm run api          # add real-network RTT context
++```
++
++Numbers to re-take on-device (all `[EMU]` rows): **TTI, Lighthouse score, LCP, TBT, CLS,
++and pan/zoom fps** (most important — the emulator's 4× CPU throttle likely overstates the
++gap). Bundle size is device-independent (firm as measured). API latency should be re-taken
++over a real radio to capture network RTT.
++
++## What measurement could not settle (for the follow-up task)
++- Whether pan/zoom actually fails on real hardware, or only under the software-GL + 4× CPU
++  emulator. **This is the biggest open question** — the 15 fps was measured with software
++  rasterization (no GPU on the host), so a real-GPU device could pass outright.
++- The amenities query plan — needs `EXPLAIN ANALYZE` on the live PostGIS to name the exact
++  PostGIS cost after subtracting the cold-isochrone term (~180 ms).
++- The Photon cold-tail cause behind the suggest p95 spike — prefix-search cost vs JVM/cache
++  warmup (p50 is fine either way).
++- Whether the projected MapLibre-defer bundle/TTI wins hold — depends on a real deferral
++  boundary, and must be re-measured, not assumed.
++- Load behavior: all API numbers are single-request/serial; concurrent multi-user latency is
++  out of scope here.
+diff --git a/scripts/perf/.gitignore b/scripts/perf/.gitignore
+new file mode 100644
+index 0000000..b062fd4
+--- /dev/null
++++ b/scripts/perf/.gitignore
+@@ -0,0 +1,7 @@
++# The perf harness installs its own deps, isolated from the app tree. Never commit them.
++node_modules/
++# Measurement outputs — regenerated each run; the committed record lives in docs/PERF_AUDIT.md.
++results/
++*.trace.json
++*.report.json
++*.report.html
+diff --git a/scripts/perf/analyze-bundle.mjs b/scripts/perf/analyze-bundle.mjs
+new file mode 100644
+index 0000000..0ede561
+--- /dev/null
++++ b/scripts/perf/analyze-bundle.mjs
+@@ -0,0 +1,150 @@
++// Bundle analysis (deliverable 2). Authoritative source = what the browser actually pulls
++// over the wire for the map route, because Turbopack chunk names are hashed and Next 16's
++// build output no longer prints per-route sizes. We load the page, read Resource Timing
++// (transferSize == gzipped bytes on the wire), then attribute each JS chunk to MapLibre /
++// pmtiles / react-dom / app+vendor by grepping the on-disk chunk for library signatures.
++// A second pass drives one interaction so we can separate INITIAL (critical-path) JS from
++// LAZY chunks that only load after the user acts.
++import { launch } from "chrome-launcher";
++import puppeteer from "puppeteer-core";
++import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
++import { gzipSync } from "node:zlib";
++import { fileURLToPath } from "node:url";
++import { dirname, join, basename } from "node:path";
++import { TARGET_URL } from "./config.mjs";
++
++const HERE = dirname(fileURLToPath(import.meta.url));
++const CHUNK_DIR = join(HERE, "..", "..", ".next", "static", "chunks");
++
++function bucketOf(fileName) {
++  const p = join(CHUNK_DIR, basename(fileName));
++  if (!existsSync(p)) return "unknown";
++  const txt = readFileSync(p, "latin1");
++  if (/maplibregl|maplibre-gl/i.test(txt)) return "maplibre";
++  if (/\bpmtiles\b|PMTiles/.test(txt)) return "pmtiles";
++  if (/react-dom|scheduler\.production|react\.production/.test(txt)) return "react";
++  return "app+vendor";
++}
++
++async function collectJs(page) {
++  // Resource Timing gives per-resource transferSize (gz on wire) + decodedBodySize (raw).
++  const entries = await page.evaluate(() =>
++    performance
++      .getEntriesByType("resource")
++      .filter((e) => e.initiatorType === "script" || /\.js(\?|$)/.test(e.name))
++      .map((e) => ({
++        name: e.name,
++        transferSize: e.transferSize,
++        encodedBodySize: e.encodedBodySize,
++        decodedBodySize: e.decodedBodySize,
++      })),
++  );
++  // Also the initial HTML document's inline scripts are negligible; ignore.
++  return entries.filter((e) => /_next\/static\/chunks\//.test(e.name));
++}
++
++function summarize(list) {
++  const byBucket = {};
++  let totalGz = 0;
++  let totalRaw = 0;
++  for (const r of list) {
++    const b = bucketOf(r.name);
++    // Prefer wire transferSize; fall back to gzipping the on-disk chunk (0 when served from
++    // cache / a real device where transferSize can be 0).
++    let gz = r.transferSize;
++    const p = join(CHUNK_DIR, basename(r.name));
++    const raw = existsSync(p) ? readFileSync(p).length : r.decodedBodySize || 0;
++    if (!gz || gz < 100) gz = existsSync(p) ? gzipSync(readFileSync(p)).length : r.encodedBodySize || 0;
++    byBucket[b] = (byBucket[b] || 0) + gz;
++    totalGz += gz;
++    totalRaw += raw;
++    r._gz = gz;
++    r._raw = raw;
++    r._bucket = b;
++  }
++  return { byBucket, totalGz, totalRaw };
++}
++
++async function main() {
++  const chrome = await launch({
++    chromeFlags: ["--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"],
++  });
++  const browser = await puppeteer.connect({ browserURL: `http://localhost:${chrome.port}`, defaultViewport: null });
++  const page = (await browser.pages())[0] ?? (await browser.newPage());
++  await page.setCacheEnabled(false);
++
++  await page.goto(TARGET_URL, { waitUntil: "networkidle0", timeout: 60000 });
++  const initial = await collectJs(page);
++  const initialNames = new Set(initial.map((e) => basename(e.name)));
++
++  // Drive one interaction (address select + car toggle) to trigger lazy chunks, if any.
++  try {
++    await page.waitForSelector('input[role="combobox"]', { timeout: 10000 });
++    await page.click('input[role="combobox"]');
++    await page.type('input[role="combobox"]', "Piata Unirii");
++    await page.waitForSelector('[role="option"]', { timeout: 8000 });
++    await page.click('[role="option"]');
++    await new Promise((r) => setTimeout(r, 2500));
++    const carBtn = await page.$$('[role="group"][aria-label="Travel mode"] button');
++    if (carBtn.length >= 3) {
++      await carBtn[2].click();
++      await new Promise((r) => setTimeout(r, 2000));
++    }
++  } catch (e) {
++    console.error("[bundle] interaction pass partial:", e.message);
++  }
++
++  const afterAll = await collectJs(page);
++  const lazy = afterAll.filter((e) => !initialNames.has(basename(e.name)));
++
++  const initSum = summarize(initial);
++  const lazySum = summarize(lazy);
++
++  const report = {
++    takenAt: new Date().toISOString(),
++    target: TARGET_URL,
++    note:
++      "transferSize == gzipped bytes on the wire (cache disabled). Buckets attributed by " +
++      "signature-grepping the on-disk Turbopack chunk. turf/d3-contour are absent from the " +
++      "client bundle by design — isochrone geometry is computed in server/ modules.",
++    initial: {
++      totalGzBytes: initSum.totalGz,
++      totalGzKB: +(initSum.totalGz / 1024).toFixed(1),
++      totalRawKB: +(initSum.totalRaw / 1024).toFixed(1),
++      byBucketGzKB: Object.fromEntries(
++        Object.entries(initSum.byBucket).map(([k, v]) => [k, +(v / 1024).toFixed(1)]),
++      ),
++      chunks: initial
++        .map((e) => ({ file: basename(e.name), bucket: e._bucket, gzKB: +(e._gz / 1024).toFixed(1), rawKB: +(e._raw / 1024).toFixed(1) }))
++        .sort((a, b) => b.gzKB - a.gzKB),
++    },
++    lazy: {
++      totalGzKB: +(lazySum.totalGz / 1024).toFixed(1),
++      chunks: lazy
++        .map((e) => ({ file: basename(e.name), bucket: e._bucket, gzKB: +(e._gz / 1024).toFixed(1) }))
++        .sort((a, b) => b.gzKB - a.gzKB),
++    },
++  };
++
++  const outDir = join(HERE, "results");
++  mkdirSync(outDir, { recursive: true });
++  writeFileSync(join(outDir, "bundle.json"), JSON.stringify(report, null, 2));
++
++  console.log(`\n=== BUNDLE (initial / critical-path JS, gzipped) ===`);
++  console.log(`Total initial JS gz: ${report.initial.totalGzKB} KB  (raw ${report.initial.totalRawKB} KB)`);
++  console.log(`Budget: 350 KB gz incl. MapLibre → ${report.initial.totalGzKB <= 350 ? "PASS" : "FAIL"}`);
++  console.log(`By bucket (gz KB):`, report.initial.byBucketGzKB);
++  console.log(`\nLargest initial chunks:`);
++  for (const c of report.initial.chunks.slice(0, 8)) console.log(`  ${c.gzKB.toString().padStart(7)} KB gz  [${c.bucket}]  ${c.file}  (raw ${c.rawKB} KB)`);
++  console.log(`\nLazy (loaded only after interaction): ${report.lazy.totalGzKB} KB gz across ${report.lazy.chunks.length} chunk(s)`);
++  for (const c of report.lazy.chunks.slice(0, 8)) console.log(`  ${c.gzKB.toString().padStart(7)} KB gz  [${c.bucket}]  ${c.file}`);
++  console.log(`\nWrote ${join(outDir, "bundle.json")}`);
++
++  browser.disconnect();
++  await chrome.kill();
++}
++
++main().catch((e) => {
++  console.error(e);
++  process.exit(1);
++});
+diff --git a/scripts/perf/browser.mjs b/scripts/perf/browser.mjs
+new file mode 100644
+index 0000000..0eaf6ec
+--- /dev/null
++++ b/scripts/perf/browser.mjs
+@@ -0,0 +1,107 @@
++// Shared Chrome control for the perf harness. Two modes, one interface:
++//   emulated → launch a local headless Chrome (chrome-launcher) and apply CPU + 4G +
++//              mobile-viewport emulation via CDP, so it mimics a mid-range phone.
++//   real     → attach (puppeteer.connect) to a Chrome already running on a real Android,
++//              reached over its adb-forwarded remote-debugging port. NO emulation — the
++//              device is the device. This is the one-command real-device re-run path.
++//
++// Everything downstream (bundle, runtime profile, API latency) drives the returned page,
++// so the SAME measurement code runs on both the emulator and a real handset.
++import { launch } from "chrome-launcher";
++import puppeteer from "puppeteer-core";
++import {
++  CPU_SLOWDOWN,
++  NETWORK_4G,
++  MOBILE_VIEWPORT,
++  IS_REAL_DEVICE,
++  CDP_PORT,
++} from "./config.mjs";
++
++// opts.throttle (default true): apply CPU + 4G emulation. Pass false for API-latency
++// probing, where we want the stack's own latency, not a simulated-transport number.
++export async function openBrowser(opts = {}) {
++  const throttle = opts.throttle !== false;
++  if (IS_REAL_DEVICE) {
++    // Real device: attach over the adb-forwarded DevTools port. The device's own CPU and
++    // radio provide the real throttling, so we apply none.
++    const browserURL = `http://localhost:${CDP_PORT}`;
++    const browser = await puppeteer.connect({ browserURL, defaultViewport: null });
++    const page = (await browser.pages())[0] ?? (await browser.newPage());
++    return { browser, page, chrome: null, emulated: false };
++  }
++
++  // Emulated: launch a headless Chrome we fully control.
++  const chrome = await launch({
++    chromeFlags: [
++      "--headless=new",
++      "--disable-gpu",
++      "--no-sandbox",
++      "--disable-dev-shm-usage",
++      `--window-size=${MOBILE_VIEWPORT.width},${MOBILE_VIEWPORT.height}`,
++    ],
++  });
++  const browser = await puppeteer.connect({
++    browserURL: `http://localhost:${chrome.port}`,
++    defaultViewport: null,
++  });
++  const page = (await browser.pages())[0] ?? (await browser.newPage());
++  if (throttle) await applyEmulation(page);
++  return { browser, page, chrome, emulated: throttle };
++}
++
++// Apply mid-range-phone emulation to a page (CPU 4x, Slow 4G, mobile viewport). Uses CDP
++// directly so the exact same knobs as Lighthouse's mobile preset are set.
++export async function applyEmulation(page) {
++  const client = await page.createCDPSession();
++  await client.send("Network.enable");
++  await client.send("Network.emulateNetworkConditions", {
++    offline: false,
++    latency: NETWORK_4G.latencyMs,
++    downloadThroughput: NETWORK_4G.downloadThroughputBps,
++    uploadThroughput: NETWORK_4G.uploadThroughputBps,
++  });
++  await client.send("Emulation.setCPUThrottlingRate", { rate: CPU_SLOWDOWN });
++  await page.setViewport({
++    width: MOBILE_VIEWPORT.width,
++    height: MOBILE_VIEWPORT.height,
++    deviceScaleFactor: MOBILE_VIEWPORT.deviceScaleFactor,
++    isMobile: true,
++    hasTouch: true,
++  });
++  return client;
++}
++
++// Read the UNMASKED WebGL renderer for the page's GL context. On a display-less CI/dev host
++// this is SwiftShader (software rasterization), which materially inflates GL-bound metrics
++// (pan/zoom fps especially) — so every report records it and the audit discloses it. Returns
++// { renderer, software } where `software` is true for SwiftShader/llvmpipe/software backends.
++export async function webglRenderer(page) {
++  try {
++    const renderer = await page.evaluate(() => {
++      const cv = document.createElement("canvas");
++      const gl = cv.getContext("webgl") || cv.getContext("experimental-webgl");
++      if (!gl) return "NO_WEBGL";
++      const ext = gl.getExtension("WEBGL_debug_renderer_info");
++      return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "UNKNOWN";
++    });
++    return { renderer, software: /swiftshader|llvmpipe|software|swrast/i.test(renderer) };
++  } catch {
++    return { renderer: "UNAVAILABLE", software: null };
++  }
++}
++
++export async function closeBrowser(ctx) {
++  try {
++    if (ctx.chrome) {
++      // We LAUNCHED this Chrome (local emulator, throttled or not) — kill it so the process
++      // exits. This is independent of whether throttling was applied.
++      await ctx.browser.close();
++      await ctx.chrome.kill();
++    } else {
++      // Real device: we only attached, so disconnect and leave the device's Chrome running.
++      ctx.browser.disconnect();
++    }
++  } catch {
++    /* best-effort teardown */
++  }
++}
+diff --git a/scripts/perf/config.mjs b/scripts/perf/config.mjs
+new file mode 100644
+index 0000000..bec3e1f
+--- /dev/null
++++ b/scripts/perf/config.mjs
+@@ -0,0 +1,103 @@
++// Shared configuration for the HowFar mobile performance harness.
++//
++// Everything device- or target-specific lives here so the individual runners stay
++// declarative. Overridable by env so the SAME scripts re-run against a real Android
++// (see README "Re-measure on a real device"): set PERF_URL / PERF_CDP_PORT / PERF_DEVICE.
++
++export const TARGET_URL = process.env.PERF_URL ?? "http://localhost:3000/";
++export const ORIGIN = new URL(TARGET_URL).origin;
++
++// "emulated" = Chrome device emulation on this dev box (CPU + network throttled to a
++// mid-range phone on 4G). "real" = drive a real Android over its remote-debugging port
++// (adb-forwarded); no emulation applied because the device IS the device.
++export const DEVICE = process.env.PERF_DEVICE ?? "emulated";
++export const IS_REAL_DEVICE = DEVICE === "real";
++
++// When measuring a real device we ATTACH to the Chrome already running on it, reached at
++// this port after `adb forward tcp:9222 localabstract:chrome_devtools_remote`.
++export const CDP_PORT = Number(process.env.PERF_CDP_PORT ?? 9222);
++
++// Number of repeats for any metric we report as a median (Lighthouse, interaction traces).
++// Perf numbers are noisy; a single shot is not evidence. Median of N.
++export const RUNS = Number(process.env.PERF_RUNS ?? 5);
++
++// Mid-range-phone emulation. These are Lighthouse's own "mobile" preset numbers (Moto
++// G-class): 4x CPU slowdown + a throttled 4G link. We reuse the exact same constants for
++// the puppeteer-driven runtime profile so Lighthouse and the interaction traces describe
++// the SAME simulated device. Source: lighthouse/core/config/constants.js (mobileSlow4G).
++export const CPU_SLOWDOWN = Number(process.env.PERF_CPU_SLOWDOWN ?? 4);
++export const NETWORK_4G = {
++  // Lighthouse "Slow 4G" (a.k.a. mobileSlow4G devtools throttling).
++  downloadThroughputBps: Math.floor((1.6 * 1024 * 1024) / 8), // ~1.6 Mbit/s
++  uploadThroughputBps: Math.floor((0.75 * 1024 * 1024) / 8), // ~750 Kbit/s
++  latencyMs: 150,
++};
++
++// Viewport for the emulated phone (Moto G Power-ish, matches Lighthouse mobile).
++export const MOBILE_VIEWPORT = { width: 412, height: 823, deviceScaleFactor: 1.75, mobile: true };
++
++// A real, in-launch-area Bucharest address used for the "address select" interaction and
++// as the origin for API-latency probes. Piata Unirii — dead centre, always geocodes.
++export const TEST_ADDRESS = "Piata Unirii Bucuresti";
++export const TEST_ORIGIN = { lat: 44.4268, lng: 26.1025 };
++
++// Self-hosted endpoints whose latency we measure from the browser. Transit + reach are
++// deliberately EXCLUDED: they are NOT self-hosted (MOTIS/GTFS gate) and hit the public
++// network under the overlay, so their latency is not a property of the local stack.
++// `cold` jitters the origin so each sample is a fresh ApiCache key (provider round-trip);
++// `warm` repeats the identical URL (ApiCache hit). Budgets are the owner's p95 targets.
++// Real, varied Bucharest inputs so each COLD sample is a distinct ApiCache key AND a valid
++// query that exercises the real provider path (not a 404 on gibberish). We cycle a fixed
++// list + a small coord jitter, so cold is representative first-touch latency, not error-path.
++//
++// ⚠ RE-RUNNABILITY: the coord-jittered endpoints (reverse/isochrone/car/amenities) are unique
++// every run, so they are genuinely cold on each run. suggest/geocode use a FIXED list, and
++// ApiCache persists (Photon 7d, Nominatim 30d) — so a SECOND harness run without a cache
++// flush measures those two as WARM, not cold. For a true cold re-measure of suggest/geocode,
++// flush first:  docker exec howfar-postgis psql -U howfar -d howfar -c 'DELETE FROM "ApiCache";'
++// The run-api-latency runner prints this reminder.
++const COLD_STREETS = [
++  "Bulevardul Magheru", "Calea Victoriei", "Strada Lipscani", "Bulevardul Unirii",
++  "Calea Dorobanti", "Strada Batistei", "Bulevardul Dacia", "Strada Franceza",
++  "Calea Mosilor", "Bulevardul Carol I", "Strada Doamnei", "Calea Grivitei",
++  "Strada Academiei", "Bulevardul Kogalniceanu", "Piata Romana", "Piata Victoriei",
++];
++const COLD_SUGGEST = ["Magh", "Victor", "Dorob", "Unir", "Lips", "Bati", "Franc", "Mosil", "Grivi", "Acade", "Roma", "Carol"];
++
++export function endpointProbes({ lat, lng } = TEST_ORIGIN) {
++  const j = (n) => (n + (Math.random() - 0.5) * 0.02).toFixed(6); // ~±1km jitter for cold keys
++  let si = 0;
++  let gi = 0;
++  return [
++    { key: "suggest", budgetMs: 150, warm: `/api/suggest?q=Piata+Unirii`, cold: () => `/api/suggest?q=${encodeURIComponent(COLD_SUGGEST[si++ % COLD_SUGGEST.length])}` },
++    { key: "geocode", budgetMs: 300, warm: `/api/geocode?q=${encodeURIComponent(TEST_ADDRESS)}`, cold: () => `/api/geocode?q=${encodeURIComponent(COLD_STREETS[gi++ % COLD_STREETS.length] + " Bucuresti")}` },
++    { key: "reverse", budgetMs: 300, warm: `/api/reverse?lat=${lat}&lng=${lng}`, cold: () => `/api/reverse?lat=${j(lat)}&lng=${j(lng)}` },
++    { key: "isochrone", budgetMs: 800, warm: `/api/isochrone?lat=${lat}&lng=${lng}&pace=normal`, cold: () => `/api/isochrone?lat=${j(lat)}&lng=${j(lng)}&pace=normal` },
++    { key: "car", budgetMs: 800, warm: `/api/car?lat=${lat}&lng=${lng}`, cold: () => `/api/car?lat=${j(lat)}&lng=${j(lng)}` },
++    { key: "amenities", budgetMs: 400, warm: `/api/amenities?lat=${lat}&lng=${lng}&pace=normal&mode=walk`, cold: () => `/api/amenities?lat=${j(lat)}&lng=${j(lng)}&pace=normal&mode=walk` },
++  ];
++}
++
++// Owner budgets (the gap list is measured against these). Kept here so every runner and
++// the report generator read one source of truth.
++export const BUDGETS = {
++  ttiMs: 2500,
++  panZoomMedianFps: 55,
++  panZoomMaxFrameMs: 32,
++  initialJsGzKB: 350, // includes MapLibre
++  lighthouseMobile: 90,
++  api: { suggest: 150, geocode: 300, isochrone: 800, amenities: 400, car: 800, reverse: 300 },
++};
++
++export function median(xs) {
++  if (xs.length === 0) return NaN;
++  const s = [...xs].sort((a, b) => a - b);
++  const m = Math.floor(s.length / 2);
++  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
++}
++export function percentile(xs, p) {
++  if (xs.length === 0) return NaN;
++  const s = [...xs].sort((a, b) => a - b);
++  const idx = Math.min(s.length - 1, Math.ceil((p / 100) * s.length) - 1);
++  return s[Math.max(0, idx)];
++}
+diff --git a/scripts/perf/run-all.mjs b/scripts/perf/run-all.mjs
+new file mode 100644
+index 0000000..ff71a07
+--- /dev/null
++++ b/scripts/perf/run-all.mjs
+@@ -0,0 +1,73 @@
++// Run every measurement in sequence, then print a combined pass/fail summary against the
++// owner budgets. Sequential (not parallel) so the runs don't contend for CPU and skew each
++// other. Each sub-runner also writes its own results/<name>.json.
++import { spawnSync } from "node:child_process";
++import { readFileSync, existsSync, rmSync } from "node:fs";
++import { fileURLToPath } from "node:url";
++import { dirname, join } from "node:path";
++import { BUDGETS } from "./config.mjs";
++
++const HERE = dirname(fileURLToPath(import.meta.url));
++const RESULTS = join(HERE, "results");
++const START = Date.now();
++
++const TARGETS = [
++  ["analyze-bundle.mjs", "bundle.json"],
++  ["run-lighthouse.mjs", "lighthouse.json"],
++  ["run-runtime-profile.mjs", "runtime-profile.json"],
++  ["run-api-latency.mjs", "api-latency.json"],
++];
++
++// Delete stale result files up front so a crashed runner can never leave a previous run's
++// numbers to be read back as if fresh.
++for (const [, out] of TARGETS) rmSync(join(RESULTS, out), { force: true });
++
++let failed = 0;
++for (const [script, out] of TARGETS) {
++  const r = spawnSync(process.execPath, [join(HERE, script)], { stdio: "inherit", env: process.env });
++  if (r.status !== 0) {
++    console.error(`[all] FAIL: ${script} exited ${r.status}`);
++    failed++;
++  } else if (!existsSync(join(RESULTS, out))) {
++    console.error(`[all] FAIL: ${script} produced no ${out}`);
++    failed++;
++  }
++}
++
++// Read only results this invocation produced (takenAt at/after START); anything older is
++// stale and rejected so the summary never mixes runs.
++const read = (f) => {
++  const p = join(RESULTS, f);
++  if (!existsSync(p)) return null;
++  const j = JSON.parse(readFileSync(p, "utf8"));
++  if (j.takenAt && new Date(j.takenAt).getTime() < START - 1000) {
++    console.error(`[all] rejecting stale ${f} (takenAt ${j.takenAt} predates this run)`);
++    return null;
++  }
++  return j;
++};
++const bundle = read("bundle.json");
++const lh = read("lighthouse.json");
++const rt = read("runtime-profile.json");
++const api = read("api-latency.json");
++
++const rows = [];
++const push = (budget, measured, pass, emu) => rows.push({ budget, measured, verdict: pass ? "PASS" : "FAIL", emu: emu ? "[EMU]" : "" });
++
++if (lh) push(`TTI ≤ ${BUDGETS.ttiMs} ms`, `${Math.round(lh.medians.ttiMs)} ms`, lh.medians.ttiMs <= BUDGETS.ttiMs, lh.emulationBased);
++if (bundle) push(`initial JS ≤ ${BUDGETS.initialJsGzKB} KB gz`, `${bundle.initial.totalGzKB} KB`, bundle.initial.totalGzKB <= BUDGETS.initialJsGzKB, false);
++if (lh) push(`Lighthouse mobile ≥ ${BUDGETS.lighthouseMobile}`, `${lh.medians.performanceScore}`, lh.medians.performanceScore >= BUDGETS.lighthouseMobile, lh.emulationBased);
++if (rt) push(`pan/zoom ≥ ${BUDGETS.panZoomMedianFps} fps`, `${rt.panZoom.medianFps.median} fps`, rt.panZoom.medianFps.median >= BUDGETS.panZoomMedianFps, rt.emulationBased || rt.softwareWebgl);
++if (rt) push(`pan/zoom worst frame ≤ ${BUDGETS.panZoomMaxFrameMs} ms`, `${rt.panZoom.maxFrameMs.median} ms`, rt.panZoom.maxFrameMs.median <= BUDGETS.panZoomMaxFrameMs, rt.emulationBased || rt.softwareWebgl);
++if (api) for (const e of api.endpoints) push(`API ${e.endpoint} p95 ≤ ${e.budgetMs} ms`, `cold ${e.coldP95 ?? "—"} ms`, e.coldP95PassesBudget, false);
++
++console.log(`\n================= COMBINED SUMMARY vs OWNER BUDGETS =================`);
++if (rt && rt.softwareWebgl) console.log(`  ⚠ WebGL was SOFTWARE (${rt.webglRenderer}) — pan/zoom fps is inflated; real-device re-measure mandatory.`);
++for (const r of rows) console.log(`  ${r.verdict === "PASS" ? "✅" : "❌"} ${r.budget.padEnd(34)} ${String(r.measured).padEnd(12)} ${r.emu}`);
++const fails = rows.filter((r) => r.verdict === "FAIL").length;
++console.log(`\n  ${fails} of ${rows.length} budgets failing. See docs/PERF_AUDIT.md for the gap list.`);
++if (rt && !rt.renderFree) console.log(`  ⚠ gesture NOT render-free — investigate.`);
++if (failed > 0) {
++  console.error(`\n[all] ${failed} runner(s) failed — summary is INCOMPLETE. Exiting non-zero.`);
++  process.exit(1);
++}
+diff --git a/scripts/perf/run-api-latency.mjs b/scripts/perf/run-api-latency.mjs
+new file mode 100644
+index 0000000..2847ca4
+--- /dev/null
++++ b/scripts/perf/run-api-latency.mjs
+@@ -0,0 +1,116 @@
++// API latency from the browser (deliverable 4). Measures each self-hosted endpoint the
++// map flow calls — suggest / geocode / reverse / isochrone / car / amenities — COLD (first
++// hit, ApiCache miss → full provider/PostGIS round trip) and WARM (repeat → ApiCache hit),
++// reporting p50/p95 per endpoint against the owner's budgets.
++//
++// Measured same-origin from a real browser (fetch + performance.now), NO CPU/network
++// throttle: these budgets target the STACK's own latency (server + local transport), not a
++// simulated 4G link. On a real device add the network RTT on top — flagged in the report.
++//
++// Transit + reach are deliberately excluded: NOT self-hosted (MOTIS/GTFS gate), they hit
++// the public network under the overlay so their latency is not a property of the local stack.
++import { writeFileSync, mkdirSync } from "node:fs";
++import { fileURLToPath } from "node:url";
++import { dirname, join } from "node:path";
++import { openBrowser, closeBrowser } from "./browser.mjs";
++import { ORIGIN, TARGET_URL, endpointProbes, percentile, median } from "./config.mjs";
++
++const HERE = dirname(fileURLToPath(import.meta.url));
++const SAMPLES = Number(process.env.PERF_API_SAMPLES ?? 12);
++
++// Time one request inside the page via fetch; returns ms (responseEnd - fetchStart from the
++// Resource Timing entry, i.e. what the browser observed on the wire + server).
++async function timeFetch(page, url) {
++  return page.evaluate(async (u) => {
++    const t0 = performance.now();
++    const res = await fetch(u, { cache: "no-store" });
++    await res.arrayBuffer();
++    const dt = performance.now() - t0;
++    return { ms: dt, status: res.status };
++  }, url);
++}
++
++async function main() {
++  const ctx = await openBrowser({ throttle: false });
++  const { page } = ctx;
++  await page.goto(TARGET_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
++
++  const probes = endpointProbes();
++  const out = [];
++  for (const probe of probes) {
++    // COLD: each sample a fresh cache key (unique URL). One provider round trip apiece.
++    const cold = [];
++    let coldStatus = 0;
++    for (let i = 0; i < SAMPLES; i++) {
++      const r = await timeFetch(page, ORIGIN + probe.cold());
++      coldStatus = r.status;
++      if (r.status < 400) cold.push(r.ms);
++    }
++    // WARM: prime once, then repeat the identical URL → ApiCache hits.
++    await timeFetch(page, ORIGIN + probe.warm);
++    const warm = [];
++    let warmStatus = 0;
++    for (let i = 0; i < SAMPLES; i++) {
++      const r = await timeFetch(page, ORIGIN + probe.warm);
++      warmStatus = r.status;
++      if (r.status < 400) warm.push(r.ms);
++    }
++    const row = {
++      endpoint: probe.key,
++      budgetMs: probe.budgetMs,
++      coldStatus,
++      warmStatus,
++      cold: cold.length ? { p50: +median(cold).toFixed(1), p95: +percentile(cold, 95).toFixed(1), n: cold.length } : null,
++      warm: warm.length ? { p50: +median(warm).toFixed(1), p95: +percentile(warm, 95).toFixed(1), n: warm.length } : null,
++    };
++    // Budget verdict is taken on the COLD p95 — a first-touch user with a fresh
++    // address/coord always pays the cache-miss cost, and unique inputs dominate real usage.
++    // Warm (ApiCache hit) is near-instant and reported alongside as the returning-user case.
++    row.coldP95PassesBudget = row.cold ? row.cold.p95 <= probe.budgetMs : null;
++    row.warmP95PassesBudget = row.warm ? row.warm.p95 <= probe.budgetMs : null;
++    row.coldP95 = row.cold ? row.cold.p95 : null;
++    out.push(row);
++    console.error(
++      `[api] ${probe.key.padEnd(10)} cold p50/p95 ${row.cold?.p50 ?? "—"}/${row.cold?.p95 ?? "—"} ms · warm p50/p95 ${row.warm?.p50 ?? "—"}/${row.warm?.p95 ?? "—"} ms (budget ${probe.budgetMs}) status c=${coldStatus} w=${warmStatus}`,
++    );
++  }
++
++  const report = {
++    takenAt: new Date().toISOString(),
++    target: TARGET_URL,
++    samplesPerCell: SAMPLES,
++    device: ctx.emulated ? "throttled" : "unthrottled (stack latency; add real-device network RTT on-device)",
++    note:
++      "cold = ApiCache miss (fresh key per sample) → full provider/PostGIS round trip; warm = " +
++      "ApiCache hit. Budget verdict on COLD p95 (first-touch). Transit/reach excluded (not " +
++      "self-hosted). Real-device network RTT (~50-150ms on 4G) adds on top of these local " +
++      "numbers. NB the amenities endpoint's cold cost INCLUDES a cold ORS isochrone call " +
++      "(resolveClip→walkingIsochrone), not just the PostGIS intersect. These are single-" +
++      "request/serial numbers, not load-tested. Re-running the harness without flushing " +
++      "ApiCache turns fixed-list cold keys (suggest/geocode) warm — see the cache-flush note.",
++    endpoints: out,
++  };
++
++  const outDir = join(HERE, "results");
++  mkdirSync(outDir, { recursive: true });
++  writeFileSync(join(outDir, "api-latency.json"), JSON.stringify(report, null, 2));
++
++  console.log(`\n=== API LATENCY (browser → local stack, ${SAMPLES} samples/cell, unthrottled) ===`);
++  console.log(`NB cold suggest/geocode use fixed keys + ApiCache persists — for a true cold RE-RUN, first:`);
++  console.log(`   docker exec howfar-postgis psql -U howfar -d howfar -c 'DELETE FROM "ApiCache";'`);
++  console.log(`endpoint     cold p50/p95      warm p50/p95     budget   cold-p95 verdict`);
++  for (const r of out) {
++    const cold = r.cold ? `${r.cold.p50}/${r.cold.p95}`.padEnd(14) : "—".padEnd(14);
++    const warm = r.warm ? `${r.warm.p50}/${r.warm.p95}`.padEnd(13) : "—".padEnd(13);
++    const verdict = r.coldP95PassesBudget == null ? "n/a" : r.coldP95PassesBudget ? "PASS" : "FAIL";
++    console.log(`${r.endpoint.padEnd(12)} ${cold}  ${warm}  ${String(r.budgetMs).padEnd(6)}  ${verdict}`);
++  }
++  console.log(`(verdict on COLD p95 = first-touch cache-miss; warm = ApiCache hit, returning user)`);
++  console.log(`\nWrote ${join(outDir, "api-latency.json")}`);
++  await closeBrowser(ctx);
++}
++
++main().catch((e) => {
++  console.error(e);
++  process.exit(1);
++});
+diff --git a/scripts/perf/run-runtime-profile.mjs b/scripts/perf/run-runtime-profile.mjs
+new file mode 100644
+index 0000000..bbf3e80
+--- /dev/null
++++ b/scripts/perf/run-runtime-profile.mjs
+@@ -0,0 +1,299 @@
++// Runtime profile of the three hot interactions (deliverable 3), repeated over N runs:
++//   A. address select → ring reveal
++//   B. mode toggle (walk → car)
++//   C. pan/zoom gesture  (real TOUCH: one-finger pan + two-finger pinch, via CDP)
++// For each we capture main-thread long-task time and React COMMIT count; for (C) also frame
++// cadence (median fps + worst frame) during the gesture, against an equal-length IDLE control.
++//
++// React commit counting works WITHOUT touching app code: we install a minimal
++// __REACT_DEVTOOLS_GLOBAL_HOOK__ before any script runs; production React still calls
++// onCommitFiberRoot on every commit if the hook is present. A commit == one render pass. The
++// owner's architecture claim is that pan/zoom is render-free — interaction C should add no
++// commits over idle.
++//
++// Reported numbers are the MEDIAN across PERF_RUNS runs (each a fresh page load), with the
++// per-run range, so run-to-run variance is visible (not a single-shot claim).
++//
++// CAVEAT recorded in every report: on a display-less host the WebGL renderer is SwiftShader
++// (software rasterization), which inflates the pan/zoom fps figure — real-device re-measure
++// is mandatory for that row, not advisory.
++import { writeFileSync, mkdirSync } from "node:fs";
++import { fileURLToPath } from "node:url";
++import { dirname, join } from "node:path";
++import { openBrowser, closeBrowser, webglRenderer } from "./browser.mjs";
++import { TARGET_URL, RUNS, BUDGETS, median, percentile } from "./config.mjs";
++
++const HERE = dirname(fileURLToPath(import.meta.url));
++
++const INSTRUMENT = () => {
++  const hook = {
++    supportsFiber: true,
++    renderers: new Map(),
++    onScheduleFiberRoot() {},
++    onCommitFiberUnmount() {},
++    onCommitFiberRoot() {
++      window.__perfCommits = (window.__perfCommits || 0) + 1;
++    },
++    inject() {
++      return 1;
++    },
++  };
++  Object.defineProperty(window, "__REACT_DEVTOOLS_GLOBAL_HOOK__", { value: hook, configurable: false });
++  window.__perfCommits = 0;
++  window.__longtasks = [];
++  try {
++    new PerformanceObserver((list) => {
++      for (const e of list.getEntries()) window.__longtasks.push(e.duration);
++    }).observe({ type: "longtask", buffered: true });
++  } catch {}
++  window.__frameRec = { on: false, times: [] };
++  const tick = (t) => {
++    if (window.__frameRec.on) window.__frameRec.times.push(t);
++    requestAnimationFrame(tick);
++  };
++  requestAnimationFrame(tick);
++};
++
++async function marks(page) {
++  return page.evaluate(() => ({
++    commits: window.__perfCommits || 0,
++    longtaskMs: (window.__longtasks || []).reduce((a, b) => a + b, 0),
++    longtaskCount: (window.__longtasks || []).length,
++  }));
++}
++
++async function delta(page, fn, label) {
++  await page.evaluate(() => {
++    window.__perfCommits = 0;
++    window.__longtasks = [];
++  });
++  const t0 = Date.now();
++  await fn();
++  const wallMs = Date.now() - t0;
++  const m = await marks(page);
++  return { label, wallMs, ...m };
++}
++
++const readFrames = (page) =>
++  page.evaluate(() => {
++    window.__frameRec.on = false;
++    const t = window.__frameRec.times;
++    const d = [];
++    for (let i = 1; i < t.length; i++) d.push(t[i] - t[i - 1]);
++    return d;
++  });
++const startFrames = (page) => page.evaluate(() => {
++  window.__frameRec = { on: true, times: [] };
++});
++function frameStats(raw) {
++  // Keep real stalls (a 500 ms frozen frame is exactly what the worst-frame budget targets);
++  // drop only clearly-bogus intervals (rAF paused when the tab is backgrounded, > 5 s).
++  const intervals = raw.filter((x) => x > 0 && x < 5000);
++  const medFrame = median(intervals);
++  return {
++    frames: intervals.length,
++    medianFrameMs: +medFrame.toFixed(2),
++    medianFps: +(1000 / medFrame).toFixed(1),
++    maxFrameMs: +Math.max(...intervals, 0).toFixed(2),
++    p95FrameMs: +percentile(intervals, 95).toFixed(2),
++    framesOver32ms: intervals.filter((x) => x > BUDGETS.panZoomMaxFrameMs).length,
++  };
++}
++
++// ---- CDP touch helpers (drive MapLibre's Touch* handlers, the real mobile path) ----
++async function touchPan(client, cx, cy) {
++  const pt = (x, y) => [{ x: Math.round(x), y: Math.round(y) }];
++  await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: pt(cx, cy) });
++  for (let i = 1; i <= 30; i++) {
++    await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: pt(cx - i * 4, cy - i * 2) });
++    await new Promise((r) => setTimeout(r, 16));
++  }
++  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
++}
++async function touchPinch(client, cx, cy) {
++  // Two fingers starting close together, spreading apart → pinch-zoom in.
++  const two = (d) => [
++    { x: Math.round(cx - d), y: Math.round(cy), id: 0 },
++    { x: Math.round(cx + d), y: Math.round(cy), id: 1 },
++  ];
++  await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: two(20) });
++  for (let i = 1; i <= 20; i++) {
++    await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: two(20 + i * 6) });
++    await new Promise((r) => setTimeout(r, 24));
++  }
++  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
++}
++
++async function oneRun(page, client) {
++  await page.goto(TARGET_URL, { waitUntil: "networkidle0", timeout: 60000 });
++  await page.waitForSelector('[data-testid="app-map"] canvas', { timeout: 30000 });
++  await new Promise((r) => setTimeout(r, 1500));
++
++  // A. address select → ring reveal
++  const a = await delta(
++    page,
++    async () => {
++      const iso = page.waitForResponse((r) => /\/api\/isochrone/.test(r.url()), { timeout: 30000 }).catch(() => null);
++      await page.click('input[role="combobox"]');
++      await page.type('input[role="combobox"]', "Piata Unirii");
++      await page.waitForSelector('[role="option"]', { timeout: 15000 });
++      await page.click('[role="option"]');
++      await iso;
++      await new Promise((r) => setTimeout(r, 2500));
++    },
++    "A: address select → ring reveal",
++  );
++
++  // B. mode toggle (walk → car). On mobile the dock collapses to a state-pill after
++  // selection; expand it first (setup, outside the measured window) to re-mount ModeToggle.
++  const pill = await page.$('[data-testid="state-pill"]');
++  if (pill) {
++    await pill.click();
++    await page.waitForSelector('[role="group"][aria-label="Travel mode"] button', { timeout: 10000 });
++    await new Promise((r) => setTimeout(r, 800));
++  }
++  const b = await delta(
++    page,
++    async () => {
++      const car = page.waitForResponse((r) => /\/api\/car/.test(r.url()), { timeout: 15000 }).catch(() => null);
++      const btns = await page.$$('[role="group"][aria-label="Travel mode"] button');
++      if (btns.length < 3) throw new Error("mode toggle: fewer than 3 mode buttons found — interaction cannot be measured");
++      await btns[2].click(); // walk[0] transit[1] car[2]
++      await car;
++      await new Promise((r) => setTimeout(r, 2000));
++    },
++    "B: mode toggle (walk→car)",
++  );
++  // Fail loudly unless the mode actually changed — a silently-missed click would report a
++  // bogus "toggle" result.
++  const carPressed = await page.$eval(
++    '[role="group"][aria-label="Travel mode"] button:nth-child(3)',
++    (el) => el.getAttribute("aria-pressed"),
++  ).catch(() => null);
++  if (carPressed !== "true") throw new Error(`mode toggle did NOT switch to car (aria-pressed=${carPressed}) — refusing to report a bogus interaction`);
++
++  // C. pan/zoom (touch). Settle first so the idle window is truly idle.
++  await new Promise((r) => setTimeout(r, 2500));
++  const box = await page.$eval('[data-testid="app-map"] canvas', (el) => {
++    const r = el.getBoundingClientRect();
++    return { x: r.x, y: r.y, w: r.width, h: r.height };
++  });
++  const pick = await page.evaluate(
++    (bx, by, bw, bh) => {
++      for (const frac of [0.5, 0.55, 0.45, 0.6, 0.4, 0.65]) {
++        const y = by + bh * frac;
++        const el = document.elementFromPoint(bx + bw / 2, y);
++        if (el && el.tagName === "CANVAS") return { y, hit: true };
++      }
++      return { y: by + bh * 0.5, hit: false };
++    },
++    box.x, box.y, box.w, box.h,
++  );
++  if (!pick.hit) throw new Error("pan/zoom: no clear canvas point found (overlays cover the map) — refusing to report a gesture that may hit an overlay");
++  const cx = box.x + box.w / 2;
++  const cy = pick.y;
++
++  await startFrames(page);
++  const idle = await delta(page, async () => new Promise((r) => setTimeout(r, 3500)), "IDLE baseline");
++  idle._frames = frameStats(await readFrames(page));
++
++  await startFrames(page);
++  const c = await delta(
++    page,
++    async () => {
++      await touchPan(client, cx, cy);
++      await new Promise((r) => setTimeout(r, 200));
++      await touchPinch(client, cx, cy);
++      await new Promise((r) => setTimeout(r, 400));
++    },
++    "C: pan/zoom (touch)",
++  );
++  Object.assign(c, frameStats(await readFrames(page)));
++
++  return { a, b, idle, c };
++}
++
++async function main() {
++  const ctx = await openBrowser();
++  const { page } = ctx;
++  const client = await page.createCDPSession();
++  await page.evaluateOnNewDocument(INSTRUMENT);
++
++  const gl = await (async () => {
++    await page.goto(TARGET_URL, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
++    return webglRenderer(page);
++  })();
++
++  const runs = [];
++  for (let i = 0; i < RUNS; i++) {
++    process.stderr.write(`[profile] run ${i + 1}/${RUNS} ...\n`);
++    runs.push(await oneRun(page, client));
++  }
++
++  // Aggregate: median (+ range) across runs of each per-run figure.
++  const across = (sel) => runs.map(sel);
++  const agg = (xs) => ({ median: +median(xs).toFixed(2), min: +Math.min(...xs).toFixed(2), max: +Math.max(...xs).toFixed(2) });
++
++  const panZoom = {
++    medianFps: agg(across((r) => r.c.medianFps)),
++    maxFrameMs: agg(across((r) => r.c.maxFrameMs)),
++    framesOver32ms: agg(across((r) => r.c.framesOver32ms)),
++    commitsDuringGesture: agg(across((r) => r.c.commits)),
++    idleCommits: agg(across((r) => r.idle.commits)),
++    idleFps: agg(across((r) => r.idle._frames.medianFps)),
++    longtaskMs: agg(across((r) => r.c.longtaskMs)),
++  };
++  const interactionA = { commits: agg(across((r) => r.a.commits)), longtaskMs: agg(across((r) => r.a.longtaskMs)) };
++  const interactionB = { commits: agg(across((r) => r.b.commits)), longtaskMs: agg(across((r) => r.b.longtaskMs)) };
++
++  const renderFree = runs.every((r) => r.c.commits <= r.idle.commits);
++  const report = {
++    takenAt: new Date().toISOString(),
++    target: TARGET_URL,
++    runs: RUNS,
++    device: ctx.emulated ? "emulated (4x CPU, Slow 4G, mobile viewport)" : "real-android (attached)",
++    emulationBased: ctx.emulated,
++    webglRenderer: gl.renderer,
++    softwareWebgl: gl.software,
++    gesture: "touch (one-finger pan + two-finger pinch, via CDP Input.dispatchTouchEvent)",
++    note:
++      "Median (+range) across N runs. React commits via injected __REACT_DEVTOOLS_GLOBAL_HOOK__. " +
++      (gl.software
++        ? "WebGL is SOFTWARE (SwiftShader) on this host — the pan/zoom fps is inflated by software rasterization; real-device re-measure is MANDATORY for that row."
++        : "WebGL renderer recorded above."),
++    perRun: runs.map((r, i) => ({
++      run: i + 1,
++      A: { commits: r.a.commits, longtaskMs: Math.round(r.a.longtaskMs) },
++      B: { commits: r.b.commits, longtaskMs: Math.round(r.b.longtaskMs) },
++      idle: { fps: r.idle._frames.medianFps, commits: r.idle.commits },
++      panZoom: { fps: r.c.medianFps, maxFrameMs: r.c.maxFrameMs, over32: r.c.framesOver32ms, commits: r.c.commits },
++    })),
++    interactionA,
++    interactionB,
++    panZoom,
++    renderFree,
++    verdictFps: panZoom.medianFps.median >= BUDGETS.panZoomMedianFps ? "PASS" : "FAIL",
++    verdictMaxFrame: panZoom.maxFrameMs.median <= BUDGETS.panZoomMaxFrameMs ? "PASS" : "FAIL",
++  };
++
++  const outDir = join(HERE, "results");
++  mkdirSync(outDir, { recursive: true });
++  writeFileSync(join(outDir, "runtime-profile.json"), JSON.stringify(report, null, 2));
++
++  console.log(`\n=== RUNTIME PROFILE — ${report.device}, median of ${RUNS} runs ===`);
++  console.log(`WebGL renderer: ${gl.renderer}${gl.software ? "  ⚠ SOFTWARE (inflates pan/zoom fps)" : ""}`);
++  console.log(`A address→rings: ${interactionA.commits.median} commits, ${Math.round(interactionA.longtaskMs.median)} ms long-task`);
++  console.log(`B mode toggle  : ${interactionB.commits.median} commits, ${Math.round(interactionB.longtaskMs.median)} ms long-task`);
++  console.log(`Idle baseline  : ${panZoom.idleFps.median} fps, ${panZoom.idleCommits.median} commits`);
++  console.log(`Pan/zoom (touch): median ${panZoom.medianFps.median} fps [${panZoom.medianFps.min}–${panZoom.medianFps.max}] (budget ≥55 → ${report.verdictFps}) · worst ${panZoom.maxFrameMs.median} ms [${panZoom.maxFrameMs.min}–${panZoom.maxFrameMs.max}] (budget ≤32 → ${report.verdictMaxFrame})`);
++  console.log(`Gesture render-free (commits ≤ idle every run): ${renderFree ? "YES ✓ (claim holds)" : "NO ✗"} — gesture commits ${panZoom.commitsDuringGesture.min}–${panZoom.commitsDuringGesture.max} vs idle ${panZoom.idleCommits.min}–${panZoom.idleCommits.max}`);
++  if (report.emulationBased) console.log(`[EMU] emulation-based${gl.software ? " + SOFTWARE WebGL" : ""} — re-measure on a real Android (see README).`);
++  console.log(`Wrote ${join(outDir, "runtime-profile.json")}`);
++
++  await closeBrowser(ctx);
++}
++
++main().catch((e) => {
++  console.error(e);
++  process.exit(1);
++});

@@ -1,0 +1,17 @@
+{
+  "findings": [],
+  "known_rejects": [
+    {
+      "id": "RJ1",
+      "claim": "env.ts importing bounds.ts makes a malformed NEXT_PUBLIC_MAP_BBOX fail the whole app at BUILD, not just the map",
+      "why_rejected": "Intended fail-closed-at-build (a bad extent should stop the deploy, not half-boot); noted for the owner, no change (r5 sonnet#2).",
+      "file": "src/lib/env.ts"
+    },
+    {
+      "id": "RJ2",
+      "claim": "assert the runtime (non-NEXT_PUBLIC) bbox / tile-archive extent against the build-time extent",
+      "why_rejected": "Architectural (P4); mitigated by one shared variable name and a documented build-time constraint.",
+      "file": "src/lib/env.ts"
+    }
+  ]
+}

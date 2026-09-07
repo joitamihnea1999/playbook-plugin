@@ -1,0 +1,43 @@
+{
+  "findings": [
+    {
+      "id": "P1",
+      "file": "plugins/playbook/tasks/compact.py",
+      "symbol": "_protected_section_spans",
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "compact.py's protected-section detection still uses raw startswith('## ') matching instead of the shared strict ATX matcher, so a `## Verification Receipt ##` can evade compaction protection (codex-sol#3; split to task 044)."
+    },
+    {
+      "id": "P2",
+      "file": "plugins/playbook/tasks/compact.py",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+parked",
+      "failure_mode": "compact.py keeps an independent backtick-toggle fence scanner (not the shared engine), so ~~~ fences and the shared rules are not honored for archive markers (codex-sol#4; split to task 044)."
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "RJ1",
+      "claim": "the risk value line is not fence-flag-checked (`## Risk\\n```reversible` reads reversible)",
+      "why_rejected": "Not a bypass in the threat model: the author controls their own value line; the intentional .strip('`*_') value parse is documented.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "extract_risk"
+    },
+    {
+      "id": "RJ2",
+      "claim": "a bare empty `##` H2 returns None from _atx_h2_text",
+      "why_rejected": "No real task.md section is a bare `##`; teaching empty-heading support touches every consumer for near-zero impact.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "_atx_h2_text"
+    },
+    {
+      "id": "RJ3",
+      "claim": "upsert_task_section is an unlocked read-modify-write",
+      "why_rejected": "Already parked: the close path is single-process; a repo close-lock is the tracked follow-up.",
+      "file": "plugins/playbook/tasks/core.py",
+      "symbol": "upsert_task_section"
+    }
+  ]
+}

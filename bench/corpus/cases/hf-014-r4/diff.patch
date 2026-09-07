@@ -1,0 +1,576 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 2284c7e..cd751b9 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -33,6 +33,9 @@ jobs:
+       # Hermetic geometry-instrument self-test (no Docker/stack needed): guards the
+       # parity harness's area/residual/verdict math so a refactor can't silently break it.
+       - run: npm run selfhost:harness-selftest
++      # Hermetic dev:selfhost script checks (no Docker/stack needed): bash -n + fail-loud
++      # preflight guards (host-artifact / OSM-extract / overlay-key).
++      - run: npm run selfhost:script-check
+ 
+   e2e:
+     name: e2e (Playwright + PostGIS)
+diff --git a/README.md b/README.md
+index bc1e3a4..cfbd8dd 100644
+--- a/README.md
++++ b/README.md
+@@ -7,8 +7,8 @@ score are planned next (not shipped yet).
+ 
+ ![HowFar — public-transport reachability (15/30/45 min) for a central Bucharest address on the dark basemap](docs/screenshot.png)
+ 
+-> **Status: M2 in progress — live at
+-> [howfar-production-b31c.up.railway.app](https://howfar-production-b31c.up.railway.app).**
++> **Status: M2 in progress — runs locally; there is no public deployment right now**
++> (the earlier hosted preview is offline).
+ > Working today: address search with type-ahead suggestions (or click anywhere on the map),
+ > walking **and** public-transport isochrones (15/30/45 min), nearby essentials in five
+ > categories, inspectable places and transit lines, and full route paths with named stops.
+@@ -17,8 +17,8 @@ score are planned next (not shipped yet).
+ > Transit reachability is computed in-process from per-stop travel times — no provider
+ > offers transit isochrones. Foundation from
+ > M0/M1 underneath: PostgreSQL/PostGIS + Prisma persistence, expiring provider cache, social
+-> sign-in, tests + [CI green](https://github.com/joitamihnea1999/HowFar/actions), Railway
+-> deploy over private networking. Next in M2: air-quality summary and the transparent
++> sign-in, tests + [CI green](https://github.com/joitamihnea1999/HowFar/actions), and a
++> deployment configuration with Postgres over private networking. Next in M2: air-quality summary and the transparent
+ > livability score. Custom domain: not yet attached.
+ > Docs: [`docs/BRIEF.md`](docs/BRIEF.md) (product brief) ·
+ > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (code tour, provider checklist) ·
+@@ -28,7 +28,7 @@ score are planned next (not shipped yet).
+ 
+ TypeScript (strict) · Next.js 16 (App Router, one full-stack repo) · Tailwind CSS 4 ·
+ MapLibre GL + self-hosted [Protomaps](https://protomaps.com) tiles · PostgreSQL 17/PostGIS 3.5 + Prisma 7 ·
+-Auth.js v5 (Google/GitHub) · Vitest + Playwright · Railway
++Auth.js v5 (Google/GitHub) · Vitest + Playwright · runs locally (no public host yet)
+ 
+ Data (live): Nominatim (geocoding) · OpenRouteService (walking isochrones) ·
+ [Transitous](https://transitous.org) / MOTIS (transit reachability) · a weekly OSM/Overpass
+@@ -68,8 +68,8 @@ npm run dev                 # http://localhost:3000
+ 
+ ### Secret safety
+ 
+-Keep real credentials only in ignored `.env` files locally and in Railway variables for
+-deployment. Google credentials must remain server-side and must never use a `NEXT_PUBLIC_`
++Keep real credentials only in ignored `.env` files locally and in the deployment
++platform's environment variables when deployed. Google credentials must remain server-side and must never use a `NEXT_PUBLIC_`
+ name. This clone uses the committed pre-commit scanner; enable it in another clone with
+ `git config core.hooksPath .githooks`. CI repeats the scan against the complete Git history.
+ 
+diff --git a/docker/selfhost/dev-selfhost.sh b/docker/selfhost/dev-selfhost.sh
+new file mode 100755
+index 0000000..3a7d36d
+--- /dev/null
++++ b/docker/selfhost/dev-selfhost.sh
+@@ -0,0 +1,212 @@
++#!/usr/bin/env bash
++# One-command dev loop: bring the local self-host provider stack up and start the app.
++# LOCAL ONLY.
++#
++# This is the DAY-2 convenience. It assumes the ONE-TIME import/build has already been
++# done (docs/SELFHOST.md §1-§5: fetch extract, import Nominatim, build Photon index,
++# build ORS graph, build tiles). It deliberately does NOT run those multi-hour imports:
++# preflight fails loud if the built host artifacts, the OSM extract, or the imported engine
++# VOLUMES are missing, so a bare `up` won't silently kick off a ~24-min Nominatim import
++# after a `down -v` (drops volumes) or `rm -rf data/osm` (drops the extract) removed them.
++# Caveat: the volume check confirms the volumes EXIST, not that an import ran to completion
++# -- an interrupted import leaves a volume behind, which preflight cannot distinguish, so
++# watch the health wait on the first start after an aborted import.
++#
++# What it does:
++#   1. Preflight (read-only): docker present; built host artifacts exist (self-built tiles
++#      archive + Photon index + Photon jar); the OSM extract exists; the imported engine
++#      VOLUMES exist (nominatim-data, ors-graphs); required provider overlay keys are set.
++#      Anything missing -> exit 2 with the runbook pointer. `--dry-run` stops here.
++#   2. Bring up the app's dev Postgres (root docker-compose.yml `db`, :5433) and the
++#      provider serve stack (nominatim + ors + photon) from docker/selfhost/.
++#   3. Wait for the dev db AND the three engines to report `healthy`, bounded by
++#      SELFHOST_WAIT_SECS (default 300). If they don't, it exits WITHOUT starting the app
++#      -- the app is never pointed at a cold db or dead engines.
++#   4. Apply the provider overlay (read from env.selfhost.example so the two never drift;
++#      layered via the process env, which Next.js does NOT override from .env -- so .env
++#      keeps its public defaults and only THIS command runs the app against the local
++#      engines) and exec `npm run dev`. Your existing DATABASE_URL / AUTH_SECRET in .env
++#      are still used (the overlay is providers only).
++#
++# Matching down: `npm run dev:selfhost:down` stops everything this command started
++# (provider engines + the dev `db`), preserving all named volumes for a fast restart.
++#
++# Not covered here: applying the schema (`prisma migrate deploy`) and importing the amenity
++# catalogue (`npm run amenities:refresh`) are the normal app setup (README). And transit
++# (/api/transit, /api/reach) is still NOT self-hosted (MOTIS/GTFS gate) -- those routes
++# hit the network even under dev:selfhost. See docs/SELFHOST.md.
++#
++# Usage (from the app root, via npm):
++#   npm run dev:selfhost                 # up (db + engines) + start the app
++#   npm run dev:selfhost -- --dry-run    # preflight only: report prerequisites, no side effects
++#   npm run dev:selfhost:down            # stop the stack (docker/selfhost/stop-selfhost.sh)
++set -euo pipefail
++
++# Resolve the app root (two levels up from this script) so the command works regardless
++# of the caller's cwd; npm already runs scripts from the app root, but be robust.
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++APP_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
++cd "$APP_ROOT"
++
++SELF_COMPOSE="docker/selfhost/docker-compose.yml"
++APP_COMPOSE="docker-compose.yml"
++OVERLAY="docker/selfhost/env.selfhost.example"
++
++# Compose project name, used to resolve the named volumes. Compose honours
++# COMPOSE_PROJECT_NAME over the compose-file `name:` key, so respect it here too or the
++# volume check would inspect the wrong project's volumes.
++SELF_PROJECT="${COMPOSE_PROJECT_NAME:-howfar-selfhost}"
++# Imported engine volumes — present once §2/§4 have run, removed by `down -v`.
++VOLUMES=("${SELF_PROJECT}_nominatim-data" "${SELF_PROJECT}_ors-graphs")
++# Built host artifacts (gitignored). PHOTON index+jar live under data/selfhost/photon/.
++PHOTON_INDEX="data/selfhost/photon/photon_data"
++PHOTON_JAR="data/selfhost/photon/photon.jar"
++# OSM extract bind-mounted by the nominatim + ors services (docker-compose.yml). Its
++# absence makes `up` create an empty directory at the mount path (SELFHOST.md caveats),
++# so guard it here. Keep in sync with the compose bind mounts when the extract changes.
++PBF="data/osm/romania-260824.osm.pbf"
++
++# Containers to wait on for health: the dev db + the three provider engines
++# (names from the compose container_name: keys).
++HEALTH_TARGETS=(howfar-postgis howfar-nominatim howfar-ors howfar-photon)
++ENGINES=(nominatim ors photon)
++WAIT_SECS="${SELFHOST_WAIT_SECS:-300}"
++
++DRY_RUN=0
++for arg in "$@"; do
++  case "$arg" in
++    --dry-run) DRY_RUN=1 ;;
++    -h|--help) awk 'NR>=2{ if(/^set -euo pipefail$/) exit; sub(/^# ?/,""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
++    *) echo "Unknown argument: $arg (try --dry-run or --help)" >&2; exit 64 ;;
++  esac
++done
++
++log() { echo "[dev:selfhost] $*" >&2; }
++
++# ── Load the provider overlay FIRST (single-source of the provider env + the tiles path) ──
++# Only KEY=value assignment lines are taken; comments and the commented-out
++# NEXT_PUBLIC_MAP_BBOX are skipped by the grep. Layered via the process env (set -a).
++if [ ! -f "$OVERLAY" ]; then
++  log "MISSING: provider overlay $OVERLAY (expected in the repo). Cannot continue."
++  exit 2
++fi
++set -a
++# shellcheck disable=SC1090
++source <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$OVERLAY")
++set +a
++# Derive the tiles-archive path from the overlay so an operator who repoints
++# TILES_PMTILES_PATH in that same file does not get a false "tiles missing".
++TILES="${TILES_PMTILES_PATH:-data/tiles/selfhost-romania.pmtiles}"
++
++# ── Preflight: read-only prerequisite checks (no writes, starts nothing) ──────
++missing=0
++volumes_verified=0
++
++if ! command -v docker >/dev/null 2>&1; then
++  log "MISSING: docker is not on PATH. Install Docker + Docker Compose v2 (docs/SELFHOST.md Prerequisites)."
++  missing=1
++fi
++
++check_artifact() {   # $1 = path, $2 = -d (dir) | -f (file exists) | -s (file non-empty), $3 = description
++  case "$2" in
++    -d) [ -d "$1" ] && { log "ok: $3 ($1)"; return; } ;;
++    -f) [ -f "$1" ] && { log "ok: $3 ($1)"; return; } ;;
++    -s) [ -s "$1" ] && { log "ok: $3 ($1)"; return; } ;;   # exists AND non-empty (catches a truncated build)
++  esac
++  log "MISSING: $3 ($1) -- missing or empty; run the one-time build in docs/SELFHOST.md (§1-§5) before dev:selfhost."
++  missing=1
++}
++# Host files first (pure filesystem — no docker), so a not-yet-built tree fails here fast.
++# The two large binary artifacts must be NON-EMPTY (a 0-byte archive/extract is a broken build).
++check_artifact "$TILES"        -s "self-built tiles archive"
++check_artifact "$PHOTON_INDEX" -d "Photon index"
++check_artifact "$PHOTON_JAR"   -f "Photon jar"
++check_artifact "$PBF"          -s "OSM extract (PBF)"
++
++# Required provider overlay keys — a partial overlay would let a provider silently fall
++# back to its PUBLIC host while we claim local routing.
++for k in NOMINATIM_BASE_URL PHOTON_BASE_URL ORS_BASE_URL; do
++  if [ -z "${!k:-}" ]; then
++    log "MISSING: overlay key $k is empty/unset in $OVERLAY -- provider would fall back to its public host."
++    missing=1
++  fi
++done
++
++# Imported engine volumes — the check the host-file check can't make. `down -v` (or a fresh
++# box) removes these while the tiles/Photon files remain, so without this a bare `up` would
++# silently start the ~24-min Nominatim import. Only enforce when the daemon is reachable
++# (if it isn't, `up` fails fast anyway — the slow-silent-import harm can't occur).
++if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
++  volumes_verified=1
++  for v in "${VOLUMES[@]}"; do
++    if docker volume inspect "$v" >/dev/null 2>&1; then
++      log "ok: engine volume present ($v)"
++    else
++      log "MISSING: engine volume '$v' -- absent (dropped by 'down -v', or never imported)."
++      log "        Re-import per docs/SELFHOST.md §2 (Nominatim) / §4 (ORS) — a bare 'up' would silently start a ~24-min import."
++      missing=1
++    fi
++  done
++else
++  log "note: docker daemon not reachable — engine volumes NOT verified (the 'up' below fails fast if a volume is absent)."
++fi
++
++if [ "$missing" -ne 0 ]; then
++  log "Preflight FAILED -- see docs/SELFHOST.md (§1-§5 for the one-time import/build)."
++  exit 2
++fi
++if [ "$volumes_verified" -eq 1 ]; then
++  log "Preflight OK: docker present, built host artifacts + extract present, engine volumes present, overlay keys set."
++else
++  log "Preflight OK (host artifacts + extract + overlay keys); engine volumes UNVERIFIED — docker daemon was unreachable."
++fi
++
++if [ "$DRY_RUN" -eq 1 ]; then
++  log "--dry-run: would now bring up '${APP_COMPOSE}:db' + '${SELF_COMPOSE}: ${ENGINES[*]}',"
++  log "           wait up to ${WAIT_SECS}s for db + engine health, then run the app with the overlay from ${OVERLAY}."
++  log "--dry-run: no containers started, no app launched, .env untouched."
++  exit 0
++fi
++
++# ── Bring the stack up ────────────────────────────────────────────────────────
++log "Starting app dev Postgres (${APP_COMPOSE}: db) ..."
++docker compose -f "$APP_COMPOSE" up -d db
++
++log "Starting provider engines (${SELF_COMPOSE}: ${ENGINES[*]}) ..."
++# `photon` sits behind the compose `serve` profile; naming it on `up` starts it.
++docker compose -f "$SELF_COMPOSE" up -d "${ENGINES[@]}"
++
++# ── Wait for db + engine health (bounded) ─────────────────────────────────────
++log "Waiting up to ${WAIT_SECS}s for db + engines to report healthy ..."
++deadline=$(( $(date +%s) + WAIT_SECS ))
++while :; do
++  all_healthy=1
++  statuses=""
++  for c in "${HEALTH_TARGETS[@]}"; do
++    s="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}}' "$c" 2>/dev/null || echo absent)"
++    statuses="${statuses} ${c}=${s}"
++    [ "$s" = "healthy" ] || all_healthy=0
++  done
++  if [ "$all_healthy" -eq 1 ]; then
++    log "Healthy:${statuses}"
++    break
++  fi
++  if [ "$(date +%s)" -ge "$deadline" ]; then
++    log "NOT all healthy within ${WAIT_SECS}s:${statuses}"
++    log "A 'starting' engine on a cold box may still be warming up (or resuming an interrupted import) -- watch:"
++    log "  docker compose -f ${SELF_COMPOSE} logs -f nominatim ors"
++    log "Not starting the app against an unready db/engines. Re-run once healthy, or raise SELFHOST_WAIT_SECS."
++    exit 1
++  fi
++  sleep 5
++done
++
++# ── Point the app at the stack and run it ─────────────────────────────────────
++# The overlay is already exported into this process env (sourced above), so `next dev`
++# inherits it. .env is untouched.
++log "Applying provider overlay from ${OVERLAY} (inline; .env untouched)."
++log "TILE-CACHE NOTE: the overlay serves ${TILES}; if this origin previously loaded a DIFFERENT"
++log "  archive (e.g. the public Bucharest cut under a plain 'npm run dev'), hard-reload (empty cache)"
++log "  the first time, or the map may render blank/garbled from stale byte ranges (docs/SELFHOST.md §6)."
++log "Starting the app: npm run dev (Ctrl-C stops the app; run 'npm run dev:selfhost:down' to stop the engines)."
++exec npm run dev
+diff --git a/docker/selfhost/env.selfhost.example b/docker/selfhost/env.selfhost.example
+index a8e5dc9..a0ee5c1 100644
+--- a/docker/selfhost/env.selfhost.example
++++ b/docker/selfhost/env.selfhost.example
+@@ -3,8 +3,9 @@
+ # These are the ONLY env values that point the app at the local self-host stack
+ # (docker/selfhost/docker-compose.yml). Merge them into HowFar/.env alongside the
+ # normal DATABASE_URL / AUTH_SECRET (this file is a provider OVERLAY, not a full
+-# .env). With none of these set, the app is byte-identical to the public Bucharest
+-# deployment — that default MUST stay green with no stack running.
++# .env). With none of these set, the app is byte-identical to the default public-provider
++# Bucharest configuration (what the retired public preview ran) — that default MUST stay
++# green with no stack running.
+ #
+ # Every host below matches a 127.0.0.1 port published by the compose file. Bare
+ # host, no trailing slash — the app appends each provider's path (see src/lib/env.ts).
+diff --git a/docker/selfhost/script-check.sh b/docker/selfhost/script-check.sh
+new file mode 100755
+index 0000000..bdc39d0
+--- /dev/null
++++ b/docker/selfhost/script-check.sh
+@@ -0,0 +1,66 @@
++#!/usr/bin/env bash
++# Static + fail-loud checks for the dev:selfhost scripts. Wired into `npm run check` /
++# `check:ci` (and CI, .github/workflows/ci.yml) so a future edit that breaks them is caught
++# by a gate, not just the one-off manual run that first validated them.
++#
++# Hermetic: needs only bash + mktemp, and runs the child with an UNREACHABLE DOCKER_HOST so
++# it never touches a real daemon (the daemon-reachable branch is skipped); writes only to a
++# private mktemp dir; parallel-safe. Coverage — each guard is watched-fail on its OWN
++# diagnostic (rule #3), not just on a shared exit 2:
++#   1. all three scripts parse                              -> bash -n
++#   2. HOST-ARTIFACT guard: artifact-less root              -> exit 2 + "self-built tiles archive"
++#   3. OSM-EXTRACT guard: everything present but the PBF    -> exit 2 + "OSM extract"
++#   4. OVERLAY-KEY guard: artifacts present, a key blanked  -> exit 2 + "overlay key NOMINATIM_BASE_URL"
++# It CANNOT exercise the engine-VOLUME guard (that needs a live daemon) -- by design.
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# Force the daemon unreachable so the child never talks to a real Docker (keeps this
++# hermetic and off the docker socket even when one is present on the check/CI host).
++export DOCKER_HOST="unix:///nonexistent/dev-selfhost-scriptcheck.sock"
++
++echo "[script-check] bash -n ..."
++bash -n "$SCRIPT_DIR/dev-selfhost.sh"
++bash -n "$SCRIPT_DIR/stop-selfhost.sh"
++bash -n "$SCRIPT_DIR/script-check.sh"
++
++# Build a temp app-root with the script + overlay; optionally stub the host artifacts
++# present (non-empty, since the tiles/PBF checks require non-empty) with per-artifact skips;
++# tweak the overlay; run --dry-run; return its exit code and echo its output.
++#   $1 = stub_artifacts (0/1) ; $2 = optional sed program on the overlay ; $3 = skip list (space-sep: pbf tiles photon jar)
++run_case() {
++  local stub="$1" sedprog="${2:-}" skip="${3:-}" tmp out rc
++  tmp="$(mktemp -d)"
++  mkdir -p "$tmp/docker/selfhost"
++  cp "$SCRIPT_DIR/dev-selfhost.sh" "$tmp/docker/selfhost/"
++  cp "$SCRIPT_DIR/env.selfhost.example" "$tmp/docker/selfhost/env.selfhost.example"
++  [ -n "$sedprog" ] && sed -i "$sedprog" "$tmp/docker/selfhost/env.selfhost.example"
++  if [ "$stub" = "1" ]; then
++    mkdir -p "$tmp/data/tiles" "$tmp/data/selfhost/photon/photon_data" "$tmp/data/osm"
++    [[ " $skip " == *" tiles "* ]] || printf 'x' > "$tmp/data/tiles/selfhost-romania.pmtiles"
++    [[ " $skip " == *" jar "*   ]] || printf 'x' > "$tmp/data/selfhost/photon/photon.jar"
++    [[ " $skip " == *" pbf "*   ]] || printf 'x' > "$tmp/data/osm/romania-260824.osm.pbf"
++  fi
++  out="$(bash "$tmp/docker/selfhost/dev-selfhost.sh" --dry-run 2>&1)"; rc=$?
++  rm -rf "$tmp"
++  printf '%s' "$out"
++  return "$rc"
++}
++
++assert() {   # $1 = exit code, $2 = expected code, $3 = expected substring, $4 = output, $5 = label
++  [ "$1" -eq "$2" ] || { echo "[script-check] FAIL ($5): exit $1, expected $2." >&2; echo "$4" >&2; exit 1; }
++  grep -q "$3" <<<"$4"   || { echo "[script-check] FAIL ($5): output missing \"$3\"." >&2; echo "$4" >&2; exit 1; }
++}
++
++echo "[script-check] host-artifact guard (artifact-less root) ..."
++set +e; out="$(run_case 0 "")"; rc=$?; set -e
++assert "$rc" 2 "MISSING: self-built tiles archive" "$out" "host-artifact"
++
++echo "[script-check] OSM-extract guard (all present but the PBF) ..."
++set +e; out="$(run_case 1 "" "pbf")"; rc=$?; set -e
++assert "$rc" 2 "MISSING: OSM extract (PBF)" "$out" "osm-extract"
++
++echo "[script-check] overlay-key guard (artifacts present, NOMINATIM_BASE_URL blanked) ..."
++set +e; out="$(run_case 1 's#^NOMINATIM_BASE_URL=.*#NOMINATIM_BASE_URL=""#')"; rc=$?; set -e
++assert "$rc" 2 "overlay key NOMINATIM_BASE_URL" "$out" "overlay-key"
++
++echo "[script-check] OK: scripts parse; host-artifact, OSM-extract, and overlay-key guards each fail loud (exit 2)."
+diff --git a/docker/selfhost/stop-selfhost.sh b/docker/selfhost/stop-selfhost.sh
+new file mode 100755
+index 0000000..89b031b
+--- /dev/null
++++ b/docker/selfhost/stop-selfhost.sh
+@@ -0,0 +1,45 @@
++#!/usr/bin/env bash
++# Stop the local self-host dev stack — the matching down path for dev-selfhost.sh.
++# LOCAL ONLY.
++#
++# Symmetry: `dev:selfhost` starts the provider engines AND the app's dev Postgres (`db`),
++# so this stops BOTH — nothing it started is left running. It STOPS containers but
++# PRESERVES the named volumes (imported Nominatim DB, ORS graph, Postgres data): a fresh
++# re-import is ~24 min (docs/SELFHOST.md), so "stop for now" must not throw that away.
++#
++# Keep the shared dev `db` running instead (e.g. another app is using :5433)? Stop only the
++# provider engines:
++#   docker compose -f docker/selfhost/docker-compose.yml --profile serve --profile import stop
++#
++# The app process (npm run dev) is foreground under dev:selfhost — stop it with Ctrl-C.
++#
++# Fuller teardown (see docs/SELFHOST.md → Teardown) is intentionally NOT the default:
++#   docker compose -f docker/selfhost/docker-compose.yml down       # remove containers, keep volumes
++#   docker compose -f docker/selfhost/docker-compose.yml down -v     # ALSO delete engine volumes (re-import needed)
++#   rm -rf data/osm data/selfhost                                    # reclaim downloaded build data
++#
++# Usage:
++#   npm run dev:selfhost:down            # stop engines + dev db, keep volumes (default)
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++APP_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
++cd "$APP_ROOT"
++
++SELF_COMPOSE="docker/selfhost/docker-compose.yml"
++APP_COMPOSE="docker-compose.yml"
++
++if ! command -v docker >/dev/null 2>&1; then
++  echo "[dev:selfhost:down] docker is not on PATH — nothing to stop." >&2
++  exit 0
++fi
++
++echo "[dev:selfhost:down] Stopping provider engines (volumes preserved) ..." >&2
++# `--profile serve --profile import` so the profiled `photon`/`photon-import` services are
++# included in the stop set.
++docker compose -f "$SELF_COMPOSE" --profile serve --profile import stop
++
++echo "[dev:selfhost:down] Stopping app dev Postgres (db) ..." >&2
++docker compose -f "$APP_COMPOSE" stop db
++
++echo "[dev:selfhost:down] Stopped engines + db. Restart with 'npm run dev:selfhost'. Fuller teardown: docs/SELFHOST.md." >&2
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 369a61f..3e599f2 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -1,8 +1,10 @@
+ # Architecture
+ 
+ HowFar is a single Next.js (App Router) app: the map UI, the API routes and the
+-data-provider clients live in one repo and deploy as one Railway app service backed
+-by PostgreSQL/PostGIS, plus one short-lived weekly importer using the same code. Two rules shape everything:
++data-provider clients live in one repo and are built to deploy as one app service backed
++by PostgreSQL/PostGIS, plus one short-lived weekly importer using the same code. (Currently
++run locally — there is no live host; the earlier Railway preview is retired, launch target is
++a Hetzner VPS.) Two rules shape everything:
+ 
+ 1. **No external data call from the browser, ever.** Every provider request
+    runs server-side, is rate-limited per provider (bucket `provider@host`), and is cached in PostgreSQL where appropriate — the
+diff --git a/docs/PROVIDERS.md b/docs/PROVIDERS.md
+index 7cf7f9b..15ed628 100644
+--- a/docs/PROVIDERS.md
++++ b/docs/PROVIDERS.md
+@@ -342,7 +342,11 @@ T&C above); a live TomTom layer would require an owner decision on a paid Permit
+   self-hosting them in `public/` is the M4 polish item (also removes a third-party availability
+   dependency).
+ 
+-### Hosting — Railway (fixed by brief) — cost note
++### Hosting — Railway (RETIRED 2026-08-29; launch target Hetzner VPS, €0 until launch) — cost note
++
++> The Railway preview is retired (trial expired) and there is no live host today. The cost note
++> below is kept as historical context; the launch decision is a self-managed Hetzner VPS.
++
+ - Pricing (<https://docs.railway.com/pricing/plans>): Trial = one-time $5 credit, services
+   **pause** when it's spent or after 30 days → not suitable for a permanent CV link.
+   **Hobby = $5/month including $5 of usage** — the realistic tier for app + PostGIS; the weekly
+@@ -389,6 +393,6 @@ T&C above); a live TomTom layer would require an owner decision on a paid Permit
+ | # | Item | Status (2026-07-21) |
+ | --- | --- | --- |
+ | 1 | Transitous courtesy hello before heavy isochrone use | **Owner skipped** (accepted risk; still non-commercial, cached, Bucharest-only) |
+-| 2 | ORS free account → `ORS_API_KEY` (server-side) | **Done** — live in prod |
+-| 3 | Railway Hobby plan ($5/mo) when trial ends | **Open** (trial pause ~2026-08-14 informational) |
++| 2 | ORS free account → `ORS_API_KEY` (server-side) | **Done** (server-side key; no live prod today — deployment retired) |
++| 3 | Hosting at launch | **Superseded** — owner ruling 2026-08-29: Hetzner VPS at launch, €0 until then; Railway trial expired/retired |
+ | 4 | Keep the GitHub repo public (Transitous open-source-client + portfolio) | **Done** — public at github.com/joitamihnea1999/HowFar |
+diff --git a/docs/SELFHOST.md b/docs/SELFHOST.md
+index a1a5df5..32c9618 100644
+--- a/docs/SELFHOST.md
++++ b/docs/SELFHOST.md
+@@ -178,7 +178,7 @@ app's `maxBounds`.
+ 
+ Merge `docker/selfhost/env.selfhost.example` into `.env` (keep your existing
+ `DATABASE_URL` / `AUTH_SECRET`), then run the app as usual. With none of those vars
+-set the app is byte-identical to the public deployment.
++set the app is byte-identical to the default public-provider configuration (what the retired public preview ran).
+ 
+ > **Tile cache after repointing `TILES_PMTILES_PATH`.** `/api/tiles` serves every archive
+ > from the same URL with `Cache-Control: max-age=86400`, so if you point an already-loaded
+@@ -187,6 +187,64 @@ set the app is byte-identical to the public deployment.
+ > against the wrong archive → a blank/garbled map. Hard-reload (empty cache) after switching,
+ > or use a fresh origin/port. The parity run (§7) already uses a separate port for exactly this.
+ 
++## 6a — Day-2 dev loop (`npm run dev:selfhost`)
++
++Once the one-time import/build above (§1–§5) is done, this brings the serving engines up
++and starts the app against them in **one command** — no need to hand-merge the overlay into
++`.env` or start each engine yourself:
++
++```bash
++npm run dev:selfhost                 # up (app db + nominatim + ors + photon) then `next dev`
++npm run dev:selfhost -- --dry-run    # preflight only: report prerequisites, no side effects
++npm run dev:selfhost:down            # stop engines + dev db (named volumes preserved)
++```
++
++What it does, in order (`docker/selfhost/dev-selfhost.sh`):
++
++1. **Preflight (read-only, starts nothing).** Checks Docker is present, the built **host
++   artifacts** exist — the self-built tiles archive (`TILES_PMTILES_PATH`, default
++   `data/tiles/selfhost-romania.pmtiles`), the Photon index (`data/selfhost/photon/photon_data`)
++   and jar — the imported **engine volumes** exist (`howfar-selfhost_nominatim-data`,
++   `howfar-selfhost_ors-graphs`), and the required provider overlay keys are set. If anything
++   is missing it prints what to build and exits `2`, pointing back here — it will **not**
++   silently kick off the ~24-min Nominatim import that a bare `docker compose up` would after a
++   `down -v` (drops the engine volumes) or `rm -rf data/osm` (drops the extract). `--dry-run`
++   stops after this step. Two limits, kept honest: engine-volume verification needs the Docker
++   daemon (if it's unreachable the check is skipped and preflight says so, since `up` then fails
++   fast anyway), and it confirms the volumes *exist*, not that an import ran to completion — an
++   interrupted import leaves a volume behind, so watch the health wait on the first start after
++   an aborted import.
++2. Brings up the app's dev Postgres (root `docker-compose.yml` `db`) and the provider serve
++   stack (`nominatim`, `ors`, `photon`).
++3. **Waits for the dev `db` and the three engines to report `healthy`**, bounded by
++   `SELFHOST_WAIT_SECS` (default 300). If they don't — a fresh box still importing/building, a
++   cold-starting db, or a crash — it exits **without** starting the app, so the app is never
++   pointed at a cold db or dead engines. Raise the timeout
++   for a first cold serve on slow disks, or watch `docker compose -f docker/selfhost/docker-compose.yml logs -f nominatim ors`.
++4. Layers the provider overlay into the app's **process environment** (read straight from
++   `env.selfhost.example`, so the two never drift) and runs `next dev`. Next.js does not
++   override an env var already set in the process, so **`.env` is never touched** — it keeps
++   its public defaults, and only this command runs the app against the local engines. Your
++   existing `DATABASE_URL` / `AUTH_SECRET` in `.env` are still used (the overlay is providers
++   only). This is the automated equivalent of §6 without the merge-into-`.env` step. It also
++   prints a one-time **hard-reload** reminder: if this origin previously loaded a *different*
++   tile archive (e.g. the public Bucharest cut under a plain `npm run dev`), empty-cache reload
++   once or the map may render blank/garbled from stale byte ranges — the same cache trap §6
++   warns about.
++
++Stop the app with **Ctrl-C** (it runs in the foreground); stop everything the command started
++— the provider engines **and** the dev `db` — with `npm run dev:selfhost:down`, which runs
++`docker compose … stop` and **preserves the named volumes** so the next start is a ~15 s serve,
++not a ~24 min re-import. To keep the shared `db` running (another app is on :5433), stop only
++the engines with `docker compose -f docker/selfhost/docker-compose.yml --profile serve --profile import stop`.
++For a fuller teardown (remove containers, or delete the volumes) see [Teardown](#teardown).
++
++> **Not covered here.** `dev:selfhost` only starts the `db` **container**; applying the schema
++> (`prisma migrate deploy`) and importing the amenity catalogue (`npm run amenities:refresh`)
++> are the normal app setup (README Quick start), unchanged. And **transit is still not
++> self-hosted** — `/api/transit` and `/api/reach` keep their public provider (the MOTIS/GTFS
++> gate), so those routes hit the network even under `dev:selfhost`.
++
+ ## 7 — Parity check (public vs local)
+ 
+ The app reads provider env at process start, so run **two** instances from the SAME
+diff --git a/package.json b/package.json
+index 2577bcb..8757db3 100644
+--- a/package.json
++++ b/package.json
+@@ -4,6 +4,8 @@
+   "private": true,
+   "scripts": {
+     "dev": "next dev",
++    "dev:selfhost": "bash docker/selfhost/dev-selfhost.sh",
++    "dev:selfhost:down": "bash docker/selfhost/stop-selfhost.sh",
+     "build": "next build",
+     "start": "next start",
+     "lint": "eslint",
+@@ -17,8 +19,9 @@
+     "test:coverage": "vitest run --coverage",
+     "test:e2e": "playwright test",
+     "selfhost:harness-selftest": "node docker/selfhost/parity-check.mjs --self-test",
+-    "check": "npm run security:google-keys && npm run lint && npm run typecheck && npm test && npm run selfhost:harness-selftest",
+-    "check:ci": "npm run security:google-keys && npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run selfhost:harness-selftest"
++    "selfhost:script-check": "bash docker/selfhost/script-check.sh",
++    "check": "npm run security:google-keys && npm run lint && npm run typecheck && npm test && npm run selfhost:harness-selftest && npm run selfhost:script-check",
++    "check:ci": "npm run security:google-keys && npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run selfhost:harness-selftest && npm run selfhost:script-check"
+   },
+   "dependencies": {
+     "@auth/prisma-adapter": "^2.11.2",
+diff --git a/src/lib/provider-http.ts b/src/lib/provider-http.ts
+index 9425d2e..60f8e24 100644
+--- a/src/lib/provider-http.ts
++++ b/src/lib/provider-http.ts
+@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
+  */
+ 
+ /** Identifies the app to providers that require a UA (Nominatim, Overpass). */
+-export const USER_AGENT = "HowFar/1.0 (+https://howfar-production-b31c.up.railway.app)";
++export const USER_AGENT = "HowFar/1.0 (+https://github.com/joitamihnea1999/HowFar)";
+ 
+ /** Thrown when an upstream provider fails (bad status, timeout, malformed body). */
+ export class ProviderError extends Error {

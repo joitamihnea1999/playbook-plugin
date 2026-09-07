@@ -1,0 +1,686 @@
+diff --git a/docs/SELFHOST.md b/docs/SELFHOST.md
+index b5e3e95..0f2db52 100644
+--- a/docs/SELFHOST.md
++++ b/docs/SELFHOST.md
+@@ -245,6 +245,56 @@ For a fuller teardown (remove containers, or delete the volumes) see [Teardown](
+ > self-hosted** — `/api/transit` and `/api/reach` keep their public provider (the MOTIS/GTFS
+ > gate), so those routes hit the network even under `dev:selfhost`.
+ 
++## 6b — Testing on a phone over LAN
++
++To open the dev app on a real phone on the same Wi-Fi, two things matter: the dev server must
++be reachable on the network (it already is), and Next's dev cross-origin block must allow the
++phone's origin.
++
++1. **Reachability is already on.** `next dev` binds to `0.0.0.0` by default (verified: `next dev --help` →
++   `-H, --hostname <hostname>` default `0.0.0.0`), so it listens on every interface — no host flag needed.
++
++2. **Find the host's LAN address:**
++
++   ```bash
++   hostname -I | awk '{print $1}'      # e.g. 192.168.1.42   (Linux)
++   # or: ip route get 1 | awk '{print $7; exit}'
++   ```
++
++3. **Allow the phone's origin.** Next blocks cross-origin requests to dev-only assets/endpoints
++   (HMR socket, RSC payloads, `/_next/*`) unless the origin is in `allowedDevOrigins`. Point the
++   app at your LAN address via the `ALLOWED_DEV_ORIGINS` env var (comma-separated), then start dev:
++
++   ```bash
++   ALLOWED_DEV_ORIGINS=192.168.1.42 npm run dev
++   # multiple: ALLOWED_DEV_ORIGINS=192.168.1.42,192.168.1.43
++   ```
++
++   > **Hostname only — no scheme, no port.** Next matches the request **hostname** against
++   > `allowedDevOrigins` (`next/dist/server/lib/router-utils/block-cross-site-dev.js` compares
++   > `parsedOrigin.hostname.toLowerCase()`), so `http://192.168.1.42:3000` would **never** match.
++   > `next.config.ts` reads `ALLOWED_DEV_ORIGINS` through `parseAllowedDevOrigins`
++   > (`src/lib/dev-origins.ts`), which is forgiving — it strips a stray scheme/port down to the
++   > bare hostname — but the value to reach for is just the IP/hostname. Unset ⇒ default (localhost
++   > only), byte-identical to no config.
++
++4. **Browse from the phone:** `http://192.168.1.42:3000`. (For `dev:selfhost`, prefix the same
++   var: `ALLOWED_DEV_ORIGINS=192.168.1.42 npm run dev:selfhost` — note transit/tiles caveats in §6a still apply.)
++
++### Stale service worker (foreign-route 404s)
++
++A service worker is **origin-scoped** — it controls exactly the origin (scheme + host + port) it
++was registered on, nothing else. If a *different* app was ever served on an origin you now load
++(the classic case: a prior project on `http://localhost:3000`, but equally the LAN origin
++`http://192.168.1.42:3000`), its **still-registered SW can intercept requests and 404 this app's
++routes** on that same origin — the app's own routes look "not found" even though the server has
++them. Note a `localhost:3000` SW does **not** affect `192.168.1.42:3000` (different origins), so
++this bites per-origin: whichever origin you actually load is the one to clear.
++
++**Fix (on the affected origin):** open it in a private/incognito window (no SWs), **or** in
++DevTools → Application → Service workers → *Unregister* (and *Clear site data*), then hard-reload.
++HowFar registers no service worker of its own, so unregistering is always safe here.
++
+ ## 7 — Parity check (public vs local)
+ 
+ The app reads provider env at process start, so run **two** instances from the SAME
+diff --git a/next.config.ts b/next.config.ts
+index 319153d..61ce0bd 100644
+--- a/next.config.ts
++++ b/next.config.ts
+@@ -1,10 +1,17 @@
+ import type { NextConfig } from "next";
+ 
++import { parseAllowedDevOrigins } from "./src/lib/dev-origins";
++
+ const nextConfig: NextConfig = {
+   // Tree-shake barrel-style packages when the client pulls basemap style helpers.
+   experimental: {
+     optimizePackageImports: ["@protomaps/basemaps"],
+   },
++  // LAN device testing (dev only): set ALLOWED_DEV_ORIGINS to the host's LAN
++  // hostname/IP so the dev server accepts cross-origin requests from a phone on
++  // the same network (see docs/SELFHOST.md). Unset → undefined → default behaviour
++  // (only localhost), byte-identical to having no key.
++  allowedDevOrigins: parseAllowedDevOrigins(process.env.ALLOWED_DEV_ORIGINS),
+ };
+ 
+ export default nextConfig;
+diff --git a/src/features/isochrones/server/transit-plan.ts b/src/features/isochrones/server/transit-plan.ts
+index e796c28..1625497 100644
+--- a/src/features/isochrones/server/transit-plan.ts
++++ b/src/features/isochrones/server/transit-plan.ts
+@@ -3,7 +3,7 @@ import { PACE_MODEL } from "@/features/isochrones/pace";
+ import { decodePolyline } from "@/features/isochrones/polyline";
+ import { hasTransitLeg } from "@/features/isochrones/transit-classify";
+ import { providerConfig, taggedCacheKey } from "@/lib/env";
+-import { providerFetch, ProviderError, roundCoord, USER_AGENT } from "@/lib/provider-http";
++import { isRetriableFetchError, providerFetch, ProviderError, roundCoord, USER_AGENT } from "@/lib/provider-http";
+ 
+ /**
+  * Transitous MOTIS journey planning (server-side, cached) for the right-click
+@@ -26,18 +26,27 @@ const PLAN_PATH = "/api/v1/plan";
+  * first attempt + the bounded retry, all under ONE absolute deadline (an
+  * AbortController armed at entry — a fixed per-attempt timeout would start
+  * only after the shared-host queue, so a `/plan` parked behind a slow
+- * one-to-all could finish and get CACHED after the client's 12s deadline
++ * one-to-all could finish and get CACHED after the client's deadline
+  * (`REACH_TIMEOUT_MS`) had already shown an error, and the very next click
+  * would "heal" — the flaky-product read this task exists to kill. Budget <
+  * client deadline is asserted in transit-plan.test.ts; the overrun path
+- * throws a ProviderError and caches nothing. */
+-export const PLAN_BUDGET_MS = 10_000;
++ * throws a ProviderError and caches nothing. Task 018 raised it 10s→12s: the
++ * owner saw "aborted at exactly 10.0s … the remote was just slow; identical
++ * retries succeed", i.e. the remote wanted ~10s and hit the OLD 10s ceiling — a
++ * MODESTLY longer single attempt (the owner's own suggestion) lets that remote
++ * SUCCEED on the first try, without a doomed short-timeout retry. A retry still
++ * fires for a FAST failure (network drop) with budget to spare; a genuine
++ * timeout has no budget left, an honest failure the client's next click reheals. */
++export const PLAN_BUDGET_MS = 12_000;
+ /** Don't bother retrying unless at least this much of the budget remains — a
+  * retry needs the configured transit spacing (default 1.5 s — the interval is
+  * config-driven since task 009) plus a realistic response window. Tuned for the
+  * default; a self-host that sets a very different TRANSIT_MIN_INTERVAL_MS may
+  * want this derived from the interval (parked follow-up). */
+ const RETRY_MIN_REMAINING_MS = 3_000;
++/** Short backoff before the single retry (transient network drop OR an
++ * effectively-empty response), bounded by the absolute budget. */
++const RETRY_BACKOFF_MS = 250;
+ // Schedules are stable within a day and the departure is in the cache key, so a
+ // few hours of reuse is safe and keeps repeat right-clicks instant.
+ const TTL_MS = 6 * 60 * 60 * 1000;
+@@ -343,8 +352,8 @@ async function fetchPlanBody(
+       provider: "transit",
+       rateHost: host,
+       minIntervalMs,
+-      // The per-attempt timeout is a ceiling only — the ABSOLUTE budget signal
+-      // is what bounds queue+attempts end-to-end (see PLAN_BUDGET_MS).
++      // The attempt runs to the absolute budget; the budget signal is what
++      // bounds the whole call (single modestly-long attempt, task 018).
+       timeoutMs: PLAN_BUDGET_MS,
+       signal: budgetSignal,
+       init: { headers: { "User-Agent": USER_AGENT } },
+@@ -352,8 +361,12 @@ async function fetchPlanBody(
+     if (!res.ok) throw new ProviderError(`transitous plan responded ${res.status}`);
+     body = (await res.json()) as MotisPlanBody;
+   } catch (err) {
+-    if (err instanceof ProviderError) throw err;
+-    throw new ProviderError(`transitous plan request failed: ${(err as Error).message}`);
++    if (err instanceof ProviderError) throw err; // upstream STATUS — deterministic (retriable stays false)
++    // A network drop / abort is transient — tag it so the unified retry loop in
++    // fetchAndParse can retry it (once, within budget) after wrapping.
++    throw new ProviderError(`transitous plan request failed: ${(err as Error).message}`, {
++      retriable: isRetriableFetchError(err),
++    });
+   }
+   if (!Array.isArray(body?.itineraries)) {
+     throw new ProviderError("transitous plan returned a malformed response (no itineraries array)");
+@@ -387,38 +400,67 @@ async function fetchAndParse(
+   const budgetTimer = setTimeout(() => budget.abort(), PLAN_BUDGET_MS);
+ 
+   // What the budget guarantees: no SUCCESS can resolve (and thus be cached)
+-  // after the deadline — the signal kills an in-flight fetch at 10s, so a
+-  // late answer can never be cached after the client's 12s deadline showed an
+-  // error (the heal-loop). What it does NOT bound: the shared-host queue wait
+-  // itself, so the resulting ProviderError may surface later than 10s — an
++  // after the deadline — the signal kills an in-flight fetch at PLAN_BUDGET_MS,
++  // so a late answer can never be cached after the client's REACH_TIMEOUT_MS
++  // deadline showed an error (the heal-loop). What it does NOT bound: the
++  // shared-host queue wait itself, so the resulting ProviderError may surface
++  // later than PLAN_BUDGET_MS — an
+   // honest, uncached, retryable failure (review: accepted residual; making the
+   // limiter signal-aware would touch every provider for no material gain).
+   const isTransitAnswer = (p: ReachPlan): boolean => p.reachable && hasTransitLeg(p.legs);
+   const usableDirect = (b: MotisPlanBody): boolean =>
+     (Array.isArray(b.direct) ? b.direct : []).some((it) => it && durationSeconds(it.duration) > 0);
+-  let plan: ReachPlan;
++  const canRetry = () => Date.now() + RETRY_MIN_REMAINING_MS < deadline;
++
++  // ONE unified retry loop, capped at TWO fetchPlanBody calls total (task 018 —
++  // nesting a fetch-failure retry INSIDE the empty-response retry could reach
++  // 3–4 upstream calls on the shared 1.5 s transit bucket, poor citizenship on a
++  // community host). A single retry
++  // covers BOTH transient signatures — a network drop/abort (`err.retriable`)
++  // and an effectively-empty response (no transit AND no direct, the replica-
++  // mid-update signature) — each retried at most once, never past the budget,
++  // and a failed retry NEVER discards a determinate first answer.
++  let plan: ReachPlan | null = null;
+   try {
+-    const body = await fetchPlanBody(url, host, intervals.transit, budget.signal);
+-    plan = bestPlan(body, { maxSeconds });
+-    // One bounded retry when the response yields NO public-transport answer AND
+-    // no direct (walk/bike) answer either — an effectively-empty response is
+-    // the signature of a transient provider miss (replica mid-update), which
+-    // would otherwise be cached as "No public-transport route" for this cell.
+-    // A direct-only response is a DETERMINATE close-destination answer and is
+-    // not retried (review: citizenship). Retry only with real budget left, and
+-    // NEVER let a failed retry discard the first, determinate answer (review).
+-    if (!isTransitAnswer(plan) && !usableDirect(body) && Date.now() + RETRY_MIN_REMAINING_MS < deadline) {
++    for (let attempt = 1; attempt <= 2; attempt++) {
++      let body: MotisPlanBody;
+       try {
+-        const second = bestPlan(await fetchPlanBody(url, host, intervals.transit, budget.signal), { maxSeconds });
+-        if (isTransitAnswer(second)) plan = second;
+-      } catch {
+-        // The first response already answers "no transit here" — a failed
+-        // retry must not turn that determinate answer into a 502.
++        body = await fetchPlanBody(url, host, intervals.transit, budget.signal);
++      } catch (err) {
++        // Keep a DETERMINATE reachable first answer (transit OR a walk-only/
++        // UNKNOWN-mode itinerary) rather than discard it on a retry throw (G4).
++        if (plan?.reachable) break;
++        const retriable = err instanceof ProviderError && err.retriable;
++        // A suspect-empty first answer we retried to confirm: retry only a
++        // transient failure with budget to spare.
++        if (attempt < 2 && retriable && canRetry()) {
++          await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS));
++          continue;
++        }
++        // Confirmation retry failed. If it was TRANSIENT (network/abort) we still
++        // haven't confirmed the empty — surface an honest failure, cache nothing
++        // (F1 Critical). But a DETERMINISTIC failure (429/503/malformed) gives no
++        // new reachability info, so keep the first empty observation rather than
++        // turn a correct "no route" into a 502 on a rate-limited host (H4).
++        if (plan !== null && !retriable) break;
++        throw err;
++      }
++      const candidate = bestPlan(body, { maxSeconds });
++      if (isTransitAnswer(candidate)) {
++        plan = candidate; // best possible answer — done
++        break;
+       }
++      if (plan === null) plan = candidate; // remember the first determinate (not-reachable / direct)
++      if (usableDirect(body)) break; // a direct (walk/bike) answer is DETERMINATE — don't retry (citizenship)
++      if (attempt >= 2 || !canRetry()) break; // effectively-empty, but out of retries/budget
++      await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS)); // empty → retry once
+     }
+   } finally {
+     clearTimeout(budgetTimer);
+   }
++  // Unreachable — the loop sets plan on any successful fetch and throws otherwise
++  // — but keeps the type honest.
++  if (plan === null) throw new ProviderError("transitous plan request failed: no response");
+   // TTL by answer kind: only a real public-transport answer is stable enough to
+   // keep for hours; a plan with no transit leg (unreachable, or the walk/bike
+   // direct fallback — both rendered as "No public-transport route") heals in
+diff --git a/src/features/isochrones/server/transit.ts b/src/features/isochrones/server/transit.ts
+index 0d18fdc..371ac6b 100644
+--- a/src/features/isochrones/server/transit.ts
++++ b/src/features/isochrones/server/transit.ts
+@@ -18,7 +18,7 @@ import {
+ import { getCachedSafe, setCachedSafe } from "@/lib/api-cache";
+ import { LAUNCH_BBOX } from "@/lib/bounds";
+ import { providerConfig, taggedCacheKey } from "@/lib/env";
+-import { providerFetch, ProviderError, roundCoord, USER_AGENT } from "@/lib/provider-http";
++import { providerFetch, ProviderError, retryOnceOnTransient, roundCoord, USER_AGENT } from "@/lib/provider-http";
+ import { withTimeout } from "@/lib/timeout";
+ 
+ /**
+@@ -37,7 +37,17 @@ const ONE_TO_ALL_PATH = "/api/v6/one-to-all";
+ // Interval is config-driven (task 009, `intervals.transit`, default 1500 ms;
+ // community-run — be a good citizen). Shared with transit-plan via the same
+ // `provider:"transit"` bucket, so the two MOTIS paths keep one chain.
+-const TIMEOUT_MS = 20_000; // one-to-all is heavy (~1.5–3 s live)
++// Absolute end-to-end budget for the one-to-all fetch: a fast network drop /
++// abort ("fetch failed") heals on ONE retry (task 018 — the owner saw
++// `/api/transit` + the amenities-in-transit cascade fail intermittently, healing
++// on an identical retry), but the retry must NOT double the worst-case latency
++// on a genuinely-slow/dead provider. The client `/api/transit` fetch has no
++// deadline of its own, so this budget is what bounds the whole call: a stalled
++// attempt aborts at the budget signal, and the retry only fires when a real
++// attempt's worth of budget remains — so worst case stays ~one attempt, not 2×.
++export const ONE_TO_ALL_BUDGET_MS = 24_000;
++export const ONE_TO_ALL_RETRY_MIN_REMAINING_MS = 5_000; // don't retry without room for a real attempt
++const ONE_TO_ALL_RETRY_BACKOFF_MS = 250;
+ const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+ const MAX_TRAVEL_MIN = THRESHOLDS[THRESHOLDS.length - 1]; // 45
+ // MOTIS access-walk speed, egress stamping, and the unioned ORS ring all read
+@@ -232,25 +242,49 @@ async function fetchAndBuild(
+ 
+   const { transitBase, intervals } = providerConfig();
+ 
++  const url =
++    `${transitBase}${ONE_TO_ALL_PATH}?one=${lat},${lng}&maxTravelTime=${MAX_TRAVEL_MIN}` +
++    `&transitModes=TRANSIT&time=${encodeURIComponent(departure)}` +
++    `&pedestrianSpeed=${paceModel.pedestrianSpeedMs}&useRoutedTransfers=true`;
++
++  // Absolute end-to-end budget spanning the attempt + one retry (see the
++  // constants): a stalled attempt is aborted by this signal, and the retry only
++  // fires with real budget left, so a fast network drop heals while a dead
++  // provider still fails fast (~one attempt), never doubling to ~40 s.
++  const deadline = Date.now() + ONE_TO_ALL_BUDGET_MS;
++  const budget = new AbortController();
++  const budgetTimer = setTimeout(() => budget.abort(), ONE_TO_ALL_BUDGET_MS);
++
+   // A stalled/unreachable/garbled upstream is a provider error (→ 502), not a 500.
++  // The status check AND the body read live INSIDE the retried attempt so an
++  // undici mid-body `TypeError: terminated` (a realistic flaky-LAN failure on
++  // the large one-to-all payload) is retried like any network drop; a non-ok
++  // STATUS throws a (non-retriable) ProviderError so it is NOT retried.
+   let body: OneToAllBody;
+   try {
+-    const url =
+-      `${transitBase}${ONE_TO_ALL_PATH}?one=${lat},${lng}&maxTravelTime=${MAX_TRAVEL_MIN}` +
+-      `&transitModes=TRANSIT&time=${encodeURIComponent(departure)}` +
+-      `&pedestrianSpeed=${paceModel.pedestrianSpeedMs}&useRoutedTransfers=true`;
+-    const res = await providerFetch(url, {
+-      provider: "transit",
+-      rateHost: new URL(transitBase).host,
+-      minIntervalMs: intervals.transit,
+-      timeoutMs: TIMEOUT_MS,
+-      init: { headers: { "User-Agent": USER_AGENT } },
+-    });
+-    if (!res.ok) throw new ProviderError(`transitous responded ${res.status}`);
+-    body = (await res.json()) as OneToAllBody;
++    body = await retryOnceOnTransient(
++      async () => {
++        const res = await providerFetch(url, {
++          provider: "transit",
++          rateHost: new URL(transitBase).host,
++          minIntervalMs: intervals.transit,
++          timeoutMs: ONE_TO_ALL_BUDGET_MS,
++          signal: budget.signal,
++          init: { headers: { "User-Agent": USER_AGENT } },
++        });
++        if (!res.ok) throw new ProviderError(`transitous responded ${res.status}`);
++        return (await res.json()) as OneToAllBody;
++      },
++      {
++        backoffMs: ONE_TO_ALL_RETRY_BACKOFF_MS,
++        canRetry: () => Date.now() + ONE_TO_ALL_RETRY_MIN_REMAINING_MS < deadline,
++      },
++    );
+   } catch (err) {
+     if (err instanceof ProviderError) throw err;
+     throw new ProviderError(`transitous request failed: ${(err as Error).message}`);
++  } finally {
++    clearTimeout(budgetTimer);
+   }
+ 
+   // Distinguish a garbled response (no stop array) from a valid zero-stop result
+@@ -262,7 +296,12 @@ async function fetchAndBuild(
+   const stops = parseStops(body.all);
+   // Bounded wait: a stalled ORS body or a deep rate-limit queue must not hold
+   // the transit response hostage (the walk ring is polish, not a dependency).
+-  const timedWalk = await withTimeout(walkPromise, WALK_RINGS_TIMEOUT_MS);
++  // Capped at WHICHEVER IS SMALLER — the walk-ring timeout OR the remaining
++  // one-to-all budget — so the WHOLE /api/transit response really is bounded by
++  // ONE_TO_ALL_BUDGET_MS (the walk timer no longer stacks a fresh 8 s on top; the
++  // unfinished ORS call keeps running into the 7-day cache as before). Task 018 H3.
++  const walkWaitMs = Math.max(0, Math.min(WALK_RINGS_TIMEOUT_MS, deadline - Date.now()));
++  const timedWalk = await withTimeout(walkPromise, walkWaitMs);
+   if (!timedWalk.ok) {
+     console.error("[transit] walking rings timed out; radial origin fallback (ORS call continues into cache)");
+   }
+diff --git a/src/features/map/hover-controller.ts b/src/features/map/hover-controller.ts
+index 4f73194..a94e30a 100644
+--- a/src/features/map/hover-controller.ts
++++ b/src/features/map/hover-controller.ts
+@@ -2,6 +2,7 @@ import type maplibregl from "maplibre-gl";
+ 
+ import type { LoadState } from "@/features/map/load-state";
+ import { markerPickPad, pickAllWithin, pickNearestWithin } from "@/features/map/marker-pick";
++import { safeQueryRenderedFeatures } from "@/features/map/query-features";
+ import { pinFootprintRadius } from "@/features/amenities/amenity-cluster";
+ 
+ export interface AmenityPick {
+@@ -37,7 +38,7 @@ export function createHoverController({
+       [point.x - pad, point.y - pad],
+       [point.x + pad, point.y + pad],
+     ];
+-    const hits = map.queryRenderedFeatures(bbox, { layers: ["amenity-markers"] });
++    const hits = safeQueryRenderedFeatures(map, bbox, { layers: ["amenity-markers"] });
+     const candidates = [];
+     for (const f of hits) {
+       if (f.geometry.type !== "Point") continue;
+@@ -65,12 +66,7 @@ export function createHoverController({
+       [point.x - pad, point.y - pad],
+       [point.x + pad, point.y + pad],
+     ];
+-    let hits: maplibregl.MapGeoJSONFeature[];
+-    try {
+-      hits = map.queryRenderedFeatures(bbox, { layers: ["amenity-markers"] });
+-    } catch {
+-      return [];
+-    }
++    const hits = safeQueryRenderedFeatures(map, bbox, { layers: ["amenity-markers"] });
+     const candidates = [];
+     for (const f of hits) {
+       if (f.geometry.type !== "Point") continue;
+diff --git a/src/features/map/query-features.ts b/src/features/map/query-features.ts
+new file mode 100644
+index 0000000..a9b5b0e
+--- /dev/null
++++ b/src/features/map/query-features.ts
+@@ -0,0 +1,87 @@
++import type maplibregl from "maplibre-gl";
++
++/**
++ * `map.queryRenderedFeatures` can throw `feature index out of bounds` when it is
++ * called while a GeoJSON source is mid-`setData` swap — the render feature index
++ * and the source data momentarily disagree, and MapLibre indexes past the end.
++ * EVERY hit-test caller races that swap (amenity hover/pick, the drawn route
++ * path, the drawn reach journey), so they all go through this guard: a throw
++ * means "nothing under the point right now", never a crash.
++ *
++ * Task 018 — the owner saw repeated `Uncaught Error: feature index out of bounds`
++ * from the hover pick (`hover-controller.ts`) racing the amenity-source swap; the
++ * click path (`pickAmenitiesAt`) already caught it, but the sibling hit-tests did
++ * not. This is the single shared guard so the whole class stays fixed.
++ */
++export function safeQueryRenderedFeatures(
++  map: maplibregl.Map,
++  geometry: [maplibregl.PointLike, maplibregl.PointLike],
++  options: { layers?: string[] },
++): maplibregl.MapGeoJSONFeature[] {
++  try {
++    return map.queryRenderedFeatures(geometry, options);
++  } catch {
++    return [];
++  }
++}
++
++/**
++ * Fail-CLOSED variant for a CLICK GUARD — "is a feature under the point, so this
++ * click should be SWALLOWED (skip starting a new selection)?" On a source-swap
++ * throw, return `true`: an indeterminate result must NOT let the click fall
++ * through and reset the user's selection (task 018 — returning `[]` here would
++ * be fail-open and silently drop the selection). Distinct from
++ * `safeQueryRenderedFeatures`, whose `[]`-on-throw is correct for hover/pick
++ * (nothing highlighted), but wrong as a guard predicate.
++ */
++export function hitTestHasFeature(
++  map: maplibregl.Map,
++  geometry: [maplibregl.PointLike, maplibregl.PointLike],
++  options: { layers?: string[] },
++): boolean {
++  try {
++    return map.queryRenderedFeatures(geometry, options).length > 0;
++  } catch {
++    return true;
++  }
++}
++
++/**
++ * Click-GUARD hit-test — "is the drawn route/journey under the point, so this
++ * click should be swallowed?" — that fails CLOSED two ways: (1) filters the
++ * layer ids through `getLayer`, and if NONE resolve yet (a mid-style-reload
++ * race) returns `true` — MapLibre returns `[]` for unknown ids WITHOUT throwing,
++ * so an indeterminate "no layers" state must still swallow the click rather than
++ * fall through to a selection reset; (2) delegates to `hitTestHasFeature`, which
++ * returns `true` on a source-swap throw. One shape shared by the route-path and
++ * reach-journey guards (task 018 G5/H5, rule 5).
++ */
++export function activeGuardHasFeature(
++  map: maplibregl.Map,
++  geometry: [maplibregl.PointLike, maplibregl.PointLike],
++  layerIds: string[],
++): boolean {
++  const layers = layerIds.filter((id) => map.getLayer(id));
++  if (layers.length === 0) return true;
++  return hitTestHasFeature(map, geometry, { layers });
++}
++
++/**
++ * `map.querySourceFeatures` throws the SAME `feature index out of bounds` mid a
++ * source `setData` swap as `queryRenderedFeatures` does. The rAF stamp polls
++ * (`route-path` / `reach-path`) call it every frame on the very source they just
++ * swapped, so an unguarded throw is an Uncaught Error in a rAF callback (the
++ * owner's reported symptom) that also strands the poll. Returns `[]` on a throw —
++ * the caller re-polls next frame once the swap settles (task 018).
++ */
++export function safeQuerySourceFeatures(
++  map: maplibregl.Map,
++  sourceId: string,
++  params?: Parameters<maplibregl.Map["querySourceFeatures"]>[1],
++): ReturnType<maplibregl.Map["querySourceFeatures"]> {
++  try {
++    return map.querySourceFeatures(sourceId, params);
++  } catch {
++    return [];
++  }
++}
+diff --git a/src/features/map/reach-directions-controller.ts b/src/features/map/reach-directions-controller.ts
+index 537dcc0..8e82839 100644
+--- a/src/features/map/reach-directions-controller.ts
++++ b/src/features/map/reach-directions-controller.ts
+@@ -20,7 +20,7 @@ import type { EdgeInsets } from "@/features/map/route-framing";
+  * below was panel-caught and must not regress):
+  *   - the reach view state machine (hint / outside / none / loading / error /
+  *     transit-with-steps) — public-transport only since task 060;
+- *   - the `/api/reach` fetch under ONE generation + abort + 12s deadline, with
++ *   - the `/api/reach` fetch under ONE generation + abort + REACH_TIMEOUT_MS deadline, with
+  *     the "invalidate gen BEFORE abort" and "late-json guard" fixes;
+  *   - orchestrating the drawn journey, amenity declutter, destination pin, and
+  *     the camera frame;
+@@ -37,8 +37,11 @@ import type { EdgeInsets } from "@/features/map/route-framing";
+  * assert the server's end-to-end plan budget (PLAN_BUDGET_MS) stays strictly
+  * below it — the server must answer or fail while the client is still
+  * listening, or a slow success gets cached after the client gave up and the
+- * next click "heals". */
+-export const REACH_TIMEOUT_MS = 12000;
++ * next click "heals". Task 018 raised it to 15s to sit a ≥2s heal-loop margin
++ * above the raised PLAN_BUDGET_MS (12s, one modestly-long attempt); a ceiling
++ * test caps it at 15s so the pair can't drift up and make every genuine phone
++ * failure slower. */
++export const REACH_TIMEOUT_MS = 15000;
+ 
+ export interface ReachStepView {
+   primary: string;
+diff --git a/src/features/map/reach-journey-controller.ts b/src/features/map/reach-journey-controller.ts
+index 3a7499b..edcb650 100644
+--- a/src/features/map/reach-journey-controller.ts
++++ b/src/features/map/reach-journey-controller.ts
+@@ -6,6 +6,7 @@ import type { EdgeInsets } from "@/features/map/route-framing";
+ import type { LoadState } from "@/features/map/load-state";
+ import { EMPTY_FC } from "@/features/map/map-setup";
+ import { MARKER_PICK_PAD_PX } from "@/features/map/marker-pick";
++import { activeGuardHasFeature, safeQuerySourceFeatures } from "@/features/map/query-features";
+ import { routeFitBreathingRoom, runRoutePathStampPoll } from "@/features/map/route-framing";
+ 
+ /**
+@@ -216,12 +217,10 @@ export function createReachJourneyController({
+       // land), so a bare `.length > 0` could stamp "rendered" off the pin alone.
+       // Require an actual leg/stop feature so the stamp means the TRIP is drawn.
+       hasFeatures: () =>
+-        map
+-          .querySourceFeatures("reach-path")
+-          .some((f) => {
+-            const kind = (f.properties as { kind?: string } | null)?.kind;
+-            return kind === "leg" || kind === "stop";
+-          }),
++        safeQuerySourceFeatures(map, "reach-path").some((f) => {
++          const kind = (f.properties as { kind?: string } | null)?.kind;
++          return kind === "leg" || kind === "stop";
++        }),
+       now: () => performance.now(),
+       schedule: (tick) => requestAnimationFrame(tick),
+       cancelled: () => drawGen !== gen,
+@@ -261,10 +260,12 @@ export function createReachJourneyController({
+       [point.x - pad, point.y - pad],
+       [point.x + pad, point.y + pad],
+     ];
+-    const layers = ["reach-path-transit", "reach-path-walk", "reach-path-stops", "reach-path-destination"].filter(
+-      (id) => map.getLayer(id),
+-    );
+-    return map.queryRenderedFeatures(bbox, { layers }).length > 0;
++    return activeGuardHasFeature(map, bbox, [
++      "reach-path-transit",
++      "reach-path-walk",
++      "reach-path-stops",
++      "reach-path-destination",
++    ]);
+   }
+ 
+   /** Fit the camera to the drawn journey so the whole path is visible beside the
+diff --git a/src/features/map/route-path-controller.ts b/src/features/map/route-path-controller.ts
+index ea95af6..08ac6d5 100644
+--- a/src/features/map/route-path-controller.ts
++++ b/src/features/map/route-path-controller.ts
+@@ -6,6 +6,7 @@ import {
+   type RoutePath,
+ } from "@/features/amenities/route-path";
+ import type { EdgeInsets } from "@/features/map/route-framing";
++import { activeGuardHasFeature, safeQuerySourceFeatures } from "@/features/map/query-features";
+ import {
+   computeRouteFraming,
+   routeFitBreathingRoom,
+@@ -156,7 +157,7 @@ export function createRoutePathController({
+     // returns without rescheduling — so no cancelAnimationFrame is needed.
+     const drawGen = gen;
+     runRoutePathStampPoll({
+-      hasFeatures: () => map.querySourceFeatures("route-path").length > 0,
++      hasFeatures: () => safeQuerySourceFeatures(map, "route-path").length > 0,
+       now: () => performance.now(),
+       schedule: (tick) => requestAnimationFrame(tick),
+       cancelled: () => drawGen !== gen,
+@@ -222,7 +223,7 @@ export function createRoutePathController({
+       [point.x - pad, point.y - pad],
+       [point.x + pad, point.y + pad],
+     ];
+-    return map.queryRenderedFeatures(bbox, { layers: ["route-path-stops", "route-path-line"] }).length > 0;
++    return activeGuardHasFeature(map, bbox, ["route-path-stops", "route-path-line"]);
+   }
+ 
+   return {
+diff --git a/src/lib/dev-origins.ts b/src/lib/dev-origins.ts
+new file mode 100644
+index 0000000..62533e2
+--- /dev/null
++++ b/src/lib/dev-origins.ts
+@@ -0,0 +1,33 @@
++/**
++ * Parse `ALLOWED_DEV_ORIGINS` (a comma-separated env var) into the list Next's
++ * top-level `allowedDevOrigins` config expects, for LAN device testing of the
++ * dev server (task 018 — formalizes the owner's manual `next.config.ts` edit).
++ *
++ * Next compares ONLY the request HOSTNAME against these entries
++ * (`next/dist/server/lib/router-utils/block-cross-site-dev.js` matches
++ * `parsedOrigin.hostname.toLowerCase()`), so a scheme or `:port` on an entry
++ * would never match. We therefore normalize each entry to a bare, lowercased
++ * hostname — e.g. `http://192.168.1.42:3000` → `192.168.1.42` — while preserving
++ * a wildcard entry like `*.local-origin.dev`.
++ *
++ * Returns `undefined` when unset/blank so `next.config.ts` is byte-identical to
++ * having no `allowedDevOrigins` key at all (the default deployment is unchanged).
++ */
++export function parseAllowedDevOrigins(raw: string | undefined): string[] | undefined {
++  if (!raw) return undefined;
++  const hostnames = raw
++    .split(",")
++    .map(hostnameOf)
++    .filter((h) => h.length > 0);
++  return hostnames.length > 0 ? hostnames : undefined;
++}
++
++/** Reduce one origin entry to the bare hostname Next actually matches on. */
++function hostnameOf(entry: string): string {
++  let s = entry.trim();
++  if (!s) return "";
++  s = s.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, ""); // strip a leading scheme://
++  s = s.split("/", 1)[0]; // drop any path/query
++  s = s.replace(/:\d+$/, ""); // drop a trailing :port
++  return s.trim().toLowerCase();
++}
+diff --git a/src/lib/provider-http.ts b/src/lib/provider-http.ts
+index 60f8e24..abcd504 100644
+--- a/src/lib/provider-http.ts
++++ b/src/lib/provider-http.ts
+@@ -17,11 +17,59 @@ import { createHash } from "node:crypto";
+ /** Identifies the app to providers that require a UA (Nominatim, Overpass). */
+ export const USER_AGENT = "HowFar/1.0 (+https://github.com/joitamihnea1999/HowFar)";
+ 
+-/** Thrown when an upstream provider fails (bad status, timeout, malformed body). */
++/** Thrown when an upstream provider fails (bad status, timeout, malformed body).
++ * `retriable` marks a failure a caller may retry once (a transient network drop
++ * or our own abort/timeout, as opposed to a deterministic upstream status);
++ * clients that wrap raw fetch errors set it from `isRetriableFetchError` so a
++ * retry loop can classify AFTER wrapping (task 018). */
+ export class ProviderError extends Error {
+-  constructor(message: string) {
++  readonly retriable: boolean;
++  constructor(message: string, opts?: { retriable?: boolean }) {
+     super(message);
+     this.name = "ProviderError";
++    this.retriable = opts?.retriable ?? false;
++  }
++}
++
++/**
++ * True for a TRANSIENT upstream failure an identical retry is known to heal: a
++ * network-level fetch rejection (undici throws `TypeError`, e.g. "fetch failed"
++ * / "network down") or an abort/timeout (`AbortError` / `TimeoutError`, incl.
++ * our own request-deadline abort). A `ProviderError` — which wraps a real
++ * upstream STATUS — is deterministic and NOT retriable (don't hammer a provider
++ * that is actively refusing). Task 018: the owner saw `/api/transit` + `/api/reach`
++ * fail intermittently on exactly these shapes, healing on an identical retry.
++ */
++export function isRetriableFetchError(err: unknown): boolean {
++  if (err instanceof ProviderError) return false;
++  if (!(err instanceof Error)) return false;
++  if (err.name === "AbortError" || err.name === "TimeoutError") return true;
++  // undici surfaces network failures as TypeError ("fetch failed"); the app's
++  // own tests use `new TypeError("network down")` for that shape.
++  if (err instanceof TypeError) return true;
++  return /fetch failed|network|aborted|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|terminated/i.test(
++    err.message,
++  );
++}
++
++/**
++ * Run `attempt`; on ONE transient failure (`isRetriableFetchError`) wait
++ * `backoffMs` then run it exactly once more. Deterministic failures rethrow
++ * immediately, and `canRetry` (when given) can veto the retry — e.g. a caller
++ * with an absolute time budget refuses a retry that wouldn't fit (task 018).
++ * Bounded at two attempts total.
++ */
++export async function retryOnceOnTransient<T>(
++  attempt: () => Promise<T>,
++  opts: { backoffMs: number; canRetry?: () => boolean },
++): Promise<T> {
++  try {
++    return await attempt();
++  } catch (err) {
++    if (!isRetriableFetchError(err)) throw err;
++    if (opts.canRetry && !opts.canRetry()) throw err;
++    if (opts.backoffMs > 0) await new Promise((resolve) => setTimeout(resolve, opts.backoffMs));
++    return attempt();
+   }
+ }
+ 

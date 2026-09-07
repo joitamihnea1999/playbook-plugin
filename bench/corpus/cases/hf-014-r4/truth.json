@@ -1,0 +1,82 @@
+{
+  "findings": [
+    {
+      "id": "D1",
+      "file": "src/app/api/ready/route.ts",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "The 'definitive grep' claim was overstated: src/ comments still name the retired platform (ready/route.ts ×2) (opus#3).",
+      "fix_commit": "6208fe6",
+      "fix_evidence": "matches the configured extent — the deployment's"
+    },
+    {
+      "id": "D2",
+      "file": "src/lib/api-cache.ts",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "api-cache.ts comment still names the retired platform (opus#3).",
+      "fix_commit": "6208fe6",
+      "fix_evidence": "(single-instance friendly)"
+    },
+    {
+      "id": "D3",
+      "file": "src/auth.ts",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "auth.ts comment still names the retired platform (opus#3).",
+      "fix_commit": "6208fe6",
+      "fix_evidence": "A reverse proxy terminates TLS in deployment"
+    },
+    {
+      "id": "I1",
+      "file": "docker/selfhost/script-check.sh",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "script-check has no positive control: all three cases assert exit 2, so an always-failing preflight passes (opus#1).",
+      "fix_commit": "6208fe6",
+      "fix_evidence": "assert \"$rc\" 0 \"Preflight OK\""
+    },
+    {
+      "id": "D4",
+      "file": "docs/BRIEF.md",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "BRIEF.md still commits to the retired hosting; judges split (sonnet: aspirational spec), resolved in the safe direction with a dated superseded note (opus#4, codex-terra).",
+      "fix_commit": "6208fe6",
+      "fix_evidence": "Hosting superseded (2026-08-29)"
+    },
+    {
+      "id": "D5",
+      "file": "README.md",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "README says 'Data (live)' with a weekly cadence that no longer runs (codex-sol#4).",
+      "fix_commit": "6208fe6",
+      "fix_evidence": "Data sources: Nominatim"
+    },
+    {
+      "id": "I2",
+      "file": "docker/selfhost/dev-selfhost.sh",
+      "symbol": null,
+      "severity": "Important",
+      "historical_outcome": "accepted+fixed",
+      "failure_mode": "A normal startup proceeds when the Docker daemon was unreachable at preflight (volumes unverified), and the Photon jar/index are not checked non-empty (codex-sol#1, #2).",
+      "fix_commit": "6208fe6",
+      "fix_evidence": "Cannot start: the Docker daemon was unreachable at preflight"
+    }
+  ],
+  "known_rejects": [
+    {
+      "id": "RJ1",
+      "claim": "add a fake-docker lifecycle test harness",
+      "why_rejected": "Over-engineering for local dev tooling; the real end-to-end smoke (up → health → local-engine responses → symmetric down → volumes preserved) is the lifecycle proof.",
+      "file": "docker/selfhost/script-check.sh"
+    }
+  ]
+}
