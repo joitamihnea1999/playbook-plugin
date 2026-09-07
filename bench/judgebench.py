@@ -101,6 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
     adj.add_argument("--auto", action="store_true",
                      help="record deterministic matches only; no terminal prompts")
 
+    con = sub.add_parser("contamination", parents=[common],
+                         help="scan a run's raw judge outputs for quoting of the cases' historical judge.md")
+    con.add_argument("run_id")
+    con.add_argument("--history", action="append", default=[], metavar="NAME=PATH",
+                     help="workspace root per case.json source.workspace (holds .agent/tasks/<NNN>-*/judge*.md)")
+    con.add_argument("--n", type=int, default=12, help="n-gram size (default 12 words)")
     rep = sub.add_parser("report", parents=[common], help="comparison table for a run")
     rep.add_argument("run_id")
     rep.add_argument("--md", type=Path, default=None, help="also write markdown here")
@@ -374,6 +380,39 @@ def cmd_adjudicate(args) -> int:
     return EXIT_OK
 
 
+def cmd_contamination(args) -> int:
+    from bench.lib import cases as _cases, contamination as _contam, records as _records
+    try:
+        validate_run_id(args.run_id)
+        roots = {}
+        for item in args.history:
+            name, sep, path = item.partition("=")
+            if not sep or not name.strip() or not path.strip():
+                raise ValueError(f"--history expects NAME=PATH, got {item!r}")
+            root = Path(path.strip()).expanduser()
+            if not (root / ".agent" / "tasks").is_dir():
+                raise ValueError(f"--history {name}: {root} has no .agent/tasks directory")
+            roots[name.strip()] = root.resolve()
+        corpus = _cases.load_corpus(args.corpus)
+    except (ValueError, _cases.CorpusError) as exc:
+        print(f"judgebench: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
+    run_dir = Path(args.runs_dir) / args.run_id
+    if not (run_dir / _records.MANIFEST_NAME).is_file():
+        print(f"judgebench: no run {args.run_id!r} under {args.runs_dir}", file=sys.stderr)
+        return EXIT_UNUSABLE
+    try:
+        with _records.RunLock(run_dir):                 # never scan a run that is still appending
+            scan = _contam.scan_run(run_dir, corpus, roots, n=args.n)
+            _contam.write_scan(run_dir, scan)
+    except _records.RunLocked as exc:
+        print(f"judgebench: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
+    print(_contam.render_scan(scan))
+    print(f"written: {run_dir / _contam.CONTAMINATION_NAME}")
+    return EXIT_DNF if scan.get("unscanned_pairs") else EXIT_OK
+
+
 def cmd_report(args) -> int:
     try:
         validate_run_id(args.run_id)
@@ -397,7 +436,11 @@ def cmd_report(args) -> int:
         return EXIT_UNUSABLE
     adj = _scoring.load_adjudication(run_dir)
     manifest = _records.read_manifest(run_dir)
-    rep = _report.aggregate(args.run_id, results, adj, corpus, weights=weights, manifest=manifest)
+    from bench.lib import contamination as _contam
+    scan = _contam.load_scan(run_dir)
+    contam = {"scan": scan, "stale": _contam.staleness(run_dir, scan)} if scan else None
+    rep = _report.aggregate(args.run_id, results, adj, corpus, weights=weights, manifest=manifest,
+                            contamination=contam)
     print(_report.render_text(rep), end="")
     if args.md:
         from tasks.atomic import atomic_write
@@ -429,6 +472,8 @@ def main(argv=None) -> int:
         return cmd_run(args)
     if args.cmd == "adjudicate":
         return cmd_adjudicate(args)
+    if args.cmd == "contamination":
+        return cmd_contamination(args)
     if args.cmd == "report":
         return cmd_report(args)
     return EXIT_UNUSABLE

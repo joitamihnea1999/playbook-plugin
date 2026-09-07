@@ -66,6 +66,8 @@ class Row:
     usd: "float | None" = None
     usd_partial: bool = False
     unique_undetermined: bool = False       # some peer never scored a case → unique is n/a
+    contam: "int | None" = None             # flagged (case) pairs from contamination.json; None = no scan
+    contam_stale: int = 0                   # scanned pairs whose latest raw changed since the scan
 
     @property
     def invocations(self) -> int:
@@ -109,7 +111,7 @@ def _truth_severity(corpus, case_id, truth_id):
 
 
 def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 1.0),
-              manifest=None) -> Report:
+              manifest=None, contamination=None) -> Report:
     wC, wI, wM = weights
     # Candidates and cases come from the MANIFEST when present (r2 sol #1): a seat with
     # no result yet must show as missing, never vanish from the comparison.
@@ -204,6 +206,21 @@ def aggregate(run_id: str, results: dict, adj: dict, corpus, weights=(8.0, 3.0, 
     if any(r.unique_undetermined for r in rows.values()):
         notes.append("unique = n/a where some candidate has no scorable result for a case — uniqueness "
                      "is only defined against peers that ran")
+    if contamination and contamination.get("scan"):
+        scan, stale = contamination["scan"], contamination.get("stale") or set()
+        for label in labels:
+            entries = scan.get("labels", {}).get(label, {})
+            rows[label].contam = sum(1 for e in entries.values() if (e.get("count") or 0) > 0)
+            rows[label].contam_stale = sum(1 for cid in entries if (label, cid) in stale)
+            for cid, e in entries.items():
+                if (e.get("count") or 0) > 0 and cid in matrix and label in matrix[cid]:
+                    matrix[cid][label] += " !c"
+        notes.append("contam? = (case, candidate) pairs whose raw output shares a word "
+                     f"{scan.get('n', 12)}-gram with the case's historical judge.md (prompt text excluded) — "
+                     "this detects QUOTING, not silent influence; 'stale' = the raw changed after the scan, re-run "
+                     "`judgebench contamination`")
+    else:
+        notes.append("contam? = n/a — `judgebench contamination <run> --history NAME=PATH` has not been run")
     if missing:
         notes.append(f"{missing} (case, candidate) pair(s) have no result — the run is INCOMPLETE; "
                      "resume it before comparing candidates")
@@ -228,7 +245,7 @@ def _fmt_usd(row: Row) -> str:
 
 COLUMNS = ("candidate", "inv", "ok", "malformed", "fail", "timeout", "dnf", "excluded", "valid",
            "unique", "Crit", "Imp", "Min", "sev-mis", "fp", "fp-rate", "pending", "weighted",
-           "tok-known", "tok-out", "w/1k-out", "p50", "p95", "timeout-rate", "dnf-rate", "usd")
+           "tok-known", "tok-out", "w/1k-out", "p50", "p95", "timeout-rate", "dnf-rate", "usd", "contam?")
 
 
 def _row_cells(r: Row) -> list:
@@ -241,7 +258,8 @@ def _row_cells(r: Row) -> list:
             str(r.severity_mismatch), str(r.fp), _fmt_rate(r.fp_rate), str(r.pending), f"{r.weighted:g}",
             f"{r.tokens_known}/{r.invocations}", str(r.tokens_out) if r.tokens_known else "n/a",
             ("n/a" if w1k is None else f"{w1k:.2f}"), _fmt_ms(r.p50_ms), _fmt_ms(r.p95_ms),
-            _fmt_rate(r.rate("timeout")), _fmt_rate(r.rate("dnf")), _fmt_usd(r)]
+            _fmt_rate(r.rate("timeout")), _fmt_rate(r.rate("dnf")), _fmt_usd(r),
+            ("n/a" if r.contam is None else str(r.contam) + (f" ({r.contam_stale} stale)" if r.contam_stale else ""))]
 
 
 def render_text(rep: Report) -> str:
