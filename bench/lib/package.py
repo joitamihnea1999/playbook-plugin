@@ -52,6 +52,11 @@ DEFAULT_TEMPLATE = TEMPLATES_DIR / "judge_prompt.md"
 # panel findings ("parked per impl-panel grok #3").
 KEPT_SECTIONS = ("status", "risk", "intent", "why", "references", "design phase",
                  "work plan", "pre-review")
+# `--spec-mode compact` (task 049, plan §5.2): the fallback for a case that would not otherwise
+# fit a seat's transport — Design Phase and the housekeeping sections go; used identically for
+# every candidate of a run and recorded in the manifest + result lines.
+COMPACT_SECTIONS = ("intent", "why", "references", "work plan")
+SPEC_MODES = ("full", "compact")
 # Sections whose checked gates are reset + outcome-stripped (the post-design record).
 OUTCOME_STRIPPED_SECTIONS = ("work plan", "pre-review")
 
@@ -98,6 +103,7 @@ class Package:
     prompt: str = ""
     template_version: str = ""
     template_sha256: str = ""
+    spec_mode: str = "full"
 
     @property
     def prompt_chars(self) -> int:
@@ -358,12 +364,31 @@ def render_prompt(spec: str, diff: str, context: list, template_text: str,
     return re.sub(r"\{\{(SPEC|DIFF|CONTEXT|TIME_BUDGET)\}\}", lambda m: values[m.group(1)], template_text)
 
 
+def compact_spec(spec: str) -> str:
+    """Keep only the COMPACT_SECTIONS of an already-reconstructed spec (H2-agnostic of fences,
+    like `reconstruct_spec`); the H1 title line is kept."""
+    out, keep = [], True
+    for i, line in enumerate(spec.splitlines(keepends=True)):
+        title = _h2_title(line)
+        if title is not None:
+            keep = title in COMPACT_SECTIONS
+        elif i == 0 and line.startswith("# "):
+            keep = True
+        if keep:
+            out.append(line)
+    return "".join(out)
+
+
 def build_package(case, template_path: Path = DEFAULT_TEMPLATE, *,
-                  soft_timeout_secs=None, hard_timeout_secs=None) -> Package:
+                  soft_timeout_secs=None, hard_timeout_secs=None, spec_mode: str = "full") -> Package:
     """The frozen package for one case: spec.md is used AS FROZEN in the corpus
     (the corpus builder ran `reconstruct_spec` when freezing; running it again
     here is idempotent and guards a hand-edited spec.md against leaks)."""
+    if spec_mode not in SPEC_MODES:
+        raise ValueError(f"unknown spec_mode {spec_mode!r} (one of {list(SPEC_MODES)})")
     spec = reconstruct_spec(case.spec_path.read_text(encoding="utf-8", errors="replace"))
+    if spec_mode == "compact":
+        spec = compact_spec(spec)
     leaks = leak_scan(spec)
     if leaks:
         raise LeakageError(f"case {case.id}: spec.md still carries review tokens after "
@@ -374,4 +399,4 @@ def build_package(case, template_path: Path = DEFAULT_TEMPLATE, *,
     prompt = render_prompt(spec, diff, context, tpl,
                            time_budget=time_budget_clause(soft_timeout_secs, hard_timeout_secs))
     return Package(case_id=case.id, spec=spec, diff=diff, context=context, prompt=prompt,
-                   template_version=version, template_sha256=sha)
+                   template_version=version, template_sha256=sha, spec_mode=spec_mode)

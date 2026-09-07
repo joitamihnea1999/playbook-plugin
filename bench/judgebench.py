@@ -88,6 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="max concurrent candidate invocations per case (default 2)")
     run.add_argument("--fake-script", type=Path, default=None,
                      help="JSON file scripting FakeRunner outputs (default: all ok)")
+    run.add_argument("--spec-mode", choices=("full", "compact"), default="full",
+                     help="spec sections shown to EVERY candidate: full (default) or compact (Intent/Why/References/Work Plan)")
     run.add_argument("--source-repo", action="append", default=[], metavar="NAME=PATH",
                      help="local checkout for a case's source.repo (live runs snapshot it at "
                           "repo_base_sha); 'playbook-plugin' defaults to this repo")
@@ -224,7 +226,8 @@ def cmd_run(args) -> int:
     try:
         try:
             packages = {c.id: _package.build_package(c, soft_timeout_secs=args.soft_timeout,
-                                                     hard_timeout_secs=args.timeout)
+                                                     hard_timeout_secs=args.timeout,
+                                                     spec_mode=args.spec_mode)
                         for c in selected}
         except (_package.LeakageError, ValueError, OSError) as exc:       # r4 terra #2
             print(f"judgebench: cannot build the frozen package: {exc}", file=sys.stderr)
@@ -244,6 +247,7 @@ def cmd_run(args) -> int:
                                                mode="live" if args.live else "fake",
                                                soft_timeout=args.soft_timeout, hard_timeout=args.timeout,
                                                concurrency=args.concurrency, fake_script=args.fake_script,
+                                               spec_mode=args.spec_mode,
                                                cli_versions=({c.backend: _records.cli_version(c.backend)
                                                               for c in candidates} if args.live else None))
             if problems:
@@ -263,7 +267,8 @@ def cmd_run(args) -> int:
                 selected_cases=selected, packages=packages, candidates=candidates,
                 soft_timeout=args.soft_timeout, hard_timeout=args.timeout,
                 concurrency=args.concurrency, source_repos=source_repos,
-                template_version=tpl_v, template_sha256=tpl_sha, fake_script=args.fake_script)
+                template_version=tpl_v, template_sha256=tpl_sha, fake_script=args.fake_script,
+                spec_mode=args.spec_mode)
             _records.write_manifest(run_dir, manifest)
         if args.live:
             try:

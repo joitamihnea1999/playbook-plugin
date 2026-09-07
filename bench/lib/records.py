@@ -271,6 +271,7 @@ def make_result_record(run_id: str, case, candidate, invocation, raw_rel: str, p
         "raw_path": raw_rel,
         "note": invocation.note,
         "attempts": list(getattr(invocation, "attempts", []) or []),   # earlier retried attempts
+        "spec_mode": getattr(package, "spec_mode", "full"),
         "template_version": package.template_version,
         "template_sha256": package.template_sha256,
         "prompt_sha256": sha256_text(package.prompt),
@@ -331,10 +332,11 @@ def fake_script_sha256(fake_script) -> str:
 
 def build_manifest(*, run_id, mode, corpus, selected_cases, packages, candidates, soft_timeout,
                    hard_timeout, concurrency, source_repos, template_version, template_sha256,
-                   fake_script=None) -> dict:
+                   fake_script=None, spec_mode="full") -> dict:
     return {
         "run_id": run_id,
         "mode": mode,                                   # fake | live
+        "spec_mode": spec_mode,                         # full | compact (task 049 §5.2) — a resume key
         "created_at": utcnow(),
         "host": {"os": platform.system(), "release": platform.release(),
                  "python": platform.python_version()},
@@ -372,7 +374,7 @@ def read_manifest(run_dir: Path) -> dict:
 
 def check_manifest(manifest: dict, *, selected_cases, packages, candidates, mode=None,
                    soft_timeout=None, hard_timeout=None, concurrency=None, fake_script=None,
-                   playbook_sha=None, cli_versions=None) -> list:
+                   playbook_sha=None, cli_versions=None, spec_mode=None) -> list:
     """Mismatches between a stored manifest and the run's inputs NOW — a resume
     must refuse on any (plan-review F9; impl-panel opus F1 / sol #1 / terra #1 /
     grok F4): same run id ⇒ same mode, same candidate SET, same timeouts, same
@@ -392,6 +394,9 @@ def check_manifest(manifest: dict, *, selected_cases, packages, candidates, mode
                 problems.append(f"{c.get('backend')} CLI version {c.get('cli_version')!r} → {now!r}")
     if mode is not None and manifest.get("mode") != mode:
         problems.append(f"mode {manifest.get('mode')!r} → {mode!r} (a run never mixes fake and live)")
+    if spec_mode is not None and manifest.get("spec_mode", "full") != spec_mode:
+        problems.append(f"spec_mode {manifest.get('spec_mode', 'full')!r} → {spec_mode!r} (every candidate of a "
+                        "run must see the same spec)")
     t = manifest.get("timeouts", {})
     if soft_timeout is not None and t.get("soft_secs") != soft_timeout:
         problems.append(f"soft timeout {t.get('soft_secs')} → {soft_timeout}")
