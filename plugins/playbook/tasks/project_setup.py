@@ -170,6 +170,20 @@ def cmd_bootstrap(cmd_args):
     print("=== PENDING TASKS ===")
     list_tasks(project_path, pending_only=True)
 
+    # Panel health (task 053): EXACTLY six lines, offline — the review-spend
+    # journal's last 14 days per seat + the two offline triggers (drift,
+    # template); the model-gap trigger needs a provider listing and lives in
+    # `tasks dashboard`, which the block names. Advisory: bootstrap must never
+    # crash on it, so a failure prints one line and moves on.
+    try:
+        from tasks.dashboard import panel_health_lines
+        _block = panel_health_lines(project_path)
+    except Exception as _e:  # advisory — never break orientation
+        _block = [f"=== PANEL HEALTH (last 14 days) === unavailable ({_e})"]
+    print()
+    for _ln in _block:
+        print(_ln)
+
     # Judge-pin nudge (task 012): covers projects that predate the models
     # maintenance loop. Presence check only — no probes at session start.
     if not (project_path / ".agent" / "models.json").exists():

@@ -94,6 +94,7 @@ _BASELINE = {
     "prepare-merge": (1, "could not compute merge base"),
     "compact": (1, "'compact' requires a task number"),
     "recall": (1, "'recall' requires a node id or keyword"),
+    "dashboard": (0, "PLAYBOOK DASHBOARD"),
 }
 
 

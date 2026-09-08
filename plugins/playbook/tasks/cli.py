@@ -30,7 +30,7 @@ COMMANDS = (
     "models", "plan-review", "impl-review", "judge", "context", "intent",
     "timeline", "tagger", "tag", "retro", "status", "audit", "blocked",
     "handoff", "parked", "freehand", "doctor", "environment", "detect-verify", "merge-doctor",
-    "mindmap-sync", "log", "prepare-merge", "compact", "recall",
+    "mindmap-sync", "log", "prepare-merge", "compact", "recall", "dashboard",
 )
 
 
@@ -64,10 +64,14 @@ def main():
         print_usage()
         return
 
-    _gc_dead_sessions(find_project_root())
-
     cmd = args[0]
     cmd_args = args[1:]
+
+    # `dashboard` is read-only END TO END (task 053, plan-panel codex#1): the
+    # session GC every other command runs first unlinks legacy flat files and
+    # dead session dirs — a read-only screen must not have that side effect.
+    if cmd != "dashboard":
+        _gc_dead_sessions(find_project_root())
 
     if cmd == "work":
         from tasks.lifecycle import cmd_work
@@ -195,6 +199,10 @@ def main():
         # task-archive.md (verbatim), keeping the hot trace reviewable (1.5.21).
         from tasks.compact import cmd_compact
         cmd_compact(cmd_args)
+
+    elif cmd == "dashboard":
+        from tasks.dashboard import cmd_dashboard
+        cmd_dashboard(cmd_args)
 
     elif cmd == "recall":
         # Cross-tier mind-map retrieval: fetch a node (main + overflow) by id, or

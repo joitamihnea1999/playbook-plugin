@@ -4,6 +4,23 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+### Added
+
+- **`tasks dashboard` — a read-only "what runs now" screen.** Plugin version, the
+  effective verify command(s) per risk class, panel seats with effort + default judge +
+  `panel_required_for`, review timeouts and judge budget, doctor's hook checks, open and
+  parked tasks, the judgebench corpus version and the last live exam per seat pair (with
+  a report copied into a task record as the durable fallback — `bench/runs/` is
+  gitignored), and per seat for the last 14 days from the lane's review-spend journal
+  (runs, ok %, timeout %, median duration; other lanes' journals named, not aggregated).
+  Exactly three triggers, each printed with the exact non-interactive command that acts on
+  it: a seat whose timeout rate or median duration doubled against its prior 30 days; a
+  codex/grok/claude model id not in the panel; the judgebench exam template changed since
+  the last exam. Nothing changes a setting automatically, and the arm is dispatched before
+  the session GC so the command is read-only end to end. `--no-detect` skips the provider
+  model listing. `tasks bootstrap` gains a six-line offline **PANEL HEALTH** block from the
+  same data.
+
 ### Fixed
 
 - **The tree-state fingerprint now binds the owner-declared `fingerprint_exclude`

@@ -738,6 +738,7 @@ Tasks CLI:
   Info:
     tasks list [--pending]     show tasks
     tasks status               current gate position
+    tasks dashboard            read-only: what playbook runs on now — panel seats + 14d journal stats, knobs, hooks, judgebench exam, 3 triggers with exact commands
     tasks recall <id|words>    fetch a mind-map node (main+overflow) by id, or locate by keyword
     tasks compact <N>          move <!-- archive:start/end --> narrative to task-archive.md"""
 
@@ -928,6 +929,10 @@ Commands:
   mindmap-sync        Mind-map merge support (conflict-marker-safe sync)
   doctor [--verbose]  Harness health check (--verbose: enumerate findings in
                       stale/foreign install copies too, not just the live one)
+  dashboard [--no-detect]  Read-only: plugin/verify/panel seats + effort/default judge, review
+                      knobs, hooks health, open+parked tasks, judgebench last exam, per-seat
+                      14d journal stats (runs, ok%, timeout%, median) and 3 triggers, each with
+                      its exact command (--no-detect: skip the provider model listing)
   environment         Advisory: optional tools that improve the setup + install hints [--json] [--suggest-only]
   detect-verify       Suggest a full verify command (typecheck+tests+lint) from the toolchains present [--json]
   bootstrap           Load mind map (indexed if large) + skills + pending tasks

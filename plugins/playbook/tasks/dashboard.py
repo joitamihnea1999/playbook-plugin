@@ -1,0 +1,918 @@
+#!/usr/bin/env python3
+"""`tasks dashboard` — what playbook runs on RIGHT NOW, read-only.
+
+One screen: plugin version, verify command, the judge panel (seat + effort +
+default judge + `panel_required_for`), the review knobs (soft/hard timeout,
+judge budget), hooks health (the same checks `tasks doctor` runs), open and
+parked tasks, the judgebench corpus + last exam per seat pair (dev-only harness,
+absent on most installs — shown as absent, never invented), and per seat over
+the last 14 days from the review-spend journal: runs, ok %, timeout %, median
+duration.
+
+Exactly THREE triggers, each printed with the exact command that acts on it:
+
+  1. drift     — a seat whose timeout rate or median duration DOUBLED against
+                 its previous 30 days (days 15–44 back);
+  2. model-gap — a model id available in codex, grok or claude that is not in
+                 the panel;
+  3. template  — the judgebench judge prompt template changed since the last
+                 live exam.
+
+CONTRACT: this module never writes, and the `dashboard` CLI arm is dispatched
+BEFORE the session garbage-collector every other command runs (plan-panel
+codex#1), so `tasks dashboard` is read-only end-to-end — not just below the
+CLI boundary. Nothing here changes a setting — a trigger is a printed command
+the operator runs (or does not). It reads the same files
+the writers own (`.agent/config.json`, `.agent/models.json`, the lane journal,
+`bench/`), tolerates every malformed input (a bad line is skipped and counted,
+never raised on), and needs no network except the optional provider listing
+behind trigger 2 (`grok models` is login-aware; `--no-detect` skips it).
+
+The review-spend record shape is the external contract documented in
+`docs/enforcement-journal.md`; the tolerant parse here mirrors what the external
+reader (playbook-lens, a separate repo) does — same filter (`hook == "review"`),
+same "count and never impute" stance — without importing it (stdlib only).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import stat as _stat
+import statistics
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from tasks.shared import find_project_root
+
+# ── constants ────────────────────────────────────────────────────────────────
+WINDOW_DAYS = 14          # the "now" window the per-seat stats cover
+BASELINE_DAYS = 30        # the comparison window right before it (drift trigger)
+MIN_RUNS_FOR_DRIFT = 3    # fewer runs in EITHER window → no verdict, no trigger
+DRIFT_FACTOR = 2.0        # "doubled"
+MODEL_GAP_CAP = 6         # ids listed per provider before "+N more"
+_MAX_NUMERIC = 10 ** 15 - 1   # the producer's magnitude cap (pb_journal._cap_int)
+
+# Effort vocabularies — mirrored from the adapters so a `provider:model:effort`
+# spec splits the same way review.py resolves it. Imported lazily where the
+# adapters are importable; these are the fallback.
+_CODEX_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+_GROK_EFFORTS = frozenset({"low", "medium", "high"})
+_CLAUDE_EFFORT = "high"   # fixed — see review._CLAUDE_JUDGE_EFFORT
+
+
+# ── small pure helpers ───────────────────────────────────────────────────────
+def parse_ts(value) -> "datetime | None":
+    """ISO-8601 → tz-aware datetime, or None. Python 3.10's fromisoformat rejects
+    a trailing `Z`, so normalise it first; a naive result is assumed UTC."""
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _is_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def fmt_ms(ms: "int | None") -> str:
+    """12345 → '12s'; 194587 → '3m15s'; None → 'n/a'."""
+    if ms is None:
+        return "n/a"
+    secs = int(round(ms / 1000.0))
+    if secs < 60:
+        return f"{secs}s"
+    m, s = divmod(secs, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+def pct(part: int, whole: int) -> str:
+    """Integer percent or 'n/a' — never a division by zero, never a fake 0%."""
+    if whole <= 0:
+        return "n/a"
+    return f"{int(round(100.0 * part / whole))}%"
+
+
+def _one_line(value) -> str:
+    """Collapse untrusted text (a seat, a status) to one printable line so a
+    hostile journal value cannot forge a row or a heading."""
+    s = "".join(" " if (c in "\r\n\t" or not c.isprintable()) else c for c in str(value))
+    return " ".join(s.split())
+
+
+# ── review-spend journal ─────────────────────────────────────────────────────
+def journal_path(project_path: Path) -> "Path | None":
+    """The lane journal the review runner writes (`.agent[/<user>]/journal/
+    enforcement.jsonl`). None when the lane cannot be resolved — a dashboard
+    must never mint a lane the enforcing resolvers refuse."""
+    try:
+        from tasks.core import resolve_agent_dir
+        agent_dir = resolve_agent_dir(Path(project_path))
+    except SystemExit:
+        return None
+    except Exception:
+        return None
+    return agent_dir / "journal" / "enforcement.jsonl"
+
+
+_JOURNAL_READ_CAP = 64 * 1024 * 1024   # bytes — a journal grown past this is truncated at the FRONT, never OOM
+
+
+def _read_regular_text(path: Path, cap: int = _JOURNAL_READ_CAP) -> "str | None":
+    """Read `path` ONLY if it is a plain regular file — the same guard the
+    journal writers use (plan-panel grok#3): a hostile swap of the journal path
+    to a FIFO/symlink/device must not hang a bootstrap. One `O_NONBLOCK|
+    O_NOFOLLOW` open (flags absent on Windows → getattr 0, plain read), `fstat`
+    re-validation AFTER the open, bounded read. None when not readable as such."""
+    flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            return None
+        chunks = []
+        remaining = cap
+        while remaining > 0:
+            b = os.read(fd, min(1 << 20, remaining))
+            if not b:
+                break
+            chunks.append(b)
+            remaining -= len(b)
+        return b"".join(chunks).decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def load_review_records(path: "Path | None") -> "tuple[list[dict], int]":
+    """Every `hook == "review"` record in the journal, normalised to
+    {ts, seat, kind, task, status, duration_ms|None}. Returns (records,
+    skipped) — a line that is not JSON, not an object, not a review record, or
+    lacks a parseable `ts`/`seat`/`status` is skipped and COUNTED, never raised
+    on. Numbers are never imputed: a missing/invalid duration stays None."""
+    out: "list[dict]" = []
+    skipped = 0
+    if path is None:
+        return out, 0
+    text = _read_regular_text(Path(path))
+    if text is None:
+        return out, 0
+    raw_lines = text.splitlines()
+    for line in raw_lines:
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            skipped += 1
+            continue
+        if not isinstance(obj, dict) or obj.get("hook") != "review":
+            continue
+        ts = parse_ts(obj.get("ts"))
+        seat = obj.get("seat")
+        status = obj.get("status")
+        if ts is None or not isinstance(seat, str) or not seat or not isinstance(status, str):
+            skipped += 1
+            continue
+        dur = obj.get("duration_ms")
+        if not _is_int(dur) or dur < 0 or dur > _MAX_NUMERIC:
+            dur = None
+        out.append({
+            "ts": ts,
+            "seat": _one_line(seat),
+            "kind": _one_line(obj.get("kind", "?")),
+            "task": _one_line(obj.get("task", "-")),
+            "status": _one_line(status),
+            "duration_ms": dur,
+        })
+    return out, skipped
+
+
+def other_lane_journals(project_path: Path, resolved: "Path | None") -> "list[str]":
+    """Lanes OTHER than the resolved one that carry a review journal — surfaced
+    by name, never aggregated (plan-panel opus#4 / codex#5 / grok#4: the writer
+    is lane-resolved; a multi-user repo must not read as 'zero spend' silently).
+    Mirrors playbook-lens's visible note."""
+    out: "list[str]" = []
+    try:
+        from tasks.core import _agent_lanes
+        for user, rel in _agent_lanes(Path(project_path)):
+            j = Path(project_path) / rel / "journal" / "enforcement.jsonl"
+            if resolved is not None and j.resolve() == Path(resolved).resolve():
+                continue
+            if j.is_file():
+                out.append(user or "(root)")
+    except Exception:
+        pass
+    return out
+
+
+def _window(records: "list[dict]", start: datetime, end: datetime) -> "list[dict]":
+    """Records with start < ts <= end."""
+    return [r for r in records if start < r["ts"] <= end]
+
+
+def seat_stats(records: "list[dict]") -> "dict[str, dict]":
+    """Per seat: runs, ok, timeout, median_ms (None when no record carried a
+    duration). No division here — the renderer formats percentages."""
+    by: "dict[str, dict]" = {}
+    for r in records:
+        s = by.setdefault(r["seat"], {"runs": 0, "ok": 0, "timeout": 0, "durations": []})
+        s["runs"] += 1
+        if r["status"] == "ok":
+            s["ok"] += 1
+        elif r["status"] == "timeout":
+            s["timeout"] += 1
+        if r["duration_ms"] is not None:
+            s["durations"].append(r["duration_ms"])
+    for s in by.values():
+        d = s.pop("durations")
+        s["median_ms"] = int(statistics.median(d)) if d else None
+    return by
+
+
+def window_stats(records: "list[dict]", now: datetime,
+                 days: int = WINDOW_DAYS) -> "dict[str, dict]":
+    """`seat_stats` over (now - days, now]."""
+    return seat_stats(_window(records, now - timedelta(days=days), now))
+
+
+# ── the panel ────────────────────────────────────────────────────────────────
+def _split_effort(provider: str, variant: "str | None") -> "tuple[str | None, str]":
+    """`gpt-5.6-sol:high` → ('gpt-5.6-sol', 'high'); claude → fixed effort;
+    a variant with no recognised suffix → (variant, '(provider default)')."""
+    if provider == "claude":
+        return variant, _CLAUDE_EFFORT
+    if not variant:
+        return None, "(provider default)"
+    vocab = _CODEX_EFFORTS if provider == "codex" else _GROK_EFFORTS if provider == "grok" else frozenset()
+    if ":" in variant:
+        head, _, tail = variant.rpartition(":")
+        if tail in vocab:
+            return head, tail
+    return variant, "(provider default)"
+
+
+def seat_label(provider: str, variant: "str | None") -> str:
+    """The journal's `seat` spelling for a panel spec — the SAME rule the review
+    runner applies (`review._seat_with_effort`): codex/grok carry the effort
+    inside the variant; claude appends its fixed effort."""
+    base = f"{provider}:{variant}" if variant else provider
+    return f"{base}:{_CLAUDE_EFFORT}" if provider == "claude" else base
+
+
+def panel_seats(project_path: Path) -> "dict":
+    """The live panel: {"panel": [spec…], "default_judge": spec, "seats": [
+    {spec, provider, model, effort, label, error}], "required_for": [...],
+    "source": path-or-note}. Resolution goes through the shipped judge-spec
+    resolver so an alias (`opus`) maps to the model id the journal records."""
+    try:
+        from provider.sandbox import load_judge_config, resolve_judge_spec
+        # models.json (judge selection), NOT .agent/config.json — named apart so
+        # the config-doc drift instrument (test_config_doc_drift) does not read
+        # these keys as undocumented config.json keys.
+        judge_cfg = load_judge_config(Path(project_path))
+    except Exception as e:  # advisory — a broken models.json is a row, not a crash
+        return {"panel": [], "default_judge": "", "seats": [], "required_for": [],
+                "source": f"unreadable ({_one_line(e)})"}
+    panel = judge_cfg.get("panel") if isinstance(judge_cfg.get("panel"), list) else []
+    dj = judge_cfg.get("default_judge") if isinstance(judge_cfg.get("default_judge"), str) else ""
+    seats = []
+    for spec in panel:
+        if not isinstance(spec, str):
+            continue
+        try:
+            prov, variant = resolve_judge_spec(spec)
+            model, effort = _split_effort(prov, variant)
+            seats.append({"spec": spec, "provider": prov, "model": model or "",
+                          "effort": effort, "label": seat_label(prov, variant), "error": ""})
+        except ValueError as e:
+            seats.append({"spec": spec, "provider": "?", "model": "", "effort": "?",
+                          "label": spec, "error": _one_line(e)})
+    proj_models = Path(project_path) / ".agent" / "models.json"
+    return {"panel": [s for s in panel if isinstance(s, str)], "default_judge": dj,
+            "seats": seats, "required_for": panel_required_for(project_path),
+            "source": ".agent/models.json" if proj_models.exists() else "plugin defaults (no .agent/models.json)"}
+
+
+def panel_required_for(project_path: Path) -> "list[str]":
+    """The raw `panel_required_for` policy as a display list ("all" → ["all"])."""
+    try:
+        from tasks.core import load_config
+        raw = load_config(Path(project_path)).get("panel_required_for")
+    except Exception:
+        return ["(unreadable)"]
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    return []
+
+
+def review_knobs(project_path: Path) -> "dict":
+    """Resolved soft/hard timeouts + judge budget, via the SAME resolvers the
+    review runner uses (env > config > default)."""
+    from tasks.core import (resolve_judge_budget, resolve_review_soft_timeout,
+                            resolve_review_timeout)
+    p = Path(project_path)
+    hard = resolve_review_timeout(p)
+    soft = resolve_review_soft_timeout(p, hard)
+    return {"soft": soft, "hard": hard, "budget_usd": resolve_judge_budget(p)}
+
+
+# ── trigger 1: drift ─────────────────────────────────────────────────────────
+def _models_set_command(panel: "dict", drop_label: "str | None" = None,
+                        add_spec: "str | None" = None) -> str:
+    """The exact `tasks models set` line that would apply a one-seat change —
+    always paste-ready and non-interactive (`run_set` accepts `--default-judge`
+    with or without `--panel`)."""
+    specs = list(panel.get("panel") or [])
+    dj = panel.get("default_judge") or ""
+    note = ""
+    if drop_label is not None:
+        keep = [s["spec"] for s in panel.get("seats", []) if s["label"] != drop_label]
+        if not keep:
+            return "(dropping the only seat leaves no panel — reseat by hand: tasks models set --panel <specs> --default-judge <spec>)"
+        dj_label = next((s["label"] for s in panel.get("seats", []) if s["spec"] == dj), dj)
+        if dj_label == drop_label:
+            # the dropped seat IS the default judge: `models set` needs a new one,
+            # so propose the first remaining seat and say so (plan-panel grok#2:
+            # never print the interactive `models select` — it blocks on input()).
+            dj = keep[0]
+            note = "   # the dropped seat was the default judge — pick the default you want"
+        specs = keep
+    if add_spec is not None:
+        specs = specs + [add_spec]
+    dj_part = f' --default-judge "{dj}"' if dj else ""
+    return f'tasks models set --panel "{",".join(specs)}"{dj_part}{note}'
+
+
+def drift_triggers(records: "list[dict]", now: datetime, panel: "dict") -> "list[dict]":
+    """Seats whose timeout rate or median duration doubled: last WINDOW_DAYS vs
+    the BASELINE_DAYS right before. Both windows need MIN_RUNS_FOR_DRIFT runs,
+    else there is no verdict (stated, not silently skipped). A baseline
+    timeout rate of 0 with current timeouts counts as doubled (0 → >0)."""
+    cur = window_stats(records, now, WINDOW_DAYS)
+    base = seat_stats(_window(records, now - timedelta(days=WINDOW_DAYS + BASELINE_DAYS),
+                              now - timedelta(days=WINDOW_DAYS)))
+    out = []
+    for seat in sorted(cur):
+        c, b = cur[seat], base.get(seat)
+        if b is None or c["runs"] < MIN_RUNS_FOR_DRIFT or b["runs"] < MIN_RUNS_FOR_DRIFT:
+            continue
+        c_rate, b_rate = c["timeout"] / c["runs"], b["timeout"] / b["runs"]
+        reasons = []
+        if c["timeout"] > 0 and c_rate >= DRIFT_FACTOR * b_rate:
+            reasons.append(f"timeout rate {pct(c['timeout'], c['runs'])} vs {pct(b['timeout'], b['runs'])} in the prior 30d")
+        if (c["median_ms"] is not None and b["median_ms"] not in (None, 0)
+                and c["median_ms"] >= DRIFT_FACTOR * b["median_ms"]):
+            reasons.append(f"median {fmt_ms(c['median_ms'])} vs {fmt_ms(b['median_ms'])} in the prior 30d")
+        if not reasons:
+            continue
+        in_panel = any(s["label"] == seat for s in panel.get("seats", []))
+        cmd = (_models_set_command(panel, drop_label=seat) if in_panel
+               else "(seat is not in the current panel — nothing to drop; raise review_timeout_secs in .agent/config.json by hand if it returns)")
+        out.append({"kind": "drift", "seat": seat, "detail": "; ".join(reasons),
+                    "command": cmd})
+    return out
+
+
+# ── trigger 2: model gap ─────────────────────────────────────────────────────
+def _bare_model(model: str) -> str:
+    """`claude-opus-4-8[1m]` and `claude-opus-4-8` are one id for the gap check."""
+    return re.sub(r"\[.*?\]\s*$", "", model or "").strip()
+
+
+def model_gap_triggers(detect_report: "dict | None", panel: "dict") -> "list[dict]":
+    """Model ids the installed codex / grok / claude CLIs offer that no panel
+    seat uses (compared by bare id, so an alias-resolved seat counts). One
+    trigger per provider with a gap, the id list capped at MODEL_GAP_CAP."""
+    if not detect_report:
+        return []
+    in_panel = {(s["provider"], _bare_model(s["model"])) for s in panel.get("seats", []) if s["model"]}
+    out = []
+    for prov in detect_report.get("providers", []):
+        name = prov.get("name")
+        if name not in ("claude", "codex", "grok") or not prov.get("installed"):
+            continue
+        seen: "set[str]" = set()
+        missing = []
+        for m in prov.get("models", []):
+            mid = m.get("id") if isinstance(m, dict) else None
+            if not isinstance(mid, str) or not mid:
+                continue
+            bare = _bare_model(mid)
+            if bare in seen or (name, bare) in in_panel:
+                continue
+            seen.add(bare)
+            missing.append(mid)
+        if not missing:
+            continue
+        shown = missing[:MODEL_GAP_CAP]
+        more = len(missing) - len(shown)
+        first = shown[0]
+        add_spec = f"{name}:{first}" if name != "claude" else f"claude:{first}"
+        if name in ("codex", "grok"):
+            add_spec += ":medium"
+        out.append({"kind": "model-gap", "seat": name,
+                    "detail": f"available but not in the panel: {', '.join(shown)}"
+                              + (f" (+{more} more — tasks models detect)" if more else ""),
+                    "command": _models_set_command(panel, add_spec=add_spec)
+                               + (f"   # shown for {first}; substitute any id above" if len(missing) > 1 else "")})
+    return out
+
+
+# ── judgebench (dev-only harness) ────────────────────────────────────────────
+def find_bench_dir(project_path: Path) -> "Path | None":
+    """`bench/` with a frozen corpus, in the project root or a `code_roots`
+    nested checkout. None on ordinary installs — the harness never ships."""
+    roots = [Path(project_path)]
+    try:
+        from tasks.core import _code_roots, load_config
+        roots += [Path(project_path) / r for r in _code_roots(load_config(Path(project_path)))]
+    except Exception:
+        pass
+    for r in roots:
+        cand = r / "bench"
+        if (cand / "corpus" / "corpus.json").is_file():
+            return cand
+    return None
+
+
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_WIN_RE = re.compile(r"\b(?:wins?|does not win|loses?)\b")
+_TABLE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|(.*)\|\s*$")
+
+
+def _decision_section(report_text: str) -> str:
+    """The `## §25 decision` section's body (to the next `## `), else the
+    whole report — the verdict sentence lives there."""
+    lines = report_text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("## ") and "decision" in ln.lower():
+            body = []
+            for nxt in lines[i + 1:]:
+                if nxt.startswith("## "):
+                    break
+                body.append(nxt)
+            return "\n".join(body)
+    return report_text
+
+
+def parse_report_verdict(report_text: str) -> "dict":
+    """From a judgebench report.md: {"verdict": <the bold §25 verdict sentence>,
+    "weighted": {label: int}}. Bold spans are paired sequentially (`**…**`), so a
+    span can never straddle two bold phrases; the verdict is the first span in
+    the decision section that speaks of winning/losing without being the rule
+    itself ("wins only if"). Missing pieces stay empty — never invented."""
+    verdict = ""
+    for m in _BOLD_RE.finditer(_decision_section(report_text)):
+        text = " ".join(m.group(1).split())
+        if _WIN_RE.search(text) and "only if" not in text:
+            verdict = text
+            break
+    weighted: "dict[str, int]" = {}
+    header_idx = None
+    for line in report_text.splitlines():
+        m = _TABLE_ROW_RE.match(line)
+        if not m:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if header_idx is None:
+            if "weighted" in cells and "candidate" in cells:
+                header_idx = cells.index("weighted")
+            continue
+        if set("".join(cells)) <= set("-: "):
+            continue
+        if header_idx < len(cells) and cells[header_idx].isdigit():
+            weighted[cells[0]] = int(cells[header_idx])
+        elif cells and cells[0] == "case":
+            break
+    return {"verdict": verdict, "weighted": weighted}
+
+
+def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
+    """{"corpus_version", "cases", "exams": [newest live run per candidate pair:
+    {run_id, date, labels, specs, template_sha, template_version, verdict,
+    weighted}], "template_sha_now", "template_path"}. Only `mode == "live"` runs
+    are exams — a fake/smoke run is never a verdict."""
+    if bench_dir is None:
+        return None
+    out: "dict" = {"corpus_version": None, "cases": 0, "exams": [],
+                   "template_sha_now": "", "template_path": ""}
+    try:
+        corpus = json.loads((bench_dir / "corpus" / "corpus.json").read_text(encoding="utf-8"))
+        out["corpus_version"] = corpus.get("version")
+        out["cases"] = len(corpus.get("cases") or [])
+    except (OSError, ValueError, AttributeError):
+        pass
+    tpl = bench_dir / "lib" / "templates" / "judge_prompt.md"
+    if tpl.is_file():
+        try:
+            out["template_sha_now"] = hashlib.sha256(tpl.read_bytes()).hexdigest()
+            out["template_path"] = str(tpl.relative_to(bench_dir.parent)) if tpl.is_relative_to(bench_dir.parent) else str(tpl)
+        except OSError:
+            pass
+    runs_dir = bench_dir / "runs"
+    exams: "dict[tuple, dict]" = {}
+    if runs_dir.is_dir():
+        for run in sorted(runs_dir.iterdir()):
+            mf = run / "manifest.json"
+            if not mf.is_file():
+                continue
+            try:
+                m = json.loads(mf.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(m, dict) or m.get("mode") != "live":
+                continue
+            cands = [c for c in (m.get("candidates") or []) if isinstance(c, dict)]
+            labels = tuple(sorted(str(c.get("label", "?")) for c in cands))
+            if len(labels) < 2:
+                continue                    # an exam compares a PAIR; a single-seat smoke is not a verdict
+            created = parse_ts(m.get("created_at"))
+            tpl_info = m.get("template") if isinstance(m.get("template"), dict) else {}
+            rep = run / "report.md"
+            verdict = parse_report_verdict(rep.read_text(encoding="utf-8", errors="replace")) if rep.is_file() else {"verdict": "", "weighted": {}}
+            entry = {"run_id": str(m.get("run_id") or run.name), "date": created,
+                     "labels": list(labels),
+                     "specs": [str(c.get("spec", "?")) for c in cands],
+                     "template_sha": str(tpl_info.get("sha256") or ""),
+                     "template_version": str(tpl_info.get("version") or ""),
+                     "verdict": verdict["verdict"] or "(no report.md verdict)",
+                     "weighted": verdict["weighted"]}
+            prev = exams.get(labels)
+            if prev is None or ((created or datetime.min.replace(tzinfo=timezone.utc))
+                                >= (prev["date"] or datetime.min.replace(tzinfo=timezone.utc))):
+                exams[labels] = entry
+    for e in exams.values():
+        e["source"] = "bench/runs manifest"
+    out["exams"] = sorted(exams.values(), key=lambda e: (e["date"] or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+    return out
+
+
+def merge_record_exams(bench: "dict | None", records: "list[dict]") -> "dict | None":
+    """Manifests win; a durable record fills in only a seat pair that has no
+    manifest exam. With no bench dir at all, records alone form the summary
+    (corpus version unknown, no template sha → the template trigger cannot fire
+    and says so)."""
+    if not records:
+        return bench
+    base = dict(bench) if bench else {"corpus_version": None, "cases": 0, "exams": [],
+                                       "template_sha_now": "", "template_path": ""}
+    have = {tuple(e["labels"]) for e in base["exams"]}
+    extra = [r for r in records if tuple(r["labels"]) not in have]
+    seen: "set[tuple]" = set()
+    dedup = []
+    for r in extra:
+        k = tuple(r["labels"])
+        if k in seen:
+            continue
+        seen.add(k)
+        dedup.append(r)
+    base["exams"] = list(base["exams"]) + dedup
+    return base
+
+
+_RECORD_HEADER_RE = re.compile(r"^# judgebench report — run `([^`]+)`\s*$", re.M)
+_RECORD_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+
+
+def record_exams(project_path: Path) -> "list[dict]":
+    """Exams recovered from DURABLE task records: any `*.md` under the lane's
+    task dirs that embeds a judgebench report (`# judgebench report — run ...`).
+    `bench/runs/` is gitignored (plan-panel codex#4 / codex-med#2), so on a
+    fresh clone only these copies survive; they carry the table + §25 verdict but
+    no manifest, so `template_sha` is empty and the date is the first ISO date
+    in the report's run-facts text (or unknown). Newest-first is by run id
+    order of appearance — records have no authoritative clock."""
+    out: "list[dict]" = []
+    try:
+        from tasks.core import _iter_task_dirs
+        dirs = [tf.parent for _n, _s, tf in _iter_task_dirs(Path(project_path))]
+    except Exception:
+        return out
+    for d in dirs:
+        try:
+            files = sorted(d.glob("*.md"))
+        except OSError:
+            continue
+        for f in files:
+            text = _read_regular_text(f, cap=8 * 1024 * 1024)
+            if not text or "judgebench report" not in text:
+                continue
+            for m in _RECORD_HEADER_RE.finditer(text):
+                seg = text[m.end():]
+                nxt = _RECORD_HEADER_RE.search(seg)
+                seg = seg[:nxt.start()] if nxt else seg
+                v = parse_report_verdict(seg)
+                labels = sorted(v["weighted"])
+                if len(labels) < 2:
+                    continue
+                dm = None
+                for sec_m in re.finditer(r"^## Run facts.*?$", seg, re.M):
+                    tail = seg[sec_m.end():sec_m.end() + 600]
+                    dm = _RECORD_DATE_RE.search(tail)
+                    break
+                out.append({"run_id": m.group(1), "date": parse_ts(dm.group(1) + "T00:00:00Z") if dm else None,
+                            "labels": labels, "specs": [], "template_sha": "", "template_version": "",
+                            "verdict": v["verdict"] or "(no verdict sentence in the record)",
+                            "weighted": v["weighted"],
+                            "source": f"record {d.name}/{f.name}"})
+    return out
+
+
+# ── trigger 3: template ──────────────────────────────────────────────────────
+def template_triggers(bench: "dict | None") -> "list[dict]":
+    """The judgebench EXAM template (`bench/lib/templates/judge_prompt.md` — the
+    instrument the exam ran with, NOT the live review.py panel prompt; plan-panel
+    opus#3) differs from the sha the newest manifest-backed exam recorded → one
+    trigger naming the exact re-exam command."""
+    if not bench or not bench.get("exams") or not bench.get("template_sha_now"):
+        return []
+    newest = next((e for e in bench["exams"] if e.get("template_sha")), None)
+    if newest is None or newest["template_sha"] == bench["template_sha_now"]:
+        return []
+    cands = ",".join(newest["labels"])
+    return [{"kind": "template", "seat": newest["run_id"],
+             "detail": (f"judgebench exam template is {bench['template_sha_now'][:12]} now, "
+                        f"was {newest['template_sha'][:12]} at exam {newest['run_id']} "
+                        f"({_date(newest['date'])}) — its verdict no longer describes the current exam prompt "
+                        "(this tracks the bench instrument, not the live review.py panel prompt)"),
+             "command": (f"python3 bench/judgebench.py run --cases all --candidates {cands} "
+                         f"--run-id {newest['run_id']}-retest --live")}]
+
+
+def _date(dt: "datetime | None") -> str:
+    return dt.strftime("%Y-%m-%d") if dt else "unknown date"
+
+
+# ── hooks health (doctor's hook checks, summarised) ──────────────────────────
+def hooks_health(project_path: Path) -> "dict":
+    """{"ok": bool, "warnings": [str], "copy": str, "version": str, "covers": str}
+    — the hook checks `tasks doctor` runs, re-derived from the same pure pieces
+    (plan-panel codex#2): (1) hooks.json command shape/quoting across install
+    copies (`hooks_check_report`); (2) the four enforcing hook scripts present
+    and executable in the authoritative copy's `scripts/`; (3) grok's global
+    enforcement file under doctor's own rule (stale paths always warn; a missing
+    file only when the project is grok-bootstrapped via AGENTS.md). NOT
+    covered (doctor-only): stale `~/.claude/settings.json` hook paths. Advisory:
+    never raises."""
+    warnings: "list[str]" = []
+    copy = version = ""
+    covers = "manifest command shape · hook scripts present+executable · grok enforcement file"
+    try:
+        from tasks.hooks_check import (_code_version, _copy_version,
+                                       authoritative_hooks_path, hooks_check_report)
+        auth = authoritative_hooks_path()
+        if auth is not None:
+            root = auth.parent.parent
+            copy = str(root)
+            version = _copy_version(auth) or _code_version()
+            for name in ("state-echo-hook", "task-gate-hook", "command-guard-hook", "stop-hook"):
+                hp = root / "scripts" / name
+                if not hp.is_file():
+                    warnings.append(f"hooks: {name} — missing from {root / 'scripts'}")
+                elif not os.access(hp, os.X_OK):
+                    warnings.append(f"hooks: {name} — found but not executable")
+        else:
+            warnings.append("no authoritative hooks.json resolved (CLAUDE_PLUGIN_ROOT unset and no sibling hooks/)")
+        for label, detail in hooks_check_report(project_path):
+            warnings.append(f"{label} — {detail}" if detail else label)
+        # grok's always-trusted enforcement file — doctor's exact rule (diagnostics
+        # 1g): a stale/broken script path warns whenever the file exists; a MISSING
+        # file warns only when the project is grok-bootstrapped (AGENTS.md). W5
+        # correspondence check caught the first draft gating everything on AGENTS.md
+        # while doctor printed six stale-path warnings.
+        from tasks.hooks_check import grok_enforcement_issues, grok_enforcement_report
+        issues = grok_enforcement_issues()
+        if issues:
+            missing_only = all(i.startswith("missing ") for i in issues)
+            if not missing_only or (Path(project_path) / "AGENTS.md").is_file():
+                for label, detail in grok_enforcement_report():
+                    warnings.append(f"{label} — {detail}" if detail else label)
+    except Exception as e:  # advisory — a dashboard must never crash on it
+        warnings.append(f"hooks check skipped ({_one_line(e)})")
+    return {"ok": not warnings, "warnings": warnings, "copy": copy, "version": version, "covers": covers}
+
+
+# ── tasks ────────────────────────────────────────────────────────────────────
+def task_counts(project_path: Path) -> "dict":
+    """{"open": [(num, status)], "parked_open": int} — open = any non-done task."""
+    open_: "list[tuple[int, str]]" = []
+    parked = 0
+    try:
+        from tasks.core import _extract_status, _iter_task_dirs, scan_parked
+        for num, _slug, tf in _iter_task_dirs(Path(project_path)):
+            st = _extract_status(tf)
+            if not st.startswith("done"):
+                open_.append((num, st.split()[0] if st else "unknown"))
+        parked = len(scan_parked(Path(project_path), open_only=True))
+    except Exception:
+        pass
+    return {"open": open_, "parked_open": parked}
+
+
+def plugin_version() -> str:
+    try:
+        from tasks.hooks_check import _code_version
+        return _code_version() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def verify_command(project_path: Path) -> "list[str]":
+    """The EFFECTIVE close-time verify commands, resolved the way the close does
+    (`resolve_verify_commands` over ONE config snapshot — plan-panel codex#3): a
+    single line when every risk class runs the same list, else one line per
+    risk. `[]` declared → the honest 'none declared' line."""
+    try:
+        from tasks.core import load_config, resolve_verify_commands
+        cfg = load_config(Path(project_path))
+        per = {r: [f"{c}" for _src, c in resolve_verify_commands(Path(project_path), r, cfg=cfg)]
+               for r in ("reversible", "assertive", "irreversible")}
+    except Exception as e:
+        return [f"verify: (config unreadable — {_one_line(e)})"]
+    if all(not v for v in per.values()):
+        return ["verify: (none declared — set `verify` in .agent/config.json; a close then warns and allows)"]
+    if len({tuple(v) for v in per.values()}) == 1:
+        return ["verify: " + " && ".join(per["reversible"])]
+    return ["verify (effective per risk class):"] + [
+        f"  {r}: " + (" && ".join(v) if v else "(none)") for r, v in per.items()]
+
+
+# ── rendering ────────────────────────────────────────────────────────────────
+def render_triggers(triggers: "list[dict]") -> "list[str]":
+    if not triggers:
+        return ["  none fired"]
+    lines = []
+    for i, t in enumerate(triggers, 1):
+        lines.append(f"  [{i}] {t['kind']} · {t['seat']} — {t['detail']}")
+        lines.append(f"      act: {t['command']}")
+    return lines
+
+
+def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
+                     detect: bool = True) -> str:
+    now = now or datetime.now(timezone.utc)
+    p = Path(project_path)
+    panel = panel_seats(p)
+    jp = journal_path(p)
+    records, skipped = load_review_records(jp)
+    cur = window_stats(records, now, WINDOW_DAYS)
+    knobs = review_knobs(p)
+    hooks = hooks_health(p)
+    tasks = task_counts(p)
+    bench = merge_record_exams(judgebench_summary(find_bench_dir(p)), record_exams(p))
+    lanes = other_lane_journals(p, jp)
+
+    detect_report = None
+    detect_note = "skipped (--no-detect)"
+    if detect:
+        try:
+            from tasks.models_check import detect_providers
+            detect_report = detect_providers(p)
+            detect_note = "codex/grok/claude listed"
+        except Exception as e:
+            detect_note = f"provider listing failed ({_one_line(e)})"
+
+    triggers = (drift_triggers(records, now, panel)
+                + model_gap_triggers(detect_report, panel)
+                + template_triggers(bench))
+
+    L: "list[str]" = []
+    L.append("=== PLAYBOOK DASHBOARD — read-only; nothing here changes a setting ===")
+    L.append(f"as of: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    L.append(f"plugin: {plugin_version()}")
+    L.extend(verify_command(p))
+    L.append("")
+    L.append(f"panel ({panel['source']}) · default judge: {panel['default_judge'] or '(none)'} · "
+             f"panel required for: {', '.join(panel['required_for']) or '(off)'}")
+    seat_rows = []
+    labels_in_panel = set()
+    for s in panel["seats"]:
+        labels_in_panel.add(s["label"])
+        st = cur.get(s["label"])
+        seat_rows.append((s["spec"], s["label"], s["effort"], st, s["error"]))
+    for label in sorted(cur):
+        if label not in labels_in_panel:
+            seat_rows.append(("(not in panel)", label, "", cur[label], ""))
+    if not seat_rows:
+        L.append("  (no panel seats configured)")
+    else:
+        w = max(len(r[1]) for r in seat_rows)
+        L.append(f"  {'seat':<{w}}  {'effort':<18} {'14d runs':>8}  {'ok':>5}  {'timeout':>7}  {'median':>7}  spec")
+        for spec, label, effort, st, err in seat_rows:
+            if st:
+                cells = (f"{st['runs']:>8}  {pct(st['ok'], st['runs']):>5}  "
+                         f"{pct(st['timeout'], st['runs']):>7}  {fmt_ms(st['median_ms']):>7}")
+            else:
+                cells = f"{'0':>8}  {'n/a':>5}  {'n/a':>7}  {'n/a':>7}"
+            tail = f"  {spec}" + (f"  ⚠ {err}" if err else "")
+            L.append(f"  {label:<{w}}  {effort:<18} {cells}{tail}")
+    L.append(f"  review-spend journal: {jp.relative_to(p).as_posix() if jp and jp.is_relative_to(p) else (jp or '(lane unresolvable)')} · "
+             f"{len(records)} review records total" + (f" · {skipped} malformed skipped" if skipped else "")
+             + (f" · other lanes with journals (NOT aggregated): {', '.join(lanes)}" if lanes else ""))
+    L.append("")
+    soft = "unlimited" if knobs["soft"] is None else f"{knobs['soft']}s"
+    hard = "unlimited" if knobs["hard"] is None else f"{knobs['hard']}s"
+    L.append(f"review knobs: soft timeout {soft} · hard timeout {hard} · judge budget ${knobs['budget_usd']} (claude only)")
+    if hooks["ok"]:
+        L.append(f"hooks (doctor's hook checks: {hooks['covers']}): OK · copy {hooks['copy'] or '?'}" + (f" v{hooks['version']}" if hooks["version"] else ""))
+    else:
+        L.append(f"hooks (doctor's hook checks: {hooks['covers']}): {len(hooks['warnings'])} warning(s) — run: tasks doctor")
+        for wmsg in hooks["warnings"][:5]:
+            L.append(f"  ⚠ {wmsg}")
+    open_desc = ", ".join(f"{n:03d}({st})" for n, st in tasks["open"]) or "none"
+    L.append(f"tasks: {len(tasks['open'])} open [{open_desc}] · {tasks['parked_open']} open parked item(s) — tasks parked")
+    L.append("")
+    if bench is None:
+        L.append("judgebench: not present (dev-only harness; no bench/corpus/corpus.json in the project or its code_roots, no report copy in a task record)")
+    else:
+        corpus = f"corpus v{bench['corpus_version']} ({bench['cases']} cases)" if bench["corpus_version"] is not None else "corpus: not present here"
+        tpl = (f"exam template sha {bench['template_sha_now'][:12]} (bench instrument, not the live review prompt)"
+               if bench["template_sha_now"] else "exam template: not present here")
+        L.append(f"judgebench: {corpus} · {tpl}")
+        if not bench["exams"]:
+            L.append("  exams: none (no live-mode run under bench/runs/ and no report copy in a task record)")
+        for e in bench["exams"]:
+            wt = " vs ".join(f"{lab} {e['weighted'][lab]}" for lab in e["labels"] if lab in e["weighted"])
+            tpl_part = (f"template {e['template_version'] or '?'} {e['template_sha'][:12]}" if e.get("template_sha")
+                        else "template sha n/a (record has no manifest)")
+            L.append(f"  exam {e['run_id']} · {_date(e['date'])} · {' vs '.join(e['labels'])} · {tpl_part} · "
+                     f"weighted {wt or 'n/a'} · {e['verdict']} · source: {e.get('source', '?')}")
+    L.append("")
+    L.append(f"triggers (3 kinds: drift 14d-vs-prior-30d · model-gap [{detect_note}] · exam-template-vs-last-exam):")
+    L.extend(render_triggers(triggers))
+    return "\n".join(L)
+
+
+def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> "list[str]":
+    """EXACTLY six lines for `tasks bootstrap` — offline (no provider listing),
+    so the model-gap trigger is deferred to the dashboard by name."""
+    now = now or datetime.now(timezone.utc)
+    p = Path(project_path)
+    panel = panel_seats(p)
+    records, _skipped = load_review_records(journal_path(p))
+    cur = window_stats(records, now, WINDOW_DAYS)
+    bench = merge_record_exams(judgebench_summary(find_bench_dir(p)), record_exams(p))
+    drift = drift_triggers(records, now, panel)
+    tpl = template_triggers(bench)
+
+    l1 = "=== PANEL HEALTH (last 14 days) ==="
+    l2 = (f"panel: {', '.join(panel['panel']) or '(none)'} · default judge: {panel['default_judge'] or '(none)'} · "
+          f"required for: {', '.join(panel['required_for']) or '(off)'}")
+    runs = sum(s["runs"] for s in cur.values())
+    if runs:
+        ok = sum(s["ok"] for s in cur.values())
+        to = sum(s["timeout"] for s in cur.values())
+        meds = [s["median_ms"] for s in cur.values() if s["median_ms"] is not None]
+        l3 = (f"reviews: {runs} judge runs across {len(cur)} seat(s) · ok {pct(ok, runs)} · timeout {pct(to, runs)} · "
+              f"median of seat medians {fmt_ms(int(statistics.median(meds))) if meds else 'n/a'}")
+        slow = max(cur.items(), key=lambda kv: (kv[1]["median_ms"] or -1))
+        worst = max(cur.items(), key=lambda kv: (kv[1]["timeout"] / kv[1]["runs"] if kv[1]["runs"] else 0))
+        silent = [s["label"] for s in panel["seats"] if s["label"] not in cur]
+        l4 = (f"slowest seat: {slow[0]} {fmt_ms(slow[1]['median_ms'])} · most timeouts: {worst[0]} "
+              f"{worst[1]['timeout']}/{worst[1]['runs']}" + (f" · no runs: {', '.join(silent)}" if silent else ""))
+    else:
+        l3 = "reviews: no review-spend records in the last 14 days"
+        l4 = "slowest seat: n/a · most timeouts: n/a"
+    if bench and bench["exams"]:
+        e = bench["exams"][0]
+        if tpl:
+            tpl_part = f"exam template CHANGED since exam {e['run_id']} ({_date(e['date'])})"
+        elif e.get("template_sha") and bench.get("template_sha_now"):
+            tpl_part = f"exam template unchanged since exam {e['run_id']} ({_date(e['date'])})"
+        else:
+            tpl_part = f"last exam {e['run_id']} ({_date(e['date'])}) — template baseline n/a (record only)"
+    else:
+        tpl_part = "template: no live exam on record"
+    l5 = (f"triggers (offline): drift {len(drift)} fired · {tpl_part} · model-gap: needs the provider listing — see dashboard")
+    l6 = "full picture + exact commands: tasks dashboard"
+    return [l1, l2, l3, l4, l5, l6]
+
+
+def cmd_dashboard(cmd_args) -> None:
+    """The `tasks dashboard [--no-detect]` arm. Read-only by construction."""
+    args = list(cmd_args or [])
+    detect = "--no-detect" not in args
+    project_path = find_project_root()
+    print(render_dashboard(project_path, detect=detect))
