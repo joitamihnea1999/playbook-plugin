@@ -165,6 +165,12 @@ class ParserTest(unittest.TestCase):
         self.assertGreater(mc.cache_age_days("2026-07-01T00:00:00Z"), 1)
         self.assertIsNone(mc.cache_age_days("not-a-date"))
         self.assertIsNone(mc.cache_age_days(None))
+        # task 054: the real codex cache stamps NANOSECONDS (9 fractional digits —
+        # `2026-09-08T12:16:51.980219765Z`), which fromisoformat rejects; the age was
+        # silently None on every real machine, so nothing downstream could use it
+        self.assertGreater(mc.cache_age_days("2026-07-01T00:00:00.980219765Z"), 1)
+        self.assertGreater(mc.cache_age_days("2026-07-01T00:00:00.98Z"), 1)
+        self.assertGreater(mc.cache_age_days("2026-07-01T00:00:00.980219765+00:00"), 1)
 
     def test_agy_models_parser(self):
         out = "Gemini 3.5 Flash (High)\n\nGemini 3.1 Pro (Low)\n"
