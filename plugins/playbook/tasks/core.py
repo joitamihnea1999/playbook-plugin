@@ -2979,17 +2979,49 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
     return task_file
 
 
+def _live_status_index(lines: "list[str]") -> "int | None":
+    """Index of the LAST *live* `## Status` heading, or None (V7 / P-F, task 043).
+
+    The ONE rule for every `## Status` reader and writer — `_extract_status`,
+    `_set_status`, `retro`, and (through `scripts/task-status.py`) the stop-hook
+    enforcement gate, so Python and the hook cannot disagree about the same file.
+
+      * LAST wins among live headings (the rule the stop-hook parity test pins);
+      * a heading inside a code fence is content, not the status — a task that
+        quotes the blocked ritual (`## Status` / `blocked`) in a fenced example,
+        or a decoy, must not read as blocked/done (the release bypass P-F);
+      * fail CLOSED on an UNCLOSED fence: the opener and everything after it stay
+        fenced through EOF. This is deliberate and not negotiable for THIS field —
+        an appended, never-closed opener followed by `## Status`/`blocked` is
+        exactly the shape that would release unchecked gates under a fail-open
+        scan; the cost is that a malformed fence ABOVE the real heading hides it
+        (status reads `unknown`, the writer refuses) — visible, never lenient;
+      * strict ATX (`_atx_h2_text`): `##\tStatus`, `## Status ##`, <=3-space
+        indents are the heading; a >=4-column `## Status` is code/text.
+    """
+    idx = None
+    for i, _s in _iter_nonfenced(lines, unclosed_is_live=False):
+        if _atx_h2_text(lines[i]) == "## Status":
+            idx = i
+    return idx
+
+
+def _status_from_lines(lines: "list[str]") -> str:
+    """The status VALUE — the stripped line after the last live `## Status`
+    (see `_live_status_index`); `unknown` when there is no live heading or no
+    line follows it."""
+    idx = _live_status_index(lines)
+    if idx is not None and idx + 1 < len(lines):
+        return lines[idx + 1].strip()
+    return "unknown"
+
+
 def _extract_status(task_file: Path) -> str:
-    """Extract status from task file (line after last ## Status)."""
+    """Extract status from task file (line after the LAST live ## Status —
+    fence-aware, fail closed; `_status_from_lines`)."""
     try:
         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        status_idx = None
-        for i, line in enumerate(lines):
-            if line.strip() == "## Status":
-                status_idx = i
-        if status_idx is not None and status_idx + 1 < len(lines):
-            return lines[status_idx + 1].strip()
-        return "unknown"
+        return _status_from_lines(lines)
     except Exception:
         return "error"
 
@@ -3062,17 +3094,21 @@ def _atomic_write(path: Path, text: str) -> None:
     atomic_write(path, text)
 
 
-def _set_status(task_file: Path, value: str) -> None:
-    """Rewrite the line after the LAST ## Status (matching _extract_status).
-    The single writer of task status."""
+def _set_status(task_file: Path, value: str) -> bool:
+    """Rewrite the line after the LAST live ## Status (the SAME heading
+    `_extract_status` reads — `_live_status_index`, fence-aware, fail closed).
+    The single writer of task status. Returns True when the status line was
+    rewritten, False when no live heading with a following line exists (nothing
+    written) — callers that must not silently lose a state change check it.
+    A fenced `## Status` example is never the target, so a decoy can neither be
+    clobbered nor stand in for the real field."""
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-    target = None
-    for i, line in enumerate(lines):
-        if line.strip() == "## Status" and i + 1 < len(lines):
-            target = i
-    if target is not None:
-        lines[target + 1] = value + "\n"
-        _atomic_write(task_file, "".join(lines))
+    target = _live_status_index(lines)
+    if target is None or target + 1 >= len(lines):
+        return False
+    lines[target + 1] = value + "\n"
+    _atomic_write(task_file, "".join(lines))
+    return True
 
 
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -3130,8 +3166,18 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     gate or section for the line-anchored parsers (the #09 hazard)."""
     clean = " ".join(reason.split()) or "(no reason given)"
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
-    _set_status(task_file, "blocked")
-    out = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    # V7 (task 043, opus #2): status and reason must land TOGETHER or not at all.
+    # Build the whole new file in memory, check the invariants on the candidate,
+    # then write once — a refused block leaves task.md byte-identical.
+    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    sidx = _live_status_index(lines)
+    if sidx is None or sidx + 1 >= len(lines):
+        raise ValueError(
+            "task.md has no live `## Status` heading (missing, or hidden inside a "
+            "code fence) — refusing to record a blocked state whose status could "
+            "not be written; fix the heading/fence first, nothing was changed")
+    out = list(lines)
+    out[sidx + 1] = "blocked"
     # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
     # fresh. Fence-aware (P1): a `## Blocked` quoted inside a fenced example is not
     # the section, so the delete can never strand an unclosed fence or swallow the
@@ -3144,6 +3190,19 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     while out and out[-1].strip() == "":
         out.pop()
     out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
+    # Post-write invariants, checked on the candidate BEFORE the write: the status
+    # reads back `blocked` through the fail-closed reader (the stop-hook's view),
+    # and the appended `## Blocked` heading is live in the fail-open view the
+    # bootstrap reader uses (not swallowed by a CLOSED fence). If either fails
+    # the block would be half-visible — refuse instead. (The documented corner
+    # where an UNCLOSED fence above hosts a decoy `## Blocked` is unchanged: the
+    # real record is appended and readable, the decoy is never deleted.)
+    if _status_from_lines(out) != "blocked":
+        raise ValueError("blocked status did not land live in task.md — refusing to "
+                         "write a divergent state (nothing was changed)")
+    if _iter_fenced_flags(out, unclosed_is_live=True)[len(out) - 3]:
+        raise ValueError("the ## Blocked section would land inside a code fence — "
+                         "refusing to write a divergent state (nothing was changed)")
     _atomic_write(task_file, "\n".join(out) + "\n")
 
 
@@ -3363,6 +3422,13 @@ def _extract_block_reason(task_file: Path) -> "str | None":
         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
+    return _block_reason_from_lines(lines)
+
+
+def _block_reason_from_lines(lines: "list[str]") -> "str | None":
+    """`_extract_block_reason` on already-split lines — shared with
+    set_task_blocked's pre-write invariant check (V7) so writer and reader
+    cannot disagree about whether the reason is readable."""
     in_blocked = False
     # Pure reader → fail OPEN (V3): an unclosed fence must not HIDE a real
     # `## Blocked` (find_unconsumed_handoff → bootstrap depends on this).

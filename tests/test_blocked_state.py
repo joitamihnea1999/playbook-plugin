@@ -270,6 +270,139 @@ class SetBlockedFenceAware(unittest.TestCase):
             "## Blocked\n> pause here  (since TS)\n\n> Resumed TS\n")
 
 
+class StatusFenceAware(unittest.TestCase):
+    """V7 / P-F (task 043, split from 039): `## Status` is the ENFORCEMENT status —
+    the stop-hook releases the turn when it reads `blocked`, `_is_done` drives
+    reopen/list. Both the reader (`_extract_status`) and the single writer
+    (`_set_status`) must select the LAST *live* `## Status` through the shared
+    strict scanner: a `## Status` quoted inside a code fence (documentation of
+    the ritual, or a decoy) is content, not the status. The reader is fail
+    CLOSED: an UNCLOSED trailing fence must not turn its interior into a live
+    `blocked` (that is exactly the release bypass), so the remainder stays fenced.
+    """
+
+    def _core(self):
+        import tasks.core as core
+        return core
+
+    def _task(self, body):
+        d = Path(tempfile.mkdtemp())
+        tf = d / "task.md"
+        tf.write_text(body, encoding="utf-8")
+        return tf
+
+    LIVE_PENDING_FENCED_BLOCKED = (
+        "# T\n\n## Status\npending\n\n"
+        "## Docs\nThe blocked ritual looks like:\n"
+        "```\n## Status\nblocked\n```\n\n"
+        "## Work Plan\n- [ ] G1: real gate\n"
+    )
+
+    def test_reader_ignores_closed_fenced_status_decoy(self):
+        core = self._core()
+        tf = self._task(self.LIVE_PENDING_FENCED_BLOCKED)
+        self.assertEqual(core._extract_status(tf), "pending",
+                         "a fenced `## Status` example must not be read as the status")
+        self.assertFalse(core._is_blocked(tf))
+
+    def test_reader_ignores_tilde_fenced_status_decoy(self):
+        core = self._core()
+        tf = self._task(self.LIVE_PENDING_FENCED_BLOCKED.replace("```", "~~~"))
+        self.assertEqual(core._extract_status(tf), "pending")
+
+    def test_reader_fails_closed_on_unclosed_trailing_fence(self):
+        # The bypass shape: append an opener that is never closed, then a
+        # `## Status`/blocked pair. A fail-OPEN reader would treat it as live and
+        # the stop-hook would release the open gate.
+        core = self._core()
+        tf = self._task("# T\n\n## Status\npending\n\n## Work Plan\n- [ ] G1\n\n"
+                        "## Notes\n```\n## Status\nblocked\n")
+        self.assertEqual(core._extract_status(tf), "pending")
+        self.assertFalse(core._is_blocked(tf))
+
+    def test_reader_nbsp_closer_does_not_close_the_fence(self):
+        # V6 shape: a ```+NBSP line is NOT a closer, so the decoy stays fenced.
+        core = self._core()
+        tf = self._task("# T\n\n## Status\npending\n\n## Docs\n```\n## Status\n"
+                        "blocked\n```\u00a0\n\n## Work Plan\n- [ ] G1\n")
+        self.assertEqual(core._extract_status(tf), "pending")
+
+    def test_reader_accepts_atx_variants_and_rejects_indented(self):
+        core = self._core()
+        for heading in ("## Status", "##\tStatus", "## Status ##", "  ## Status"):
+            tf = self._task(f"# T\n\n{heading}\nblocked\n\n## Work Plan\n- [ ] G1\n")
+            self.assertEqual(core._extract_status(tf), "blocked", heading)
+        # >=4-column indent is an indented code block / not an ATX heading.
+        tf = self._task("# T\n\n## Status\npending\n\n    ## Status\n    blocked\n")
+        self.assertEqual(core._extract_status(tf), "pending")
+
+    def test_reader_last_live_status_still_wins(self):
+        # Control: the LAST-wins rule (parity with the stop-hook) is unchanged
+        # among LIVE headings.
+        core = self._core()
+        tf = self._task("# T\n\n## Status\npending\n\n## Work Plan\n- [ ] G1\n\n"
+                        "## Status\nblocked\n")
+        self.assertEqual(core._extract_status(tf), "blocked")
+
+    def test_writer_targets_live_status_not_fenced_decoy(self):
+        core = self._core()
+        tf = self._task(self.LIVE_PENDING_FENCED_BLOCKED)
+        self.assertTrue(core._set_status(tf, "in_progress"))
+        text = tf.read_text(encoding="utf-8")
+        self.assertIn("## Status\nin_progress\n", text, "the LIVE status must be rewritten")
+        self.assertIn("```\n## Status\nblocked\n```", text,
+                      "the fenced example must stay byte-intact")
+        self.assertEqual(core._extract_status(tf), "in_progress")
+
+    def test_writer_returns_false_when_no_live_status(self):
+        core = self._core()
+        body = "# T\n\n```\n## Status\npending\n```\n\n## Work Plan\n- [ ] G1\n"
+        tf = self._task(body)
+        self.assertFalse(core._set_status(tf, "done"))
+        self.assertEqual(tf.read_text(encoding="utf-8"), body, "nothing may be written")
+
+    def test_writer_round_trip_byte_identical_on_a_normal_file(self):
+        # Negative control: the ordinary task.md shape is unchanged by the routing.
+        core = self._core()
+        tf = self._task(TASK.format(n="012"))
+        core._set_status(tf, "blocked")
+        self.assertEqual(tf.read_text(encoding="utf-8"),
+                         TASK.format(n="012").replace("## Status\npending", "## Status\nblocked"))
+
+    def test_set_task_blocked_refuses_when_status_cannot_land(self):
+        # The `set_task_blocked` non-fenced check (opus #2): if the status cannot be
+        # written live, status and reason would diverge (a `## Blocked` section with
+        # no `blocked` status) — refuse and write NOTHING.
+        core = self._core()
+        body = "# T\n\n```\n## Status\npending\n```\n\n## Work Plan\n- [ ] G1\n"
+        tf = self._task(body)
+        with self.assertRaises(ValueError):
+            core.set_task_blocked(tf, "REALPAUSE")
+        self.assertEqual(tf.read_text(encoding="utf-8"), body,
+                         "a refused block must leave task.md byte-identical")
+
+    def test_set_task_blocked_verifies_status_and_reason_agree(self):
+        core = self._core()
+        tf = self._task(self.LIVE_PENDING_FENCED_BLOCKED)
+        core.set_task_blocked(tf, "REALPAUSE")
+        self.assertEqual(core._extract_status(tf), "blocked")
+        self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
+        self.assertIn("```\n## Status\nblocked\n```", tf.read_text(encoding="utf-8"))
+
+    def test_lifecycle_reopen_targets_live_status(self):
+        # lifecycle's reopen path (`tasks work <N>` on a done task) must use the
+        # same fence-aware writer, not a hand-rolled fence-blind loop.
+        import re
+        src = (PLUGIN / "tasks" / "lifecycle.py").read_text(encoding="utf-8")
+        self.assertNotRegex(src, re.compile(r'line\.strip\(\) == "## Status"'),
+                            "lifecycle must route status writes through core._set_status")
+
+    def test_retro_status_reader_is_the_shared_one(self):
+        import tasks.retro as retro
+        lines = self.LIVE_PENDING_FENCED_BLOCKED.splitlines()
+        self.assertEqual(retro._extract_status(lines), "pending")
+
+
 class BlockedEndToEnd(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -371,6 +504,61 @@ class BlockedEndToEnd(unittest.TestCase):
         self._set_counters()
         self.assertEqual(self.run_stop_hook().returncode, 2,
                          "a decoy 'blocked' heading must not release the gate")
+
+
+    def test_fenced_status_decoy_does_not_release_the_stop_gate(self):
+        """V7 / P-F (task 043): the stop-hook reads the SAME fence-aware status as
+        Python (scripts/task-status.py → core._extract_status). A `## Status` /
+        `blocked` pair quoted in a code fence after the live `pending` — a
+        closed fence, a `~~~` fence, or an UNCLOSED trailing fence — must NOT let
+        the turn end with an open gate. The fence-blind awk released it."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        shapes = {
+            "closed": ("# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n"
+                       "- [ ] open gate\n\n## Docs\n```\n## Status\nblocked\n```\n"),
+            "tilde": ("# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n"
+                      "- [ ] open gate\n\n## Docs\n~~~\n## Status\nblocked\n~~~\n"),
+            "unclosed": ("# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n"
+                         "- [ ] open gate\n\n## Docs\n```\n## Status\nblocked\n"),
+        }
+        for name, body in shapes.items():
+            self.task_file.write_text(body, encoding="utf-8")
+            self.assertEqual(_extract_status(self.task_file), "pending", name)
+            self._set_counters()
+            r = self.run_stop_hook()
+            self.assertEqual(r.returncode, 2,
+                             f"{name}: a fenced `## Status`/blocked decoy released the gate: {r.stderr}")
+        # Control: the same file with a REAL trailing blocked status is released,
+        # and the hook agrees with Python (the LAST live heading wins).
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [ ] open gate\n\n"
+            "## Docs\n```\n## Status\npending\n```\n\n## Status\nblocked\n\n## Blocked\n> waiting\n",
+            encoding="utf-8")
+        self.assertEqual(_extract_status(self.task_file), "blocked")
+        self._set_counters()
+        self.assertEqual(self.run_stop_hook().returncode, 0,
+                         "a real live blocked status after a fenced example must still release")
+
+    def test_status_read_fails_closed_without_python(self):
+        """When the python status reader cannot run, the hook must not guess: the
+        status is unreadable, so the gate count runs (fail CLOSED, loud) — the
+        same policy task-gate-hook applies to a missing python3."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\nblocked\n\n## Work Plan\n- [ ] open gate\n",
+            encoding="utf-8")
+        self._set_counters()
+        shim = Path(tempfile.mkdtemp())
+        (shim / "python3").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        os.chmod(shim / "python3", 0o755)
+        env = self._env()
+        env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+        payload = '{"stop_hook_active": false}'
+        r = subprocess.run([bash_or_skip(), str(SCRIPTS / "stop-hook")], input=payload,
+                           cwd=self.project, env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2,
+                         f"unreadable status must fail CLOSED (gate count runs): {r.stderr}")
+        self.assertIn("status", r.stderr.lower(), "the fallback must be loud")
 
 
 if __name__ == "__main__":

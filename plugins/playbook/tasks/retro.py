@@ -162,14 +162,11 @@ def _extract_section(lines: list[str], heading: str) -> str:
 
 
 def _extract_status(lines: list[str]) -> str:
-    """Extract status line (line after last ## Status)."""
-    status_idx = None
-    for i, line in enumerate(lines):
-        if line.strip() == "## Status":
-            status_idx = i
-    if status_idx is not None and status_idx + 1 < len(lines):
-        return lines[status_idx + 1].strip()
-    return "unknown"
+    """Status line (after the last LIVE ## Status) — the shared fence-aware
+    reader from core (V7, task 043), so retro's advisory view of a task's state
+    agrees with the lifecycle and the stop-hook."""
+    from tasks.core import _status_from_lines
+    return _status_from_lines(lines)
 
 
 def _detect_type(content: str) -> str:

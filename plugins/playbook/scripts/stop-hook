@@ -111,14 +111,21 @@ fi
 # on the agent — let the turn end without a fabricated checkbox. Keyed on the
 # status marker (the line after `## Status`), NOT on gate text, so it can't
 # inherit the freehand bypass's first-unchecked-gate fragility.
-# LAST `## Status` wins — this must mirror core.py::_extract_status exactly
-# (which reads the line after the last heading). A first-match read here plus a
-# stray duplicate heading in prose would make Python and the enforcing hook
-# disagree about the same file — the #09 disease in a new spot.
-STATUS_LINE=$(awk '/^## Status[[:space:]]*$/{want=NR+1} NR==want{val=$0} END{if (want) print val}' "$TASK_FILE" 2>/dev/null | tr -d '[:space:]')
-if [ "$STATUS_LINE" = "blocked" ]; then
-    exit 0
+# The status is read by scripts/task-status.py, which calls the SAME reader the
+# CLI uses (core.py::_extract_status — LAST live `## Status` wins, fence-aware,
+# fail closed on an unclosed fence). Until task 043 this was an awk mirror of a
+# fence-blind rule, so a `## Status`/blocked pair quoted inside a code fence
+# released unchecked gates (P-F). One implementation, not two: Python and the
+# enforcing hook cannot disagree about the same file (the #09 disease).
+# If the reader cannot run (no python3, import failure) the status is UNREADABLE:
+# say so and fall through to the gate count — fail CLOSED, never guess `blocked`.
+if ! STATUS_LINE=$(python3 "$HOOK_DIR/task-status.py" "$TASK_FILE" 2>/dev/null); then
+    echo "[stop-hook] WARNING: could not read ## Status via python3 ($HOOK_DIR/task-status.py) — treating the status as unreadable and enforcing open gates" >&2
+    STATUS_LINE=""
 fi
+case "$STATUS_LINE" in
+    blocked*) exit 0 ;;   # core._is_blocked: STARTS WITH blocked
+esac
 
 # Count unchecked gates (only real gates at line start, not inside blockquotes)
 UNCHECKED=$(grep -cE '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null) || UNCHECKED=0

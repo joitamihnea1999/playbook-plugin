@@ -511,7 +511,14 @@ def cmd_work(cmd_args):
                     entries, _head, risk, reason=(reason if force else None),
                     dirty_files=_dirty, freshness=_freshness)
                 upsert_task_section(task_file, "Verification Receipt", receipt)
-                _set_status(task_file, "done")
+                if not _set_status(task_file, "done"):
+                    # V7: the writer found no LIVE `## Status` (missing, or hidden
+                    # by a malformed fence). Say so loudly rather than let the
+                    # receipt claim a close the file does not show.
+                    print(f"WARNING: task.md has no live `## Status` heading — "
+                          f"status NOT set to done ({task_file}). Fix the heading/"
+                          "fence and re-run `tasks work done`.", file=sys.stderr,
+                          flush=True)
                 # T5: record the verify contract this close ran in the
                 # enforcement journal too. `.agent/config.json` (which declares
                 # `verify`) is gate-exempt, so a silently weakened verify could
@@ -637,17 +644,14 @@ def cmd_work(cmd_args):
         tasks_dir = resolve_agent_dir(project_path) / "tasks"
         matches = list(tasks_dir.glob(f"{task_num}-*/task.md"))
         if matches:
-            from tasks.core import _is_done
+            from tasks.core import _is_done, _set_status
             tf = matches[0]
             done = _is_done(tf)
             if done:
                 # Reopen: reset Status to in_progress so activation can proceed.
-                lines = tf.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-                for i, line in enumerate(lines):
-                    if line.strip() == "## Status" and i + 1 < len(lines):
-                        lines[i + 1] = "in_progress\n"
-                        _atomic_write(tf, "".join(lines))  # I9: atomic reopen write
-                        break
+                # Through the ONE fence-aware status writer (V7, task 043) — the
+                # same heading _is_done just read; atomic (I9).
+                _set_status(tf, "in_progress")
                 print(f"Note: task {task_num} was marked done — reopening.")
                 task_file = tf
                 # Fall through to activation below
