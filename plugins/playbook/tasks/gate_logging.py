@@ -17,7 +17,6 @@ from pathlib import Path
 
 _G_RE = re.compile(r"^\*\*\[G(\d+):", re.MULTILINE)
 _M_RE = re.compile(r"^\*\*\[M\d+\]", re.MULTILINE)
-_STATUS_RE = re.compile(r"^##\s*Status\s*$", re.IGNORECASE)
 _TASK_DIR_RE = re.compile(r"^(\d{3})-")
 
 
@@ -78,17 +77,13 @@ def done_task_numbers(tasks_dir: Path) -> list[int]:
 
 
 def _task_is_done(task_md: Path) -> bool:
+    """The shared fence-aware status reader (task 043): this module used to carry
+    its own fence-blind `## Status` regex with different skip rules, so doctor's
+    gate-logging-gap check could count a fenced `## Status`/done example as a
+    closed task. One reader for every consumer."""
+    from tasks.core import _status_from_lines
     try:
         lines = task_md.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    for i, line in enumerate(lines):
-        if _STATUS_RE.match(line.strip()):
-            # Status value is the next non-empty, non-comment line.
-            for nxt in lines[i + 1:]:
-                s = nxt.strip()
-                if not s or s.startswith(">"):
-                    continue
-                return s.lower().startswith("done")
-            return False
-    return False
+    return _status_from_lines(lines).lower().startswith("done")

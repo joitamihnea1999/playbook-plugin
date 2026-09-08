@@ -3023,12 +3023,12 @@ def _live_status_index(lines: "list[str]") -> "int | None":
     return last
 
 
-# A status VALUE: letter-led word(s) with `_`/`-`, optional `(…)` tail. Anchored on
-# the raw (unstripped-left, CR/LF-stripped) line so a >=4-space indent — which the
-# fence scanner does not flag for a value line — is still just text and accepted;
-# what it must NOT accept are the structural shapes (`- [ ]`, `#`, `>`, `<!--`, a
-# fence, blank), which all start with a non-letter.
-_STATUS_VALUE_RE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z0-9_\- ]*(\([^()]*\))?[ \t]*$")
+# A status VALUE: a letter-led word(s) with `_`/`-`, optional `(…)` tail, starting
+# at COLUMN 0 — an indented value (`    blocked`, `\tblocked`) is Markdown code
+# after a heading, not a value (round-3 panel); the fence scanner does not flag it
+# (no blank precedes it) so the shape rule must. Structural shapes (`- [ ]`, `#`,
+# `>`, `<!--`, a fence, blank) all start with a non-letter and are never a value.
+_STATUS_VALUE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\- ]*(\([^()]*\))?[ \t]*$")
 
 
 def _status_from_lines(lines: "list[str]") -> str:
@@ -3102,8 +3102,11 @@ def _is_done(task_file: Path) -> bool:
 def _is_blocked(task_file: Path) -> bool:
     """A task paused awaiting the owner's decision (issue #08). Distinct from
     pending/in_progress: it is NOT waiting on the agent, so it must not read as
-    work in progress or be auto-adopted as the active task."""
-    return _extract_status(task_file).startswith("blocked")
+    work in progress or be auto-adopted as the active task. EXACT token: the one
+    writer (`_set_status`) only ever writes the bare `blocked`, so a `blocked*`
+    prefix (`blockedness`) is not the blocked state — the stop-hook mirrors this
+    (round-3 panel). `_is_done` stays prefix-based for the legacy `done (…)`."""
+    return _extract_status(task_file) == "blocked"
 
 
 def _atomic_write(path: Path, text: str) -> None:

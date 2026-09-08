@@ -69,6 +69,18 @@ class DoneTaskNumbersTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "task.md").write_text(f"# {name}\n\n## Status\n{status}\n", encoding="utf-8")
 
+    def test_fenced_status_decoy_is_not_done(self):
+        # Task 043 round-3 panel (opus): this reader used its own fence-blind regex;
+        # it must use the shared fence-aware status reader like every other consumer.
+        root = Path(tempfile.mkdtemp()) / ".agent" / "tasks"
+        d = root / "004-decoy"; d.mkdir(parents=True)
+        # The decoy sits FIRST: the old first-match regex reader read `done` here.
+        (d / "task.md").write_text(
+            "# 004\n\n## Docs\n```\n## Status\ndone\n```\n\n## Status\npending\n",
+            encoding="utf-8")
+        self._mk(root, "005-real", "done")
+        self.assertEqual(done_task_numbers(root), [5])
+
     def test_counts_only_done(self):
         root = Path(tempfile.mkdtemp()) / "tasks"
         root.mkdir()

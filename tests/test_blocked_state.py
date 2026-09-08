@@ -454,6 +454,27 @@ class StatusFenceAware(unittest.TestCase):
             core.resume_blocked_task(tf)
         self.assertEqual(tf.read_text(encoding="utf-8"), body)
 
+    def test_indented_value_is_code_not_a_status(self):
+        # Round-3 panel (codex convergent): `## Status\n    blocked` / `\tblocked`
+        # is Markdown code, not a value — reader unknown, writer refuses.
+        core = self._core()
+        for value in ("    blocked", "\tblocked", " blocked"):
+            body = f"# T\n\n## Status\n{value}\n\n## Work Plan\n- [ ] G1\n"
+            tf = self._task(body)
+            self.assertEqual(core._extract_status(tf), "unknown", repr(value))
+            self.assertFalse(core._is_blocked(tf), repr(value))
+            self.assertFalse(core._set_status(tf, "done"), repr(value))
+            self.assertEqual(tf.read_text(encoding="utf-8"), body, repr(value))
+
+    def test_blocked_is_an_exact_token_not_a_prefix(self):
+        core = self._core()
+        for value in ("blockedness", "blocked and done", "Blocked"):
+            tf = self._task(f"# T\n\n## Status\n{value}\n\n## Work Plan\n- [ ] G1\n")
+            self.assertEqual(core._extract_status(tf), value)
+            self.assertFalse(core._is_blocked(tf), repr(value))
+        tf = self._task("# T\n\n## Status\nblocked\n\n## Work Plan\n- [ ] G1\n")
+        self.assertTrue(core._is_blocked(tf))
+
     def test_lifecycle_reopen_targets_live_status(self):
         # lifecycle's reopen path (`tasks work <N>` on a done task) must use the
         # same fence-aware writer, not a hand-rolled fence-blind loop.
@@ -686,6 +707,16 @@ class BlockedEndToEnd(unittest.TestCase):
         self._set_counters()
         r = self.run_stop_hook()
         self.assertEqual(r.returncode, 2, f"fallback to an earlier blocked released the gate: {r.stderr}")
+
+
+    def test_hook_blocked_match_is_exact(self):
+        # Round-3 panel: `blockedness` must not release the gate in the hook either.
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\nblockedness\n\n## Work Plan\n- [ ] open gate\n",
+            encoding="utf-8")
+        self._set_counters()
+        self.assertEqual(self.run_stop_hook().returncode, 2, "a blocked* prefix released the gate")
 
 
 if __name__ == "__main__":

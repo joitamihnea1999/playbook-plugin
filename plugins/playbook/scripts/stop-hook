@@ -124,7 +124,7 @@ if ! STATUS_LINE=$(python3 "$HOOK_DIR/task-status.py" "$TASK_FILE" 2>/dev/null);
     STATUS_LINE=""
 fi
 case "$STATUS_LINE" in
-    blocked*) exit 0 ;;   # core._is_blocked: STARTS WITH blocked
+    blocked) exit 0 ;;   # core._is_blocked: the EXACT token (the writer only ever writes the bare word)
 esac
 
 # Count unchecked gates (only real gates at line start, not inside blockquotes)
