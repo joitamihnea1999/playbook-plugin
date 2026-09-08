@@ -818,11 +818,17 @@ def _write_panel(path: Path, existing: dict, new_panel: Optional[list[str]],
     can't truncate models.json — the write goes through a temp + os.replace.
     Seeds a project-scoped `_doc` when the file had none.
     """
+    now = datetime.now(timezone.utc)
     if new_panel is not None:
+        # `_panel_changed` marks the most recent SEAT-LIST change (task 054): the
+        # dashboard's health window starts there, so a default-judge-only or
+        # same-panel rewrite must not move it (it still bumps `_updated`/mtime).
+        if existing.get("panel") != new_panel:
+            existing["_panel_changed"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         existing["panel"] = new_panel
     if default_judge:
         existing["default_judge"] = default_judge
-    existing["_updated"] = datetime.now(timezone.utc).date().isoformat()
+    existing["_updated"] = now.date().isoformat()
     existing.setdefault(
         "_doc",
         "Project override for playbook judge selection (shadows the plugin's "

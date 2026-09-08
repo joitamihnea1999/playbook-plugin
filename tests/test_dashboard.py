@@ -391,8 +391,10 @@ class ModelGapTrigger(unittest.TestCase):
         trig = db.model_gap_triggers(report, self.PANEL, baseline)
         self.assertEqual([(t["kind"], t["seat"]) for t in trig], [("model-gap", "codex:gpt-5.6-sol:high")])
         self.assertTrue(trig[0]["detail"].startswith("dead pin: gpt-5.6-sol is no longer listed by codex"), trig[0]["detail"])
-        self.assertIn("tasks models check", trig[0]["detail"])           # listed ≠ probed — the check confirms
-        self.assertEqual(trig[0]["command"], "tasks models set --panel opus --default-judge opus")
+        # r2 sol-high#1 / sol-med#4: the codex listing is a local cache, not a probe — the ACTION
+        # is the confirming probe; the drop command is offered inside the detail, for after it
+        self.assertEqual(trig[0]["command"], "tasks models check")
+        self.assertIn("if confirmed, drop it: tasks models set --panel opus --default-judge opus", trig[0]["detail"])
 
     def test_claude_listing_is_configured_not_a_catalog_so_never_a_dead_pin(self):
         report = json.loads(json.dumps(self.REPORT))
@@ -428,6 +430,14 @@ class ModelGapTrigger(unittest.TestCase):
         self.assertTrue(trig[0]["detail"].startswith("new since 2026-09-01: gpt-5.6-terra, gpt-5.6-luna"), trig[0]["detail"])
         self.assertIn("codex:gpt-5.6-terra:low", trig[0]["command"])   # terra offers no "medium" → its first
 
+    def test_claude_new_id_discloses_its_source(self):
+        # r2 sonnet: claude's "listing" is settings.json + the plugin's alias table, not a vendor catalog
+        baseline = {"recorded_at": "2026-09-01T00:00:00Z", "providers": {"claude": ["claude-opus-4-8"], "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}}
+        trig = db.model_gap_triggers(self.REPORT, self.PANEL, baseline)
+        self.assertEqual([t["seat"] for t in trig], ["claude"])
+        self.assertIn("not a vendor catalog", trig[0]["detail"])
+        self.assertIn("a new plugin release", trig[0]["detail"])
+
     def test_no_baseline_means_no_new_id_verdict(self):
         # first run: nothing is "new since last recorded" — only a dead pin can fire
         self.assertEqual(db.model_gap_triggers(self.REPORT, self.PANEL, None), [])
@@ -460,6 +470,29 @@ class ModelGapTrigger(unittest.TestCase):
             # a listing that failed / --no-detect records nothing
             self.assertIn("not recorded", db.record_catalog_baseline(p, None, NOW))
 
+    def test_partial_listing_never_erases_a_provider_from_the_baseline(self):
+        # r2 sol-high#2 / sol-med#1 / grok#1: a transient empty/failed codex or grok listing must
+        # not drop that provider's record, else the recovery run calls its whole catalog "new"
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            db.record_catalog_baseline(p, self.REPORT, NOW)
+            shrunk = json.loads(json.dumps(self.REPORT))
+            shrunk["providers"][1]["models"] = []                         # codex cache unreadable this run
+            note = db.record_catalog_baseline(p, shrunk, NOW + timedelta(days=1))
+            self.assertIn("unchanged", note)
+            kept = db.load_catalog_baseline(db.catalog_baseline_path(p))
+            self.assertEqual(kept["providers"]["codex"], ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+            self.assertEqual(kept["recorded_at"], "2026-09-08T12:00:00Z")
+            # recovery: nothing is new
+            self.assertEqual(db.model_gap_triggers(self.REPORT, self.PANEL, kept), [])
+            # a provider that DID list is refreshed (an id that vanished from its catalog is dropped)
+            changed = json.loads(json.dumps(self.REPORT))
+            changed["providers"][1]["models"] = [{"id": "gpt-5.6-sol", "efforts": ["high"]}]
+            db.record_catalog_baseline(p, changed, NOW + timedelta(days=2))
+            now = db.load_catalog_baseline(db.catalog_baseline_path(p))
+            self.assertEqual(now["providers"]["codex"], ["gpt-5.6-sol"])
+            self.assertEqual(now["providers"]["claude"], ["claude-opus-4-8", "claude-sonnet-5"])   # merged, not replaced
+
     def test_baseline_write_failure_is_a_note_not_a_crash(self):
         with tempfile.TemporaryDirectory() as td:
             p = _project(Path(td))
@@ -487,6 +520,40 @@ class HealthWindow(unittest.TestCase):
             self.assertIsNone(db.panel_changed_at(p))
             self.assertEqual(db.window_bounds(NOW, None), (NOW - timedelta(days=14), "last 14 days"))
 
+    def test_panel_changed_stamp_beats_the_file_mtime(self):
+        # r2 sol-high#4 / sol-med#3 / grok#2: `models set` rewrites models.json even when the
+        # panel did not change (default-judge only, same panel) — the writer stamps `_panel_changed`
+        # only on a seat-list change, and the dashboard prefers that stamp to the mtime
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            mj = p / ".agent" / "models.json"
+            data = json.loads(mj.read_text(encoding="utf-8"))
+            data["_panel_changed"] = "2026-09-05T12:00:00Z"
+            mj.write_text(json.dumps(data), encoding="utf-8")
+            _touch(mj, NOW - timedelta(hours=1))                          # a default-judge-only rewrite
+            self.assertEqual(db.panel_changed_at(p), NOW - timedelta(days=3))
+            data["_panel_changed"] = "garbage"
+            mj.write_text(json.dumps(data), encoding="utf-8")
+            _touch(mj, NOW - timedelta(hours=2))
+            self.assertEqual(db.panel_changed_at(p), NOW - timedelta(hours=2))   # unparseable stamp → mtime
+
+    def test_models_set_stamps_panel_changed_only_on_a_seat_list_change(self):
+        from tasks import models_check as mc
+        with tempfile.TemporaryDirectory() as td, contextlib.redirect_stdout(io.StringIO()):
+            path = Path(td) / "models.json"
+            mc._write_panel(path, {}, ["opus", "codex:gpt-5.6-sol:high"], "opus")
+            first = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(db.parse_ts(first.get("_panel_changed")), first)
+            stamp = first["_panel_changed"]
+            mc._write_panel(path, dict(first), None, "codex:gpt-5.6-sol:high")          # default-judge only
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["_panel_changed"], stamp)
+            mc._write_panel(path, json.loads(path.read_text(encoding="utf-8")), ["opus", "codex:gpt-5.6-sol:high"], None)   # same panel
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["_panel_changed"], stamp)
+            cur = json.loads(path.read_text(encoding="utf-8"))
+            cur["_panel_changed"] = "2020-01-01T00:00:00Z"                                 # make a change observable
+            mc._write_panel(path, cur, ["opus"], None)                                    # seat dropped
+            self.assertNotEqual(json.loads(path.read_text(encoding="utf-8"))["_panel_changed"], "2020-01-01T00:00:00Z")
+
     def test_stats_and_drift_honour_the_bounded_window(self):
         lines = [_rec(10, "codex:gpt-5.6-sol:high"), _rec(5, "codex:gpt-5.6-sol:high", "timeout"),
                  _rec(1, "codex:gpt-5.6-sol:high")]
@@ -501,7 +568,10 @@ class HealthWindow(unittest.TestCase):
             self.assertEqual(len(block), 6)
             self.assertTrue(block[0].startswith("=== PANEL HEALTH (since panel change 2026-09-05"), block[0])
             self.assertIn("reviews: 1 judge runs", block[2])
-        # drift compares the bounded window with the 30 days before ITS start
+            self.assertIn("drift n/a (window cut at the panel change", block[4])
+            self.assertIn("drift n/a — window cut at the panel change", out)
+        # r2 opus#2: a window cut at a panel change yields NO drift verdict — a 3-run window against
+        # a 30-day baseline that predates the change is small-sample noise about a different panel
         panel = {"panel": ["codex:gpt-5.6-sol:high", "opus"], "default_judge": "opus",
                  "seats": [{"spec": "codex:gpt-5.6-sol:high", "provider": "codex", "model": "gpt-5.6-sol", "label": "codex:gpt-5.6-sol:high", "error": ""},
                            {"spec": "opus", "provider": "claude", "model": "claude-opus-4-8[1m]", "label": "claude:claude-opus-4-8[1m]:high", "error": ""}]}
@@ -511,9 +581,11 @@ class HealthWindow(unittest.TestCase):
                                     _rec(4, "codex:gpt-5.6-sol:high"), _rec(5, "codex:gpt-5.6-sol:high"), _rec(6, "codex:gpt-5.6-sol:high")]) + "\n", encoding="utf-8")
             recs, _, _ = db.load_review_journal(j)
         start = NOW - timedelta(days=3)
-        trig = db.drift_triggers(recs, NOW, panel, start=start)
-        self.assertEqual([t["seat"] for t in trig], ["codex:gpt-5.6-sol:high"])   # 2/3 timeouts now vs 0/3 in the 30d before the change
-        self.assertEqual(db.drift_triggers(recs, NOW, panel, start=NOW - timedelta(days=14)), [])   # unbounded: 2/6 vs nothing before → no baseline
+        self.assertEqual(db.drift_triggers(recs, NOW, panel, start=start), [])   # 2/3 vs 0/3 would fire — but the window is cut
+        self.assertEqual(db.drift_triggers(recs, NOW, panel, start=NOW - timedelta(days=14)), [])   # full window: 2/6 vs nothing before → no baseline
+        # the same shape over a FULL window still fires (the cut is the only suppressor)
+        recs14 = [dict(r, ts=r["ts"] - timedelta(days=11)) for r in recs]    # 13/12.5/12d timeouts+ok vs 15/16/17d ok
+        self.assertEqual([t["seat"] for t in db.drift_triggers(recs14, NOW, panel)], ["codex:gpt-5.6-sol:high"])
 
 
 class Judgebench(unittest.TestCase):
@@ -847,7 +919,8 @@ class RenderAndReadOnly(unittest.TestCase):
                 db.render_dashboard(p, now=NOW, detect=True)                 # records the baseline
                 out = db.render_dashboard(p, now=NOW, detect=True)
             self.assertIn("model-gap · codex:gpt-5.6-sol:high — dead pin: gpt-5.6-sol is no longer listed by codex", out)
-            self.assertIn("tasks models set --panel opus,grok:grok-4.6:medium --default-judge opus", out)   # sol was the default judge
+            self.assertIn("act: tasks models check", out)
+            self.assertIn("if confirmed, drop it: tasks models set --panel opus,grok:grok-4.6:medium --default-judge opus", out)   # sol was the default judge
 
     def test_record_scan_runs_once_per_render_when_a_bench_exists(self):
         # impl-panel r1 opus#1 + r2: the scan is bounded to projects that HAVE a bench dir

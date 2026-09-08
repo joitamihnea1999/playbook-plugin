@@ -144,9 +144,19 @@ def merge_claude_md(template_text: str, existing: "str | None",
 
 
 def merge_gitignore(existing: "str | None") -> "str | None":
-    """Existing + the marker-guarded block; None when already present."""
+    """Existing + the marker-guarded block; None when nothing is missing. A file
+    that already carries the marker gains any entry added since it was written
+    (inserted right under the marker, once) — so an upgraded plugin's new
+    machine-local files stay out of every already-inited clone's record too."""
     if existing is not None and GITIGNORE_MARKER in existing:
-        return None
+        present = {line.strip() for line in existing.splitlines()}
+        missing = [e for e in GITIGNORE_ENTRIES if e not in present]
+        if not missing:
+            return None
+        lines = existing.splitlines()
+        at = next(i for i, line in enumerate(lines) if line.strip() == GITIGNORE_MARKER)
+        lines[at + 1:at + 1] = missing
+        return "\n".join(lines) + "\n"
     block = GITIGNORE_MARKER + "\n" + "\n".join(GITIGNORE_ENTRIES) + "\n"
     if existing is None or not existing.strip():
         return block

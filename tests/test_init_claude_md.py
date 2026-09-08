@@ -113,6 +113,19 @@ class MergeGitignore(unittest.TestCase):
         self.assertIn(cmm.GITIGNORE_MARKER, out)
         self.assertIsNone(cmm.merge_gitignore(out), "second run must be a no-op")
 
+    def test_existing_block_gains_missing_entries_once(self):
+        # task 054 r2 grok#3: an already-inited clone has the marker but not the newer
+        # entries — the merge must ADD the missing lines inside the block, once
+        pre_054 = "# mine\n" + cmm.GITIGNORE_MARKER + "\n" + "\n".join(
+            e for e in cmm.GITIGNORE_ENTRIES if e != ".agent/model-catalog.json") + "\n"
+        out = cmm.merge_gitignore(pre_054)
+        self.assertIsNotNone(out)
+        self.assertEqual(out.count(".agent/model-catalog.json"), 1)
+        self.assertEqual(out.count(cmm.GITIGNORE_MARKER), 1)
+        self.assertTrue(out.startswith("# mine\n" + cmm.GITIGNORE_MARKER + "\n"))
+        self.assertEqual(out.count(".agent/models.json"), 1)
+        self.assertIsNone(cmm.merge_gitignore(out), "complete block → no-op")
+
 
 class InitWritesBothFiles(unittest.TestCase):
     """The real scripts/init run — the seam the gauntlet found fragile."""

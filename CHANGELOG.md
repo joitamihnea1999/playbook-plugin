@@ -14,17 +14,22 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   `bench/runs/` is gitignored), and per seat from the lane's review-spend journal (runs,
   ok %, timeout %, median duration; other lanes' journals named, not aggregated) over a
   health window of the last 14 days that never reaches back past the most recent panel
-  change (the mtime of the `.agent/models.json` in use), so the stats describe the seats
+  change (`tasks models set/select` now stamp `_panel_changed` in `.agent/models.json`
+  only when the seat list changes; mtime is the fallback), so the stats describe the seats
   configured now. Exactly three triggers, each printed with the exact non-interactive
   command that acts on it: a seat whose timeout rate or median duration doubled against
-  the 30 days before the window; a **model gap** — a seated codex/grok model the CLI no
-  longer lists (a dead pin; "listed ≠ probed", `tasks models check` confirms) or a
-  codex/grok/claude id that is *new* since the dashboard last recorded the provider
-  catalog; the judgebench exam template changed since the last exam. "Available but not
-  seated" ids are an informational line, not a trigger. The catalog baseline
-  `.agent/model-catalog.json` (machine-local, gitignored by init like `models.json`) is
-  the command's one write — atomic, only when the catalog changed, never with
-  `--no-detect`, and a failed write is a printed note. The arm is dispatched before the
+  its prior 30 days (no verdict on a window cut at a panel change); a **model gap** — a
+  seated codex/grok model the CLI's catalog no longer lists (a dead pin; the catalog is a
+  local cache, so the action is the confirming `tasks models check` and the drop command
+  follows it) or a codex/grok/claude id that is *new* since the dashboard last recorded
+  the provider catalog (a claude "new" id is disclosed as possibly a new plugin alias);
+  the judgebench exam template changed since the last exam. "Available but not seated"
+  ids are an informational line, not a trigger. The catalog baseline
+  `.agent/model-catalog.json` (machine-local, gitignored by init like `models.json`; the
+  init `.gitignore` block now also gains missing entries on already-inited clones) is the
+  command's one write — atomic, merged per provider so an empty/failed listing never
+  erases a record, only when the catalog changed, never with `--no-detect`, and a failed
+  write is a printed note. The arm is dispatched before the
   session GC so it touches no task or session state. `--no-detect` skips the provider
   model listing. `tasks bootstrap` gains a six-line offline **PANEL HEALTH** block from the
   same data.
