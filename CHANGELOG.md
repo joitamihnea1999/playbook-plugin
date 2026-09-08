@@ -2,6 +2,26 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [Unreleased]
+
+### Fixed
+
+- **The tree-state fingerprint now binds the owner-declared `fingerprint_exclude`
+  set** (task 051, from Test A bug candidates #28/#54/#117 on corpus case
+  pb-036-r2 and the implementation panel). The literal candidate — `tail_cert_delta`
+  honoring the live exclude set instead of the F0 snapshot's — was already fixed in
+  task 036 round 4, but its consequence survived one layer up: the pathspecs only
+  filtered git output, so a `fingerprint_exclude` added after a panel for a path
+  that was CLEAN at the panel left the hash unchanged, the tree read FRESH, and
+  the close never reached the exclude-set check. The specs are now part of the
+  hashed material whenever the key is non-empty (byte-identical fingerprints for
+  every project without it; a project with it reads STALE once and self-heals at
+  its next panel).
+- `test_exclude_set_change_fails_closed` passed for the wrong reason (it touched
+  only code, so the hidden path left an empty delta and finding A blocked
+  regardless — deleting the exclude-set check kept it green). It now touches a
+  doc too and asserts the control enumeration, so the mutant fails.
+
 ## [1.5.42] — 2026-09-03
 
 The headline is the **review-spend journal**: every judge invocation the review

@@ -965,15 +965,82 @@ class Round4Fixes(unittest.TestCase):
     def test_exclude_set_change_fails_closed(self):
         d = _repo()
         (d / ".agent").mkdir()
+        (d / "docs").mkdir()
         fp = tree_state_fingerprint(d)
         snap = build_panel_snapshot(d, fp)                # exclude = default
-        # add a fingerprint_exclude entry AFTER the panel, then touch code + docs
+        # add a fingerprint_exclude entry AFTER the panel, then touch code + docs.
+        # The docs touch is what makes this test DISCRIMINATING (task 051): with
+        # only code.py touched, the live exclude hides it and the delta is EMPTY,
+        # so finding A ("stale but unexplained") blocks even when the exclude-set
+        # check is removed — the test passed for the wrong reason. With a
+        # non-behavioral doc in the delta, a missing exclude-set check would
+        # CERTIFY (True, [], ["docs/note.md"]) while code.py slips through.
         (d / ".agent" / "config.json").write_text(
             json.dumps({"fingerprint_exclude": ["code.py"]}), encoding="utf-8")
         (d / "code.py").write_text("x = 99\n", encoding="utf-8")
+        (d / "docs" / "note.md").write_text("post-panel note\n", encoding="utf-8")
         can, beh, non = tail_cert_delta(d, snap, snap["tree_fp"])
         self.assertFalse(can)                             # exclude-set changed → block
         self.assertEqual((beh, non), ([], []))
+        # control: the SAME delta with the exclude set left unchanged does
+        # enumerate — proving the block above came from the exclude-set check,
+        # not from an empty or errored enumeration.
+        (d / ".agent" / "config.json").unlink()
+        can2, beh2, non2 = tail_cert_delta(d, snap, snap["tree_fp"])
+        self.assertTrue(can2)
+        self.assertEqual((beh2, non2), (["code.py"], ["docs/note.md"]))
+
+    # task 051 (impl-panel r1 opus#1 / grok#1) — the FINGERPRINT must bind the
+    # owner-declared exclude set too: a post-panel `fingerprint_exclude` for a
+    # path that was CLEAN at F0 used to leave the tree FRESH (the exclude strings
+    # never entered the hashed material and .agent/config.json is itself
+    # excluded), so the freshness gate never fired and the R4-3 check in
+    # tail_cert_delta was never reached — the candidates' consequence ("lets
+    # behavioral code through") survived at the close path.
+    def test_fingerprint_binds_exclude_set_so_post_panel_exclude_reads_stale(self):
+        d = _repo()
+        (d / ".agent").mkdir()
+        fp0 = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp0)
+        # a no-op config (no fingerprint_exclude key) leaves the value byte-identical
+        (d / ".agent" / "config.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(tree_state_fingerprint(d), fp0)
+        # post-panel: exclude the (clean, tracked) code path, then edit it
+        (d / ".agent" / "config.json").write_text(
+            json.dumps({"fingerprint_exclude": ["code.py"]}), encoding="utf-8")
+        fp1 = tree_state_fingerprint(d)
+        self.assertNotEqual(fp1, fp0, "adding an exclude must move the fingerprint (STALE)")
+        (d / "code.py").write_text("x = 99\n", encoding="utf-8")
+        self.assertNotEqual(tree_state_fingerprint(d), fp0)
+        # and the stale path then fails CLOSED on the exclude-set mismatch
+        self.assertEqual(tail_cert_delta(d, snap, fp0), (False, [], []))
+
+    # task 051 impl-panel r2 grok#1 — the bind must be the SET, not mere presence:
+    # the documented real config is already non-empty (`["journal/"]`), so
+    # EXTENDING it with a clean code path must move the fingerprint too. A
+    # presence-only marker would pass the test above and leave this attack FRESH.
+    def test_fingerprint_binds_exclude_set_extension_not_just_presence(self):
+        d = _repo()
+        (d / ".agent").mkdir()
+        (d / ".agent" / "config.json").write_text(
+            json.dumps({"fingerprint_exclude": ["journal/"]}), encoding="utf-8")
+        fp0 = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp0)
+        (d / ".agent" / "config.json").write_text(
+            json.dumps({"fingerprint_exclude": ["journal/", "code.py"]}), encoding="utf-8")
+        self.assertNotEqual(tree_state_fingerprint(d), fp0,
+                            "extending a non-empty exclude set must move the fingerprint")
+        (d / "code.py").write_text("x = 99\n", encoding="utf-8")
+        self.assertNotEqual(tree_state_fingerprint(d), fp0)
+        self.assertEqual(tail_cert_delta(d, snap, fp0), (False, [], []))
+        # order-insensitive: the same set in another order is the same fingerprint
+        (d / "code.py").write_text("x = 1\n", encoding="utf-8")
+        (d / ".agent" / "config.json").write_text(
+            json.dumps({"fingerprint_exclude": ["code.py", "journal/"]}), encoding="utf-8")
+        fp_a = tree_state_fingerprint(d)
+        (d / ".agent" / "config.json").write_text(
+            json.dumps({"fingerprint_exclude": ["journal/", "code.py"]}), encoding="utf-8")
+        self.assertEqual(tree_state_fingerprint(d), fp_a)
 
     # R4-1 — worktree-DELETED but index-STAGED: the staged blob is shown
     def test_review_diff_shows_staged_blob_when_worktree_deleted(self):

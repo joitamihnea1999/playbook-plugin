@@ -2734,7 +2734,7 @@
     {
       "id": "PB-PANEL-FRESHNESS",
       "category": "judges-and-reviews",
-      "statement": "Panel evidence is stamped to the reviewed tree; when panel evidence is required by policy (panel_required_for), a close held to the high-consequence bar (assertive, irreversible, or an unset/unclassified risk) blocks on stale evidence while a reversible close stays advisory, the override is refused without a reason and records the reason when given, and a fresh stamp closes cleanly. As of task 036 (owner decision A, 2026-08-27) a STALE close whose only post-panel delta is in non-behavioral file classes (a *.md under docs/ or named README*/CHANGELOG*/MIND_MAP*, a *.json under docs/, the repo-root CLAUDE.md, and anything under tests/; root .agent/ task records are instead excluded from the freshness fingerprint entirely, so an .agent/ edit never stales a panel and never enters the certified delta) may instead satisfy freshness via a single-judge TAIL CERTIFICATION that re-reviews the F0-anchored close delta (the changed-path set and the current closing content; an original uncommitted at F0 is not persisted, so that path is reviewed current-vs-HEAD) and emits a structured TAIL-CERT: PASS/FAIL; any behavioral (code) delta — including a code comment, a config.json, a non-doc top-level file, or the source endpoint of a rename into docs/ — still forces a fresh full panel, and the mechanism fails closed on a missing/mismatched descriptor, a changed code_roots scope set, a git error, a stale tree with no attributable delta, a non-PASS verdict, or a tree that mutates during the judge call (a TOCTOU compare-and-swap).",
+      "statement": "Panel evidence is stamped to the reviewed tree; when panel evidence is required by policy (panel_required_for), a close held to the high-consequence bar (assertive, irreversible, or an unset/unclassified risk) blocks on stale evidence while a reversible close stays advisory, the override is refused without a reason and records the reason when given, and a fresh stamp closes cleanly. As of task 036 (owner decision A, 2026-08-27) a STALE close whose only post-panel delta is in non-behavioral file classes (a *.md under docs/ or named README*/CHANGELOG*/MIND_MAP*, a *.json under docs/, the repo-root CLAUDE.md, and anything under tests/; root .agent/ task records are instead excluded from the freshness fingerprint entirely, so an .agent/ edit never stales a panel and never enters the certified delta) may instead satisfy freshness via a single-judge TAIL CERTIFICATION that re-reviews the F0-anchored close delta (the changed-path set and the current closing content; an original uncommitted at F0 is not persisted, so that path is reviewed current-vs-HEAD) and emits a structured TAIL-CERT: PASS/FAIL; any behavioral (code) delta — including a code comment, a config.json, a non-doc top-level file, or the source endpoint of a rename into docs/ — still forces a fresh full panel, and the mechanism fails closed on a missing/mismatched descriptor, a changed code_roots scope set or fingerprint_exclude set (the exclude pathspecs are hashed into the fingerprint since task 051, so a post-panel exclude reads STALE instead of FRESH and is then rejected), a git error, a stale tree with no attributable delta, a non-PASS verdict, or a tree that mutates during the judge call (a TOCTOU compare-and-swap).",
       "owner": [
         {
           "path": "plugins/playbook/tasks/core.py",
@@ -3052,6 +3052,19 @@
           "negative_control": null,
           "limitations": [
             "Skips on platforms without os.symlink (Windows). impl-panel F2: a code_roots entry symlinking to a repo outside the project is refused loudly."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tail_certification.py",
+          "reference": "Round4Fixes.test_fingerprint_binds_exclude_set_so_post_panel_exclude_reads_stale",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tail_certification.py",
+            "reference": "Round4Fixes.test_fingerprint_binds_exclude_set_extension_not_just_presence"
+          },
+          "limitations": [
+            "Task 051: the owner-declared fingerprint_exclude pathspecs are hashed into tree_state_fingerprint, so a post-panel exclude for a path that was CLEAN at F0 reads STALE (before 051 it read FRESH and tail_cert_delta's exclude-set check was never reached). The proof asserts byte-identity with no key, STALE after adding an exclude, and tail_cert_delta failing closed on the mismatch; the negative control (impl-panel r2 grok#1) starts from a non-empty set and asserts EXTENDING it moves the fingerprint (a presence-only marker fails it) and that the set is order-insensitive. Both were watched fail against the pre-fix / presence-only mutant. Not covered: the close path end-to-end (cmd_work) for this specific attack — the stale branch is exercised by ClosePathTailCert above."
           ]
         }
       ],

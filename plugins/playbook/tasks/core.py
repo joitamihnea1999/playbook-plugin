@@ -1591,6 +1591,20 @@ def tree_state_fingerprint(project_path: Path) -> str:
     if base is None:
         return ""            # git absent — no fingerprint beats a fabricated one
     material = base
+    # Bind the OWNER-DECLARED exclude set into the material (task 051, impl-panel
+    # opus#1/grok#1): the pathspecs only FILTER porcelain/diff/untracked output,
+    # so a `fingerprint_exclude` added after the panel for a path that was CLEAN
+    # at F0 left the hash unchanged — the tree read FRESH, the close never
+    # entered tail-cert, and the R4-3 exclude-set check in `tail_cert_delta`
+    # (which rejects exactly that change) was never reached. Hashing the specs
+    # makes an exclude-set change STALE by construction, so the close routes to
+    # the check that fails it closed. UNSET/empty key → nothing appended →
+    # byte-identical fingerprints for every project without the key; a project
+    # WITH it reads STALE once and self-heals at its next panel (the 1.5.6
+    # precedent above).
+    _owner_excl = sorted(e for e in exclude if e != ":(exclude).agent")
+    if _owner_excl:
+        material += "\0fingerprint_exclude:" + "\0".join(_owner_excl)
     # Nested code repos (config `code_roots`): a code-only edit inside a
     # gitignored nested checkout is invisible to the outer `git status`, so the
     # outer material above never moves for it. Fold each root's own material in.

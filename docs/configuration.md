@@ -121,7 +121,10 @@ bookkeeping outside `.agent/`** that standing gates write after the last panel
 ```
 
 Entries are git pathspec strings, appended to the exclusion set for both the
-panel stamp and the close comparison. Malformed entries are skipped with a
+panel stamp and the close comparison. The list itself is hashed into the
+fingerprint (task 051): changing it after a panel reads STALE, and the close
+then fails closed on the changed exclude set — a fresh panel is required — so an
+exclude cannot be added post-panel to hide a path that was clean at the panel. Malformed entries are skipped with a
 printed warning, never silently. Exclude only true bookkeeping: anything
 excluded here can change after a panel without anyone being told, so a path
 that can carry claims or code does NOT belong in this list. Commit the file —
