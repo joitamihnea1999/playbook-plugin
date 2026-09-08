@@ -157,6 +157,13 @@ class JournalParsing(unittest.TestCase):
         self.assertIn("other lanes with journals (NOT aggregated): (root)", out)
         self.assertIn("1 review records total", out)          # alice's one, not root's
 
+    def test_unknown_status_is_malformed_not_a_run(self):
+        # impl-panel r2 codex-med#4: the contract allows ok|fail|timeout|dnf only
+        lines = [_rec(1, "s", "ok"), _rec(1, "s", "bogus"), _rec(1, "s", "dnf")]
+        recs, skipped = db.load_review_records(self._write(lines))
+        self.assertEqual(len(recs), 2)
+        self.assertEqual(skipped, 1)
+
     def test_missing_journal_is_empty_not_error(self):
         self.assertEqual(db.load_review_records(Path("/nonexistent/x.jsonl")), ([], 0))
         self.assertEqual(db.load_review_records(None), ([], 0))
@@ -355,8 +362,9 @@ class Judgebench(unittest.TestCase):
         self.assertEqual(len(trig), 1)
         self.assertEqual(trig[0]["kind"], "template")
         # impl-panel codex#2 / grok#3: label=spec in MANIFEST order — presets cover only sol-*/grok-*
+        # called on a bare bench dir (no project) → absolute path; via _exams_with_fallback it is project-relative
         self.assertEqual(trig[0]["command"],
-                         "python3 bench/judgebench.py run --cases all --candidates "
+                         f"python3 {b}/judgebench.py run --cases all --candidates "
                          "sol-med=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high --run-id testA-retest --live")
 
     def test_record_copy_fills_in_when_bench_runs_is_gone(self):
@@ -429,8 +437,68 @@ class Judgebench(unittest.TestCase):
         self.assertEqual([e["run_id"] for e in s["exams"]], ["renamed"])
         self.assertEqual(s["exams"][0]["labels"], ["fast", "slow"])
         self.assertEqual(trig[0]["command"],
-                         "python3 bench/judgebench.py run --cases all --candidates "
+                         f"python3 {b}/judgebench.py run --cases all --candidates "
                          "slow=codex:gpt-5.6-sol:high,fast=codex:gpt-5.6-sol:medium --run-id renamed-retest --live")
+
+    def test_three_seat_run_is_not_a_pair(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = Path(td) / "bench"
+            _bench(b)
+            r = b / "runs" / "trio"
+            r.mkdir()
+            (r / "manifest.json").write_text(json.dumps({
+                "run_id": "trio", "mode": "live", "created_at": "2026-09-09T00:00:00Z",
+                "candidates": [{"label": "a", "spec": "codex:gpt-5.6-sol:high"}, {"label": "b", "spec": "codex:gpt-5.6-sol:medium"},
+                               {"label": "c", "spec": "grok:grok-4.6:medium"}],
+                "template": {"version": "v1", "sha256": "e" * 64}}), encoding="utf-8")
+            (b / "runs" / "bad").mkdir()
+            (b / "runs" / "bad" / "manifest.json").write_text(json.dumps({"run_id": "bad", "mode": "live", "candidates": {"x": 1}}), encoding="utf-8")
+            s = db.judgebench_summary(b)
+        self.assertEqual([e["run_id"] for e in s["exams"]], ["testA"])
+
+    def test_template_command_is_quoted_and_uses_the_found_bench_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            (p / ".agent" / "config.json").write_text(json.dumps({"code_roots": ["nested"]}), encoding="utf-8")
+            b = p / "nested" / "bench"
+            _bench(b, live_sha="f" * 64)
+            mf = b / "runs" / "testA" / "manifest.json"
+            m = json.loads(mf.read_text(encoding="utf-8"))
+            m["run_id"] = "t$(x)"
+            m["candidates"][0]["label"] = "a;b"
+            mf.write_text(json.dumps(m), encoding="utf-8")
+            trig = db.template_triggers(db._exams_with_fallback(p))
+        import shlex
+        self.assertEqual(len(trig), 1)
+        argv = shlex.split(trig[0]["command"])
+        self.assertEqual(argv[1], "nested/bench/judgebench.py")      # project-relative via _exams_with_fallback
+        self.assertEqual(argv[argv.index("--run-id") + 1], "t$(x)-retest")
+        self.assertEqual(argv[argv.index("--candidates") + 1], "a;b=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high")
+        self.assertNotIn("$(x) ", trig[0]["command"])
+
+    def test_record_fills_only_pairs_without_a_manifest(self):
+        # impl-panel r2 codex#2 / grok#2: one surviving manifest must not hide other pairs
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td), bench=True)               # manifest exam: sol-high vs sol-med
+            tdir = p / ".agent" / "tasks" / "050-x"
+            tdir.mkdir()
+            (tdir / "task.md").write_text("## Status\ndone\n", encoding="utf-8")
+            (tdir / "copy.md").write_text(
+                "# judgebench report — run `testB`\n\n| candidate | inv | weighted |\n|---|---|---|\n| grok-high | 19 | 51 |\n| grok-med | 19 | 67 |\n\n"
+                "## Run facts\n\n- Live run 2026-09-07.\n\n## §25 decision\n\n**grok-high does not win Test B.**\n\n"
+                "# judgebench report — run `testA-copy`\n\n| candidate | inv | weighted |\n|---|---|---|\n| sol-high | 19 | 1 |\n| sol-med | 19 | 1 |\n\n"
+                "## §25 decision\n\n**sol-med wins.**\n", encoding="utf-8")
+            bench = db._exams_with_fallback(p)
+        self.assertEqual([(e["run_id"], e["source"][:6]) for e in bench["exams"]], [("testA", "bench/"), ("testB", "record")])
+
+    def test_no_bench_dir_means_no_record_scan(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            with mock.patch("tasks.dashboard.record_exams", side_effect=AssertionError("scanned")) as re_:
+                self.assertIsNone(db._exams_with_fallback(p))
+                db.panel_health_lines(p, now=NOW)
+            re_.assert_not_called()
 
     def test_manifest_exam_wins_over_a_record_for_the_same_pair(self):
         with tempfile.TemporaryDirectory() as td:
@@ -488,20 +556,16 @@ class RenderAndReadOnly(unittest.TestCase):
         self.assertIn("model-gap · codex — available but not in the panel: gpt-x", out)
         self.assertIn("codex:gpt-x:medium", out)
 
-    def test_record_scan_skipped_when_manifests_exist(self):
-        # impl-panel opus#1: bootstrap must not regex every task-dir markdown when manifests answer
+    def test_record_scan_runs_once_per_render_when_a_bench_exists(self):
+        # impl-panel r1 opus#1 + r2: the scan is bounded to projects that HAVE a bench dir
+        # (see test_no_bench_dir_means_no_record_scan) and runs once per render/block.
         from unittest import mock
         with tempfile.TemporaryDirectory() as td:
             p = _project(Path(td), bench=True)
-            with mock.patch("tasks.dashboard.record_exams", side_effect=AssertionError("scanned")) as re_:
+            with mock.patch("tasks.dashboard.record_exams", return_value=[]) as re_:
                 block = db.panel_health_lines(p, now=NOW)
                 db.render_dashboard(p, now=NOW, detect=False)
-            re_.assert_not_called()
-            (p / "bench" / "runs" / "testA" / "manifest.json").unlink()
-            (p / "bench" / "runs" / "old" / "manifest.json").unlink()
-            with mock.patch("tasks.dashboard.record_exams", return_value=[]) as re2:
-                db.panel_health_lines(p, now=NOW)
-            re2.assert_called_once()
+            self.assertEqual(re_.call_count, 2)
         self.assertEqual(len(block), 6)
 
     def test_stale_settings_hook_paths_rule(self):
@@ -553,6 +617,28 @@ class RenderAndReadOnly(unittest.TestCase):
             self.assertEqual(alive, expect_alive, f"{cmd}: rc={r.returncode} out={r.stdout[-300:]} err={r.stderr[-300:]}")
             if cmd == "dashboard":
                 self.assertIn("PLAYBOOK DASHBOARD", r.stdout)
+
+    def test_hooks_health_is_ok_on_a_clean_resolve(self):
+        # impl-panel r2 (opus/sonnet/codex/grok, Critical): a for…else had appended
+        # "no authoritative hooks.json resolved" on EVERY call, so ok was never True.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            with mock.patch("tasks.hooks_check.hooks_check_report", return_value=[]), \
+                 mock.patch("tasks.hooks_check.grok_enforcement_issues", return_value=[]), \
+                 mock.patch("tasks.dashboard._stale_settings_hook_paths", return_value=[]):
+                h = db.hooks_health(p)
+        self.assertEqual(h["warnings"], [], h)
+        self.assertTrue(h["ok"])
+        self.assertTrue(h["copy"] and h["version"], h)
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            with mock.patch("tasks.hooks_check.hooks_check_report", return_value=[]), \
+                 mock.patch("tasks.hooks_check.grok_enforcement_issues", return_value=[]), \
+                 mock.patch("tasks.dashboard._stale_settings_hook_paths", return_value=["/gone/x"]), \
+                 mock.patch("tasks.hooks_check.authoritative_hooks_path", return_value=None):
+                h2 = db.hooks_health(p)
+        self.assertEqual(len(h2["warnings"]), 2, h2)     # one stale path + one "no authoritative copy", once each
 
     def test_hooks_health_mirrors_doctor_grok_rule(self):
         # W5 correspondence: doctor warns on STALE grok enforcement paths even without
@@ -615,6 +701,28 @@ class BootstrapBlock(unittest.TestCase):
         self.assertEqual(len(block), 6)
         self.assertIn("no review-spend records in the last 14 days", block[2])
         self.assertIn("template: no live exam on record", block[4])
+
+    def test_bootstrap_block_is_six_lines_even_when_the_dashboard_raises(self):
+        # impl-panel r2 codex-med#5: the six-line contract holds on the exception path too
+        from unittest import mock
+        from tasks.project_setup import cmd_bootstrap
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            (p / "MIND_MAP.md").write_text("# Mind Map\n\n[1] **Overview** - x.\n", encoding="utf-8")
+            cwd = os.getcwd()
+            buf = io.StringIO()
+            try:
+                os.chdir(p)
+                with mock.patch("tasks.dashboard.panel_health_lines", side_effect=RuntimeError("boom\nline2")), \
+                     contextlib.redirect_stdout(buf):
+                    cmd_bootstrap([])
+            finally:
+                os.chdir(cwd)
+        out = buf.getvalue().splitlines()
+        i = out.index("=== PANEL HEALTH (last 14 days) ===")
+        self.assertEqual(out[i + 1], "unavailable: boom line2")
+        self.assertEqual(out[i + 5], "full picture + exact commands: tasks dashboard")
+        self.assertEqual(out[i + 6], "")
 
     def test_bootstrap_prints_the_block(self):
         from tasks.project_setup import cmd_bootstrap

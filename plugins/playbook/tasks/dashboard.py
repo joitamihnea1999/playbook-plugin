@@ -61,6 +61,7 @@ _MAX_NUMERIC = 10 ** 15 - 1   # the producer's magnitude cap (pb_journal._cap_in
 _CODEX_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _GROK_EFFORTS = frozenset({"low", "medium", "high"})
 _CLAUDE_EFFORT = "high"   # fixed — see review._CLAUDE_JUDGE_EFFORT
+_KNOWN_STATUSES = frozenset({"ok", "fail", "timeout", "dnf"})   # docs/enforcement-journal.md
 
 
 # ── small pure helpers ───────────────────────────────────────────────────────
@@ -218,8 +219,9 @@ def load_review_journal(path: "Path | None", cap: int = _JOURNAL_READ_CAP) -> "t
         ts = parse_ts(obj.get("ts"))
         seat = obj.get("seat")
         status = obj.get("status")
-        if ts is None or not isinstance(seat, str) or not seat or not isinstance(status, str):
-            skipped += 1
+        if (ts is None or not isinstance(seat, str) or not seat
+                or not isinstance(status, str) or status not in _KNOWN_STATUSES):
+            skipped += 1        # an out-of-contract status is malformed, not a run (impl-panel r2 codex-med#4)
             continue
         dur = obj.get("duration_ms")
         if not _is_int(dur) or dur < 0 or dur > _MAX_NUMERIC:
@@ -570,7 +572,7 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
     if bench_dir is None:
         return None
     out: "dict" = {"corpus_version": None, "cases": 0, "exams": [],
-                   "template_sha_now": "", "template_path": ""}
+                   "template_sha_now": "", "template_path": "", "bench_dir": str(bench_dir)}
     try:
         corpus = json.loads((bench_dir / "corpus" / "corpus.json").read_text(encoding="utf-8"))
         out["corpus_version"] = corpus.get("version")
@@ -597,13 +599,15 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
                 continue
             if not isinstance(m, dict) or m.get("mode") != "live":
                 continue
-            cands = [c for c in (m.get("candidates") or []) if isinstance(c, dict)]
+            raw_c = m.get("candidates")
+            cands = [c for c in raw_c if isinstance(c, dict)] if isinstance(raw_c, list) else []
             # (label, spec) pairs in MANIFEST order — never re-sorted apart (impl-panel
             # grok#3): the re-exam command needs `label=spec` for every candidate.
             pairs = [(str(c.get("label", "?")), str(c.get("spec", "?"))) for c in cands]
             labels = tuple(sorted(lab for lab, _sp in pairs))
-            if len(labels) < 2:
-                continue                    # an exam compares a PAIR; a single-seat smoke is not a verdict
+            if len(labels) != 2 or len(set(labels)) != 2:
+                continue                    # an exam compares exactly ONE PAIR (impl-panel r2 codex#4): a
+                                            # single-seat smoke or a 3-seat run is not a per-pair verdict
             # keyed by the canonical SPECS (impl-panel codex#1): labels are mutable
             # display names; two exams of the same seats under renamed labels are one pair
             key = tuple(sorted(sp for _lab, sp in pairs))
@@ -687,8 +691,8 @@ def record_exams(project_path: Path) -> "list[dict]":
                 seg = seg[:nxt.start()] if nxt else seg
                 v = parse_report_verdict(seg)
                 labels = sorted(v["weighted"])
-                if len(labels) < 2:
-                    continue
+                if len(labels) != 2:
+                    continue                # exactly one pair, as for manifests
                 dm = None
                 for sec_m in re.finditer(r"^## Run facts.*?$", seg, re.M):
                     tail = seg[sec_m.end():sec_m.end() + 600]
@@ -703,13 +707,24 @@ def record_exams(project_path: Path) -> "list[dict]":
 
 
 def _exams_with_fallback(project_path: Path) -> "dict | None":
-    """Manifests first; the task-record scan runs ONLY when they yield no exam
-    (impl-panel opus#1: bootstrap must not regex every task-dir markdown on
-    every session once `bench/runs/` is present)."""
-    bench = judgebench_summary(find_bench_dir(project_path))
-    if bench and bench.get("exams"):
-        return bench
-    return merge_record_exams(bench, record_exams(project_path))
+    """Manifests, then durable task-record copies filling every seat pair that
+    has no manifest exam (impl-panel r2 codex#2 / grok#2: one surviving manifest
+    must not hide the other pairs). The record scan runs ONLY when a bench dir
+    exists at all (r2 opus#2 / codex#5): an ordinary install has no judgebench
+    and must pay nothing for it on every bootstrap; the fresh-clone case the
+    fallback exists for (committed corpus, gitignored runs) still has `bench/`."""
+    bench_dir = find_bench_dir(project_path)
+    if bench_dir is None:
+        return None
+    bench = merge_record_exams(judgebench_summary(bench_dir), record_exams(project_path))
+    if bench is not None:
+        # the printed re-exam command uses a project-relative path when the bench
+        # lives inside the project (e.g. `playbook-plugin/bench/judgebench.py`)
+        try:
+            bench["bench_dir_display"] = bench_dir.relative_to(Path(project_path)).as_posix()
+        except ValueError:
+            bench["bench_dir_display"] = str(bench_dir)
+    return bench
 
 
 # ── trigger 3: template ──────────────────────────────────────────────────────
@@ -728,13 +743,17 @@ def template_triggers(bench: "dict | None") -> "list[dict]":
     # codex-med#1 / grok#3)
     pairs = newest.get("candidates") or [(lab, lab) for lab in newest["labels"]]
     cands = ",".join(f"{lab}={sp}" if sp and sp != lab else lab for lab, sp in pairs)
+    # every interpolated token is manifest-controlled text → shlex-quoted (impl-panel
+    # r2 codex-med#1 / grok#3), and the bench path is the one actually found (a
+    # `code_roots` nested bench is not `bench/` at the project root — codex#3)
+    bench_py = (bench.get("bench_dir_display") or bench.get("bench_dir") or "bench").rstrip("/") + "/judgebench.py"
     return [{"kind": "template", "seat": newest["run_id"],
              "detail": (f"judgebench exam template is {bench['template_sha_now'][:12]} now, "
                         f"was {newest['template_sha'][:12]} at exam {newest['run_id']} "
                         f"({_date(newest['date'])}) — its verdict no longer describes the current exam prompt "
                         "(this tracks the bench instrument, not the live review.py panel prompt)"),
-             "command": (f"python3 bench/judgebench.py run --cases all --candidates {cands} "
-                         f"--run-id {newest['run_id']}-retest --live")}]
+             "command": (f"python3 {shlex.quote(bench_py)} run --cases all --candidates {shlex.quote(cands)} "
+                         f"--run-id {shlex.quote(newest['run_id'] + '-retest')} --live")}]
 
 
 def _date(dt: "datetime | None") -> str:
@@ -775,11 +794,11 @@ def hooks_health(project_path: Path) -> "dict":
                 body = _read_regular_text(echo, cap=1 << 20) or ""
                 if "cut -c" not in body and "GATE_TEXT_STORE" not in body:
                     warnings.append("hooks: gate text truncation — state-echo-hook has no truncation (gate text may grow unbounded)")
+        else:
+            warnings.append("no authoritative hooks.json resolved (CLAUDE_PLUGIN_ROOT unset and no sibling hooks/)")
         # doctor §4b: stale hook entries in ~/.claude/settings.json
         for stale in _stale_settings_hook_paths():
             warnings.append(f"hooks: stale ~/.claude/settings.json entry — {stale}")
-        else:
-            warnings.append("no authoritative hooks.json resolved (CLAUDE_PLUGIN_ROOT unset and no sibling hooks/)")
         for label, detail in hooks_check_report(project_path):
             warnings.append(f"{label} — {detail}" if detail else label)
         # grok's always-trusted enforcement file — doctor's exact rule (diagnostics

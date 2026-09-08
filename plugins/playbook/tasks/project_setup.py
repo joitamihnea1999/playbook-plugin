@@ -179,7 +179,12 @@ def cmd_bootstrap(cmd_args):
         from tasks.dashboard import panel_health_lines
         _block = panel_health_lines(project_path)
     except Exception as _e:  # advisory — never break orientation
-        _block = [f"=== PANEL HEALTH (last 14 days) === unavailable ({_e})"]
+        _block = ["=== PANEL HEALTH (last 14 days) ===",
+                  f"unavailable: {' '.join(str(_e).split())[:200] or type(_e).__name__}",
+                  "reviews: n/a", "slowest seat: n/a · most timeouts: n/a",
+                  "triggers (offline): n/a", "full picture + exact commands: tasks dashboard"]
+    if len(_block) != 6:                 # the block is a six-line CONTRACT, even degraded
+        _block = (_block + ["" ] * 6)[:6]
     print()
     for _ln in _block:
         print(_ln)
