@@ -52,7 +52,7 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   value, and there is no fallback to an earlier pair); `set_task_blocked`,
   `resume_blocked_task`, `tasks handoff` and `tasks work done` all check that the status
   can land BEFORE writing anything and refuse (stderr + exit 1, file byte-identical)
-  otherwise — the status lands or nothing is written. The value must start at column 0 (an indented value is code) and the blocked release matches the exact token `blocked`; doctor's gate-logging reader uses the same status reader. The one disclosed corner is
+  otherwise — the status lands or nothing is written. The value must start at column 0 (an indented value is code) and the blocked release matches the exact token `blocked`; doctor's gate-logging reader uses the same status reader; blank lines between `## Status` and its value are tolerated, and the hook's read is CR-safe on Windows. The one disclosed corner is
   unchanged: under an UNCLOSED fence the appended `## Blocked` is still written and read
   fail-open, but an earlier decoy `## Blocked` inside that fence is what the reason reader
   surfaces first. The reopen path and `tasks retro` use the same reader/writer.

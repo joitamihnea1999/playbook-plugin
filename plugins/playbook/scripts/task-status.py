@@ -40,7 +40,11 @@ def main(argv: "list[str]") -> int:
     if status == "error":
         print("task-status: could not read the task file", file=sys.stderr)
         return 1
-    print(status)
+    # Bytes, `\n` only: a text-mode print() on native Windows emits CRLF and bash
+    # command substitution keeps the CR, so `blocked\r` would miss the hook's exact
+    # match (round-5 panel). The hook also strips one trailing CR — belt + braces.
+    sys.stdout.buffer.write((status + "\n").encode("utf-8", "replace"))
+    sys.stdout.buffer.flush()
     return 0
 
 

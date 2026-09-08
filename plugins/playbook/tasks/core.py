@@ -2979,12 +2979,14 @@ def create_task(project_path: Path, name: str, task_type: str | None = None,
     return task_file
 
 
-def _live_status_index(lines: "list[str]") -> "int | None":
-    """Index of the LAST *live* `## Status` heading, or None (V7 / P-F, task 043).
+def _live_status_pair(lines: "list[str]") -> "tuple[int, int] | None":
+    """(heading_index, value_index) of the LAST *live* `## Status` and its VALUE
+    line, or None (V7 / P-F, task 043).
 
     The ONE rule for every `## Status` reader and writer — `_extract_status`,
-    `_set_status`, `retro`, and (through `scripts/task-status.py`) the stop-hook
-    enforcement gate, so Python and the hook cannot disagree about the same file.
+    `_set_status`, `retro`, `gate_logging`, and (through `scripts/task-status.py`)
+    the stop-hook enforcement gate, so Python and the hook cannot disagree about
+    the same file.
 
       * LAST wins among live headings (the rule the stop-hook parity test pins);
       * a heading inside a code fence is content, not the status — a task that
@@ -2998,29 +3000,43 @@ def _live_status_index(lines: "list[str]") -> "int | None":
         (status reads `unknown`, the writer refuses) — visible, never lenient;
       * strict ATX (`_atx_h2_text`): `##\tStatus`, `## Status ##`, <=3-space
         indents are the heading; a >=4-column `## Status` is code/text;
-      * the LAST live heading must be followed by a STATUS-SHAPED value line
-        (`_STATUS_VALUE_RE`: letter-led scalar, optional trailing parenthetical —
-        `pending`, `in_progress`, `blocked`, `done`, `done (2026-…)`), live and
-        unfenced. A gate (`- [ ] …`), a heading, a blockquote, an HTML marker, a
-        fence or a blank line is NEVER a value (round-1/round-2 panels:
-        `## Status\n## Risk` / `## Status\n- [ ] GATE` — reading them as the status
-        is nonsense and WRITING over them destroyed the Risk section / released
-        the gate count). When the LAST live heading has no valid value line the
-        result is None — the reader says `unknown`, the writers refuse. There is
-        deliberately NO fallback to an earlier valid pair: that fallback re-opened
-        the release bypass (an earlier `blocked` + a trailing malformed pair read
-        as blocked — round-2 panel, convergent).
+      * the LAST live heading's VALUE is the first non-blank line after it (blank
+        lines are skipped — an older hand-formatted `## Status\n\npending` must
+        not become uncloseable, round-5 panel), and it must be STATUS-SHAPED
+        (`_STATUS_VALUE_RE`: column-0, letter-led scalar, optional trailing
+        parenthetical — `pending`, `in_progress`, `blocked`, `done`, `done (…)`),
+        live and unfenced. A gate (`- [ ] …`), a heading, a blockquote, an HTML
+        marker, a fence or an indented line is NEVER a value (round-1..3 panels:
+        `## Status\n## Risk` / `## Status\n- [ ] GATE` / `## Status\n    blocked` —
+        reading them as the status is nonsense and WRITING over them destroyed
+        the Risk section / released the gate count). When the LAST live heading
+        has no valid value line the result is None — the reader says `unknown`,
+        the writers refuse. There is deliberately NO fallback to an earlier valid
+        pair: that fallback re-opened the release bypass (an earlier `blocked` +
+        a trailing malformed pair read as blocked — round-2 panel, convergent).
     """
     flags = _iter_fenced_flags(lines, unclosed_is_live=False)
     last = None
     for i, line in enumerate(lines):
         if not flags[i] and _atx_h2_text(line) == "## Status":
             last = i
-    if last is None or last + 1 >= len(lines) or flags[last + 1]:
-        return None                             # no heading / no live value line
-    if not _STATUS_VALUE_RE.match(lines[last + 1].rstrip("\r\n")):
+    if last is None:
+        return None
+    v = last + 1
+    while v < len(lines) and lines[v].strip() == "":
+        v += 1                                  # skip blank lines only
+    if v >= len(lines) or flags[v]:
+        return None                             # no value line / fenced value
+    if not _STATUS_VALUE_RE.match(lines[v].rstrip("\r\n")):
         return None                             # structural line, not a value
-    return last
+    return (last, v)
+
+
+def _live_status_index(lines: "list[str]") -> "int | None":
+    """Heading index of the live `## Status` pair (`_live_status_pair`), or None.
+    Kept for callers that only need to know a status CAN land."""
+    pair = _live_status_pair(lines)
+    return None if pair is None else pair[0]
 
 
 # A status VALUE: a letter-led word(s) with `_`/`-`, optional `(…)` tail, starting
@@ -3035,9 +3051,9 @@ def _status_from_lines(lines: "list[str]") -> str:
     """The status VALUE — the stripped line after the last live `## Status`
     (see `_live_status_index`); `unknown` when there is no live heading or no
     line follows it."""
-    idx = _live_status_index(lines)
-    if idx is not None:
-        return lines[idx + 1].strip()
+    pair = _live_status_pair(lines)
+    if pair is not None:
+        return lines[pair[1]].strip()
     return "unknown"
 
 
@@ -3131,10 +3147,10 @@ def _set_status(task_file: Path, value: str) -> bool:
     A fenced `## Status` example is never the target, so a decoy can neither be
     clobbered nor stand in for the real field."""
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-    target = _live_status_index(lines)
-    if target is None:
+    pair = _live_status_pair(lines)
+    if pair is None:
         return False
-    lines[target + 1] = value + "\n"
+    lines[pair[1]] = value + "\n"
     _atomic_write(task_file, "".join(lines))
     return True
 
@@ -3198,15 +3214,15 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     # Build the whole new file in memory, check the invariants on the candidate,
     # then write once — a refused block leaves task.md byte-identical.
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    sidx = _live_status_index(lines)
-    if sidx is None:
+    pair = _live_status_pair(lines)
+    if pair is None:
         raise ValueError(
             "task.md has no live `## Status` heading with a value line (missing, "
             "hidden inside a code fence, or directly followed by another section) "
             "— refusing to record a blocked state whose status could not be "
             "written; fix the heading/fence first, nothing was changed")
     out = list(lines)
-    out[sidx + 1] = "blocked"
+    out[pair[1]] = "blocked"
     # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
     # fresh. Fence-aware (P1): a `## Blocked` quoted inside a fenced example is not
     # the section, so the delete can never strand an unclosed fence or swallow the

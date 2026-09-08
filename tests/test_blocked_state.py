@@ -475,6 +475,30 @@ class StatusFenceAware(unittest.TestCase):
         tf = self._task("# T\n\n## Status\nblocked\n\n## Work Plan\n- [ ] G1\n")
         self.assertTrue(core._is_blocked(tf))
 
+    def test_blank_lines_between_heading_and_value_are_skipped(self):
+        # Round-5 panel (opus): `## Status\n\npending` must read AND write the value
+        # line (an older hand-formatted file must not become uncloseable).
+        core = self._core()
+        body = "# T\n\n## Status\n\npending\n\n## Work Plan\n- [ ] G1\n"
+        tf = self._task(body)
+        self.assertEqual(core._extract_status(tf), "pending")
+        self.assertTrue(core._set_status(tf, "blocked"))
+        self.assertEqual(tf.read_text(encoding="utf-8"),
+                         body.replace("## Status\n\npending", "## Status\n\nblocked"))
+        # Blank then another section: still no value.
+        tf2 = self._task("# T\n\n## Status\n\n## Risk\nassertive\n")
+        self.assertEqual(core._extract_status(tf2), "unknown")
+
+    def test_task_status_script_emits_lf_only_bytes(self):
+        # Round-5 panel (codex): on Windows a text-mode print() emits CRLF and bash
+        # keeps the CR, breaking the hook's exact match. The script must write
+        # `\n`-only bytes on every platform.
+        tf = self._task("# T\n\n## Status\nblocked\n\n## Work Plan\n- [ ] G1\n")
+        r = subprocess.run([sys.executable, str(SCRIPTS / "task-status.py"), str(tf)],
+                           capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, b"blocked\n")
+
     def test_lifecycle_reopen_targets_live_status(self):
         # lifecycle's reopen path (`tasks work <N>` on a done task) must use the
         # same fence-aware writer, not a hand-rolled fence-blind loop.
@@ -729,6 +753,30 @@ class BlockedEndToEnd(unittest.TestCase):
         r = self.run_tasks("work", "done", "--force", "--reason", "testing the preflight")
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.task_file.read_text(encoding="utf-8"), body)
+
+
+    def test_hook_tolerates_a_crlf_status_from_python(self):
+        # Round-5 panel (codex): a python3 whose stdout is CRLF-translated (native
+        # Windows) yields `blocked\r`; the hook must strip the CR, not miss the match.
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\nblocked\n\n## Work Plan\n- [ ] open gate\n",
+            encoding="utf-8")
+        self._set_counters()
+        shim = Path(tempfile.mkdtemp())
+        # The shim answers the STATUS read with CRLF and lets every other python3
+        # call (the stop_hook_active JSON parse) fall through to the real one.
+        real = sys.executable.replace("\\", "/")
+        (shim / "python3").write_text(
+            "#!/bin/sh\ncase \"$1\" in *task-status.py) printf 'blocked\\r\\n'; exit 0;; esac\n"
+            f"exec \"{real}\" \"$@\"\n", encoding="utf-8")
+        os.chmod(shim / "python3", 0o755)
+        env = self._env()
+        env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+        r = subprocess.run([bash_or_skip(), str(SCRIPTS / "stop-hook")],
+                           input='{"stop_hook_active": false}', cwd=self.project, env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"a CR after `blocked` must not defeat the release: {r.stderr}")
 
 
 if __name__ == "__main__":

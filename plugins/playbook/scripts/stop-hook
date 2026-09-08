@@ -123,6 +123,10 @@ if ! STATUS_LINE=$(python3 "$HOOK_DIR/task-status.py" "$TASK_FILE" 2>/dev/null);
     echo "[stop-hook] WARNING: could not read ## Status via python3 ($HOOK_DIR/task-status.py) — treating the status as unreadable and enforcing open gates" >&2
     STATUS_LINE=""
 fi
+# A CRLF-translating python3 (native Windows) leaves `blocked\r` in the
+# substitution; drop one trailing CR so the exact match below holds (same
+# idiom as scripts/init's manifest reader).
+STATUS_LINE=${STATUS_LINE%$'\r'}
 case "$STATUS_LINE" in
     blocked) exit 0 ;;   # core._is_blocked: the EXACT token (the writer only ever writes the bare word)
 esac
