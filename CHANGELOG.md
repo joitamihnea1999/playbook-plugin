@@ -6,18 +6,26 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Added
 
-- **`tasks dashboard` — a read-only "what runs now" screen.** Plugin version, the
-  effective verify command(s) per risk class, panel seats with effort + default judge +
-  `panel_required_for`, review timeouts and judge budget, doctor's hook checks, open and
-  parked tasks, the judgebench corpus version and the last live exam per seat pair (with
-  a report copied into a task record as the durable fallback — `bench/runs/` is
-  gitignored), and per seat for the last 14 days from the lane's review-spend journal
-  (runs, ok %, timeout %, median duration; other lanes' journals named, not aggregated).
-  Exactly three triggers, each printed with the exact non-interactive command that acts on
-  it: a seat whose timeout rate or median duration doubled against its prior 30 days; a
-  codex/grok/claude model id not in the panel; the judgebench exam template changed since
-  the last exam. Nothing changes a setting automatically, and the arm is dispatched before
-  the session GC so the command is read-only end to end. `--no-detect` skips the provider
+- **`tasks dashboard` — a "what runs now" screen that changes no setting.** Plugin
+  version, the effective verify command(s) per risk class, panel seats with effort +
+  default judge + `panel_required_for`, review timeouts and judge budget, doctor's hook
+  checks, open and parked tasks, the judgebench corpus version and the last live exam per
+  seat pair (with a report copied into a task record as the durable fallback —
+  `bench/runs/` is gitignored), and per seat from the lane's review-spend journal (runs,
+  ok %, timeout %, median duration; other lanes' journals named, not aggregated) over a
+  health window of the last 14 days that never reaches back past the most recent panel
+  change (the mtime of the `.agent/models.json` in use), so the stats describe the seats
+  configured now. Exactly three triggers, each printed with the exact non-interactive
+  command that acts on it: a seat whose timeout rate or median duration doubled against
+  the 30 days before the window; a **model gap** — a seated codex/grok model the CLI no
+  longer lists (a dead pin; "listed ≠ probed", `tasks models check` confirms) or a
+  codex/grok/claude id that is *new* since the dashboard last recorded the provider
+  catalog; the judgebench exam template changed since the last exam. "Available but not
+  seated" ids are an informational line, not a trigger. The catalog baseline
+  `.agent/model-catalog.json` (machine-local, gitignored by init like `models.json`) is
+  the command's one write — atomic, only when the catalog changed, never with
+  `--no-detect`, and a failed write is a printed note. The arm is dispatched before the
+  session GC so it touches no task or session state. `--no-detect` skips the provider
   model listing. `tasks bootstrap` gains a six-line offline **PANEL HEALTH** block from the
   same data.
 

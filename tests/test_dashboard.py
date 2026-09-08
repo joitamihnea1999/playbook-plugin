@@ -2,13 +2,20 @@
 """`tasks dashboard` + the bootstrap panel-health block (task 053).
 
 Invariants:
-  * read-only — rendering the dashboard changes no byte under the project;
-  * per-seat 14d stats come from the review-spend journal, tolerant of every
-    malformed line (skipped and counted, never raised on, never imputed);
+  * changes no setting — rendering changes no existing byte under the project;
+    its ONE write is `.agent/model-catalog.json` (the catalog baseline), only
+    with a provider listing and only when the catalog changed (task 054);
+  * per-seat stats come from the review-spend journal over the health window —
+    the last 14 days, cut at the most recent panel change (models.json mtime) —
+    tolerant of every malformed line (skipped and counted, never raised on,
+    never imputed);
   * exactly three trigger kinds, each with an exact command; drift needs a
-    baseline (no verdict without one); model-gap compares bare ids so an
-    alias-resolved seat is not a gap; template compares the live sha with the
-    newest LIVE exam's recorded sha (fake runs are never exams);
+    baseline (no verdict without one); model-gap fires on a DEAD PIN (a seated
+    codex/grok id the catalog no longer lists) or an id NEW since the recorded
+    catalog — "available but not seated" is information, never a trigger —
+    comparing bare ids so an alias-resolved seat is not a gap; template compares
+    the live sha with the newest LIVE exam's recorded sha (fake runs are never
+    exams);
   * the bootstrap block is exactly six lines with data and without.
 
 Run: python3 tests/test_dashboard.py
@@ -56,6 +63,10 @@ def _project(tmp: Path, *, journal_lines=None, models=True, bench=False) -> Path
             "panel": ["opus", "codex:gpt-5.6-sol:high", "grok:grok-4.6:medium"],
             "default_judge": "codex:gpt-5.6-sol:high",
         }), encoding="utf-8")
+        # the health window starts at the most recent panel change (models.json
+        # mtime, task 054): pin it 60 days before NOW so the default window is the
+        # plain 14 days; a test that wants a bounded window re-touches the file.
+        _touch(tmp / ".agent" / "models.json", NOW - timedelta(days=60))
     if journal_lines is not None:
         (tmp / ".agent" / "journal").mkdir()
         (tmp / ".agent" / "journal" / "enforcement.jsonl").write_text(
@@ -98,6 +109,10 @@ def _bench(b: Path, *, template_text="<!-- judgebench template v1 -->\nprompt\n"
             "falls back to parity, and this report says so.** On parity: **sol-high exceeds sol-med on the fallback "
             "measure, so the costlier configuration wins Test A** — caveats.\n\n## Contamination disclosure\n\n"
             "**No** quoting found; nobody wins here.\n", encoding="utf-8")
+
+
+def _touch(path: Path, when: datetime) -> None:
+    os.utime(path, (when.timestamp(), when.timestamp()))
 
 
 def _tree_digest(root: Path) -> dict:
@@ -325,8 +340,9 @@ class DriftTrigger(unittest.TestCase):
                  "seats": [{"spec": "opus", "provider": "claude", "model": "claude-opus-4-8[1m]", "label": "claude:claude-opus-4-8[1m]:high"},
                            {"spec": "codex:gpt-5.6-sol:high", "provider": "codex", "model": "gpt-5.6-sol", "label": "codex:gpt-5.6-sol:high"}]}
         report = {"providers": [{"name": "codex", "installed": True,
-                                 "models": [{"id": "x$(rm -rf /)", "efforts": ["high"]}]}]}
-        trig = db.model_gap_triggers(report, panel)
+                                 "models": [{"id": "gpt-5.6-sol", "efforts": ["high"]}, {"id": "x$(rm -rf /)", "efforts": ["high"]}]}]}
+        # task 054: the hostile id is NEW since the baseline (sol seated + listed → no dead pin)
+        trig = db.model_gap_triggers(report, panel, {"recorded_at": "2026-09-01T00:00:00Z", "providers": {"codex": ["gpt-5.6-sol"]}})
         self.assertEqual(len(trig), 1)
         # the whole --panel value is single-quoted, so `$(` is inert when pasted
         self.assertIn("--panel 'opus,codex:gpt-5.6-sol:high,codex:x$(rm -rf /):high' --default-judge opus", trig[0]["command"])
@@ -342,31 +358,162 @@ class DriftTrigger(unittest.TestCase):
 
 class ModelGapTrigger(unittest.TestCase):
     PANEL = {"panel": ["opus", "codex:gpt-5.6-sol:high"], "default_judge": "opus",
-             "seats": [{"spec": "opus", "provider": "claude", "model": "claude-opus-4-8[1m]", "label": "claude:claude-opus-4-8[1m]:high"},
-                       {"spec": "codex:gpt-5.6-sol:high", "provider": "codex", "model": "gpt-5.6-sol", "label": "codex:gpt-5.6-sol:high"}]}
+             "seats": [{"spec": "opus", "provider": "claude", "model": "claude-opus-4-8[1m]", "label": "claude:claude-opus-4-8[1m]:high", "error": ""},
+                       {"spec": "codex:gpt-5.6-sol:high", "provider": "codex", "model": "gpt-5.6-sol", "label": "codex:gpt-5.6-sol:high", "error": ""}]}
+    REPORT = {"providers": [
+        {"name": "claude", "installed": True, "models": [{"id": "claude-opus-4-8[1m]"}, {"id": "claude-opus-4-8"}, {"id": "claude-sonnet-5"}]},
+        {"name": "codex", "installed": True, "models": [{"id": "gpt-5.6-sol", "efforts": ["medium", "high"]},
+                                                          {"id": "gpt-5.6-terra", "efforts": ["low", "high"]},
+                                                          {"id": "gpt-5.6-luna", "efforts": ["medium", "high"]}]},
+        {"name": "grok", "installed": False, "models": [{"id": "grok-4.6"}]},
+        {"name": "agy", "installed": True, "models": [{"id": "gemini-x"}]},
+    ]}
 
-    def test_gap_per_provider_with_add_command_and_bare_id_match(self):
-        report = {"providers": [
-            {"name": "claude", "installed": True, "models": [{"id": "claude-opus-4-8[1m]"}, {"id": "claude-opus-4-8"}, {"id": "claude-sonnet-5"}]},
-            {"name": "codex", "installed": True, "models": [{"id": "gpt-5.6-sol", "efforts": ["medium", "high"]},
-                                                              {"id": "gpt-5.6-terra", "efforts": ["low", "high"]},
-                                                              {"id": "gpt-5.6-luna", "efforts": ["medium", "high"]}]},
-            {"name": "grok", "installed": False, "models": [{"id": "grok-4.6"}]},
-            {"name": "agy", "installed": True, "models": [{"id": "gemini-x"}]},
-        ]}
-        trig = db.model_gap_triggers(report, self.PANEL)
-        kinds = [(t["kind"], t["seat"]) for t in trig]
-        self.assertEqual(kinds, [("model-gap", "claude"), ("model-gap", "codex")])   # grok not installed, agy out of scope
-        self.assertTrue(trig[0]["detail"].endswith(": claude-sonnet-5"), trig[0]["detail"])   # bare-id dedupe: opus[1m]≡opus
+    def test_available_but_unseated_is_information_not_a_trigger(self):
+        # task 054: a deliberately selective panel is not an alarm — the catalog
+        # matches the baseline and every seat is listed, so NOTHING fires…
+        baseline = {"recorded_at": "2026-09-01T00:00:00Z", "providers": db.catalog_from_report(self.REPORT)}
+        self.assertEqual(db.model_gap_triggers(self.REPORT, self.PANEL, baseline), [])
+        # …and the unseated ids are one informational line per provider (bare-id dedupe: opus[1m]≡opus; agy out of scope)
+        info = db.model_gap_info(self.REPORT, self.PANEL)
+        self.assertEqual(info, ["claude: claude-sonnet-5", "codex: gpt-5.6-terra, gpt-5.6-luna"])
+
+    def test_catalog_from_report_is_bare_sorted_and_in_scope(self):
+        cat = db.catalog_from_report(self.REPORT)
+        self.assertEqual(cat, {"claude": ["claude-opus-4-8", "claude-sonnet-5"],
+                               "codex": ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]})   # grok not installed → absent; agy never
+        self.assertEqual(db.catalog_from_report(None), {})
+
+    def test_dead_pin_fires_with_the_exact_drop_command(self):
+        report = json.loads(json.dumps(self.REPORT))
+        report["providers"][1]["models"] = [{"id": "gpt-5.6-terra", "efforts": ["low", "high"]}]   # sol vanished from codex's catalog
+        baseline = {"recorded_at": "2026-09-01T00:00:00Z", "providers": db.catalog_from_report(report)}
+        trig = db.model_gap_triggers(report, self.PANEL, baseline)
+        self.assertEqual([(t["kind"], t["seat"]) for t in trig], [("model-gap", "codex:gpt-5.6-sol:high")])
+        self.assertTrue(trig[0]["detail"].startswith("dead pin: gpt-5.6-sol is no longer listed by codex"), trig[0]["detail"])
+        self.assertIn("tasks models check", trig[0]["detail"])           # listed ≠ probed — the check confirms
+        self.assertEqual(trig[0]["command"], "tasks models set --panel opus --default-judge opus")
+
+    def test_claude_listing_is_configured_not_a_catalog_so_never_a_dead_pin(self):
+        report = json.loads(json.dumps(self.REPORT))
+        report["providers"][0]["models"] = [{"id": "claude-sonnet-5"}]     # settings.json no longer names opus
+        baseline = {"recorded_at": "2026-09-01T00:00:00Z", "providers": db.catalog_from_report(report)}
+        self.assertEqual(db.model_gap_triggers(report, self.PANEL, baseline), [])
+
+    def test_uninstalled_or_empty_listing_is_unknown_not_dead(self):
+        panel = json.loads(json.dumps(self.PANEL))
+        panel["panel"].append("grok:grok-4.6:medium")
+        panel["seats"].append({"spec": "grok:grok-4.6:medium", "provider": "grok", "model": "grok-4.6", "label": "grok:grok-4.6:medium", "error": ""})
+        report = json.loads(json.dumps(self.REPORT))
+        report["providers"][1]["models"] = []                              # codex installed but listed nothing (cache missing)
+        baseline = {"recorded_at": "2026-09-01T00:00:00Z", "providers": db.catalog_from_report(report)}
+        self.assertEqual(db.model_gap_triggers(report, panel, baseline), [])   # grok not installed, codex empty → no verdict
+
+    def test_new_id_since_the_baseline_fires_with_the_add_command(self):
+        baseline = {"recorded_at": "2026-09-01T00:00:00Z",
+                    "providers": {"claude": ["claude-opus-4-8", "claude-sonnet-5"], "codex": ["gpt-5.6-sol", "gpt-5.6-terra"]}}
+        trig = db.model_gap_triggers(self.REPORT, self.PANEL, baseline)
+        self.assertEqual([(t["kind"], t["seat"]) for t in trig], [("model-gap", "codex")])
+        self.assertTrue(trig[0]["detail"].startswith("new since 2026-09-01: gpt-5.6-luna"), trig[0]["detail"])
         self.assertIn("listed ≠ probed", trig[0]["detail"])
-        self.assertTrue(trig[0]["command"].startswith("tasks models set --panel opus,codex:gpt-5.6-sol:high,claude:claude-sonnet-5 --default-judge opus"), trig[0]["command"])
-        # impl-panel sonnet#2 / codex#3: effort from the model's OWN list — terra offers no "medium", so its first ("low")
-        self.assertIn("codex:gpt-5.6-terra:low", trig[1]["command"])
-        self.assertTrue(trig[1]["detail"].endswith(": gpt-5.6-terra, gpt-5.6-luna"), trig[1]["detail"])
+        # effort from the model's OWN list; shlex-quoted; the existing panel kept
+        self.assertEqual(trig[0]["command"], "tasks models set --panel opus,codex:gpt-5.6-sol:high,codex:gpt-5.6-luna:medium --default-judge opus")
 
-    def test_no_report_no_trigger(self):
-        self.assertEqual(db.model_gap_triggers(None, self.PANEL), [])
-        self.assertEqual(db.model_gap_triggers({"providers": [{"name": "codex", "installed": True, "models": [{"id": "gpt-5.6-sol"}]}]}, self.PANEL), [])
+    def test_new_id_already_seated_and_a_newly_installed_provider(self):
+        baseline = {"recorded_at": "2026-09-01T00:00:00Z", "providers": {"claude": ["claude-opus-4-8", "claude-sonnet-5"]}}   # codex was not installed then
+        trig = db.model_gap_triggers(self.REPORT, self.PANEL, baseline)
+        self.assertEqual(len(trig), 1)
+        self.assertEqual(trig[0]["seat"], "codex")
+        # sol is new to the baseline but already seated → not in the list; terra/luna are
+        self.assertTrue(trig[0]["detail"].startswith("new since 2026-09-01: gpt-5.6-terra, gpt-5.6-luna"), trig[0]["detail"])
+        self.assertIn("codex:gpt-5.6-terra:low", trig[0]["command"])   # terra offers no "medium" → its first
+
+    def test_no_baseline_means_no_new_id_verdict(self):
+        # first run: nothing is "new since last recorded" — only a dead pin can fire
+        self.assertEqual(db.model_gap_triggers(self.REPORT, self.PANEL, None), [])
+        self.assertEqual(db.model_gap_triggers(None, self.PANEL, None), [])
+        self.assertEqual(db.model_gap_info(None, self.PANEL), [])
+
+    def test_baseline_roundtrip_records_once_and_skips_an_unchanged_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            path = db.catalog_baseline_path(p)
+            self.assertEqual(path, p / ".agent" / "model-catalog.json")
+            self.assertIsNone(db.load_catalog_baseline(path))
+            note = db.record_catalog_baseline(p, self.REPORT, NOW)
+            self.assertIn("recorded now", note)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["recorded_at"], "2026-09-08T12:00:00Z")
+            self.assertEqual(data["providers"], db.catalog_from_report(self.REPORT))
+            before = path.read_bytes()
+            note2 = db.record_catalog_baseline(p, self.REPORT, NOW + timedelta(days=1))
+            self.assertIn("unchanged since 2026-09-08", note2)
+            self.assertEqual(path.read_bytes(), before)                    # no churn on an unchanged catalog
+            report = json.loads(json.dumps(self.REPORT))
+            report["providers"][1]["models"].append({"id": "gpt-new", "efforts": ["medium"]})
+            note3 = db.record_catalog_baseline(p, report, NOW + timedelta(days=2))
+            self.assertIn("updated", note3)
+            self.assertIn("gpt-new", db.load_catalog_baseline(path)["providers"]["codex"])
+            # a malformed baseline is "no baseline", never a crash
+            path.write_text("{not json", encoding="utf-8")
+            self.assertIsNone(db.load_catalog_baseline(path))
+            # a listing that failed / --no-detect records nothing
+            self.assertIn("not recorded", db.record_catalog_baseline(p, None, NOW))
+
+    def test_baseline_write_failure_is_a_note_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            (p / ".agent" / "model-catalog.json").mkdir()                  # a directory where the file goes
+            note = db.record_catalog_baseline(p, self.REPORT, NOW)
+            self.assertIn("write failed", note)
+
+
+class HealthWindow(unittest.TestCase):
+    def test_window_starts_at_the_most_recent_panel_change(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            self.assertEqual(db.window_bounds(NOW, db.panel_changed_at(p))[1], "last 14 days")   # fixture mtime: 60d ago
+            _touch(p / ".agent" / "models.json", NOW - timedelta(days=3))
+            changed = db.panel_changed_at(p)
+            self.assertEqual(changed, NOW - timedelta(days=3))
+            start, label = db.window_bounds(NOW, changed)
+            self.assertEqual(start, NOW - timedelta(days=3))
+            self.assertIn("since panel change 2026-09-05", label)
+            # a future mtime (clock skew) is capped at now, never an empty-window crash
+            self.assertEqual(db.window_bounds(NOW, NOW + timedelta(days=1))[0], NOW)
+        # plugin defaults (no models.json) → no bound
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td), models=False)
+            self.assertIsNone(db.panel_changed_at(p))
+            self.assertEqual(db.window_bounds(NOW, None), (NOW - timedelta(days=14), "last 14 days"))
+
+    def test_stats_and_drift_honour_the_bounded_window(self):
+        lines = [_rec(10, "codex:gpt-5.6-sol:high"), _rec(5, "codex:gpt-5.6-sol:high", "timeout"),
+                 _rec(1, "codex:gpt-5.6-sol:high")]
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td), journal_lines=lines)
+            _touch(p / ".agent" / "models.json", NOW - timedelta(days=3))
+            out = db.render_dashboard(p, now=NOW, detect=False)
+            self.assertIn("window: since panel change 2026-09-05", out)
+            row = next(l for l in out.splitlines() if l.startswith("  codex:gpt-5.6-sol:high"))
+            self.assertRegex(row, r"\s1\s+100%\s+0%")                    # only the 1d record counts; the 5d timeout is before the change
+            block = db.panel_health_lines(p, now=NOW)
+            self.assertEqual(len(block), 6)
+            self.assertTrue(block[0].startswith("=== PANEL HEALTH (since panel change 2026-09-05"), block[0])
+            self.assertIn("reviews: 1 judge runs", block[2])
+        # drift compares the bounded window with the 30 days before ITS start
+        panel = {"panel": ["codex:gpt-5.6-sol:high", "opus"], "default_judge": "opus",
+                 "seats": [{"spec": "codex:gpt-5.6-sol:high", "provider": "codex", "model": "gpt-5.6-sol", "label": "codex:gpt-5.6-sol:high", "error": ""},
+                           {"spec": "opus", "provider": "claude", "model": "claude-opus-4-8[1m]", "label": "claude:claude-opus-4-8[1m]:high", "error": ""}]}
+        with tempfile.TemporaryDirectory() as td:
+            j = Path(td) / "j.jsonl"
+            j.write_text("\n".join([_rec(2, "codex:gpt-5.6-sol:high", "timeout"), _rec(1.5, "codex:gpt-5.6-sol:high", "timeout"), _rec(1, "codex:gpt-5.6-sol:high"),
+                                    _rec(4, "codex:gpt-5.6-sol:high"), _rec(5, "codex:gpt-5.6-sol:high"), _rec(6, "codex:gpt-5.6-sol:high")]) + "\n", encoding="utf-8")
+            recs, _, _ = db.load_review_journal(j)
+        start = NOW - timedelta(days=3)
+        trig = db.drift_triggers(recs, NOW, panel, start=start)
+        self.assertEqual([t["seat"] for t in trig], ["codex:gpt-5.6-sol:high"])   # 2/3 timeouts now vs 0/3 in the 30d before the change
+        self.assertEqual(db.drift_triggers(recs, NOW, panel, start=NOW - timedelta(days=14)), [])   # unbounded: 2/6 vs nothing before → no baseline
 
 
 class Judgebench(unittest.TestCase):
@@ -658,20 +805,49 @@ class RenderAndReadOnly(unittest.TestCase):
                        "triggers (3 kinds", "model-gap [skipped (--no-detect)]", "none fired"):
             self.assertIn(needle, out, needle)
 
-    def test_render_is_read_only_with_detect_on(self):
-        # impl-panel opus#2: the headline invariant on the DEFAULT path (detect=True)
+    def test_detect_on_writes_only_the_catalog_baseline_and_fires_only_on_new_ids(self):
+        # task 054: the one sanctioned write is `.agent/model-catalog.json`; a
+        # selective panel is information, a NEW id since the baseline is the trigger
         from unittest import mock
-        fake = {"providers": [{"name": "codex", "installed": True, "models": [{"id": "gpt-x", "efforts": ["medium"]}]}]}
+        fake = {"providers": [{"name": "codex", "installed": True,
+                               "models": [{"id": "gpt-5.6-sol", "efforts": ["medium", "high"]}, {"id": "gpt-x", "efforts": ["medium"]}]}]}
         with tempfile.TemporaryDirectory() as td:
             p = _project(Path(td), journal_lines=[_rec(1, "codex:gpt-5.6-sol:high")], bench=True)
             before = _tree_digest(p)
             with mock.patch("tasks.models_check.detect_providers", return_value=fake) as dp:
                 out = db.render_dashboard(p, now=NOW, detect=True)
-            self.assertEqual(_tree_digest(p), before, "dashboard wrote into the project (detect on)")
-        dp.assert_called_once()
-        self.assertIn("model-gap · codex — listed by codex but not in the panel", out)
-        self.assertIn(": gpt-x", out)
-        self.assertIn("codex:gpt-x:medium", out)
+            after = _tree_digest(p)
+            self.assertEqual(set(after) - set(before), {os.path.join(".agent", "model-catalog.json")}, "dashboard wrote more than the baseline")
+            self.assertEqual({k: v for k, v in after.items() if k in before}, before, "dashboard changed an existing file")
+            dp.assert_called_once()
+            self.assertIn("none fired", out)
+            self.assertIn("info: available but not seated — codex: gpt-x", out)
+            self.assertIn("catalog baseline .agent/model-catalog.json recorded now", out)
+            self.assertNotIn("model-gap · codex", out)
+            # second run, a new id appeared → the trigger, with the add command
+            fake2 = json.loads(json.dumps(fake))
+            fake2["providers"][0]["models"].append({"id": "gpt-y", "efforts": ["low", "high"]})
+            with mock.patch("tasks.models_check.detect_providers", return_value=fake2):
+                out2 = db.render_dashboard(p, now=NOW + timedelta(days=1), detect=True)
+            self.assertIn("model-gap · codex — new since 2026-09-08: gpt-y", out2)
+            self.assertIn("codex:gpt-y:low", out2)
+            self.assertIn("catalog baseline .agent/model-catalog.json updated", out2)
+            # --no-detect never writes, even with a baseline present
+            digest = _tree_digest(p)
+            out3 = db.render_dashboard(p, now=NOW + timedelta(days=2), detect=False)
+            self.assertEqual(_tree_digest(p), digest)
+            self.assertIn("model-gap [skipped (--no-detect)]", out3)
+
+    def test_dead_pin_renders_with_its_seat_label(self):
+        from unittest import mock
+        fake = {"providers": [{"name": "codex", "installed": True, "models": [{"id": "gpt-5.6-terra", "efforts": ["high"]}]}]}
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            with mock.patch("tasks.models_check.detect_providers", return_value=fake):
+                db.render_dashboard(p, now=NOW, detect=True)                 # records the baseline
+                out = db.render_dashboard(p, now=NOW, detect=True)
+            self.assertIn("model-gap · codex:gpt-5.6-sol:high — dead pin: gpt-5.6-sol is no longer listed by codex", out)
+            self.assertIn("tasks models set --panel opus,grok:grok-4.6:medium --default-judge opus", out)   # sol was the default judge
 
     def test_record_scan_runs_once_per_render_when_a_bench_exists(self):
         # impl-panel r1 opus#1 + r2: the scan is bounded to projects that HAVE a bench dir

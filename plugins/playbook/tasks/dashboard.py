@@ -13,20 +13,34 @@ Exactly THREE triggers, each printed with the exact command that acts on it:
 
   1. drift     — a seat whose timeout rate or median duration DOUBLED against
                  its previous 30 days (days 15–44 back);
-  2. model-gap — a model id available in codex, grok or claude that is not in
-                 the panel;
+  2. model-gap — a SEATED model that the installed codex / grok CLI no longer
+                 lists (a dead pin), or a model id that is NEW since the
+                 dashboard last recorded the provider catalog in the baseline
+                 file `.agent/model-catalog.json` (task 054). "Available but not
+                 seated" is an informational line, never a trigger — a selective
+                 panel is a choice, not a defect;
   3. template  — the judgebench judge prompt template changed since the last
                  live exam.
 
-CONTRACT: this module never writes, and the `dashboard` CLI arm is dispatched
-BEFORE the session garbage-collector every other command runs (plan-panel
-codex#1), so `tasks dashboard` is read-only end-to-end — not just below the
-CLI boundary. Nothing here changes a setting — a trigger is a printed command
-the operator runs (or does not). It reads the same files
-the writers own (`.agent/config.json`, `.agent/models.json`, the lane journal,
-`bench/`), tolerates every malformed input (a bad line is skipped and counted,
-never raised on), and needs no network except the optional provider listing
-behind trigger 2 (`grok models` is login-aware; `--no-detect` skips it).
+CONTRACT: this module changes NO setting, and the `dashboard` CLI arm is
+dispatched BEFORE the session garbage-collector every other command runs
+(plan-panel codex#1), so `tasks dashboard` touches no task/session state
+end-to-end — not just below the CLI boundary. Its ONE write is the model-catalog
+baseline `.agent/model-catalog.json` (machine-local, gitignored like
+`models.json`): the provider ids the listing returned, so the next run can say
+what is NEW. It is written atomically, best-effort (a failure is a printed note,
+never a crash), only when the listing ran (`--no-detect` never writes) and only
+when the catalog changed (no mtime churn). A trigger is a printed command the
+operator runs (or does not). It reads the same files the writers own
+(`.agent/config.json`, `.agent/models.json`, the lane journal, `bench/`),
+tolerates every malformed input (a bad line is skipped and counted, never
+raised on), and needs no network except the optional provider listing behind
+trigger 2 (`grok models` is login-aware; `--no-detect` skips it).
+
+The per-seat health window is the last WINDOW_DAYS, but never reaches back
+past the most recent panel change (the mtime of the `.agent/models.json` the
+panel was resolved from — only `tasks models set/select` or a hand edit write
+it), so the stats describe the seats configured NOW (task 054).
 
 The review-spend record shape is the external contract documented in
 `docs/enforcement-journal.md`; the tolerant parse here mirrors what the external
@@ -53,6 +67,13 @@ BASELINE_DAYS = 30        # the comparison window right before it (drift trigger
 MIN_RUNS_FOR_DRIFT = 3    # fewer runs in EITHER window → no verdict, no trigger
 DRIFT_FACTOR = 2.0        # "doubled"
 MODEL_GAP_CAP = 6         # ids listed per provider before "+N more"
+_GAP_PROVIDERS = ("claude", "codex", "grok")     # providers the model-gap check reads
+# Providers whose listing is the CLI's own CATALOG (codex models cache, `grok
+# models`): a seated id missing from it is a dead pin. Claude has no list
+# command — its "listing" is the model(s) configured in settings.json, so a
+# seat absent from it is unknown, never dead (only `tasks models check` probes).
+_CATALOG_PROVIDERS = frozenset({"codex", "grok"})
+CATALOG_BASELINE_REL = ".agent/model-catalog.json"
 _MAX_NUMERIC = 10 ** 15 - 1   # the producer's magnitude cap (pb_journal._cap_int)
 
 # Effort vocabularies — mirrored from the adapters so a `provider:model:effort`
@@ -286,6 +307,34 @@ def window_stats(records: "list[dict]", now: datetime,
     return seat_stats(_window(records, now - timedelta(days=days), now))
 
 
+def panel_changed_at(project_path: Path) -> "datetime | None":
+    """When the panel last changed: the mtime of the `.agent/models.json` the
+    panel is resolved from (the same walk-up `load_judge_config` uses, so an
+    inherited ancestor file counts). None on plugin defaults or any error."""
+    try:
+        from provider.sandbox import _find_project_models_override
+        used = _find_project_models_override(Path(project_path))
+        if used is None:
+            return None
+        return datetime.fromtimestamp(used.stat().st_mtime, tz=timezone.utc)
+    except Exception:
+        return None
+
+
+def window_bounds(now: datetime, changed_at: "datetime | None") -> "tuple[datetime, str]":
+    """(start, label) of the health window: the last WINDOW_DAYS, cut at the most
+    recent panel change so the stats describe the seats configured NOW. A change
+    stamped in the future (clock skew) is capped at `now`, never an inverted
+    window."""
+    start = now - timedelta(days=WINDOW_DAYS)
+    if changed_at is not None and changed_at > start:
+        start = min(changed_at, now)
+        age = (now - start).days
+        return start, (f"since panel change {start.strftime('%Y-%m-%d %H:%M')}Z, "
+                       f"{age}d ago — shorter than {WINDOW_DAYS}d")
+    return start, f"last {WINDOW_DAYS} days"
+
+
 # ── the panel ────────────────────────────────────────────────────────────────
 def _split_effort(provider: str, variant: "str | None") -> "tuple[str | None, str]":
     """`gpt-5.6-sol:high` → ('gpt-5.6-sol', 'high'); claude → fixed effort;
@@ -429,14 +478,17 @@ def _label_of_spec(spec: str) -> str:
         return ""
 
 
-def drift_triggers(records: "list[dict]", now: datetime, panel: "dict") -> "list[dict]":
-    """Seats whose timeout rate or median duration doubled: last WINDOW_DAYS vs
-    the BASELINE_DAYS right before. Both windows need MIN_RUNS_FOR_DRIFT runs,
-    else there is no verdict (stated, not silently skipped). A baseline
-    timeout rate of 0 with current timeouts counts as doubled (0 → >0)."""
-    cur = window_stats(records, now, WINDOW_DAYS)
-    base = seat_stats(_window(records, now - timedelta(days=WINDOW_DAYS + BASELINE_DAYS),
-                              now - timedelta(days=WINDOW_DAYS)))
+def drift_triggers(records: "list[dict]", now: datetime, panel: "dict",
+                   start: "datetime | None" = None) -> "list[dict]":
+    """Seats whose timeout rate or median duration doubled: the health window
+    (`start`, now] — default the last WINDOW_DAYS, or the bounded window from
+    `window_bounds` — vs the BASELINE_DAYS right before ITS start. Both windows
+    need MIN_RUNS_FOR_DRIFT runs, else there is no verdict (stated, not silently
+    skipped). A baseline timeout rate of 0 with current timeouts counts as
+    doubled (0 → >0)."""
+    start = start if start is not None else now - timedelta(days=WINDOW_DAYS)
+    cur = seat_stats(_window(records, start, now))
+    base = seat_stats(_window(records, start - timedelta(days=BASELINE_DAYS), start))
     out = []
     for seat in sorted(cur):
         c, b = cur[seat], base.get(seat)
@@ -469,50 +521,176 @@ def _bare_model(model: str) -> str:
     return re.sub(r"\[.*?\]\s*$", "", model or "").strip()
 
 
-def model_gap_triggers(detect_report: "dict | None", panel: "dict") -> "list[dict]":
-    """Model ids the installed codex / grok / claude CLIs offer that no panel
-    seat uses (compared by bare id, so an alias-resolved seat counts). One
-    trigger per provider with a gap, the id list capped at MODEL_GAP_CAP."""
-    if not detect_report:
-        return []
-    in_panel = {(s["provider"], _bare_model(s["model"])) for s in panel.get("seats", []) if s["model"]}
-    out = []
-    for prov in detect_report.get("providers", []):
+def _listing(detect_report: "dict | None") -> "dict[str, list[tuple[str, str, list]]]":
+    """Per in-scope INSTALLED provider, its listed models as (raw id, bare id,
+    efforts), deduplicated by bare id in listing order. A provider that is not
+    installed or listed nothing is absent — unknown, not empty."""
+    out: "dict[str, list[tuple[str, str, list]]]" = {}
+    if not isinstance(detect_report, dict):
+        return out
+    for prov in detect_report.get("providers", []) or []:
+        if not isinstance(prov, dict):
+            continue
         name = prov.get("name")
-        if name not in ("claude", "codex", "grok") or not prov.get("installed"):
+        if name not in _GAP_PROVIDERS or not prov.get("installed"):
             continue
         seen: "set[str]" = set()
-        missing = []
-        efforts_of: "dict[str, list]" = {}
-        for m in prov.get("models", []):
+        items = []
+        for m in prov.get("models", []) or []:
             mid = m.get("id") if isinstance(m, dict) else None
             if not isinstance(mid, str) or not mid:
                 continue
             bare = _bare_model(mid)
-            if bare in seen or (name, bare) in in_panel:
+            if not bare or bare in seen:
                 continue
             seen.add(bare)
-            missing.append(mid)
             eff = m.get("efforts") if isinstance(m.get("efforts"), list) else []
-            efforts_of[mid] = [e for e in eff if isinstance(e, str)]
-        if not missing:
-            continue
-        shown = missing[:MODEL_GAP_CAP]
-        more = len(missing) - len(shown)
-        first = shown[0]
-        add_spec = f"{name}:{first}"
-        # effort from the model's OWN advertised vocabulary (impl-panel sonnet#2 /
-        # codex#3): "medium" when offered, else its first effort, else no suffix —
-        # never a hardcoded suffix `tasks models set` would reject as BAD_EFFORT.
-        eff = efforts_of.get(first) or []
-        if eff:
-            add_spec += ":" + ("medium" if "medium" in eff else eff[0])
-        out.append({"kind": "model-gap", "seat": name,
-                    "detail": f"listed by {name} but not in the panel (listed ≠ probed — `tasks models check` confirms entitlement): {', '.join(shown)}"
-                              + (f" (+{more} more — tasks models detect)" if more else ""),
-                    "command": _models_set_command(panel, add_spec=add_spec)
-                               + (f"   # shown for {first}; substitute any id above" if len(missing) > 1 else "")})
+            items.append((mid, bare, [e for e in eff if isinstance(e, str)]))
+        if items:
+            out[name] = items
     return out
+
+
+def catalog_from_report(detect_report: "dict | None") -> "dict[str, list[str]]":
+    """The catalog the baseline records: provider → sorted bare ids (installed,
+    in-scope providers with a non-empty listing only)."""
+    return {prov: sorted(b for _raw, b, _e in items) for prov, items in _listing(detect_report).items()}
+
+
+def _seated(panel: "dict") -> "set[tuple[str, str]]":
+    return {(s["provider"], _bare_model(s["model"])) for s in panel.get("seats", []) if s.get("model")}
+
+
+def _add_spec(prov: str, raw_id: str, efforts: "list[str]") -> str:
+    """`prov:id[:effort]` with the effort from the model's OWN advertised
+    vocabulary (impl-panel sonnet#2 / codex#3): "medium" when offered, else its
+    first, else no suffix — never a hardcoded suffix `models set` would reject."""
+    spec = f"{prov}:{raw_id}"
+    if efforts:
+        spec += ":" + ("medium" if "medium" in efforts else efforts[0])
+    return spec
+
+
+def model_gap_info(detect_report: "dict | None", panel: "dict") -> "list[str]":
+    """Informational, never a trigger: per provider, the listed ids no seat uses
+    (bare-id compare so an alias-resolved seat is not "unseated"). One
+    `provider: id, id (+N more)` string per provider with any."""
+    seated = _seated(panel)
+    out = []
+    for prov, items in _listing(detect_report).items():
+        unseated = [raw for raw, bare, _e in items if (prov, bare) not in seated]
+        if not unseated:
+            continue
+        shown = unseated[:MODEL_GAP_CAP]
+        more = len(unseated) - len(shown)
+        out.append(f"{prov}: {', '.join(shown)}" + (f" (+{more} more — tasks models detect)" if more else ""))
+    return out
+
+
+def model_gap_triggers(detect_report: "dict | None", panel: "dict",
+                       baseline: "dict | None" = None) -> "list[dict]":
+    """Two reasons fire, both kind `model-gap` (task 054):
+
+    * dead pin — a seat whose provider is a CATALOG provider (codex/grok) that
+      is installed and listed models, but not the seated one. `seat` is the
+      seat's journal label; the command drops it (or, for a sole seat, is
+      `tasks models check`, the only executable remedy). Listed ≠ probed — the
+      detail says to confirm with `tasks models check` first. Claude's listing
+      is what settings.json configures, not a catalog → never a dead pin; an
+      uninstalled provider or an empty listing is unknown, not dead.
+    * new id — a listed bare id absent from `baseline["providers"][prov]`
+      (the catalog the dashboard last recorded) and not already seated. One
+      trigger per provider, ids capped at MODEL_GAP_CAP, the add command shown
+      for the first. No baseline (first run, or unreadable) → no verdict.
+
+    "Available but not seated" alone never fires — see `model_gap_info`."""
+    listing = _listing(detect_report)
+    if not listing:
+        return []
+    seated = _seated(panel)
+    out: "list[dict]" = []
+    for s in panel.get("seats", []):
+        prov = s.get("provider")
+        if prov not in _CATALOG_PROVIDERS or not s.get("model") or s.get("error"):
+            continue
+        items = listing.get(prov)
+        if not items:
+            continue                         # not installed / listed nothing → unknown, no verdict
+        bare = _bare_model(s["model"])
+        if any(b == bare for _raw, b, _e in items):
+            continue
+        cmd = _models_set_command(panel, drop_label=s["label"]) or "tasks models check"
+        out.append({"kind": "model-gap", "seat": s["label"],
+                    "detail": f"dead pin: {bare} is no longer listed by {prov} (listed ≠ probed — "
+                              f"`tasks models check` confirms before you drop it)",
+                    "command": cmd})
+    base_prov = baseline.get("providers") if isinstance(baseline, dict) else None
+    if not isinstance(base_prov, dict):
+        return out
+    since = _date(parse_ts(baseline.get("recorded_at")))
+    for prov, items in listing.items():
+        known_raw = base_prov.get(prov)
+        known = {k for k in known_raw if isinstance(k, str)} if isinstance(known_raw, list) else set()
+        new = [(raw, bare, eff) for raw, bare, eff in items if bare not in known and (prov, bare) not in seated]
+        if not new:
+            continue
+        shown = new[:MODEL_GAP_CAP]
+        more = len(new) - len(shown)
+        first_raw, _b, eff = shown[0]
+        out.append({"kind": "model-gap", "seat": prov,
+                    "detail": f"new since {since}: {', '.join(r for r, _b2, _e2 in shown)}"
+                              + (f" (+{more} more — tasks models detect)" if more else "")
+                              + f" (listed by {prov}, not seated; listed ≠ probed — `tasks models check` confirms entitlement)",
+                    "command": _models_set_command(panel, add_spec=_add_spec(prov, first_raw, eff))
+                               + (f"   # shown for {first_raw}; substitute any id above" if len(new) > 1 else "")})
+    return out
+
+
+# ── the catalog baseline (the module's one write) ────────────────────────────
+def catalog_baseline_path(project_path: Path) -> Path:
+    return Path(project_path) / ".agent" / "model-catalog.json"
+
+
+def load_catalog_baseline(path: Path) -> "dict | None":
+    """The recorded catalog, or None when absent/unreadable/malformed (= no
+    baseline, no new-id verdict — never a crash)."""
+    try:
+        data = _load_json_bounded(Path(path))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("providers"), dict):
+        return None
+    return data
+
+
+def record_catalog_baseline(project_path: Path, detect_report: "dict | None", now: datetime) -> str:
+    """Write the current catalog as the new baseline — atomically, best-effort,
+    and only when it differs from the recorded one. Returns the one-line note the
+    render prints. Nothing is written without a listing (`--no-detect`, or a
+    failed listing)."""
+    rel = CATALOG_BASELINE_REL
+    if not detect_report:
+        return f"catalog baseline {rel} not recorded (no provider listing this run)"
+    path = catalog_baseline_path(project_path)
+    catalog = catalog_from_report(detect_report)
+    prev = load_catalog_baseline(path)
+    if prev is not None and prev.get("providers") == catalog:
+        return f"catalog baseline {rel} unchanged since {_date(parse_ts(prev.get('recorded_at')))}"
+    payload = {
+        "recorded_at": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "providers": catalog,
+        "_doc": "Model ids the installed codex/grok/claude CLIs listed when `tasks dashboard` "
+                "last ran (bare ids). The dashboard's model-gap trigger fires on ids NEW since "
+                "this record; machine-local like models.json — do not commit.",
+    }
+    try:
+        from tasks.atomic import atomic_write
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    except Exception as e:
+        return f"catalog baseline {rel} write failed ({_one_line(e)}) — new-id verdicts keep using the previous record"
+    return (f"catalog baseline {rel} recorded now (first run — nothing is new yet)" if prev is None
+            else f"catalog baseline {rel} updated")
 
 
 # ── judgebench (dev-only harness) ────────────────────────────────────────────
@@ -1033,7 +1211,8 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
     panel = panel_seats(p)
     jp = journal_path(p)
     records, skipped, jstatus = load_review_journal(jp)
-    cur = window_stats(records, now, WINDOW_DAYS)
+    win_start, win_label = window_bounds(now, panel_changed_at(p))
+    cur = seat_stats(_window(records, win_start, now))
     knobs = review_knobs(p)
     hooks = hooks_health(p)
     tasks = task_counts(p)
@@ -1046,22 +1225,26 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
         try:
             from tasks.models_check import detect_providers
             detect_report = detect_providers(p)
-            detect_note = "codex/grok/claude listed"
+            detect_note = "dead pin or new id since the catalog baseline; codex/grok/claude listed"
         except Exception as e:
             detect_note = f"provider listing failed ({_one_line(e)})"
 
-    triggers = (drift_triggers(records, now, panel)
-                + model_gap_triggers(detect_report, panel)
+    # new-id verdicts compare with the PREVIOUS record; the record is refreshed after
+    baseline = load_catalog_baseline(catalog_baseline_path(p)) if detect_report else None
+    triggers = (drift_triggers(records, now, panel, start=win_start)
+                + model_gap_triggers(detect_report, panel, baseline)
                 + template_triggers(bench))
+    gap_info = model_gap_info(detect_report, panel)
+    baseline_note = record_catalog_baseline(p, detect_report, now) if detect else ""
 
     L: "list[str]" = []
-    L.append("=== PLAYBOOK DASHBOARD — read-only; nothing here changes a setting ===")
+    L.append("=== PLAYBOOK DASHBOARD — nothing here changes a setting (read-only, except the model-catalog baseline it records) ===")
     L.append(f"as of: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
     L.append(f"plugin: {plugin_version()}")
     L.extend(verify_command(p))
     L.append("")
     L.append(f"panel ({panel['source']}) · default judge: {panel['default_judge'] or '(none)'} · "
-             f"panel required for: {', '.join(panel['required_for']) or '(off)'}")
+             f"panel required for: {', '.join(panel['required_for']) or '(off)'} · window: {win_label}")
     seat_rows = []
     labels_in_panel = set()
     for s in panel["seats"]:
@@ -1075,7 +1258,7 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
         L.append("  (no panel seats configured)")
     else:
         w = max(len(r[1]) for r in seat_rows)
-        L.append(f"  {'seat':<{w}}  {'effort':<18} {'14d runs':>8}  {'ok':>5}  {'timeout':>7}  {'median':>7}  spec")
+        L.append(f"  {'seat':<{w}}  {'effort':<18} {'runs':>8}  {'ok':>5}  {'timeout':>7}  {'median':>7}  spec")
         for spec, label, effort, st, err in seat_rows:
             if st:
                 cells = (f"{st['runs']:>8}  {pct(st['ok'], st['runs']):>5}  "
@@ -1121,8 +1304,12 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
             L.append(f"  exam {e['run_id']} · {_date(e['date'])} · {' vs '.join(e['labels'])} · {tpl_part} · "
                      f"weighted {wt or 'n/a'} · {e['verdict']} · source: {e.get('source', '?')}")
     L.append("")
-    L.append(f"triggers (3 kinds: drift 14d-vs-prior-30d · model-gap [{detect_note}] · exam-template-vs-last-exam):")
+    L.append(f"triggers (3 kinds: drift window-vs-prior-30d · model-gap [{detect_note}] · exam-template-vs-last-exam):")
     L.extend(render_triggers(triggers))
+    if gap_info:
+        L.append(f"  info: available but not seated — {' · '.join(gap_info)}   (not a trigger: a selective panel is a choice)")
+    if baseline_note:
+        L.append(f"  {baseline_note}")
     return "\n".join(L)
 
 
@@ -1133,12 +1320,13 @@ def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> 
     p = Path(project_path)
     panel = panel_seats(p)
     records, _skipped, jstatus = load_review_journal(journal_path(p))
-    cur = window_stats(records, now, WINDOW_DAYS)
+    win_start, win_label = window_bounds(now, panel_changed_at(p))
+    cur = seat_stats(_window(records, win_start, now))
     bench = _exams_with_fallback(p)
-    drift = drift_triggers(records, now, panel)
+    drift = drift_triggers(records, now, panel, start=win_start)
     tpl = template_triggers(bench)
 
-    l1 = "=== PANEL HEALTH (last 14 days) ==="
+    l1 = f"=== PANEL HEALTH ({win_label}) ==="
     l2 = (f"panel: {', '.join(panel['panel']) or '(none)'} · default judge: {panel['default_judge'] or '(none)'} · "
           f"required for: {', '.join(panel['required_for']) or '(off)'}")
     runs = sum(s["runs"] for s in cur.values())
@@ -1159,7 +1347,8 @@ def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> 
     else:
         why = {"missing": " (no journal yet)", "unreadable": " (journal UNREADABLE)",
                "unresolved": " (lane unresolvable)", "truncated": " (journal truncated)"}.get(jstatus, "")
-        l3 = f"reviews: no review-spend records in the last 14 days{why}"
+        where = f"in the {win_label}" if win_label.startswith("last") else f"since the panel change ({win_start.strftime('%Y-%m-%d')})"
+        l3 = f"reviews: no review-spend records {where}{why}"
         l4 = "slowest seat: n/a · most timeouts: n/a"
     if bench and bench["exams"]:
         e = bench["exams"][0]                                   # newest by date (merged list is sorted)

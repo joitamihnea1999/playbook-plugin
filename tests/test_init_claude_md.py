@@ -100,6 +100,7 @@ class MergeGitignore(unittest.TestCase):
         self.assertIn(".agent/sessions/", out)
         self.assertIn(".agent/*/sessions/", out)  # multi-user lanes covered
         self.assertIn(".agent/models.json", out)
+        self.assertIn(".agent/model-catalog.json", out)   # task 054: the dashboard's catalog baseline, machine-local like models.json
         # T2: the enforcement journal is machine-local runtime state (the block
         # predated it), both root and per-user lanes.
         self.assertIn(".agent/journal/", out)

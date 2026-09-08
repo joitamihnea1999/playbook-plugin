@@ -74,6 +74,7 @@ GITIGNORE_ENTRIES = (
     ".agent/*/journal/",
     ".agent/current_user",
     ".agent/models.json",
+    ".agent/model-catalog.json",
 )
 
 
