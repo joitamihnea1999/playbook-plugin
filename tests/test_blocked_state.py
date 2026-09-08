@@ -458,7 +458,7 @@ class StatusFenceAware(unittest.TestCase):
         # Round-3 panel (codex convergent): `## Status\n    blocked` / `\tblocked`
         # is Markdown code, not a value — reader unknown, writer refuses.
         core = self._core()
-        for value in ("    blocked", "\tblocked", " blocked"):
+        for value in ("    blocked", "\tblocked"):
             body = f"# T\n\n## Status\n{value}\n\n## Work Plan\n- [ ] G1\n"
             tf = self._task(body)
             self.assertEqual(core._extract_status(tf), "unknown", repr(value))
@@ -502,31 +502,71 @@ class StatusFenceAware(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, b"blocked\n")
 
-    # task-gate-hook's F3 status read, copied VERBATIM (scripts/task-gate-hook).
-    F3_AWK = ("{gsub(/\\r/,\"\")} flag {status=$0; flag=0} "
-              "/^[[:space:]]*## Status[[:space:]]*$/ {flag=1} END {print status}")
+    @staticmethod
+    def _f3_awk_program():
+        """task-gate-hook's F3 `## Status` awk, EXTRACTED from the live hook source
+        (round-7 panel: a hard-coded copy would keep passing against a fossil)."""
+        import re
+        src = (SCRIPTS / "task-gate-hook").read_text(encoding="utf-8")
+        m = re.search(r"STATUS=\$\(awk '(.*?)'\s*\"\$RESOLVED\"", src, re.S)
+        assert m, "could not locate the F3 status awk in scripts/task-gate-hook"
+        return m.group(1)
 
     def _f3_reads(self, tf):
         import shutil
         awk = shutil.which("awk")
         if awk is None:
             self.skipTest("awk not available")
-        r = subprocess.run([awk, self.F3_AWK, str(tf)], capture_output=True, text=True)
-        return "".join(r.stdout.split())
+        r = subprocess.run([awk, self._f3_awk_program(), str(tf)], capture_output=True, text=True)
+        return "".join(r.stdout.split())   # the hook pipes through tr -d '[:space:]'
+
+    def test_f3_awk_is_extracted_from_the_hook_not_copied(self):
+        prog = self._f3_awk_program()
+        self.assertIn("## Status", prog)
+        self.assertIn("flag", prog)
+        # A control read through the extracted program on the canonical layout.
+        tf = self._task(TASK.format(n="012"))
+        self.assertEqual(self._f3_reads(tf), "pending")
 
     def test_written_status_layout_agrees_with_the_f3_awk(self):
         # Every file playbook WRITES must read the same in Python and in the
-        # fence-blind F3 awk: blank lines after the heading are collapsed on write.
+        # fence-blind F3 awk: blank lines after the heading are collapsed and the
+        # heading itself is canonicalized to `## Status` on write (round-6/7 panels:
+        # `## Status\n\ndone`, `## Status ##\ndone`, `##\tStatus\ndone` all read `""`
+        # in F3 → a stale done-pointer would authorize edits).
         core = self._core()
-        for body in ("# T\n\n## Status\n\npending\n\n## Work Plan\n- [ ] G1\n",
-                     "# T\n\n## Status\n\n\n\npending\n\n## Work Plan\n- [ ] G1\n",
-                     TASK.format(n="012")):
+        bodies = [
+            "# T\n\n## Status\n\npending\n\n## Work Plan\n- [ ] G1\n",
+            "# T\n\n## Status\n\n\n\npending\n\n## Work Plan\n- [ ] G1\n",
+            "# T\n\n## Status ##\npending\n\n## Work Plan\n- [ ] G1\n",
+            "# T\n\n##\tStatus\npending\n\n## Work Plan\n- [ ] G1\n",
+            "# T\n\n  ## Status\n  pending\n\n## Work Plan\n- [ ] G1\n",
+            TASK.format(n="012"),
+        ]
+        for body in bodies:
             tf = self._task(body)
-            self.assertTrue(core._set_status(tf, "done"))
-            self.assertEqual(core._extract_status(tf), "done")
+            self.assertTrue(core._set_status(tf, "done"), repr(body))
+            self.assertEqual(core._extract_status(tf), "done", repr(body))
             self.assertEqual(self._f3_reads(tf), "done", repr(body))
+            self.assertIn("\n## Status\ndone\n", tf.read_text(encoding="utf-8"), repr(body))
+        # set_task_blocked DIRECTLY on the raw bodies (the `tasks blocked` path never
+        # calls _set_status first — sonnet, round 7).
+        for body in bodies:
+            tf = self._task(body)
             core.set_task_blocked(tf, "pause")
+            self.assertEqual(core._extract_status(tf), "blocked", repr(body))
             self.assertEqual(self._f3_reads(tf), "blocked", repr(body))
+            self.assertIn("\n## Status\nblocked\n", tf.read_text(encoding="utf-8"), repr(body))
+
+    def test_value_with_one_to_three_leading_spaces_is_text(self):
+        # Round-7 panel (codex): 1-3 leading spaces are ordinary Markdown text (the
+        # pre-043 `.strip()` reader accepted them); only a tab / >=4 columns is code.
+        core = self._core()
+        for value in (" pending", "  pending", "   pending"):
+            tf = self._task(f"# T\n\n## Status\n{value}\n\n## Work Plan\n- [ ] G1\n")
+            self.assertEqual(core._extract_status(tf), "pending", repr(value))
+            self.assertTrue(core._set_status(tf, "done"), repr(value))
+            self.assertIn("## Status\ndone\n", tf.read_text(encoding="utf-8"))   # canonical
 
     def test_lifecycle_reopen_targets_live_status(self):
         # lifecycle's reopen path (`tasks work <N>` on a done task) must use the

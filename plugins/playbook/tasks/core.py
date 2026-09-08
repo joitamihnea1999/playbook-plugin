@@ -3044,7 +3044,25 @@ def _live_status_index(lines: "list[str]") -> "int | None":
 # after a heading, not a value (round-3 panel); the fence scanner does not flag it
 # (no blank precedes it) so the shape rule must. Structural shapes (`- [ ]`, `#`,
 # `>`, `<!--`, a fence, blank) all start with a non-letter and are never a value.
-_STATUS_VALUE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\- ]*(\([^()]*\))?[ \t]*$")
+_STATUS_VALUE_RE = re.compile(r"^ {0,3}[A-Za-z][A-Za-z0-9_\- ]*(\([^()]*\))?[ \t]*$")
+
+
+def _splice_status_value(lines: "list[str]", pair: "tuple[int, int]", value: str) -> None:
+    """Rewrite the live `## Status` pair IN PLACE to the canonical layout
+    `## Status` / `<value>` — the ONE status splice both writers use (round-7
+    panel: two hand-rolled copies drift). Canonicalization is deliberate: the
+    fence-blind F3 awk in task-gate-hook matches only a literal `## Status` on
+    one line and reads the IMMEDIATE next line, so an accepted-but-non-canonical
+    heading (`## Status ##`, `##\tStatus`, an indented one) or blank padding that
+    playbook WROTE would make a stale done-pointer read `""` → authorize (rounds
+    6-7). Every file playbook writes must read identically in Python and in that
+    awk. Nothing of content is lost: a heading spelling and blank lines are layout.
+    Line endings: keeps the heading line's own ending (callers may pass
+    keepends lines — CRLF stays CRLF) or none when the lines carry none."""
+    h, v = pair
+    raw = lines[h]
+    eol = "\r\n" if raw.endswith("\r\n") else ("\n" if raw.endswith("\n") else "")
+    lines[h:v + 1] = ["## Status" + eol, value + eol]
 
 
 def _status_from_lines(lines: "list[str]") -> str:
@@ -3150,12 +3168,7 @@ def _set_status(task_file: Path, value: str) -> bool:
     pair = _live_status_pair(lines)
     if pair is None:
         return False
-    # Collapse any blank lines between the heading and the value so the written
-    # file is canonical `## Status\n<value>` (round-6 panel, grok): task-gate-hook's
-    # F3 awk reads the IMMEDIATE next line, and a blank there would make a stale
-    # done-pointer read `""` → authorize. Every file playbook writes must read the
-    # same in Python and in that awk. A blank is never content, so nothing is lost.
-    lines[pair[0] + 1:pair[1] + 1] = [value + "\n"]
+    _splice_status_value(lines, pair, value)      # canonical layout (see helper)
     _atomic_write(task_file, "".join(lines))
     return True
 
@@ -3227,7 +3240,7 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
             "— refusing to record a blocked state whose status could not be "
             "written; fix the heading/fence first, nothing was changed")
     out = list(lines)
-    out[pair[0] + 1:pair[1] + 1] = ["blocked"]   # same blank-collapse as _set_status
+    _splice_status_value(out, pair, "blocked")     # the same splice _set_status uses
     # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
     # fresh. Fence-aware (P1): a `## Blocked` quoted inside a fenced example is not
     # the section, so the delete can never strand an unclosed fence or swallow the
@@ -3240,16 +3253,14 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     while out and out[-1].strip() == "":
         out.pop()
     out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
-    # Post-write invariant, checked on the candidate BEFORE the write: the status
-    # reads back `blocked` through the fail-closed reader (the stop-hook's view),
-    # so status and reason can never land apart. The appended `## Blocked` sits
-    # at EOF, so no CLOSED fence can enclose it (a check for that would be dead
-    # code — round-1 panel); the documented corner where an UNCLOSED fence above
-    # hosts a decoy `## Blocked` is unchanged and disclosed in the ledger: the
-    # real record is appended and readable fail-open, the decoy is never deleted.
-    if _status_from_lines(out) != "blocked":
-        raise ValueError("blocked status did not land live in task.md — refusing to "
-                         "write a divergent state (nothing was changed)")
+    # What guarantees "the status lands or nothing is written" is the PREFLIGHT
+    # above (`_live_status_pair` is None → ValueError before any write) plus the
+    # direct splice of the value: a post-splice re-read would be tautological, so
+    # there is none (round-1 and round-7 panels both flagged such checks as dead).
+    # The appended `## Blocked` sits at EOF, so no CLOSED fence can enclose it; the
+    # documented corner where an UNCLOSED fence above hosts a decoy `## Blocked`
+    # is unchanged and disclosed in the ledger: the real record is appended and
+    # readable fail-open, the decoy is never deleted.
     _atomic_write(task_file, "\n".join(out) + "\n")
 
 
