@@ -388,6 +388,38 @@ class Compact(unittest.TestCase):
         self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
         self.assertFalse((self.task_dir / "task-archive.md").exists())
 
+    def test_protected_span_ends_where_the_drift_sweep_window_ends(self):
+        # Round-3 panel (sonnet raised a plain `## decoy` between the receipt entry
+        # and its bullets as laundering): compact's protected span ends at the next
+        # live H2 of ANY name — exactly where audit's drift sweep ends its
+        # `in_receipt` window (audit.check_verify_contract_change sets
+        # in_receipt = (h2 == "## Verification Receipt") on every live H2). A bullet
+        # below such a heading is therefore NOT baseline for the sweep, and moving
+        # it changes nothing the sweep reads; inserting the heading is the
+        # disclosed raw-content bound, not a compaction hole. Pin the equivalence.
+        from tasks.compact import _protected_section_spans
+        from tasks.core import _atx_h2_text, _closed_fence_line_indices
+        lines = ["# 012", "", "## Verification Receipt", "",
+                 "### 2026-01-01T00:00:00+00:00 · risk reversible · commit abc1234",
+                 "## decoy", "<!-- archive:start -->",
+                 "    - [PASS] `python3 scripts/verify` (verify)", "<!-- archive:end -->"]
+        spans = _protected_section_spans(lines)
+        self.assertEqual(spans, [(2, 4)], "span must end right before the live decoy H2")
+        # The sweep's window, computed with the sweep's own rule on the same lines:
+        skip = _closed_fence_line_indices(lines)
+        in_receipt, window = False, []
+        for i, ln in enumerate(lines):
+            if i in skip:
+                continue
+            h2 = _atx_h2_text(ln)
+            if h2 is not None:
+                in_receipt = (h2 == "## Verification Receipt")
+                continue
+            if in_receipt:
+                window.append(i)
+        self.assertEqual(window, [3, 4], "sweep window ends at the same decoy H2")
+        self.assertNotIn(7, window, "the bullet below the decoy is not baseline for the sweep")
+
     def test_block_with_pre_panel_audit_is_refused(self):
         # Same reasoning for the audit receipt: the panel's freshness check reads
         # `## Pre-Panel Audit`, so it must not be archivable either.
