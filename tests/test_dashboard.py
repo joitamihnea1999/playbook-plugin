@@ -593,6 +593,18 @@ class HealthWindow(unittest.TestCase):
             final = json.loads(path.read_text(encoding="utf-8"))
             self.assertNotEqual(final["_panel_changed"], "2020-01-01T00:00:00Z")
             self.assertEqual(final["_panel_changed_for"], db.panel_digest(["opus"]))
+            # r3 sol-med#1: a LEGACY (unstamped) file gets its stamp seeded from the pre-write
+            # mtime — the best approximation of the last change — so a default-judge-only or
+            # same-panel write on a pre-054 config does not reset the window to "now"
+            legacy = Path(td) / "legacy.json"
+            legacy.write_text(json.dumps({"panel": ["opus", "sonnet"], "default_judge": "opus"}), encoding="utf-8")
+            _touch(legacy, NOW - timedelta(days=9))
+            mc._write_panel(legacy, json.loads(legacy.read_text(encoding="utf-8")), None, "sonnet")
+            seeded = json.loads(legacy.read_text(encoding="utf-8"))
+            self.assertEqual(db.parse_ts(seeded["_panel_changed"]), NOW - timedelta(days=9))
+            self.assertEqual(seeded["_panel_changed_for"], db.panel_digest(["opus", "sonnet"]))
+            mc._write_panel(legacy, seeded, ["opus", "sonnet"], None)                         # same panel: stamp kept
+            self.assertEqual(json.loads(legacy.read_text(encoding="utf-8"))["_panel_changed"], seeded["_panel_changed"])
 
     def test_stats_and_drift_honour_the_bounded_window(self):
         lines = [_rec(10, "codex:gpt-5.6-sol:high"), _rec(5, "codex:gpt-5.6-sol:high", "timeout"),

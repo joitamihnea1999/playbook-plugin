@@ -190,8 +190,9 @@ def load_codex_cache(path: Path = CODEX_CACHE_PATH) -> Optional[dict]:
 
 
 def cache_age_days(fetched_at: Optional[str]) -> Optional[float]:
-    """Age of the cache's ISO-8601 fetched_at stamp, in days; None if unparsable."""
-    if not fetched_at:
+    """Age of the cache's ISO-8601 fetched_at stamp, in days; None if unparsable,
+    not a string, or in the future (a future stamp is unknown, never fresh)."""
+    if not fetched_at or not isinstance(fetched_at, str):
         return None
     # the codex cache stamps nanoseconds (`...51.980219765Z`) and Python 3.10's
     # fromisoformat accepts ONLY 3 or 6 fractional digits — normalise the fraction
@@ -202,7 +203,10 @@ def cache_age_days(fetched_at: Optional[str]) -> Optional[float]:
         stamp = datetime.fromisoformat(normalized)
     except ValueError:
         return None
-    return (datetime.now(timezone.utc) - stamp).total_seconds() / 86400
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - stamp).total_seconds() / 86400
+    return age if age >= 0 else None
 
 
 def installed_cli_version(binary: str = "codex") -> Optional[str]:
@@ -824,6 +828,17 @@ def _write_panel(path: Path, existing: dict, new_panel: Optional[list[str]],
     Seeds a project-scoped `_doc` when the file had none.
     """
     now = datetime.now(timezone.utc)
+    if "_panel_changed" not in existing and path.is_file():
+        # a LEGACY file (written before the stamp existed): seed the stamp from its
+        # pre-write mtime — the best approximation of its last change — so this
+        # write does not read as a panel change when the seats stay the same
+        try:
+            from tasks.dashboard import panel_digest
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            existing["_panel_changed"] = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
+            existing["_panel_changed_for"] = panel_digest(existing.get("panel"))
+        except OSError:
+            pass
     if new_panel is not None:
         # `_panel_changed` marks the most recent SEAT-LIST change (task 054): the
         # dashboard's health window starts there, so a default-judge-only or

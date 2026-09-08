@@ -171,6 +171,13 @@ class ParserTest(unittest.TestCase):
         self.assertGreater(mc.cache_age_days("2026-07-01T00:00:00.980219765Z"), 1)
         self.assertGreater(mc.cache_age_days("2026-07-01T00:00:00.98Z"), 1)
         self.assertGreater(mc.cache_age_days("2026-07-01T00:00:00.980219765+00:00"), 1)
+        # r3 sol-high#1: a non-string stamp must not raise (it would abort the whole
+        # provider inventory); a naive stamp is read as UTC; a FUTURE stamp (clock skew,
+        # a hand-edited cache) is unknown — never "fresh"
+        self.assertIsNone(mc.cache_age_days(12345))
+        self.assertIsNone(mc.cache_age_days({"t": 1}))
+        self.assertGreater(mc.cache_age_days("2026-07-01T00:00:00"), 1)
+        self.assertIsNone(mc.cache_age_days("2999-01-01T00:00:00Z"))
 
     def test_agy_models_parser(self):
         out = "Gemini 3.5 Flash (High)\n\nGemini 3.1 Pro (Low)\n"
