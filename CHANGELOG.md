@@ -38,6 +38,11 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- **`cache_age_days` accepted no real codex cache stamp** (task 054). `~/.codex/models_cache.json`
+  writes `fetched_at` with nanoseconds (`…51.980219765Z`) and Python 3.10's `fromisoformat`
+  takes only 3 or 6 fractional digits, so the age was silently `None` on every machine
+  (`tasks models check` never reported a cache age; the dashboard's dead-pin freshness bar
+  could never be met). The fraction is now normalised to six digits before parsing.
 - **The tree-state fingerprint now binds the owner-declared `fingerprint_exclude`
   set** (task 051, from Test A bug candidates #28/#54/#117 on corpus case
   pb-036-r2 and the implementation panel). The literal candidate — `tail_cert_delta`
