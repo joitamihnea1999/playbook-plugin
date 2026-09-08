@@ -252,6 +252,75 @@ class Compact(unittest.TestCase):
         self.assertIn("protected section", err)
         self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
 
+    # --- task 044: one scanner (shared fence engine + strict ATX) ---------------
+
+    RECEIPT_TAIL = (
+        "### 2026-01-01T00:00:00+00:00 · risk reversible · commit abc1234\n"
+        "- **Commands:**\n"
+        "<!-- archive:start -->\n"
+        "    - [PASS] `python3 scripts/verify` (verify)\n"
+        "<!-- archive:end -->\n\n## Parked\n")
+
+    def test_closing_hash_receipt_heading_is_protected(self):
+        # `## Verification Receipt ##` is a valid ATX heading the receipt reader/writer
+        # and the audit drift sweep all recognise (core._atx_h2_text); compact must
+        # protect it too, or wrapping its bullets launders the drift baseline.
+        self.task_md.write_text("# 012\nlive\n\n## Verification Receipt ##\n\n" + self.RECEIPT_TAIL,
+                                encoding="utf-8")
+        code, _, err = self._run("12")
+        self.assertEqual(code, 1, "closing-hash receipt heading evaded protection")
+        self.assertIn("protected section", err)
+        self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
+
+    def test_tab_separated_receipt_heading_is_protected(self):
+        self.task_md.write_text("# 012\nlive\n\n##\tVerification Receipt\n\n" + self.RECEIPT_TAIL,
+                                encoding="utf-8")
+        code, _, err = self._run("12")
+        self.assertEqual(code, 1, "tab-separated receipt heading evaded protection")
+        self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
+
+    def test_markers_inside_a_tilde_fence_are_ignored(self):
+        body = ("# 012\n- [x] gate\n~~~\n<!-- archive:start -->\n"
+                "an example of the ritual\n<!-- archive:end -->\n~~~\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, _ = self._run("12")
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to compact", out, "a ~~~ fence must hide example markers")
+        self.assertEqual(self.task_md.read_text(encoding="utf-8"), body)
+        self.assertFalse((self.task_dir / "task-archive.md").exists())
+
+    def test_longer_fence_is_not_closed_by_a_shorter_one(self):
+        # CommonMark: a ```` opener needs a closer of >= 4 backticks; an interior
+        # ``` line is content. The old toggle treated it as the closer and then
+        # read the example markers as live.
+        body = ("# 012\n- [x] gate\n````\nA fenced ``` example:\n```\n<!-- archive:start -->\n"
+                "an example of the ritual\n<!-- archive:end -->\n````\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, _ = self._run("12")
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to compact", out)
+        self.assertEqual(self.task_md.read_text(encoding="utf-8"), body)
+
+    def test_indented_intent_heading_in_block_is_refused(self):
+        # ` ## Intent` (1-3 leading spaces) is a valid ATX heading; the old
+        # `^##` regex missed it, so a block containing the Intent could move.
+        code, _, err = self._corrupt_and_run(BODY.replace(
+            "### Round 1 findings", " ## Intent\nreal intent text"))
+        self.assertEqual(code, 1, "indented protected heading evaded _validate")
+        self.assertIn("protected section heading", err)
+        self.assertIn("real intent text", self.task_md.read_text(encoding="utf-8"))
+
+    def test_markers_after_an_unclosed_fence_stay_ignored(self):
+        # Control for the fail direction: an UNCLOSED opener fences through EOF for
+        # the marker scan (delete-ish writer → fail closed), exactly as before.
+        body = ("# 012\n- [x] gate\n```\n<!-- archive:start -->\n"
+                "would be moved if the fence were ignored\n<!-- archive:end -->\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, _ = self._run("12")
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to compact", out)
+        self.assertEqual(self.task_md.read_text(encoding="utf-8"), body)
+
     def test_block_with_pre_panel_audit_is_refused(self):
         # Same reasoning for the audit receipt: the panel's freshness check reads
         # `## Pre-Panel Audit`, so it must not be archivable either.

@@ -30,12 +30,12 @@ import sys
 from pathlib import Path
 
 from tasks.atomic import atomic_write
-from tasks.core import resolve_agent_dir
+from tasks.core import (_atx_h2_text, _closed_fence_line_indices,
+                        _iter_fenced_flags, resolve_agent_dir)
 from tasks.shared import find_project_root
 
 _START = "<!-- archive:start -->"
 _END = "<!-- archive:end -->"
-_FENCE = "```"
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -45,8 +45,12 @@ def _atomic_write(path: Path, text: str) -> None:
     `newline=""` is what keeps a CRLF file from being rewritten LF-only."""
     atomic_write(path, text, newline="")
 _GATE_RE = re.compile(r"^\s*- \[[ xX]\]")
+# Matched against the NORMALIZED heading from core._atx_h2_text (task 044), so a
+# valid ATX variant — ` ## Intent` (1-3 leading spaces), `##\tIntent`, `## Intent ##`
+# — is protected exactly like the plain spelling; the old `^##\s+` regex on the raw
+# line missed the indented form and let a block containing the Intent move.
 _PROTECTED_HEADING_RE = re.compile(
-    r"^##\s+(Intent|Why|Design|Work Plan|Parked|Status|Risk|References"
+    r"^## (Intent|Why|Design|Work Plan|Parked|Status|Risk|References"
     r"|Verification Receipt|Pre-Panel Audit)\b", re.IGNORECASE)
 # A single close's receipt ENTRY (`### <ts> · risk <r> · commit <sha>`) must not
 # be archivable even when its `## Verification Receipt` heading stays outside the
@@ -69,18 +73,24 @@ def _blocks(lines: "list[str]") -> "tuple[list[tuple[int, int]], str | None]":
     or (…, error) when the markers do not nest cleanly. Nesting is not allowed —
     a second start before an end, an end with no open start, or an unclosed start
     are all refused, because guessing the intent is exactly how a wrong region
-    gets moved. Markers inside a ``` code fence are ignored — a task that quotes
-    the ritual in an example must not have its example moved."""
+    gets moved. Markers inside a code fence are ignored — a task that quotes the
+    ritual in an example must not have its example moved.
+
+    Fence rules come from the ONE shared CommonMark engine (task 044; previously a
+    private ``` toggle that missed `~~~`, treated an interior ``` as the closer of a
+    ```` fence, and toggled on an indented ```). Fail direction for THIS scan —
+    a delete-ish writer — is CLOSED (`unclosed_is_live=False`): an opener never
+    closed before EOF fences everything after it, so markers after a malformed
+    fence are never real (the old toggle behaved the same). Indented-code
+    tracking is OFF: a marker indented >=4 columns stays a marker, as before —
+    only the fence rules change, no new refusal surface."""
     spans: "list[tuple[int, int]]" = []
     open_at = None
-    infence = False
+    fenced = _iter_fenced_flags(lines, unclosed_is_live=False, track_indented_code=False)
     for i, ln in enumerate(lines):
+        if fenced[i]:
+            continue
         s = ln.strip()
-        if s.startswith(_FENCE):
-            infence = not infence
-            continue
-        if infence:
-            continue
         if s == _START:
             if open_at is not None:
                 return spans, f"nested {_START} at line {i + 1} (previous opened at line {open_at + 1})"
@@ -102,7 +112,8 @@ def _validate(block_lines: "list[str]") -> "str | None":
             return f"contains a gate checkbox ({ln.strip()[:60]!r})"
         if "<!-- pin -->" in ln:
             return "contains a <!-- pin --> (must survive trims — never archive it)"
-        if _PROTECTED_HEADING_RE.match(ln):
+        h2 = _atx_h2_text(ln)
+        if h2 is not None and _PROTECTED_HEADING_RE.match(h2):
             return f"contains a protected section heading ({ln.strip()[:60]!r})"
         if _RECEIPT_ENTRY_RE.match(ln):
             return f"contains a verification-receipt entry ({ln.strip()[:60]!r})"
@@ -111,27 +122,31 @@ def _validate(block_lines: "list[str]") -> "str | None":
 
 def _protected_section_spans(lines: "list[str]") -> "list[tuple[int, int]]":
     """Inclusive (start, end) line ranges of every `## Verification Receipt` /
-    `## Pre-Panel Audit` SECTION (heading through the line before the next
-    top-level `## `). Matched on the STRIPPED line, exactly like the audit
-    reader, so an indented ` ## Verification Receipt` is covered too (panel
-    round-9 codex). A block overlapping any of these must be refused: protecting
-    only the heading/entry LINES missed a block that wraps just the `- [PASS]`
-    command bullets, stranding them in the archive and emptying the drift
-    baseline (panel round-9 grok)."""
-    from tasks.core import _closed_fence_line_indices
+    `## Pre-Panel Audit` SECTION (heading through the line before the next live
+    top-level heading). Headings are recognised by the strict shared ATX matcher
+    `core._atx_h2_text` (task 044) — exactly what the receipt reader
+    (`_latest_receipt_line`), the receipt writer (`upsert_task_section`) and the
+    audit drift sweep use — so a `## Verification Receipt ##`, `##\tVerification
+    Receipt` or 1-3-space-indented heading is protected too (the old
+    `strip() in protected` test missed the first two and a block wrapping their
+    `- [PASS]` bullets could launder the drift baseline). A block overlapping any
+    of these must be refused: protecting only the heading/entry LINES missed a
+    block that wraps just the command bullets (panel round-9 grok). Fence view is
+    the fail-OPEN `_closed_fence_line_indices` (an unclosed fence never HIDES a
+    receipt from protection) — the same view the receipt writer uses."""
     fenced = _closed_fence_line_indices(lines)   # ONE shared CommonMark scanner
     protected = ("## Verification Receipt", "## Pre-Panel Audit")
     spans: "list[tuple[int, int]]" = []
     i, n = 0, len(lines)
     while i < n:
-        if i not in fenced and lines[i].strip() in protected:
-            # The section ends at the next REAL (non-fenced) top-level heading. A
-            # `## ` line inside a code fence (a decoy example) or otherwise must
-            # NOT terminate the span early, or a block wrapping the command
-            # bullets below it would escape the overlap check (panel round-11
-            # sonnet, Critical) — same fence rule the reader and writer use.
+        if i not in fenced and _atx_h2_text(lines[i]) in protected:
+            # The section ends at the next REAL (non-fenced) live H2. A `## ` line
+            # inside a code fence (a decoy example), an indented >=4 `## x` (code)
+            # or an H3 entry must NOT terminate the span early, or a block wrapping
+            # the command bullets below it would escape the overlap check (panel
+            # round-11 sonnet, Critical) — same rules the reader and writer use.
             j = i + 1
-            while j < n and not (j not in fenced and lines[j].strip().startswith("## ")):
+            while j < n and not (j not in fenced and _atx_h2_text(lines[j]) is not None):
                 j += 1
             spans.append((i, j - 1))
             i = j
