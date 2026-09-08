@@ -39,6 +39,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat as _stat
 import statistics
 from datetime import datetime, timedelta, timezone
@@ -131,19 +132,35 @@ _JOURNAL_READ_CAP = 64 * 1024 * 1024   # bytes — a journal grown past this is 
 def _read_regular_text(path: Path, cap: int = _JOURNAL_READ_CAP) -> "str | None":
     """Read `path` ONLY if it is a plain regular file — the same guard the
     journal writers use (plan-panel grok#3): a hostile swap of the journal path
-    to a FIFO/symlink/device must not hang a bootstrap. One `O_NONBLOCK|
-    O_NOFOLLOW` open (flags absent on Windows → getattr 0, plain read), `fstat`
-    re-validation AFTER the open, bounded read. None when not readable as such."""
+    to a FIFO/symlink/device must not hang a bootstrap. None when not readable
+    as such. See `_read_regular_tagged` for the status-carrying form."""
+    text, _status = _read_regular_tagged(path, cap)
+    return text
+
+
+def _read_regular_tagged(path: Path, cap: int = _JOURNAL_READ_CAP) -> "tuple[str | None, str]":
+    """(text, status) with status ∈ {ok, missing, unreadable, truncated}. One
+    `O_NONBLOCK|O_NOFOLLOW` open (flags absent on Windows → getattr 0, plain
+    read), `fstat` re-validation AFTER the open. A file larger than `cap` is read
+    from its TAIL (newest records — impl-panel codex#4: the head is the oldest
+    data, useless for a 14-day window), dropping the first partial line, and
+    tagged `truncated` so the render can say so instead of presenting a partial
+    total as the total."""
     flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
              | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
     try:
         fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None, "missing"
     except OSError:
-        return None
+        return None, "unreadable"
     try:
         st = os.fstat(fd)
         if not _stat.S_ISREG(st.st_mode):
-            return None
+            return None, "unreadable"
+        truncated = st.st_size > cap
+        if truncated:
+            os.lseek(fd, st.st_size - cap, os.SEEK_SET)
         chunks = []
         remaining = cap
         while remaining > 0:
@@ -152,9 +169,13 @@ def _read_regular_text(path: Path, cap: int = _JOURNAL_READ_CAP) -> "str | None"
                 break
             chunks.append(b)
             remaining -= len(b)
-        return b"".join(chunks).decode("utf-8", "replace")
+        raw = b"".join(chunks)
+        if truncated:
+            nl = raw.find(b"\n")
+            raw = raw[nl + 1:] if nl >= 0 else b""
+        return raw.decode("utf-8", "replace"), ("truncated" if truncated else "ok")
     except OSError:
-        return None
+        return None, "unreadable"
     finally:
         try:
             os.close(fd)
@@ -163,18 +184,26 @@ def _read_regular_text(path: Path, cap: int = _JOURNAL_READ_CAP) -> "str | None"
 
 
 def load_review_records(path: "Path | None") -> "tuple[list[dict], int]":
+    """(records, skipped) — see `load_review_journal` for the status-carrying form."""
+    records, skipped, _status = load_review_journal(path)
+    return records, skipped
+
+
+def load_review_journal(path: "Path | None", cap: int = _JOURNAL_READ_CAP) -> "tuple[list[dict], int, str]":
     """Every `hook == "review"` record in the journal, normalised to
-    {ts, seat, kind, task, status, duration_ms|None}. Returns (records,
-    skipped) — a line that is not JSON, not an object, not a review record, or
-    lacks a parseable `ts`/`seat`/`status` is skipped and COUNTED, never raised
-    on. Numbers are never imputed: a missing/invalid duration stays None."""
+    {ts, seat, kind, task, status, duration_ms|None}. Returns (records, skipped,
+    status) — status ∈ {ok, missing, unreadable, truncated, unresolved} so the
+    render can tell "no spend" from "could not read" (impl-panel codex#4). A line
+    that is not JSON, not an object, not a review record, or lacks a parseable
+    `ts`/`seat`/`status` is skipped and COUNTED, never raised on. Numbers are
+    never imputed: a missing/invalid duration stays None."""
     out: "list[dict]" = []
     skipped = 0
     if path is None:
-        return out, 0
-    text = _read_regular_text(Path(path))
+        return out, 0, "unresolved"
+    text, read_status = _read_regular_tagged(Path(path), cap)
     if text is None:
-        return out, 0
+        return out, 0, read_status
     raw_lines = text.splitlines()
     for line in raw_lines:
         if not line.strip():
@@ -203,7 +232,7 @@ def load_review_records(path: "Path | None") -> "tuple[list[dict], int]":
             "status": _one_line(status),
             "duration_ms": dur,
         })
-    return out, skipped
+    return out, skipped, read_status
 
 
 def other_lane_journals(project_path: Path, resolved: "Path | None") -> "list[str]":
@@ -307,10 +336,23 @@ def panel_seats(project_path: Path) -> "dict":
         except ValueError as e:
             seats.append({"spec": spec, "provider": "?", "model": "", "effort": "?",
                           "label": spec, "error": _one_line(e)})
-    proj_models = Path(project_path) / ".agent" / "models.json"
+    # the label must name the file whose bytes were used (impl-panel grok#1):
+    # `load_judge_config` walks UP for `.agent/models.json`, so a nested project
+    # without its own file inherits an ancestor's panel — say so.
+    try:
+        from provider.sandbox import _find_project_models_override
+        used = _find_project_models_override(Path(project_path))
+    except Exception:
+        used = None
+    if used is None:
+        source = "plugin defaults (no .agent/models.json here or above)"
+    elif used.resolve() == (Path(project_path) / ".agent" / "models.json").resolve():
+        source = ".agent/models.json"
+    else:
+        source = f"{used} (an ANCESTOR project's models.json — not this project's)"
     return {"panel": [s for s in panel if isinstance(s, str)], "default_judge": dj,
             "seats": seats, "required_for": panel_required_for(project_path),
-            "source": ".agent/models.json" if proj_models.exists() else "plugin defaults (no .agent/models.json)"}
+            "source": source}
 
 
 def panel_required_for(project_path: Path) -> "list[str]":
@@ -361,8 +403,10 @@ def _models_set_command(panel: "dict", drop_label: "str | None" = None,
         specs = keep
     if add_spec is not None:
         specs = specs + [add_spec]
-    dj_part = f' --default-judge "{dj}"' if dj else ""
-    return f'tasks models set --panel "{",".join(specs)}"{dj_part}{note}'
+    # shlex-quoted (impl-panel codex-med#5): a detected id or configured variant is
+    # untrusted text and must not become shell substitution when pasted.
+    dj_part = f" --default-judge {shlex.quote(dj)}" if dj else ""
+    return f"tasks models set --panel {shlex.quote(','.join(specs))}{dj_part}{note}"
 
 
 def drift_triggers(records: "list[dict]", now: datetime, panel: "dict") -> "list[dict]":
@@ -387,11 +431,13 @@ def drift_triggers(records: "list[dict]", now: datetime, panel: "dict") -> "list
             reasons.append(f"median {fmt_ms(c['median_ms'])} vs {fmt_ms(b['median_ms'])} in the prior 30d")
         if not reasons:
             continue
-        in_panel = any(s["label"] == seat for s in panel.get("seats", []))
-        cmd = (_models_set_command(panel, drop_label=seat) if in_panel
-               else "(seat is not in the current panel — nothing to drop; raise review_timeout_secs in .agent/config.json by hand if it returns)")
+        if not any(s["label"] == seat for s in panel.get("seats", [])):
+            # a seat that is no longer configured has no actionable command (nothing
+            # to drop) — it stays visible as a "(not in panel)" row, but is not an
+            # alarm (impl-panel codex#3: every alarm carries a real command).
+            continue
         out.append({"kind": "drift", "seat": seat, "detail": "; ".join(reasons),
-                    "command": cmd})
+                    "command": _models_set_command(panel, drop_label=seat)})
     return out
 
 
@@ -415,6 +461,7 @@ def model_gap_triggers(detect_report: "dict | None", panel: "dict") -> "list[dic
             continue
         seen: "set[str]" = set()
         missing = []
+        efforts_of: "dict[str, list]" = {}
         for m in prov.get("models", []):
             mid = m.get("id") if isinstance(m, dict) else None
             if not isinstance(mid, str) or not mid:
@@ -424,14 +471,20 @@ def model_gap_triggers(detect_report: "dict | None", panel: "dict") -> "list[dic
                 continue
             seen.add(bare)
             missing.append(mid)
+            eff = m.get("efforts") if isinstance(m.get("efforts"), list) else []
+            efforts_of[mid] = [e for e in eff if isinstance(e, str)]
         if not missing:
             continue
         shown = missing[:MODEL_GAP_CAP]
         more = len(missing) - len(shown)
         first = shown[0]
-        add_spec = f"{name}:{first}" if name != "claude" else f"claude:{first}"
-        if name in ("codex", "grok"):
-            add_spec += ":medium"
+        add_spec = f"{name}:{first}"
+        # effort from the model's OWN advertised vocabulary (impl-panel sonnet#2 /
+        # codex#3): "medium" when offered, else its first effort, else no suffix —
+        # never a hardcoded suffix `tasks models set` would reject as BAD_EFFORT.
+        eff = efforts_of.get(first) or []
+        if eff:
+            add_spec += ":" + ("medium" if "medium" in eff else eff[0])
         out.append({"kind": "model-gap", "seat": name,
                     "detail": f"available but not in the panel: {', '.join(shown)}"
                               + (f" (+{more} more — tasks models detect)" if more else ""),
@@ -545,28 +598,37 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
             if not isinstance(m, dict) or m.get("mode") != "live":
                 continue
             cands = [c for c in (m.get("candidates") or []) if isinstance(c, dict)]
-            labels = tuple(sorted(str(c.get("label", "?")) for c in cands))
+            # (label, spec) pairs in MANIFEST order — never re-sorted apart (impl-panel
+            # grok#3): the re-exam command needs `label=spec` for every candidate.
+            pairs = [(str(c.get("label", "?")), str(c.get("spec", "?"))) for c in cands]
+            labels = tuple(sorted(lab for lab, _sp in pairs))
             if len(labels) < 2:
                 continue                    # an exam compares a PAIR; a single-seat smoke is not a verdict
+            # keyed by the canonical SPECS (impl-panel codex#1): labels are mutable
+            # display names; two exams of the same seats under renamed labels are one pair
+            key = tuple(sorted(sp for _lab, sp in pairs))
             created = parse_ts(m.get("created_at"))
             tpl_info = m.get("template") if isinstance(m.get("template"), dict) else {}
             rep = run / "report.md"
-            verdict = parse_report_verdict(rep.read_text(encoding="utf-8", errors="replace")) if rep.is_file() else {"verdict": "", "weighted": {}}
+            verdict = parse_report_verdict(_read_regular_text(rep, cap=8 * 1024 * 1024) or "") if rep.is_file() else {"verdict": "", "weighted": {}}
             entry = {"run_id": str(m.get("run_id") or run.name), "date": created,
-                     "labels": list(labels),
-                     "specs": [str(c.get("spec", "?")) for c in cands],
+                     "labels": list(labels), "candidates": pairs,
+                     "specs": [sp for _lab, sp in pairs],
                      "template_sha": str(tpl_info.get("sha256") or ""),
                      "template_version": str(tpl_info.get("version") or ""),
                      "verdict": verdict["verdict"] or "(no report.md verdict)",
                      "weighted": verdict["weighted"]}
-            prev = exams.get(labels)
-            if prev is None or ((created or datetime.min.replace(tzinfo=timezone.utc))
-                                >= (prev["date"] or datetime.min.replace(tzinfo=timezone.utc))):
-                exams[labels] = entry
+            prev = exams.get(key)
+            if prev is None or _exam_date_key(entry) >= _exam_date_key(prev):
+                exams[key] = entry
     for e in exams.values():
         e["source"] = "bench/runs manifest"
-    out["exams"] = sorted(exams.values(), key=lambda e: (e["date"] or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+    out["exams"] = sorted(exams.values(), key=_exam_date_key, reverse=True)
     return out
+
+
+def _exam_date_key(e: dict) -> datetime:
+    return e.get("date") or datetime.min.replace(tzinfo=timezone.utc)
 
 
 def merge_record_exams(bench: "dict | None", records: "list[dict]") -> "dict | None":
@@ -579,16 +641,16 @@ def merge_record_exams(bench: "dict | None", records: "list[dict]") -> "dict | N
     base = dict(bench) if bench else {"corpus_version": None, "cases": 0, "exams": [],
                                        "template_sha_now": "", "template_path": ""}
     have = {tuple(e["labels"]) for e in base["exams"]}
-    extra = [r for r in records if tuple(r["labels"]) not in have]
-    seen: "set[tuple]" = set()
-    dedup = []
-    for r in extra:
+    # per label-pair keep the NEWEST dated record, not the first file found
+    # (impl-panel sonnet#1 / codex#1 / grok#2); then one global newest-first sort
+    newest: "dict[tuple, dict]" = {}
+    for r in records:
         k = tuple(r["labels"])
-        if k in seen:
+        if k in have:
             continue
-        seen.add(k)
-        dedup.append(r)
-    base["exams"] = list(base["exams"]) + dedup
+        if k not in newest or _exam_date_key(r) >= _exam_date_key(newest[k]):
+            newest[k] = r
+    base["exams"] = sorted(list(base["exams"]) + list(newest.values()), key=_exam_date_key, reverse=True)
     return base
 
 
@@ -633,11 +695,21 @@ def record_exams(project_path: Path) -> "list[dict]":
                     dm = _RECORD_DATE_RE.search(tail)
                     break
                 out.append({"run_id": m.group(1), "date": parse_ts(dm.group(1) + "T00:00:00Z") if dm else None,
-                            "labels": labels, "specs": [], "template_sha": "", "template_version": "",
+                            "labels": labels, "candidates": [], "specs": [], "template_sha": "", "template_version": "",
                             "verdict": v["verdict"] or "(no verdict sentence in the record)",
                             "weighted": v["weighted"],
                             "source": f"record {d.name}/{f.name}"})
     return out
+
+
+def _exams_with_fallback(project_path: Path) -> "dict | None":
+    """Manifests first; the task-record scan runs ONLY when they yield no exam
+    (impl-panel opus#1: bootstrap must not regex every task-dir markdown on
+    every session once `bench/runs/` is present)."""
+    bench = judgebench_summary(find_bench_dir(project_path))
+    if bench and bench.get("exams"):
+        return bench
+    return merge_record_exams(bench, record_exams(project_path))
 
 
 # ── trigger 3: template ──────────────────────────────────────────────────────
@@ -651,7 +723,11 @@ def template_triggers(bench: "dict | None") -> "list[dict]":
     newest = next((e for e in bench["exams"] if e.get("template_sha")), None)
     if newest is None or newest["template_sha"] == bench["template_sha_now"]:
         return []
-    cands = ",".join(newest["labels"])
+    # `label=spec` per candidate, in manifest order — bench presets cover only the
+    # sol-*/grok-* labels; any other label needs its spec (impl-panel codex#2 /
+    # codex-med#1 / grok#3)
+    pairs = newest.get("candidates") or [(lab, lab) for lab in newest["labels"]]
+    cands = ",".join(f"{lab}={sp}" if sp and sp != lab else lab for lab, sp in pairs)
     return [{"kind": "template", "seat": newest["run_id"],
              "detail": (f"judgebench exam template is {bench['template_sha_now'][:12]} now, "
                         f"was {newest['template_sha'][:12]} at exam {newest['run_id']} "
@@ -678,7 +754,7 @@ def hooks_health(project_path: Path) -> "dict":
     never raises."""
     warnings: "list[str]" = []
     copy = version = ""
-    covers = "manifest command shape · hook scripts present+executable · grok enforcement file"
+    covers = "manifest command shape · hook scripts present+executable · gate-text truncation · stale ~/.claude/settings.json hook paths · grok enforcement file"
     try:
         from tasks.hooks_check import (_code_version, _copy_version,
                                        authoritative_hooks_path, hooks_check_report)
@@ -693,6 +769,15 @@ def hooks_health(project_path: Path) -> "dict":
                     warnings.append(f"hooks: {name} — missing from {root / 'scripts'}")
                 elif not os.access(hp, os.X_OK):
                     warnings.append(f"hooks: {name} — found but not executable")
+            # doctor §8: the state-echo hook must truncate gate text
+            echo = root / "scripts" / "state-echo-hook"
+            if echo.is_file():
+                body = _read_regular_text(echo, cap=1 << 20) or ""
+                if "cut -c" not in body and "GATE_TEXT_STORE" not in body:
+                    warnings.append("hooks: gate text truncation — state-echo-hook has no truncation (gate text may grow unbounded)")
+        # doctor §4b: stale hook entries in ~/.claude/settings.json
+        for stale in _stale_settings_hook_paths():
+            warnings.append(f"hooks: stale ~/.claude/settings.json entry — {stale}")
         else:
             warnings.append("no authoritative hooks.json resolved (CLAUDE_PLUGIN_ROOT unset and no sibling hooks/)")
         for label, detail in hooks_check_report(project_path):
@@ -712,6 +797,40 @@ def hooks_health(project_path: Path) -> "dict":
     except Exception as e:  # advisory — a dashboard must never crash on it
         warnings.append(f"hooks check skipped ({_one_line(e)})")
     return {"ok": not warnings, "warnings": warnings, "copy": copy, "version": version, "covers": covers}
+
+
+def _stale_settings_hook_paths(settings_path: "Path | None" = None) -> "list[str]":
+    """Doctor's §4b rule verbatim: every hook `command` token in
+    `~/.claude/settings.json` that looks like a script path (suffix .sh or none,
+    >2 parts) and does not exist. [] when the file is absent/malformed."""
+    p = settings_path or (Path.home() / ".claude" / "settings.json")
+    text = _read_regular_text(p, cap=4 * 1024 * 1024)
+    if text is None:
+        return []
+    try:
+        settings = json.loads(text)
+    except ValueError:
+        return []
+
+    def _cmds(node):
+        if isinstance(node, dict):
+            c = node.get("command")
+            if isinstance(c, str):
+                yield c
+            for v in node.values():
+                yield from _cmds(v)
+        elif isinstance(node, list):
+            for item in node:
+                yield from _cmds(item)
+
+    out: "list[str]" = []
+    hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
+    for cmd in _cmds(hooks):
+        for token in cmd.split():
+            tp = Path(token)
+            if tp.suffix in (".sh", "") and len(tp.parts) > 2 and not tp.exists():
+                out.append(str(tp))
+    return out
 
 
 # ── tasks ────────────────────────────────────────────────────────────────────
@@ -776,12 +895,12 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
     p = Path(project_path)
     panel = panel_seats(p)
     jp = journal_path(p)
-    records, skipped = load_review_records(jp)
+    records, skipped, jstatus = load_review_journal(jp)
     cur = window_stats(records, now, WINDOW_DAYS)
     knobs = review_knobs(p)
     hooks = hooks_health(p)
     tasks = task_counts(p)
-    bench = merge_record_exams(judgebench_summary(find_bench_dir(p)), record_exams(p))
+    bench = _exams_with_fallback(p)
     lanes = other_lane_journals(p, jp)
 
     detect_report = None
@@ -828,8 +947,13 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
                 cells = f"{'0':>8}  {'n/a':>5}  {'n/a':>7}  {'n/a':>7}"
             tail = f"  {spec}" + (f"  ⚠ {err}" if err else "")
             L.append(f"  {label:<{w}}  {effort:<18} {cells}{tail}")
+    jdesc = {"ok": f"{len(records)} review records total",
+             "truncated": f"TRUNCATED to the newest {_JOURNAL_READ_CAP >> 20} MB — {len(records)} review records read, older ones NOT counted",
+             "missing": "no journal file yet (no review has run in this lane)",
+             "unreadable": "UNREADABLE (not a regular file, or permission denied) — stats above are empty, not zero",
+             "unresolved": "lane unresolvable (fresh clone without .agent/current_user) — stats above are empty, not zero"}[jstatus]
     L.append(f"  review-spend journal: {jp.relative_to(p).as_posix() if jp and jp.is_relative_to(p) else (jp or '(lane unresolvable)')} · "
-             f"{len(records)} review records total" + (f" · {skipped} malformed skipped" if skipped else "")
+             + jdesc + (f" · {skipped} malformed skipped" if skipped else "")
              + (f" · other lanes with journals (NOT aggregated): {', '.join(lanes)}" if lanes else ""))
     L.append("")
     soft = "unlimited" if knobs["soft"] is None else f"{knobs['soft']}s"
@@ -871,9 +995,9 @@ def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> 
     now = now or datetime.now(timezone.utc)
     p = Path(project_path)
     panel = panel_seats(p)
-    records, _skipped = load_review_records(journal_path(p))
+    records, _skipped, jstatus = load_review_journal(journal_path(p))
     cur = window_stats(records, now, WINDOW_DAYS)
-    bench = merge_record_exams(judgebench_summary(find_bench_dir(p)), record_exams(p))
+    bench = _exams_with_fallback(p)
     drift = drift_triggers(records, now, panel)
     tpl = template_triggers(bench)
 
@@ -893,14 +1017,17 @@ def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> 
         l4 = (f"slowest seat: {slow[0]} {fmt_ms(slow[1]['median_ms'])} · most timeouts: {worst[0]} "
               f"{worst[1]['timeout']}/{worst[1]['runs']}" + (f" · no runs: {', '.join(silent)}" if silent else ""))
     else:
-        l3 = "reviews: no review-spend records in the last 14 days"
+        why = {"missing": " (no journal yet)", "unreadable": " (journal UNREADABLE)",
+               "unresolved": " (lane unresolvable)", "truncated": " (journal truncated)"}.get(jstatus, "")
+        l3 = f"reviews: no review-spend records in the last 14 days{why}"
         l4 = "slowest seat: n/a · most timeouts: n/a"
     if bench and bench["exams"]:
-        e = bench["exams"][0]
+        e = bench["exams"][0]                                   # newest by date (merged list is sorted)
+        with_sha = next((x for x in bench["exams"] if x.get("template_sha")), None)
         if tpl:
-            tpl_part = f"exam template CHANGED since exam {e['run_id']} ({_date(e['date'])})"
-        elif e.get("template_sha") and bench.get("template_sha_now"):
-            tpl_part = f"exam template unchanged since exam {e['run_id']} ({_date(e['date'])})"
+            tpl_part = f"exam template CHANGED since exam {tpl[0]['seat']}"
+        elif with_sha and bench.get("template_sha_now"):
+            tpl_part = f"exam template unchanged since exam {with_sha['run_id']} ({_date(with_sha['date'])})"
         else:
             tpl_part = f"last exam {e['run_id']} ({_date(e['date'])}) — template baseline n/a (record only)"
     else:

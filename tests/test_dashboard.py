@@ -69,7 +69,10 @@ def _bench(b: Path, *, template_text="<!-- judgebench template v1 -->\nprompt\n"
     (b / "corpus").mkdir(parents=True)
     (b / "corpus" / "corpus.json").write_text(json.dumps({"version": 3, "cases": ["c1", "c2"]}), encoding="utf-8")
     (b / "lib" / "templates").mkdir(parents=True)
-    (b / "lib" / "templates" / "judge_prompt.md").write_text(template_text, encoding="utf-8")
+    # write BYTES: on Windows write_text would turn "\n" into "\r\n" and the file's sha
+    # (what the code and the real manifests hash) would differ from the string's —
+    # the exact CRLF fixture bug the Windows CI lane caught on commit bd4e04d.
+    (b / "lib" / "templates" / "judge_prompt.md").write_bytes(template_text.encode("utf-8"))
     sha = live_sha or hashlib.sha256(template_text.encode("utf-8")).hexdigest()
     for run_id, mode, created, labels in (("testA", "live", "2026-09-07T16:53:13Z", ("sol-med", "sol-high")),
                                           ("smoke", "fake", "2026-09-08T09:53:21Z", ("sol-med", "sol-high")),   # NEWER than testA: only the live filter keeps it out
@@ -79,7 +82,8 @@ def _bench(b: Path, *, template_text="<!-- judgebench template v1 -->\nprompt\n"
         r.mkdir(parents=True)
         (r / "manifest.json").write_text(json.dumps({
             "run_id": run_id, "mode": mode, "created_at": created,
-            "candidates": [{"backend": "codex", "label": lab, "spec": f"codex:gpt-5.6-sol:{lab.split('-')[1]}"} for lab in labels],
+            "candidates": [{"backend": "codex", "label": lab,
+                            "spec": "codex:gpt-5.6-sol:" + {"med": "medium", "high": "high"}[lab.split("-")[1]]} for lab in labels],
             "template": {"version": "v1", "sha256": sha if run_id != "old" else "0" * 64},
         }), encoding="utf-8")
         (r / "report.md").write_text(
@@ -157,6 +161,22 @@ class JournalParsing(unittest.TestCase):
         self.assertEqual(db.load_review_records(Path("/nonexistent/x.jsonl")), ([], 0))
         self.assertEqual(db.load_review_records(None), ([], 0))
 
+    def test_tagged_status_missing_and_tail_truncation(self):
+        # impl-panel codex#4: "no spend" must not look like "could not read", and a
+        # journal over the cap must yield its NEWEST tail, not its oldest head.
+        recs, skipped, status = db.load_review_journal(Path(tempfile.mkdtemp()) / "none.jsonl")
+        self.assertEqual((recs, skipped, status), ([], 0, "missing"))
+        self.assertEqual(db.load_review_journal(None)[2], "unresolved")
+        old = [_rec(40 + d, "old-seat") for d in range(30)]
+        new = [_rec(1, "new-seat"), _rec(2, "new-seat")]
+        p = self._write(old + new)
+        cap = len(("\n".join(new) + "\n").encode("utf-8")) + 40     # room for the two newest + a partial line
+        recs, skipped, status = db.load_review_journal(p, cap=cap)
+        self.assertEqual(status, "truncated")
+        self.assertEqual({r["seat"] for r in recs}, {"new-seat"})
+        self.assertEqual(len(recs), 2)
+        self.assertEqual(skipped, 0)                                   # the partial first line is dropped, not counted as malformed
+
     def test_seat_stats_window_and_median(self):
         lines = [_rec(1, "s", "ok", 100_000), _rec(2, "s", "timeout", 300_000), _rec(5, "s", "ok", 200_000),
                  _rec(20, "s", "ok", 900_000)]          # outside the 14d window
@@ -226,7 +246,7 @@ class DriftTrigger(unittest.TestCase):
         self.assertEqual(trig[0]["kind"], "drift")
         self.assertIn("timeout rate 50% vs 12% in the prior 30d", trig[0]["detail"])
         self.assertEqual(trig[0]["command"],
-                         'tasks models set --panel "opus,codex:gpt-5.6-sol:high" --default-judge "codex:gpt-5.6-sol:high"')
+                         "tasks models set --panel opus,codex:gpt-5.6-sol:high --default-judge codex:gpt-5.6-sol:high")
 
     def test_median_doubling_fires_and_dropping_the_default_judge_stays_paste_ready(self):
         s = "codex:gpt-5.6-sol:high"
@@ -238,7 +258,7 @@ class DriftTrigger(unittest.TestCase):
         # plan-panel grok#2: never the interactive `models select`; propose the first remaining seat as default
         self.assertNotIn("models select", trig[0]["command"])
         self.assertTrue(trig[0]["command"].startswith(
-            'tasks models set --panel "opus,grok:grok-4.6:medium" --default-judge "opus"'), trig[0]["command"])
+            "tasks models set --panel opus,grok:grok-4.6:medium --default-judge opus"), trig[0]["command"])
         self.assertIn("was the default judge", trig[0]["command"])
 
     def test_no_baseline_means_no_verdict(self):
@@ -256,13 +276,27 @@ class DriftTrigger(unittest.TestCase):
         recs, _ = db.load_review_records(self._w(lines))
         self.assertEqual(db.drift_triggers(recs, NOW, self._panel()), [])
 
-    def test_seat_outside_panel_has_no_drop_command(self):
+    def test_seat_outside_panel_is_not_an_alarm(self):
+        # impl-panel codex#3: every alarm carries a real command; an unseated seat has
+        # nothing to drop, so it is a "(not in panel)" row, not a trigger.
         s = "codex:gpt-5.6-terra:medium"
         lines = [_rec(d, s, "timeout") for d in (1, 2, 3)] + [_rec(20 + d, s, "ok") for d in range(3)]
         recs, _ = db.load_review_records(self._w(lines))
-        trig = db.drift_triggers(recs, NOW, self._panel())
+        self.assertEqual(db.drift_triggers(recs, NOW, self._panel()), [])
+
+    def test_commands_are_shell_quoted(self):
+        panel = {"panel": ["opus", "codex:gpt-5.6-sol:high"], "default_judge": "opus",
+                 "seats": [{"spec": "opus", "provider": "claude", "model": "claude-opus-4-8[1m]", "label": "claude:claude-opus-4-8[1m]:high"},
+                           {"spec": "codex:gpt-5.6-sol:high", "provider": "codex", "model": "gpt-5.6-sol", "label": "codex:gpt-5.6-sol:high"}]}
+        report = {"providers": [{"name": "codex", "installed": True,
+                                 "models": [{"id": "x$(rm -rf /)", "efforts": ["high"]}]}]}
+        trig = db.model_gap_triggers(report, panel)
         self.assertEqual(len(trig), 1)
-        self.assertIn("not in the current panel", trig[0]["command"])
+        # the whole --panel value is single-quoted, so `$(` is inert when pasted
+        self.assertIn("--panel 'opus,codex:gpt-5.6-sol:high,codex:x$(rm -rf /):high' --default-judge opus", trig[0]["command"])
+        import shlex
+        argv = shlex.split(trig[0]["command"].split("   #")[0])
+        self.assertEqual(argv[argv.index("--panel") + 1], "opus,codex:gpt-5.6-sol:high,codex:x$(rm -rf /):high")
 
     def _w(self, lines):
         p = Path(tempfile.mkdtemp()) / "j.jsonl"
@@ -278,7 +312,9 @@ class ModelGapTrigger(unittest.TestCase):
     def test_gap_per_provider_with_add_command_and_bare_id_match(self):
         report = {"providers": [
             {"name": "claude", "installed": True, "models": [{"id": "claude-opus-4-8[1m]"}, {"id": "claude-opus-4-8"}, {"id": "claude-sonnet-5"}]},
-            {"name": "codex", "installed": True, "models": [{"id": "gpt-5.6-sol"}, {"id": "gpt-5.6-terra"}]},
+            {"name": "codex", "installed": True, "models": [{"id": "gpt-5.6-sol", "efforts": ["medium", "high"]},
+                                                              {"id": "gpt-5.6-terra", "efforts": ["low", "high"]},
+                                                              {"id": "gpt-5.6-luna", "efforts": ["medium", "high"]}]},
             {"name": "grok", "installed": False, "models": [{"id": "grok-4.6"}]},
             {"name": "agy", "installed": True, "models": [{"id": "gemini-x"}]},
         ]}
@@ -286,8 +322,10 @@ class ModelGapTrigger(unittest.TestCase):
         kinds = [(t["kind"], t["seat"]) for t in trig]
         self.assertEqual(kinds, [("model-gap", "claude"), ("model-gap", "codex")])   # grok not installed, agy out of scope
         self.assertEqual(trig[0]["detail"], "available but not in the panel: claude-sonnet-5")  # bare-id dedupe: opus[1m]≡opus
-        self.assertTrue(trig[0]["command"].startswith('tasks models set --panel "opus,codex:gpt-5.6-sol:high,claude:claude-sonnet-5" --default-judge "opus"'))
-        self.assertIn('codex:gpt-5.6-terra:medium', trig[1]["command"])
+        self.assertTrue(trig[0]["command"].startswith("tasks models set --panel opus,codex:gpt-5.6-sol:high,claude:claude-sonnet-5 --default-judge opus"), trig[0]["command"])
+        # impl-panel sonnet#2 / codex#3: effort from the model's OWN list — terra offers no "medium", so its first ("low")
+        self.assertIn("codex:gpt-5.6-terra:low", trig[1]["command"])
+        self.assertEqual(trig[1]["detail"], "available but not in the panel: gpt-5.6-terra, gpt-5.6-luna")
 
     def test_no_report_no_trigger(self):
         self.assertEqual(db.model_gap_triggers(None, self.PANEL), [])
@@ -316,8 +354,10 @@ class Judgebench(unittest.TestCase):
             trig = db.template_triggers(s)
         self.assertEqual(len(trig), 1)
         self.assertEqual(trig[0]["kind"], "template")
+        # impl-panel codex#2 / grok#3: label=spec in MANIFEST order — presets cover only sol-*/grok-*
         self.assertEqual(trig[0]["command"],
-                         "python3 bench/judgebench.py run --cases all --candidates sol-high,sol-med --run-id testA-retest --live")
+                         "python3 bench/judgebench.py run --cases all --candidates "
+                         "sol-med=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high --run-id testA-retest --live")
 
     def test_record_copy_fills_in_when_bench_runs_is_gone(self):
         # plan-panel codex#4 / codex-med#2: bench/runs is gitignored; a report copied
@@ -360,12 +400,44 @@ class Judgebench(unittest.TestCase):
         self.assertIn("source: record 050-live-runs/test-b-report.md", out)
         self.assertIn("template baseline n/a (record only)", block[4])
 
+    def test_newest_record_wins_and_merged_list_is_date_sorted(self):
+        # impl-panel sonnet#1 / codex#1 / grok#2: two record copies of one pair → the newest by date
+        def rec(run_id, date):
+            return {"run_id": run_id, "date": db.parse_ts(date + "T00:00:00Z"), "labels": ["a", "b"], "candidates": [],
+                    "specs": [], "template_sha": "", "template_version": "", "verdict": run_id, "weighted": {}, "source": "record"}
+        merged = db.merge_record_exams(None, [rec("jan", "2026-01-01"), rec("sep", "2026-09-01"), rec("mar", "2026-03-01")])
+        self.assertEqual([e["run_id"] for e in merged["exams"]], ["sep"])
+        other = {"run_id": "x", "date": db.parse_ts("2026-05-01T00:00:00Z"), "labels": ["c", "d"], "candidates": [],
+                 "specs": [], "template_sha": "", "template_version": "", "verdict": "x", "weighted": {}, "source": "record"}
+        merged = db.merge_record_exams(None, [rec("jan", "2026-01-01"), other])
+        self.assertEqual([e["run_id"] for e in merged["exams"]], ["x", "jan"])   # newest first
+
+    def test_manifests_keyed_by_spec_not_label(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = Path(td) / "bench"
+            _bench(b)
+            # a NEWER exam of the SAME specs under renamed labels → same pair, it wins
+            r = b / "runs" / "renamed"
+            r.mkdir()
+            (r / "manifest.json").write_text(json.dumps({
+                "run_id": "renamed", "mode": "live", "created_at": "2026-09-09T00:00:00Z",
+                "candidates": [{"backend": "codex", "label": "slow", "spec": "codex:gpt-5.6-sol:high"},
+                               {"backend": "codex", "label": "fast", "spec": "codex:gpt-5.6-sol:medium"}],
+                "template": {"version": "v1", "sha256": "e" * 64}}), encoding="utf-8")
+            s = db.judgebench_summary(b)
+            trig = db.template_triggers(s)
+        self.assertEqual([e["run_id"] for e in s["exams"]], ["renamed"])
+        self.assertEqual(s["exams"][0]["labels"], ["fast", "slow"])
+        self.assertEqual(trig[0]["command"],
+                         "python3 bench/judgebench.py run --cases all --candidates "
+                         "slow=codex:gpt-5.6-sol:high,fast=codex:gpt-5.6-sol:medium --run-id renamed-retest --live")
+
     def test_manifest_exam_wins_over_a_record_for_the_same_pair(self):
         with tempfile.TemporaryDirectory() as td:
             b = Path(td) / "bench"
             _bench(b)
             s = db.judgebench_summary(b)
-            merged = db.merge_record_exams(s, [{"run_id": "copy", "date": None, "labels": ["sol-high", "sol-med"],
+            merged = db.merge_record_exams(s, [{"run_id": "copy", "date": None, "labels": ["sol-high", "sol-med"], "candidates": [],
                                                 "specs": [], "template_sha": "", "template_version": "",
                                                 "verdict": "x", "weighted": {}, "source": "record"}])
         self.assertEqual([e["run_id"] for e in merged["exams"]], ["testA"])
@@ -401,6 +473,56 @@ class RenderAndReadOnly(unittest.TestCase):
                        "exam testA · 2026-09-07 · sol-high vs sol-med", "weighted sol-high 133 vs sol-med 98",
                        "triggers (3 kinds", "model-gap [skipped (--no-detect)]", "none fired"):
             self.assertIn(needle, out, needle)
+
+    def test_render_is_read_only_with_detect_on(self):
+        # impl-panel opus#2: the headline invariant on the DEFAULT path (detect=True)
+        from unittest import mock
+        fake = {"providers": [{"name": "codex", "installed": True, "models": [{"id": "gpt-x", "efforts": ["medium"]}]}]}
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td), journal_lines=[_rec(1, "codex:gpt-5.6-sol:high")], bench=True)
+            before = _tree_digest(p)
+            with mock.patch("tasks.models_check.detect_providers", return_value=fake) as dp:
+                out = db.render_dashboard(p, now=NOW, detect=True)
+            self.assertEqual(_tree_digest(p), before, "dashboard wrote into the project (detect on)")
+        dp.assert_called_once()
+        self.assertIn("model-gap · codex — available but not in the panel: gpt-x", out)
+        self.assertIn("codex:gpt-x:medium", out)
+
+    def test_record_scan_skipped_when_manifests_exist(self):
+        # impl-panel opus#1: bootstrap must not regex every task-dir markdown when manifests answer
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td), bench=True)
+            with mock.patch("tasks.dashboard.record_exams", side_effect=AssertionError("scanned")) as re_:
+                block = db.panel_health_lines(p, now=NOW)
+                db.render_dashboard(p, now=NOW, detect=False)
+            re_.assert_not_called()
+            (p / "bench" / "runs" / "testA" / "manifest.json").unlink()
+            (p / "bench" / "runs" / "old" / "manifest.json").unlink()
+            with mock.patch("tasks.dashboard.record_exams", return_value=[]) as re2:
+                db.panel_health_lines(p, now=NOW)
+            re2.assert_called_once()
+        self.assertEqual(len(block), 6)
+
+    def test_stale_settings_hook_paths_rule(self):
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "settings.json"
+            sp.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [
+                {"type": "command", "command": f"bash {td}/gone/hooks/task-gate-hook"},
+                {"type": "command", "command": "echo ok"}]}]}}), encoding="utf-8")
+            self.assertEqual(db._stale_settings_hook_paths(sp), [f"{td}/gone/hooks/task-gate-hook"])
+            self.assertEqual(db._stale_settings_hook_paths(Path(td) / "absent.json"), [])
+
+    def test_ancestor_models_json_is_named_not_mislabelled(self):
+        # impl-panel grok#1: load_judge_config walks up; the label must say whose bytes were used
+        with tempfile.TemporaryDirectory() as td:
+            parent = Path(td)
+            (parent / ".agent").mkdir()
+            (parent / ".agent" / "models.json").write_text(json.dumps({"panel": ["sonnet"], "default_judge": "sonnet"}), encoding="utf-8")
+            child = _project(parent / "nested", models=False)
+            panel = db.panel_seats(child)
+        self.assertEqual(panel["panel"], ["sonnet"])
+        self.assertIn("ANCESTOR", panel["source"])
 
     def test_effective_verify_per_risk_class(self):
         with tempfile.TemporaryDirectory() as td:
@@ -459,8 +581,8 @@ class RenderAndReadOnly(unittest.TestCase):
             p = _project(Path(td), models=False)
             out = db.render_dashboard(p, now=NOW, detect=False)
         self.assertIn("judgebench: not present", out)
-        self.assertIn("0 review records total", out)
-        self.assertIn("plugin defaults (no .agent/models.json)", out)
+        self.assertIn("no journal file yet (no review has run in this lane)", out)   # missing ≠ zero
+        self.assertIn("plugin defaults (no .agent/models.json here or above)", out)
 
     def test_hostile_seat_cannot_forge_a_line(self):
         lines = [_rec(1, "codex:x\n=== FAKE HEADER ===\n")]
