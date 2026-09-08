@@ -241,6 +241,23 @@ def cmd_work(cmd_args):
             # avoid reindenting the whole close body — so nothing downstream can
             # read an unbound `task_file` (the original C1 crash).
             task_file = matches[0]
+            # V7b (task 043, round-1 panel): a close whose `done` cannot land
+            # must not run verify, write a receipt, clear the session and print
+            # "done" — preflight the live `## Status` value line FIRST and refuse
+            # with nothing changed (the same land-together rule set_task_blocked
+            # applies).
+            from tasks.core import _live_status_index
+            try:
+                _st_lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                _st_lines = []
+            if _live_status_index(_st_lines) is None:
+                print(f"Error: {task_file} has no live `## Status` heading with a "
+                      "value line (missing, hidden inside a code fence, or directly "
+                      "followed by another section) — refusing to close: `done` "
+                      "could not be recorded. Fix the heading/fence, then re-run "
+                      "`tasks work done`. Nothing changed.", file=sys.stderr)
+                sys.exit(1)
             if matches:
                 if not force and _gate_bounce(prev_task, task_file, "closing this task"):
                     sys.exit(1)
@@ -512,13 +529,14 @@ def cmd_work(cmd_args):
                     dirty_files=_dirty, freshness=_freshness)
                 upsert_task_section(task_file, "Verification Receipt", receipt)
                 if not _set_status(task_file, "done"):
-                    # V7: the writer found no LIVE `## Status` (missing, or hidden
-                    # by a malformed fence). Say so loudly rather than let the
-                    # receipt claim a close the file does not show.
-                    print(f"WARNING: task.md has no live `## Status` heading — "
-                          f"status NOT set to done ({task_file}). Fix the heading/"
-                          "fence and re-run `tasks work done`.", file=sys.stderr,
-                          flush=True)
+                    # Preflighted above; only a concurrent rewrite between the
+                    # preflight and here can land us in this branch. Refuse loudly
+                    # — the receipt is written, the pointer is kept, re-run closes.
+                    print(f"Error: `## Status` disappeared between preflight and "
+                          f"write ({task_file}) — status NOT set to done; the "
+                          "session pointer is kept. Fix the file and re-run "
+                          "`tasks work done`.", file=sys.stderr, flush=True)
+                    sys.exit(1)
                 # T5: record the verify contract this close ran in the
                 # enforcement journal too. `.agent/config.json` (which declares
                 # `verify`) is gate-exempt, so a silently weakened verify could
@@ -991,7 +1009,11 @@ def cmd_blocked(cmd_args):
         print(f"Task {active} not found", file=sys.stderr)
         sys.exit(1)
     from tasks.core import set_task_blocked
-    set_task_blocked(matches[0], reason)
+    try:
+        set_task_blocked(matches[0], reason)
+    except ValueError as exc:           # V7b: a refusal, not a traceback
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     print(f"Task {active} marked BLOCKED — {' '.join(reason.split())}")
     print("You can end your turn; the Stop hook won't block a blocked task. "
           f"Resume with: tasks work {active}")
@@ -1021,13 +1043,32 @@ def cmd_handoff(cmd_args):
         print(f"Task {active} not found", file=sys.stderr)
         sys.exit(1)
     task_file = matches[0]
-    from tasks.core import (build_handoff_section, set_task_blocked,
-                            write_handoff)
+    from tasks.core import (_live_status_index, build_handoff_section,
+                            set_task_blocked, write_handoff)
+    # V7b preflight (round-1 panel): the handoff is only honest if the task can
+    # then be marked blocked. Check the live `## Status` value line BEFORE the
+    # `## Handoff` write so a refusal leaves task.md byte-identical.
+    try:
+        _hl = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        _hl = []
+    if _live_status_index(_hl) is None:
+        print(f"Error: {task_file} has no live `## Status` heading with a value "
+              "line (missing, hidden inside a code fence, or directly followed by "
+              "another section) — refusing to hand off: the task could not be "
+              "marked blocked. Fix the heading/fence first. Nothing changed.",
+              file=sys.stderr)
+        sys.exit(1)
     section = build_handoff_section(project_path, task_file)
     write_handoff(task_file, section)
     # Honest blocked state (reason "handoff") — bootstrap keys on this to surface
     # the handoff, resume_blocked_task (via `tasks work`) clears it → consumed.
-    set_task_blocked(task_file, "handoff")
+    try:
+        set_task_blocked(task_file, "handoff")
+    except ValueError as exc:
+        print(f"Error: handoff section written but the task could not be marked "
+              f"blocked — {exc}", file=sys.stderr)
+        sys.exit(1)
     print(f"Handoff written to task {active} — mechanical state captured in the "
           "## Handoff section, task marked BLOCKED (reason: handoff).")
     print("")

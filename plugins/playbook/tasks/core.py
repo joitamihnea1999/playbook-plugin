@@ -2997,12 +2997,24 @@ def _live_status_index(lines: "list[str]") -> "int | None":
         scan; the cost is that a malformed fence ABOVE the real heading hides it
         (status reads `unknown`, the writer refuses) — visible, never lenient;
       * strict ATX (`_atx_h2_text`): `##\tStatus`, `## Status ##`, <=3-space
-        indents are the heading; a >=4-column `## Status` is code/text.
+        indents are the heading; a >=4-column `## Status` is code/text;
+      * the heading must be followed by a VALUE line — a live line that is not
+        itself an H2 and not a fence line (round-1 panel: `## Status\n## Risk`
+        has no value; reading `## Risk` as the status is nonsense and WRITING
+        over it would destroy the Risk section). A heading with no valid value
+        line is not a status pair, so the reader says `unknown` and the writer
+        refuses rather than clobber a neighbour.
     """
+    flags = _iter_fenced_flags(lines, unclosed_is_live=False)
     idx = None
-    for i, _s in _iter_nonfenced(lines, unclosed_is_live=False):
-        if _atx_h2_text(lines[i]) == "## Status":
-            idx = i
+    for i, line in enumerate(lines):
+        if flags[i] or _atx_h2_text(line) != "## Status":
+            continue
+        if i + 1 >= len(lines) or flags[i + 1]:
+            continue                            # no value line / fenced value
+        if _atx_h2_text(lines[i + 1]) is not None:
+            continue                            # next line is another section
+        idx = i
     return idx
 
 
@@ -3011,7 +3023,7 @@ def _status_from_lines(lines: "list[str]") -> str:
     (see `_live_status_index`); `unknown` when there is no live heading or no
     line follows it."""
     idx = _live_status_index(lines)
-    if idx is not None and idx + 1 < len(lines):
+    if idx is not None:
         return lines[idx + 1].strip()
     return "unknown"
 
@@ -3104,7 +3116,7 @@ def _set_status(task_file: Path, value: str) -> bool:
     clobbered nor stand in for the real field."""
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     target = _live_status_index(lines)
-    if target is None or target + 1 >= len(lines):
+    if target is None:
         return False
     lines[target + 1] = value + "\n"
     _atomic_write(task_file, "".join(lines))
@@ -3171,11 +3183,12 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     # then write once — a refused block leaves task.md byte-identical.
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
     sidx = _live_status_index(lines)
-    if sidx is None or sidx + 1 >= len(lines):
+    if sidx is None:
         raise ValueError(
-            "task.md has no live `## Status` heading (missing, or hidden inside a "
-            "code fence) — refusing to record a blocked state whose status could "
-            "not be written; fix the heading/fence first, nothing was changed")
+            "task.md has no live `## Status` heading with a value line (missing, "
+            "hidden inside a code fence, or directly followed by another section) "
+            "— refusing to record a blocked state whose status could not be "
+            "written; fix the heading/fence first, nothing was changed")
     out = list(lines)
     out[sidx + 1] = "blocked"
     # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
@@ -3190,19 +3203,16 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     while out and out[-1].strip() == "":
         out.pop()
     out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
-    # Post-write invariants, checked on the candidate BEFORE the write: the status
+    # Post-write invariant, checked on the candidate BEFORE the write: the status
     # reads back `blocked` through the fail-closed reader (the stop-hook's view),
-    # and the appended `## Blocked` heading is live in the fail-open view the
-    # bootstrap reader uses (not swallowed by a CLOSED fence). If either fails
-    # the block would be half-visible — refuse instead. (The documented corner
-    # where an UNCLOSED fence above hosts a decoy `## Blocked` is unchanged: the
-    # real record is appended and readable, the decoy is never deleted.)
+    # so status and reason can never land apart. The appended `## Blocked` sits
+    # at EOF, so no CLOSED fence can enclose it (a check for that would be dead
+    # code — round-1 panel); the documented corner where an UNCLOSED fence above
+    # hosts a decoy `## Blocked` is unchanged and disclosed in the ledger: the
+    # real record is appended and readable fail-open, the decoy is never deleted.
     if _status_from_lines(out) != "blocked":
         raise ValueError("blocked status did not land live in task.md — refusing to "
                          "write a divergent state (nothing was changed)")
-    if _iter_fenced_flags(out, unclosed_is_live=True)[len(out) - 3]:
-        raise ValueError("the ## Blocked section would land inside a code fence — "
-                         "refusing to write a divergent state (nothing was changed)")
     _atomic_write(task_file, "\n".join(out) + "\n")
 
 

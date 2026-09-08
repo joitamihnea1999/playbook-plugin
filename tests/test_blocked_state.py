@@ -389,6 +389,28 @@ class StatusFenceAware(unittest.TestCase):
         self.assertEqual(core._extract_block_reason(tf), "REALPAUSE")
         self.assertIn("```\n## Status\nblocked\n```", tf.read_text(encoding="utf-8"))
 
+    def test_status_value_line_must_be_a_value_not_a_heading(self):
+        # Panel round 1 (codex-sol/codex-terra, convergent): `## Status` directly
+        # followed by another live H2 has NO value; reading `## Risk` as the status
+        # is nonsense and WRITING over it would destroy the Risk section.
+        core = self._core()
+        body = "# T\n\n## Status\n## Risk\nassertive\n\n## Work Plan\n- [ ] G1\n"
+        tf = self._task(body)
+        self.assertEqual(core._extract_status(tf), "unknown")
+        self.assertFalse(core._set_status(tf, "blocked"))
+        with self.assertRaises(ValueError):
+            core.set_task_blocked(tf, "REALPAUSE")
+        self.assertEqual(tf.read_text(encoding="utf-8"), body,
+                         "a heading must never be overwritten as a status value")
+
+    def test_status_value_line_must_not_be_a_fence_opener(self):
+        core = self._core()
+        body = "# T\n\n## Status\n```\npending\n```\n\n## Work Plan\n- [ ] G1\n"
+        tf = self._task(body)
+        self.assertEqual(core._extract_status(tf), "unknown")
+        self.assertFalse(core._set_status(tf, "done"))
+        self.assertEqual(tf.read_text(encoding="utf-8"), body)
+
     def test_lifecycle_reopen_targets_live_status(self):
         # lifecycle's reopen path (`tasks work <N>` on a done task) must use the
         # same fence-aware writer, not a hand-rolled fence-blind loop.
@@ -559,6 +581,55 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 2,
                          f"unreadable status must fail CLOSED (gate count runs): {r.stderr}")
         self.assertIn("status", r.stderr.lower(), "the fallback must be loud")
+
+
+    FENCED_ONLY_STATUS = ("# 012 - Decide\n\n```\n## Status\npending\n```\n\n"
+                          "## Work Plan\n- [ ] open gate\n")
+
+    def test_blocked_command_refuses_cleanly_when_status_cannot_land(self):
+        # Panel round 1 (grok/codex convergent): the ValueError must surface as a
+        # refusal (stderr + exit 1), never a traceback, and the file stays intact.
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(self.FENCED_ONLY_STATUS, encoding="utf-8")
+        r = self.run_tasks("blocked", "waiting on owner")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("## Status", r.stderr)
+        self.assertEqual(self.task_file.read_text(encoding="utf-8"), self.FENCED_ONLY_STATUS)
+
+    def test_handoff_preflights_before_writing_anything(self):
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(self.FENCED_ONLY_STATUS, encoding="utf-8")
+        r = self.run_tasks("handoff")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(self.task_file.read_text(encoding="utf-8"), self.FENCED_ONLY_STATUS,
+                         "a refused handoff must write NOTHING — no ## Handoff, no status")
+
+    def test_work_done_refuses_instead_of_half_closing(self):
+        # Panel round 1 (opus/codex convergent): a close whose `done` cannot land
+        # must not write a receipt, clear the session and print "done".
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        body = ("# 012 - Decide\n\n```\n## Status\npending\n```\n\n"
+                "## Risk\nreversible\n\n## Work Plan\n- [x] gate\n")
+        self.task_file.write_text(body, encoding="utf-8")
+        r = self.run_tasks("work", "done")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Verification Receipt", self.task_file.read_text(encoding="utf-8"))
+        self.assertEqual(self.task_file.read_text(encoding="utf-8"), body)
+        pointer = self.project / ".agent" / "sessions" / SID / "current_state"
+        self.assertTrue(pointer.exists(), "a refused close must keep the session pointer")
+
+    def test_reopen_targets_live_status_not_fenced_example(self):
+        # Panel round 1 (grok): prove the reopen path end-to-end, not by grep.
+        body = ("# 012 - Decide\n\n## Status\ndone\n\n## Docs\n```\n## Status\npending\n```\n\n"
+                "## Work Plan\n- [ ] open gate\n")
+        self.task_file.write_text(body, encoding="utf-8")
+        r = self.run_tasks("work", "012")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = self.task_file.read_text(encoding="utf-8")
+        self.assertIn("## Status\nin_progress\n", text)
+        self.assertIn("```\n## Status\npending\n```", text, "the fenced example must stay intact")
 
 
 if __name__ == "__main__":
