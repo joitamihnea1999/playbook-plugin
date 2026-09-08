@@ -38,6 +38,20 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- **Fence-aware `## Status` — the stop-hook and the CLI read the same field (task 043,
+  the V7 vector split from task 039).** `_extract_status`/`_set_status` select the LAST
+  *live* `## Status` through the shared strict scanner (a `## Status`/`blocked` pair quoted
+  in a code fence is content, not the status; an unclosed fence fails CLOSED, so a
+  never-closed opener followed by `## Status`/`blocked` can no longer release unchecked
+  gates) and the strict ATX matcher (`##\tStatus`, `## Status ##`, ≤3-space indents are
+  the heading). The stop-hook no longer mirrors that rule in awk: it calls the new
+  `scripts/task-status.py`, which imports the CLI's own reader, so Python and the enforcing
+  hook cannot disagree about the same file; if python3 cannot run, the status is
+  unreadable and open gates are enforced (loud). `set_task_blocked` now checks on the
+  in-memory candidate that the status lands `blocked` and the `## Blocked` heading lands
+  outside any closed fence before its single atomic write, refusing (nothing written)
+  otherwise; the reopen path and `tasks retro` use the same reader/writer.
+
 - **`cache_age_days` accepted no real codex cache stamp** (task 054). `~/.codex/models_cache.json`
   writes `fetched_at` with nanoseconds (`…51.980219765Z`) and Python 3.10's `fromisoformat`
   takes only 3 or 6 fractional digits, so the age was silently `None` on every machine

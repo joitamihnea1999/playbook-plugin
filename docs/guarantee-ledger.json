@@ -1,7 +1,7 @@
 {
   "$schema": "guarantee-ledger.schema.json",
   "schema_version": 1,
-  "ledger_version": "2026-09-03",
+  "ledger_version": "2026-09-08",
   "guarantees": [
     {
       "id": "PB-TASK-ACTIVATE",
@@ -182,7 +182,7 @@
     {
       "id": "PB-TASK-BLOCKED",
       "category": "task-lifecycle",
-      "statement": "tasks blocked refuses an empty reason, records the reason without touching gates or minting a heading, locates the `## Blocked` section fence-aware so a fenced `## Blocked`/`## Handoff` example in task.md cannot delete or mis-splice the `## Blocked`/`## Handoff` section, and tasks work on the blocked task restores in_progress.",
+      "statement": "tasks blocked refuses an empty reason, records the reason without touching gates or minting a heading, locates the `## Blocked` section fence-aware so a fenced `## Blocked`/`## Handoff` example in task.md cannot delete or mis-splice the `## Blocked`/`## Handoff` section, reads and writes `## Status` fence-aware through the ONE shared reader (`_live_status_index`: LAST live heading, strict ATX, fail closed on an unclosed fence) so a fenced `## Status`/blocked example is never read as, or clobbered as, the status, refuses (writing nothing) when the blocked status cannot land live, and tasks work on the blocked task restores in_progress. The stop-hook reads the status through the same Python reader (`scripts/task-status.py`) so the enforcing hook and the CLI cannot disagree about the same file.",
       "owner": [
         {
           "path": "plugins/playbook/tasks/lifecycle.py",
@@ -199,6 +199,18 @@
         {
           "path": "plugins/playbook/tasks/core.py",
           "reference": "symbol:_live_section_span"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:_live_status_index"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:_set_status"
+        },
+        {
+          "path": "plugins/playbook/scripts/task-status.py",
+          "reference": "symbol:main"
         }
       ],
       "failure_consequence": "Medium",
@@ -315,6 +327,55 @@
           "limitations": [
             "Proves the destructive writer fails CLOSED on an unclosed fence: a `## Blocked` decoy after an unclosed opener is NOT deleted. On this malformed input the appended block lands inside the trailing fence, so the asserted property is non-deletion + reason-recorded, not reader-visibility."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_blocked_state.py",
+          "reference": "StatusFenceAware.test_reader_fails_closed_on_unclosed_trailing_fence",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_blocked_state.py",
+            "reference": "StatusFenceAware.test_reader_last_live_status_still_wins"
+          },
+          "limitations": [
+            "Asserts the READER's fail-closed direction on the release-bypass shape (an appended never-closed opener + `## Status`/blocked); the control pins that LAST-wins among LIVE headings is unchanged. Closed ```/~~~ decoys and the NBSP false-closer are asserted by sibling StatusFenceAware cases."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_blocked_state.py",
+          "reference": "StatusFenceAware.test_set_task_blocked_refuses_when_status_cannot_land",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_blocked_state.py",
+            "reference": "StatusFenceAware.test_writer_round_trip_byte_identical_on_a_normal_file"
+          },
+          "limitations": [
+            "Asserts the refusal leaves task.md byte-identical when the only `## Status` is fenced; the control asserts the ordinary status round-trip is byte-identical to the pre-fix shape."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_blocked_state.py",
+          "reference": "BlockedEndToEnd.test_fenced_status_decoy_does_not_release_the_stop_gate",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_blocked_state.py",
+            "reference": "BlockedEndToEnd.test_duplicate_status_headings_hook_agrees_with_python"
+          },
+          "limitations": [
+            "Runs the REAL scripts/stop-hook against closed-```, ~~~ and unclosed-trailing `## Status`/blocked decoys (exit 2 with an open gate) and a real live trailing blocked (exit 0); the control is the pre-existing LAST-wins parity table. Local bash subprocess — provider-native Stop scheduling is not live-proven (PB-HOOK-STOP-CLOSE)."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_blocked_state.py",
+          "reference": "BlockedEndToEnd.test_status_read_fails_closed_without_python",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": [
+            "PATH shim whose python3 exits 1: the hook must treat the status as unreadable and enforce the open gate (exit 2) with a stderr warning — the fail-CLOSED direction of the new python dependency."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -327,8 +388,8 @@
       ],
       "status": "partially_evidenced",
       "missing_evidence_or_limitation": [
-        "Fence-safety scope: the new proofs cover the section-rewriting WRITERS on the blocked/handoff path (set_task_blocked, resume_blocked_task) and their fence-aware readers — the fence-aware clause is scoped to the `## Blocked`/`## Handoff` SECTION, not the whole task record. Still fence-blind, deliberately out of this guarantee's scope: (a) the STATUS pair _set_status/_extract_status + the reopen writer lifecycle.py::cmd_work, which set_task_blocked/resume call FIRST on the same invocation — a fenced `## Status` example is written/read at the last (fenced) heading, clobbering the example line while the real status stays stale; fixing it requires lockstep changes to the bash/awk `## Status` reader in the stop-hook (parity test test_blocked_state.py::BlockedEndToEnd.test_duplicate_status_headings_hook_agrees_with_python), a cross-language enforcement-path change — SPLIT OUT of task 039 as the dedicated V7 follow-up task (the only cross-language lockstep vector); (b) the non-corrupting display READERS: extract_parked_items and _extract_problem were made fence-aware in task 039 (route through the shared scanner, fail open); retro._extract_section/retro._extract_status remain fence-blind (advisory retrospective only, never rewrite), and retro._extract_status belongs with the V7 `## Status` work.",
-        "Fence-scanner unification (task 032, consolidated task 039): ONE strict CommonMark engine `_iter_fenced_flags(lines, *, unclosed_is_live)` backs every task.md scanner — `_iter_nonfenced` (fail CLOSED: an UNCLOSED opener fences through EOF, so the DELETE/replace writers and the risk reader never treat post-fence content as live) and `_closed_fence_line_indices` (fail OPEN: an unclosed opener contributes nothing, so the receipt writer only ever INSERTS). The pure bootstrap/handoff READERS (_extract_block_reason, _latest_receipt_line, find_unconsumed_handoff) call `_iter_nonfenced(unclosed_is_live=True)` so a malformed unclosed fence never HIDES a real `## Blocked`/`## Handoff`/receipt (V3). So the destructive path is the stricter of the two on every axis and never the more destructive. Task-039 tightenings that CLOSED the prior residuals: (a) FIXED — a strict shared ATX-H2 matcher `_atx_h2_text` (<=3 leading spaces, space-OR-tab separator, not `###`) applied on the RAW line by `_live_section_span`, write_handoff._section_span, and the readers, so `##\\tX` is a boundary and a >=4-space `## X` is not, and writer+reader agree (V5); (b) FIXED — INDENTED CODE BLOCKS (>=4 columns, space or tab, after a blank line) are now tracked in the shared engine, so a `## Risk`/`## Blocked` inside one is content, not live (V4); the NBSP false-closer (P-A) is closed by the ASCII-only closer `_ASCII_WS_ONLY_RE` (V6); and the risk close-gate fails STRICT on an unclosed fence via `_has_unclosed_fence` (V2, see PB-RISK-CLASSIFY). Residual STILL open (disclosed, best-effort — same posture as PB-CLOSE-VERIFY-CONTRACT's raw-content-crafting bound): (c) on a genuinely unclosed fence, set_task_blocked appends the fresh block at EOF inside that fence, so the record is written but the fence-aware reader cannot see it — non-deletion is preserved, readability is not; this is part of the SPLIT-OUT V7 follow-up (block-landed-non-fenced check, lockstep with the `## Status` fix). Adversarially-malformed committed task.md remains a best-effort bound contained by diff review + the OS sandbox.",
+        "Fence-safety scope: the proofs cover the section-rewriting WRITERS on the blocked/handoff path (set_task_blocked, resume_blocked_task), their fence-aware readers, AND (task 043, V7) the `## Status` pair: _extract_status/_set_status select the LAST live `## Status` via `_live_status_index` (shared strict scanner, fail CLOSED on an unclosed fence — deliberate for THIS field: a never-closed opener followed by `## Status`/blocked is the release-bypass shape, so it must stay fenced; the cost is that a malformed fence ABOVE the real heading makes the status read `unknown` and the writer refuse — visible, never lenient); the reopen writer lifecycle.py::cmd_work and retro._extract_status route through the same reader. The stop-hook no longer mirrors the rule in awk: it calls scripts/task-status.py (imports core._extract_status), so parity is by construction; if python3 cannot run the hook treats the status as UNREADABLE and enforces open gates (fail closed, loud) — a blocked task cannot end the turn without python3, the same policy task-gate-hook already applies. STILL fence-blind, disclosed: (a) scripts/task-gate-hook's F3 stale-pointer done-awk — its only decoy effect is an OVER-block on a stale pointer to a task whose LAST `## Status` is a fenced `done` (safe direction), and it runs on the per-edit hot path where a second python spawn is a measurable cost; (b) provider/codex_hooks.py::_task_status_is_done — the codex-as-agent path is experimental (owner decision 2026-08-21) and that lib cannot import tasks.*; (c) scripts/monitor-lib/bootstrap.sh's regex (advisory monitor). retro._extract_section (non-status) remains fence-blind (advisory only).",
+        "Fence-scanner unification (task 032, consolidated task 039): ONE strict CommonMark engine `_iter_fenced_flags(lines, *, unclosed_is_live)` backs every task.md scanner — `_iter_nonfenced` (fail CLOSED: an UNCLOSED opener fences through EOF, so the DELETE/replace writers and the risk reader never treat post-fence content as live) and `_closed_fence_line_indices` (fail OPEN: an unclosed opener contributes nothing, so the receipt writer only ever INSERTS). The pure bootstrap/handoff READERS (_extract_block_reason, _latest_receipt_line, find_unconsumed_handoff) call `_iter_nonfenced(unclosed_is_live=True)` so a malformed unclosed fence never HIDES a real `## Blocked`/`## Handoff`/receipt (V3). So the destructive path is the stricter of the two on every axis and never the more destructive. Task-039 tightenings that CLOSED the prior residuals: (a) FIXED — a strict shared ATX-H2 matcher `_atx_h2_text` (<=3 leading spaces, space-OR-tab separator, not `###`) applied on the RAW line by `_live_section_span`, write_handoff._section_span, and the readers, so `##\\tX` is a boundary and a >=4-space `## X` is not, and writer+reader agree (V5); (b) FIXED — INDENTED CODE BLOCKS (>=4 columns, space or tab, after a blank line) are now tracked in the shared engine, so a `## Risk`/`## Blocked` inside one is content, not live (V4); the NBSP false-closer (P-A) is closed by the ASCII-only closer `_ASCII_WS_ONLY_RE` (V6); and the risk close-gate fails STRICT on an unclosed fence via `_has_unclosed_fence` (V2, see PB-RISK-CLASSIFY). Residual (disclosed, best-effort — same posture as PB-CLOSE-VERIFY-CONTRACT's raw-content-crafting bound): (c) on a genuinely unclosed fence, set_task_blocked appends the fresh block at EOF inside that fence; the fail-OPEN readers (bootstrap) still surface it, the fail-CLOSED writers do not, and a decoy `## Blocked` under that same unclosed fence is read first — non-deletion is preserved, readability is degraded (test-pinned corner). Task 043 added the pre-write invariant: set_task_blocked checks on the in-memory candidate that the status reads back `blocked` (fail-closed reader) and that the appended `## Blocked` heading is not inside a CLOSED fence, and refuses (ValueError, nothing written) otherwise — status and reason can no longer land apart. Adversarially-malformed committed task.md remains a best-effort bound contained by diff review + the OS sandbox.",
         "The `minting a heading` clause is not asserted by any bound proof. Both SetBlockedPure proofs compare only tasks/core.py::_gate_counts, which counts line-anchored gate markers and not headings, so they establish gate-count preservation and not heading containment. Reproduced by mutation: a /tmp copy of plugins/playbook/tasks/core.py with the one-line reason collapse removed from set_task_blocked writes a real `## Fake Heading` at line start, and BOTH bound proofs stay green.",
         "The no-heading guarantee is retained because current production behavior is correct: set_task_blocked collapses the reason to one line and renders it as a blockquote, which is what prevents the forged heading. The gap is in the evidence, not in the product; no runtime change is made or needed here.",
         "An exact regression proof - assert that no new Markdown heading appears at line start after a hostile reason, alongside the existing gate-count assertion - is scheduled for Phase 3; adding it is a product-test change and is deliberately NOT performed in Phase 1.",
@@ -7140,7 +7201,7 @@
     {
       "id": "PB-HOOK-STOP-CLOSE",
       "category": "risk-and-close",
-      "statement": "Stop enforcement blocks a first stop while task completion requirements remain, fails closed on an unknowable lane, and uses its one-shot valve to avoid permanently trapping the session.",
+      "statement": "Stop enforcement blocks a first stop while task completion requirements remain, fails closed on an unknowable lane, and uses its one-shot valve to avoid permanently trapping the session. The blocked-task release reads `## Status` through the CLI's own fence-aware Python reader (scripts/task-status.py → core._extract_status), never an independent awk rule; when that reader cannot run the status is unreadable and open gates are enforced (fail closed, loud).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/stop-hook",
@@ -7149,6 +7210,10 @@
         {
           "path": "plugins/playbook/scripts/gate-echo-lib.sh",
           "reference": "function:require_lane_marker"
+        },
+        {
+          "path": "plugins/playbook/scripts/task-status.py",
+          "reference": "symbol:main"
         }
       ],
       "failure_consequence": "Critical",
@@ -7166,6 +7231,19 @@
           "limitations": [
             "Local hook subprocess; provider-specific stop scheduling is not live-proven."
           ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_blocked_state.py",
+          "reference": "BlockedEndToEnd.test_fenced_status_decoy_does_not_release_the_stop_gate",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_blocked_state.py",
+            "reference": "BlockedEndToEnd.test_status_read_fails_closed_without_python"
+          },
+          "limitations": [
+            "A fenced `## Status`/blocked decoy (closed, ~~~, unclosed-trailing) does not release a first stop with an open gate; the paired case pins that a python3 failure enforces rather than releases. Local subprocess only."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -7180,7 +7258,8 @@
       "missing_evidence_or_limitation": [
         "Real provider Stop/close semantics and capability gaps are unverified.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
-        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."
+        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
+        "Task 043 (V7): the status read depends on python3 >= 3.10 being on PATH (already required by task-gate-hook and the CLI); its absence makes a genuinely blocked task unable to end the turn via the blocked release (the one-shot stop_hook_active valve still ends a re-issued stop). Cost: one python spawn per Stop event (~30 ms import of tasks.core), not on the per-tool PreToolUse path."
       ],
       "follow_up_phases": [
         8
