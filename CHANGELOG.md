@@ -38,6 +38,16 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- **`tasks compact` uses the one shared task.md scanner (task 044, split from task 039).**
+  Compaction protection decided "what is a fence" with a private ``` toggle (no `~~~`, an
+  interior ``` closed a ```` fence) and "what is a heading" with raw `## ` string tests, so a
+  hand-written `## Verification Receipt ##` section was not protected (wrapping its `- [PASS]`
+  bullets archived the verify-contract drift baseline) and example archive markers inside a
+  `~~~` fence were moved. It now recognises fences through the shared CommonMark engine (fail
+  closed on an unclosed opener, as before) and headings through the strict ATX matcher every
+  other reader/writer uses, so closing-hash, tab-separated and 1-3-space-indented protected
+  headings are protected and fenced examples stay put.
+
 - **Fence-aware `## Status` — the stop-hook and the CLI read the same field (task 043,
   the V7 vector split from task 039).** `_extract_status`/`_set_status` select the LAST
   *live* `## Status` through the shared strict scanner (a `## Status`/`blocked` pair quoted

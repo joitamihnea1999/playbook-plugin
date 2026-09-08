@@ -1,7 +1,7 @@
 {
   "$schema": "guarantee-ledger.schema.json",
   "schema_version": 1,
-  "ledger_version": "2026-09-08",
+  "ledger_version": "2026-09-09",
   "guarantees": [
     {
       "id": "PB-TASK-ACTIVATE",
@@ -942,6 +942,52 @@
           "limitations": [
             "Best-effort journal: the negative control proves a wedged/unwritable journal never changes or blocks the close. A multi-line verify command is newline-escaped into a single-line record (test_close_journals_full_multiline_verify_command) so later commands are not dropped at a newline; the joined `command` field is still capped at pb_journal's 200-BYTE head limit (byte-capped so a multi-byte command cannot exceed the <PIPE_BUF atomic single-write bound; pinned by test_close_journal_command_field_is_bounded and test_journal_command_field_byte_capped_for_multibyte), and the committed `## Verification Receipt` is the authoritative uncapped per-command list."
           ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_compact.py",
+          "reference": "Compact.test_closing_hash_receipt_heading_is_protected",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_compact.py",
+            "reference": "Compact.test_moves_block_verbatim_and_leaves_a_pointer"
+          },
+          "limitations": [
+            "Real cmd_compact: a block wrapping the `- [PASS]` bullets under `## Verification Receipt ##` is refused (exit 1, bullets stay); the control is the ordinary clean move."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_compact.py",
+          "reference": "Compact.test_tab_separated_receipt_heading_is_protected",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "`##\\tVerification Receipt` section protected."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_compact.py",
+          "reference": "Compact.test_markers_inside_a_tilde_fence_are_ignored",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_compact.py",
+            "reference": "Compact.test_markers_after_an_unclosed_fence_stay_ignored"
+          },
+          "limitations": [
+            "`~~~`-fenced example markers are not real (Nothing to compact, file byte-identical); the paired control pins the unchanged fail-closed direction on an unclosed opener. Sibling: test_longer_fence_is_not_closed_by_a_shorter_one (```` vs ```)."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_compact.py",
+          "reference": "Compact.test_indented_intent_heading_in_block_is_refused",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "A 1-space-indented `## Intent` inside a marked block is refused by _validate through the shared ATX matcher."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -957,7 +1003,8 @@
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
         "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
         "Fence-scanner consolidation (task 039): the receipt reader/writer's fence-awareness now routes through the single strict engine `_iter_fenced_flags` shared by every task.md scanner (via `_closed_fence_line_indices`), which additionally tracks >=4-column indented code blocks (V4) and rejects a NBSP false-closer (ASCII-only closer, V6). A real receipt heading is written at column 0 by upsert_task_section, so indented-code tracking cannot hide it; the fenced/indented/unclosed receipt-masking proofs (test_fenced_receipt_heading_is_ignored, test_indented_fence_marker_does_not_hide_the_receipt, test_unclosed_fence_does_not_hide_the_receipt) stay green on the consolidated engine. The adversarially-malformed-committed-task.md residual is unchanged (best-effort; diff review + OS sandbox are the containment).",
-        "Receipt writer/reader/audit heading agreement (task 039 V10, round-3 opus F2 + codex-terra): upsert_task_section (the receipt writer) and the verify-contract drift-sweep boundary in audit.py now match a `## Verification Receipt` heading through the strict shared `_atx_h2_text` (closing-hash normalized, tab-separator, <=3-space, BOM/CRLF-tolerant) — the same matcher the readers (_latest_receipt_line) use. Previously the writer/audit used raw exact/startswith matching, so a valid `## Verification Receipt ##` or `##\\tVerification Receipt` was found by the reader but NOT the writer (a duplicate section was appended and the stale first entry read) — a writer/reader disagreement the fence-consolidation invariant forbids. Receipt headings are machine-written plain today, so practical impact was low; the fix upholds the invariant. Pinned by test_fence_scanner.py::StrictAtxH2Matcher.test_receipt_writer_agrees_with_reader_on_closing_hash_heading."
+        "Receipt writer/reader/audit heading agreement (task 039 V10, round-3 opus F2 + codex-terra): upsert_task_section (the receipt writer) and the verify-contract drift-sweep boundary in audit.py now match a `## Verification Receipt` heading through the strict shared `_atx_h2_text` (closing-hash normalized, tab-separator, <=3-space, BOM/CRLF-tolerant) — the same matcher the readers (_latest_receipt_line) use. Previously the writer/audit used raw exact/startswith matching, so a valid `## Verification Receipt ##` or `##\\tVerification Receipt` was found by the reader but NOT the writer (a duplicate section was appended and the stale first entry read) — a writer/reader disagreement the fence-consolidation invariant forbids. Receipt headings are machine-written plain today, so practical impact was low; the fix upholds the invariant. Pinned by test_fence_scanner.py::StrictAtxH2Matcher.test_receipt_writer_agrees_with_reader_on_closing_hash_heading.",
+        "Compaction protection uses the ONE shared task.md engine (task 044, split from 039 round-4 codex-sol #3/#4): `tasks compact` recognises fences through `core._iter_fenced_flags` (marker scan: fail CLOSED on an unclosed opener, indented-code tracking off — only the fence rules changed) and headings through `core._atx_h2_text` (protection spans, span ends, and the `_validate` protected-name check), exactly like the receipt reader/writer and the audit drift sweep. Closed bounds: a hand-written `## Verification Receipt ##` / `##\\tVerification Receipt` section is protected (previously `strip() in protected` missed it, so wrapping its `- [PASS]` bullets archived the drift baseline); a `~~~` fence or a ````-fence with an interior ``` hides example archive markers (previously a private ``` toggle treated them as live); a 1-3-space-indented `## Intent`/protected heading inside a block is refused. Still best-effort by design: compaction is agent-marked, so a mismarked region that contains none of the protected shapes can still move; the receipt SECTION protection depends on the heading being a live ATX H2 (a receipt heading inside an HTML comment or under an unclosed fence follows the engine-wide bounds disclosed in PB-TASK-BLOCKED)."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
