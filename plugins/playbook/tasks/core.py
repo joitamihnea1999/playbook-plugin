@@ -3150,7 +3150,12 @@ def _set_status(task_file: Path, value: str) -> bool:
     pair = _live_status_pair(lines)
     if pair is None:
         return False
-    lines[pair[1]] = value + "\n"
+    # Collapse any blank lines between the heading and the value so the written
+    # file is canonical `## Status\n<value>` (round-6 panel, grok): task-gate-hook's
+    # F3 awk reads the IMMEDIATE next line, and a blank there would make a stale
+    # done-pointer read `""` → authorize. Every file playbook writes must read the
+    # same in Python and in that awk. A blank is never content, so nothing is lost.
+    lines[pair[0] + 1:pair[1] + 1] = [value + "\n"]
     _atomic_write(task_file, "".join(lines))
     return True
 
@@ -3222,7 +3227,7 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
             "— refusing to record a blocked state whose status could not be "
             "written; fix the heading/fence first, nothing was changed")
     out = list(lines)
-    out[pair[1]] = "blocked"
+    out[pair[0] + 1:pair[1] + 1] = ["blocked"]   # same blank-collapse as _set_status
     # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
     # fresh. Fence-aware (P1): a `## Blocked` quoted inside a fenced example is not
     # the section, so the delete can never strand an unclosed fence or swallow the

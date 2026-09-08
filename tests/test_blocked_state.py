@@ -483,8 +483,11 @@ class StatusFenceAware(unittest.TestCase):
         tf = self._task(body)
         self.assertEqual(core._extract_status(tf), "pending")
         self.assertTrue(core._set_status(tf, "blocked"))
+        # Round-6 panel (grok): the WRITER collapses the blanks so the value sits
+        # directly under the heading — task-gate-hook's F3 awk reads the immediate
+        # next line, and a blank there would authorize a stale done-pointer.
         self.assertEqual(tf.read_text(encoding="utf-8"),
-                         body.replace("## Status\n\npending", "## Status\n\nblocked"))
+                         body.replace("## Status\n\npending", "## Status\nblocked"))
         # Blank then another section: still no value.
         tf2 = self._task("# T\n\n## Status\n\n## Risk\nassertive\n")
         self.assertEqual(core._extract_status(tf2), "unknown")
@@ -498,6 +501,32 @@ class StatusFenceAware(unittest.TestCase):
                            capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, b"blocked\n")
+
+    # task-gate-hook's F3 status read, copied VERBATIM (scripts/task-gate-hook).
+    F3_AWK = ("{gsub(/\\r/,\"\")} flag {status=$0; flag=0} "
+              "/^[[:space:]]*## Status[[:space:]]*$/ {flag=1} END {print status}")
+
+    def _f3_reads(self, tf):
+        import shutil
+        awk = shutil.which("awk")
+        if awk is None:
+            self.skipTest("awk not available")
+        r = subprocess.run([awk, self.F3_AWK, str(tf)], capture_output=True, text=True)
+        return "".join(r.stdout.split())
+
+    def test_written_status_layout_agrees_with_the_f3_awk(self):
+        # Every file playbook WRITES must read the same in Python and in the
+        # fence-blind F3 awk: blank lines after the heading are collapsed on write.
+        core = self._core()
+        for body in ("# T\n\n## Status\n\npending\n\n## Work Plan\n- [ ] G1\n",
+                     "# T\n\n## Status\n\n\n\npending\n\n## Work Plan\n- [ ] G1\n",
+                     TASK.format(n="012")):
+            tf = self._task(body)
+            self.assertTrue(core._set_status(tf, "done"))
+            self.assertEqual(core._extract_status(tf), "done")
+            self.assertEqual(self._f3_reads(tf), "done", repr(body))
+            core.set_task_blocked(tf, "pause")
+            self.assertEqual(self._f3_reads(tf), "blocked", repr(body))
 
     def test_lifecycle_reopen_targets_live_status(self):
         # lifecycle's reopen path (`tasks work <N>` on a done task) must use the
