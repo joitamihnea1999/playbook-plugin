@@ -193,9 +193,11 @@ def cache_age_days(fetched_at: Optional[str]) -> Optional[float]:
     """Age of the cache's ISO-8601 fetched_at stamp, in days; None if unparsable."""
     if not fetched_at:
         return None
-    # the codex cache stamps nanoseconds (`...51.980219765Z`); fromisoformat takes
-    # at most 6 fractional digits — trim, never reject (task 054)
-    normalized = re.sub(r"(\.\d{6})\d+", r"\1", fetched_at.replace("Z", "+00:00"))
+    # the codex cache stamps nanoseconds (`...51.980219765Z`) and Python 3.10's
+    # fromisoformat accepts ONLY 3 or 6 fractional digits — normalise the fraction
+    # to exactly 6 (trim or zero-pad), never reject (task 054)
+    normalized = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"),
+                        fetched_at.replace("Z", "+00:00"))
     try:
         stamp = datetime.fromisoformat(normalized)
     except ValueError:
