@@ -82,11 +82,17 @@ def _blocks(lines: "list[str]") -> "tuple[list[tuple[int, int]], str | None]":
     a delete-ish writer — is CLOSED (`unclosed_is_live=False`): an opener never
     closed before EOF fences everything after it, so markers after a malformed
     fence are never real (the old toggle behaved the same). Indented-code
-    tracking is OFF: a marker indented >=4 columns stays a marker, as before —
-    only the fence rules change, no new refusal surface."""
+    tracking is ON (round-1 panel): a fenced example nested in a list item is
+    indented >=4 columns, which the engine's <=3-space opener rule would otherwise
+    read as live text and MOVE — so an indented example is indented code (inert),
+    and so is a marker indented >=4 after a blank line (fail toward NOT moving;
+    real markers are written at column 0). Disclosed delta: a backtick opener
+    whose info string contains a backtick is not a fence per CommonMark, so the
+    markers after it are live and do move — the old toggle hid them; recreating
+    that as a private rule would bring back the two-scanner disease."""
     spans: "list[tuple[int, int]]" = []
     open_at = None
-    fenced = _iter_fenced_flags(lines, unclosed_is_live=False, track_indented_code=False)
+    fenced = _iter_fenced_flags(lines, unclosed_is_live=False, track_indented_code=True)
     for i, ln in enumerate(lines):
         if fenced[i]:
             continue

@@ -321,6 +321,40 @@ class Compact(unittest.TestCase):
         self.assertIn("Nothing to compact", out)
         self.assertEqual(self.task_md.read_text(encoding="utf-8"), body)
 
+    def test_markers_inside_an_indented_fence_example_are_inert(self):
+        # Round-1 panel (grok/opus): a fenced example nested in a list item is
+        # indented >=4 columns; the old toggle hid its markers and so must the
+        # shared engine (indented-code tracking ON for the marker scan).
+        body = ("# 012\n- [x] gate\n- how the ritual looks:\n\n    ```\n    <!-- archive:start -->\n"
+                "    example narrative\n    <!-- archive:end -->\n    ```\n\nlive tail\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, _ = self._run("12")
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to compact", out, "an indented fenced example must not be compacted")
+        self.assertEqual(self.task_md.read_text(encoding="utf-8"), body)
+
+    def test_indented_markers_are_inert_not_moved(self):
+        # Chosen outcome (fail toward NOT moving): a marker indented >=4 after a
+        # blank is indented code, so nothing moves. Real markers sit at column 0.
+        body = ("# 012\n- [x] gate\n\n    <!-- archive:start -->\n    cold?\n    <!-- archive:end -->\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, _ = self._run("12")
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to compact", out)
+        self.assertEqual(self.task_md.read_text(encoding="utf-8"), body)
+
+    def test_backtick_in_info_string_is_not_a_fence_by_spec(self):
+        # Pinned delta (disclosed): CommonMark says a backtick opener whose info
+        # string contains a backtick is NOT a fence, so markers after it are live
+        # and DO move. The old private toggle hid them; the shared engine does not.
+        body = ("# 012\n- [x] gate\n```not`a`fence\n<!-- archive:start -->\ncold narrative\n"
+                "<!-- archive:end -->\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, err = self._run("12")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("cold narrative", self.task_md.read_text(encoding="utf-8"))
+        self.assertIn("cold narrative", (self.task_dir / "task-archive.md").read_text(encoding="utf-8"))
+
     def test_block_with_pre_panel_audit_is_refused(self):
         # Same reasoning for the audit receipt: the panel's freshness check reads
         # `## Pre-Panel Audit`, so it must not be archivable either.
