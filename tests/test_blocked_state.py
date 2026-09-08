@@ -411,6 +411,49 @@ class StatusFenceAware(unittest.TestCase):
         self.assertFalse(core._set_status(tf, "done"))
         self.assertEqual(tf.read_text(encoding="utf-8"), body)
 
+    def test_last_live_heading_wins_even_when_malformed_no_fallback(self):
+        # Round-2 panel (opus/codex convergent): a value-less LAST `## Status` must
+        # not fall back to an EARLIER valid pair — that re-opened the release
+        # bypass (earlier `blocked`, trailing malformed pair → read blocked).
+        core = self._core()
+        body = ("# T\n\n## Status\nblocked\n\n## Work Plan\n- [ ] G1\n\n"
+                "## Status\n## Risk\nassertive\n")
+        tf = self._task(body)
+        self.assertEqual(core._extract_status(tf), "unknown")
+        self.assertFalse(core._is_blocked(tf))
+        self.assertFalse(core._set_status(tf, "done"))
+        self.assertEqual(tf.read_text(encoding="utf-8"), body)
+
+    def test_value_line_must_be_status_shaped(self):
+        # Round-2 panel (codex-sol Critical): `## Status\n- [ ] GATE` let a block
+        # overwrite the gate with `blocked` — a structural line is never a value.
+        core = self._core()
+        for value in ("- [ ] CRITICAL GATE", "- [x] done gate", "> quoted", "",
+                      "<!-- pin -->", "### entry", "* bullet"):
+            body = f"# T\n\n## Status\n{value}\n\n## Work Plan\n- [ ] G1\n"
+            tf = self._task(body)
+            self.assertEqual(core._extract_status(tf), "unknown", repr(value))
+            self.assertFalse(core._set_status(tf, "blocked"), repr(value))
+            with self.assertRaises(ValueError):
+                core.set_task_blocked(tf, "REALPAUSE")
+            self.assertEqual(tf.read_text(encoding="utf-8"), body, repr(value))
+        # Every real status shape stays readable.
+        for value in ("pending", "in_progress", "blocked", "done", "done (2026-01-01)",
+                      "in progress", "Done"):
+            tf = self._task(f"# T\n\n## Status\n{value}\n\n## Work Plan\n- [ ] G1\n")
+            self.assertEqual(core._extract_status(tf), value, repr(value))
+
+    def test_resume_refuses_when_status_cannot_land(self):
+        # Round-2 panel (sonnet): resume must not stamp `Resumed` when the status
+        # flip did not land — same land-together rule as block.
+        core = self._core()
+        body = ("# T\n\n```\n## Status\nblocked\n```\n\n## Work Plan\n- [ ] G1\n\n"
+                "## Blocked\n> waiting  (since 2000-01-01T00:00)\n")
+        tf = self._task(body)
+        with self.assertRaises(ValueError):
+            core.resume_blocked_task(tf)
+        self.assertEqual(tf.read_text(encoding="utf-8"), body)
+
     def test_lifecycle_reopen_targets_live_status(self):
         # lifecycle's reopen path (`tasks work <N>` on a done task) must use the
         # same fence-aware writer, not a hand-rolled fence-blind loop.
@@ -630,6 +673,19 @@ class BlockedEndToEnd(unittest.TestCase):
         text = self.task_file.read_text(encoding="utf-8")
         self.assertIn("## Status\nin_progress\n", text)
         self.assertIn("```\n## Status\npending\n```", text, "the fenced example must stay intact")
+
+
+    def test_malformed_trailing_status_does_not_fall_back_and_release(self):
+        # Round-2 panel: earlier live `blocked` + trailing value-less `## Status`.
+        # Reader → unknown; the hook must BLOCK the open gate (fail closed).
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\nblocked\n\n## Work Plan\n- [ ] open gate\n\n"
+            "## Status\n## Risk\nreversible\n", encoding="utf-8")
+        self.assertEqual(_extract_status(self.task_file), "unknown")
+        self._set_counters()
+        r = self.run_stop_hook()
+        self.assertEqual(r.returncode, 2, f"fallback to an earlier blocked released the gate: {r.stderr}")
 
 
 if __name__ == "__main__":

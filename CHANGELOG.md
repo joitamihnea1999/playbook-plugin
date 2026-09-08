@@ -47,10 +47,15 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   the heading). The stop-hook no longer mirrors that rule in awk: it calls the new
   `scripts/task-status.py`, which imports the CLI's own reader, so Python and the enforcing
   hook cannot disagree about the same file; if python3 cannot run, the status is
-  unreadable and open gates are enforced (loud). `set_task_blocked` now checks on the
-  in-memory candidate that the status lands `blocked` and the `## Blocked` heading lands
-  outside any closed fence before its single atomic write, refusing (nothing written)
-  otherwise; the reopen path and `tasks retro` use the same reader/writer.
+  unreadable and open gates are enforced (loud). The LAST live `## Status` must carry a
+  status-shaped value line (a gate, heading, blockquote, marker or blank line is never a
+  value, and there is no fallback to an earlier pair); `set_task_blocked`,
+  `resume_blocked_task`, `tasks handoff` and `tasks work done` all check that the status
+  can land BEFORE writing anything and refuse (stderr + exit 1, file byte-identical)
+  otherwise — the status lands or nothing is written. The one disclosed corner is
+  unchanged: under an UNCLOSED fence the appended `## Blocked` is still written and read
+  fail-open, but an earlier decoy `## Blocked` inside that fence is what the reason reader
+  surfaces first. The reopen path and `tasks retro` use the same reader/writer.
 
 - **`cache_age_days` accepted no real codex cache stamp** (task 054). `~/.codex/models_cache.json`
   writes `fetched_at` with nanoseconds (`…51.980219765Z`) and Python 3.10's `fromisoformat`

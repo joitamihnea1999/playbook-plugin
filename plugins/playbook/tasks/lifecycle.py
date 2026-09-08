@@ -648,7 +648,11 @@ def cmd_work(cmd_args):
     if _resume_matches:
         from tasks.core import _is_blocked, resume_blocked_task
         if _is_blocked(_resume_matches[0]):
-            resume_blocked_task(_resume_matches[0])
+            try:
+                resume_blocked_task(_resume_matches[0])
+            except ValueError as exc:       # V7c: a refusal, not a traceback
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
             print(f"Resuming task {task_num} (was blocked — decision made).")
 
     # Verify task exists

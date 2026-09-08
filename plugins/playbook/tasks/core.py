@@ -2998,24 +2998,37 @@ def _live_status_index(lines: "list[str]") -> "int | None":
         (status reads `unknown`, the writer refuses) — visible, never lenient;
       * strict ATX (`_atx_h2_text`): `##\tStatus`, `## Status ##`, <=3-space
         indents are the heading; a >=4-column `## Status` is code/text;
-      * the heading must be followed by a VALUE line — a live line that is not
-        itself an H2 and not a fence line (round-1 panel: `## Status\n## Risk`
-        has no value; reading `## Risk` as the status is nonsense and WRITING
-        over it would destroy the Risk section). A heading with no valid value
-        line is not a status pair, so the reader says `unknown` and the writer
-        refuses rather than clobber a neighbour.
+      * the LAST live heading must be followed by a STATUS-SHAPED value line
+        (`_STATUS_VALUE_RE`: letter-led scalar, optional trailing parenthetical —
+        `pending`, `in_progress`, `blocked`, `done`, `done (2026-…)`), live and
+        unfenced. A gate (`- [ ] …`), a heading, a blockquote, an HTML marker, a
+        fence or a blank line is NEVER a value (round-1/round-2 panels:
+        `## Status\n## Risk` / `## Status\n- [ ] GATE` — reading them as the status
+        is nonsense and WRITING over them destroyed the Risk section / released
+        the gate count). When the LAST live heading has no valid value line the
+        result is None — the reader says `unknown`, the writers refuse. There is
+        deliberately NO fallback to an earlier valid pair: that fallback re-opened
+        the release bypass (an earlier `blocked` + a trailing malformed pair read
+        as blocked — round-2 panel, convergent).
     """
     flags = _iter_fenced_flags(lines, unclosed_is_live=False)
-    idx = None
+    last = None
     for i, line in enumerate(lines):
-        if flags[i] or _atx_h2_text(line) != "## Status":
-            continue
-        if i + 1 >= len(lines) or flags[i + 1]:
-            continue                            # no value line / fenced value
-        if _atx_h2_text(lines[i + 1]) is not None:
-            continue                            # next line is another section
-        idx = i
-    return idx
+        if not flags[i] and _atx_h2_text(line) == "## Status":
+            last = i
+    if last is None or last + 1 >= len(lines) or flags[last + 1]:
+        return None                             # no heading / no live value line
+    if not _STATUS_VALUE_RE.match(lines[last + 1].rstrip("\r\n")):
+        return None                             # structural line, not a value
+    return last
+
+
+# A status VALUE: letter-led word(s) with `_`/`-`, optional `(…)` tail. Anchored on
+# the raw (unstripped-left, CR/LF-stripped) line so a >=4-space indent — which the
+# fence scanner does not flag for a value line — is still just text and accepted;
+# what it must NOT accept are the structural shapes (`- [ ]`, `#`, `>`, `<!--`, a
+# fence, blank), which all start with a non-letter.
+_STATUS_VALUE_RE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z0-9_\- ]*(\([^()]*\))?[ \t]*$")
 
 
 def _status_from_lines(lines: "list[str]") -> str:
@@ -3218,8 +3231,15 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
 
 def resume_blocked_task(task_file: Path) -> None:
     """Clear a block: status → in_progress, and stamp the ## Blocked section with a
-    resume line so the history stays true and current rather than stale (#08)."""
-    _set_status(task_file, "in_progress")
+    resume line so the history stays true and current rather than stale (#08).
+    Raises ValueError (nothing written) when the status flip cannot land — the
+    same land-together rule as set_task_blocked (round-2 panel): a `Resumed` stamp
+    on a task whose status is not in_progress would be a lie."""
+    if not _set_status(task_file, "in_progress"):
+        raise ValueError(
+            "task.md has no live `## Status` heading with a value line — refusing "
+            "to resume a blocked task whose status could not be written; fix the "
+            "heading/fence first, nothing was changed")
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
     lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
     # Fence-aware (P1): stamp only the LIVE ## Blocked section, never a fenced
