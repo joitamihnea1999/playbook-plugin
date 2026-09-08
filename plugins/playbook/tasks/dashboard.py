@@ -211,7 +211,7 @@ def load_review_journal(path: "Path | None", cap: int = _JOURNAL_READ_CAP) -> "t
             continue
         try:
             obj = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):   # deeply nested but valid JSON is still a bad line (r3 codex#3)
             skipped += 1
             continue
         if not isinstance(obj, dict) or obj.get("hook") != "review":
@@ -324,8 +324,11 @@ def panel_seats(project_path: Path) -> "dict":
     except Exception as e:  # advisory — a broken models.json is a row, not a crash
         return {"panel": [], "default_judge": "", "seats": [], "required_for": [],
                 "source": f"unreadable ({_one_line(e)})"}
-    panel = judge_cfg.get("panel") if isinstance(judge_cfg.get("panel"), list) else []
-    dj = judge_cfg.get("default_judge") if isinstance(judge_cfg.get("default_judge"), str) else ""
+    # config-sourced strings are untrusted text for the RENDER too (r3 grok#3 /
+    # codex-med#3): a `\n` inside a valid JSON spec must not split the six-line
+    # block or forge a heading
+    panel = [_one_line(x) for x in judge_cfg.get("panel") if isinstance(x, str)] if isinstance(judge_cfg.get("panel"), list) else []
+    dj = _one_line(judge_cfg.get("default_judge")) if isinstance(judge_cfg.get("default_judge"), str) else ""
     seats = []
     for spec in panel:
         if not isinstance(spec, str):
@@ -333,8 +336,8 @@ def panel_seats(project_path: Path) -> "dict":
         try:
             prov, variant = resolve_judge_spec(spec)
             model, effort = _split_effort(prov, variant)
-            seats.append({"spec": spec, "provider": prov, "model": model or "",
-                          "effort": effort, "label": seat_label(prov, variant), "error": ""})
+            seats.append({"spec": spec, "provider": prov, "model": _one_line(model or ""),
+                          "effort": _one_line(effort), "label": _one_line(seat_label(prov, variant)), "error": ""})
         except ValueError as e:
             seats.append({"spec": spec, "provider": "?", "model": "", "effort": "?",
                           "label": spec, "error": _one_line(e)})
@@ -352,9 +355,9 @@ def panel_seats(project_path: Path) -> "dict":
         source = ".agent/models.json"
     else:
         source = f"{used} (an ANCESTOR project's models.json — not this project's)"
-    return {"panel": [s for s in panel if isinstance(s, str)], "default_judge": dj,
-            "seats": seats, "required_for": panel_required_for(project_path),
-            "source": source}
+    return {"panel": panel, "default_judge": dj,
+            "seats": seats, "required_for": [_one_line(r) for r in panel_required_for(project_path)],
+            "source": _one_line(source)}
 
 
 def panel_required_for(project_path: Path) -> "list[str]":
@@ -488,7 +491,7 @@ def model_gap_triggers(detect_report: "dict | None", panel: "dict") -> "list[dic
         if eff:
             add_spec += ":" + ("medium" if "medium" in eff else eff[0])
         out.append({"kind": "model-gap", "seat": name,
-                    "detail": f"available but not in the panel: {', '.join(shown)}"
+                    "detail": f"listed by {name} but not in the panel (listed ≠ probed — `tasks models check` confirms entitlement): {', '.join(shown)}"
                               + (f" (+{more} more — tasks models detect)" if more else ""),
                     "command": _models_set_command(panel, add_spec=add_spec)
                                + (f"   # shown for {first}; substitute any id above" if len(missing) > 1 else "")})
@@ -535,15 +538,15 @@ def _decision_section(report_text: str) -> str:
 def parse_report_verdict(report_text: str) -> "dict":
     """From a judgebench report.md: {"verdict": <the bold §25 verdict sentence>,
     "weighted": {label: int}}. Bold spans are paired sequentially (`**…**`), so a
-    span can never straddle two bold phrases; the verdict is the first span in
+    span can never straddle two bold phrases; the verdict is the LAST span in
     the decision section that speaks of winning/losing without being the rule
-    itself ("wins only if"). Missing pieces stay empty — never invented."""
+    itself ("wins only if") — the conclusion follows any restatement. Missing
+    pieces stay empty — never invented."""
     verdict = ""
     for m in _BOLD_RE.finditer(_decision_section(report_text)):
         text = " ".join(m.group(1).split())
         if _WIN_RE.search(text) and "only if" not in text:
-            verdict = text
-            break
+            verdict = text          # keep going: the CONCLUSION is the last such span (r3 opus#3 decoy)
     weighted: "dict[str, int]" = {}
     header_idx = None
     for line in report_text.splitlines():
@@ -572,7 +575,7 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
     if bench_dir is None:
         return None
     out: "dict" = {"corpus_version": None, "cases": 0, "exams": [],
-                   "template_sha_now": "", "template_path": "", "bench_dir": str(bench_dir)}
+                   "template_sha_now": "", "template_path": "", "bench_dir": Path(bench_dir).as_posix()}
     try:
         corpus = json.loads((bench_dir / "corpus" / "corpus.json").read_text(encoding="utf-8"))
         out["corpus_version"] = corpus.get("version")
@@ -600,14 +603,16 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
             if not isinstance(m, dict) or m.get("mode") != "live":
                 continue
             raw_c = m.get("candidates")
-            cands = [c for c in raw_c if isinstance(c, dict)] if isinstance(raw_c, list) else []
+            # exactly TWO candidate dicts in the raw list (r2 codex#4, r3 grok#2: counting
+            # after dropping junk let a 3-entry list pass) — an exam compares ONE pair
+            if not (isinstance(raw_c, list) and len(raw_c) == 2 and all(isinstance(c, dict) for c in raw_c)):
+                continue
             # (label, spec) pairs in MANIFEST order — never re-sorted apart (impl-panel
             # grok#3): the re-exam command needs `label=spec` for every candidate.
-            pairs = [(str(c.get("label", "?")), str(c.get("spec", "?"))) for c in cands]
+            pairs = [(_one_line(c.get("label", "?")), _one_line(c.get("spec", "?"))) for c in raw_c]
             labels = tuple(sorted(lab for lab, _sp in pairs))
-            if len(labels) != 2 or len(set(labels)) != 2:
-                continue                    # an exam compares exactly ONE PAIR (impl-panel r2 codex#4): a
-                                            # single-seat smoke or a 3-seat run is not a per-pair verdict
+            if len(set(labels)) != 2:
+                continue
             # keyed by the canonical SPECS (impl-panel codex#1): labels are mutable
             # display names; two exams of the same seats under renamed labels are one pair
             key = tuple(sorted(sp for _lab, sp in pairs))
@@ -615,13 +620,27 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
             tpl_info = m.get("template") if isinstance(m.get("template"), dict) else {}
             rep = run / "report.md"
             verdict = parse_report_verdict(_read_regular_text(rep, cap=8 * 1024 * 1024) or "") if rep.is_file() else {"verdict": "", "weighted": {}}
-            entry = {"run_id": str(m.get("run_id") or run.name), "date": created,
+            if not verdict["verdict"] and not verdict["weighted"]:
+                continue                    # a manifest is written BEFORE the first invocation: without a
+                                            # report it is an interrupted run, not an exam (r3 codex#2)
+            srcs = m.get("source_repos") if isinstance(m.get("source_repos"), dict) else {}
+            tmo = m.get("timeouts") if isinstance(m.get("timeouts"), dict) else {}
+            entry = {"run_id": _one_line(m.get("run_id") or run.name), "date": created,
                      "labels": list(labels), "candidates": pairs,
                      "specs": [sp for _lab, sp in pairs],
                      "template_sha": str(tpl_info.get("sha256") or ""),
-                     "template_version": str(tpl_info.get("version") or ""),
-                     "verdict": verdict["verdict"] or "(no report.md verdict)",
-                     "weighted": verdict["weighted"]}
+                     "template_version": _one_line(tpl_info.get("version") or ""),
+                     "verdict": verdict["verdict"] or "(no §25 verdict sentence in report.md)",
+                     "weighted": verdict["weighted"],
+                     # the run parameters an EXACT re-run needs (r3 codex#1)
+                     "run_params": {
+                         "spec_mode": _one_line(m["spec_mode"]) if isinstance(m.get("spec_mode"), str) else "",
+                         "concurrency": m["concurrency"] if _is_int(m.get("concurrency")) else None,
+                         "soft_timeout": tmo["soft_secs"] if _is_int(tmo.get("soft_secs")) else None,
+                         "timeout": tmo["hard_secs"] if _is_int(tmo.get("hard_secs")) else None,
+                         "source_repos": {_one_line(k): _one_line(v.get("path"))
+                                          for k, v in srcs.items() if isinstance(v, dict) and isinstance(v.get("path"), str)},
+                     }}
             prev = exams.get(key)
             if prev is None or _exam_date_key(entry) >= _exam_date_key(prev):
                 exams[key] = entry
@@ -723,7 +742,7 @@ def _exams_with_fallback(project_path: Path) -> "dict | None":
         try:
             bench["bench_dir_display"] = bench_dir.relative_to(Path(project_path)).as_posix()
         except ValueError:
-            bench["bench_dir_display"] = str(bench_dir)
+            bench["bench_dir_display"] = Path(bench_dir).as_posix()
     return bench
 
 
@@ -746,14 +765,49 @@ def template_triggers(bench: "dict | None") -> "list[dict]":
     # every interpolated token is manifest-controlled text → shlex-quoted (impl-panel
     # r2 codex-med#1 / grok#3), and the bench path is the one actually found (a
     # `code_roots` nested bench is not `bench/` at the project root — codex#3)
-    bench_py = (bench.get("bench_dir_display") or bench.get("bench_dir") or "bench").rstrip("/") + "/judgebench.py"
+    bench_root = (bench.get("bench_dir_display") or bench.get("bench_dir") or "bench").rstrip("/")
+    bench_py = bench_root + "/judgebench.py"
+    new_id = _retest_run_id(newest["run_id"], Path(bench.get("bench_dir") or bench_root) / "runs")
+    rp = newest.get("run_params") or {}
+    extra = ""
+    if rp.get("spec_mode"):
+        extra += f" --spec-mode {shlex.quote(rp['spec_mode'])}"
+    if rp.get("concurrency") is not None:
+        extra += f" --concurrency {rp['concurrency']}"
+    if rp.get("soft_timeout") is not None:
+        extra += f" --soft-timeout {rp['soft_timeout']}"
+    if rp.get("timeout") is not None:
+        extra += f" --timeout {rp['timeout']}"
+    for name, path in sorted((rp.get("source_repos") or {}).items()):
+        extra += f" --source-repo {shlex.quote(f'{name}={path}')}"
     return [{"kind": "template", "seat": newest["run_id"],
              "detail": (f"judgebench exam template is {bench['template_sha_now'][:12]} now, "
                         f"was {newest['template_sha'][:12]} at exam {newest['run_id']} "
                         f"({_date(newest['date'])}) — its verdict no longer describes the current exam prompt "
                         "(this tracks the bench instrument, not the live review.py panel prompt)"),
              "command": (f"python3 {shlex.quote(bench_py)} run --cases all --candidates {shlex.quote(cands)} "
-                         f"--run-id {shlex.quote(newest['run_id'] + '-retest')} --live")}]
+                         f"--run-id {shlex.quote(new_id)}{extra} --live")}]
+
+
+_RUN_ID_MAX = 64          # bench/judgebench.py refuses longer ids
+
+
+def _retest_run_id(base: str, runs_dir: Path) -> str:
+    """`<base>-retest`, shortened to the harness's 64-char cap and made
+    collision-free against existing run dirs (`-retest2`, `-retest3`, …) — a
+    printed "exact" command must not be refused on paste (r3 codex-med#4)."""
+    base = re.sub(r"[^A-Za-z0-9._-]", "-", base) or "exam"
+    n = 1
+    while True:
+        suffix = "-retest" if n == 1 else f"-retest{n}"
+        rid = base[: _RUN_ID_MAX - len(suffix)].rstrip("-.") + suffix
+        try:
+            exists = (runs_dir / rid).exists()
+        except OSError:
+            exists = False
+        if not exists:
+            return rid
+        n += 1
 
 
 def _date(dt: "datetime | None") -> str:
@@ -768,9 +822,14 @@ def hooks_health(project_path: Path) -> "dict":
     copies (`hooks_check_report`); (2) the four enforcing hook scripts present
     and executable in the authoritative copy's `scripts/`; (3) grok's global
     enforcement file under doctor's own rule (stale paths always warn; a missing
-    file only when the project is grok-bootstrapped via AGENTS.md). NOT
-    covered (doctor-only): stale `~/.claude/settings.json` hook paths. Advisory:
-    never raises."""
+    file only when the project is grok-bootstrapped via AGENTS.md); (4) doctor
+    §4b stale `~/.claude/settings.json` hook paths; (5) doctor §8 gate-text
+    truncation. Hook scripts are looked up in DOCTOR'S dir order (project
+    `scripts/`, `.claude/hooks/`, `src/hooks/`, `$CLAUDE_PLUGIN_ROOT/scripts`,
+    the running code's own `scripts/`), first existing copy wins — so the two
+    commands report on the same file (r3 sonnet#1). NOT covered: doctor's
+    non-hook checks (encoding, resolver parity, version). Advisory: never
+    raises."""
     warnings: "list[str]" = []
     copy = version = ""
     covers = "manifest command shape · hook scripts present+executable · gate-text truncation · stale ~/.claude/settings.json hook paths · grok enforcement file"
@@ -779,23 +838,25 @@ def hooks_health(project_path: Path) -> "dict":
                                        authoritative_hooks_path, hooks_check_report)
         auth = authoritative_hooks_path()
         if auth is not None:
-            root = auth.parent.parent
-            copy = str(root)
+            copy = str(auth.parent.parent)
             version = _copy_version(auth) or _code_version()
-            for name in ("state-echo-hook", "task-gate-hook", "command-guard-hook", "stop-hook"):
-                hp = root / "scripts" / name
-                if not hp.is_file():
-                    warnings.append(f"hooks: {name} — missing from {root / 'scripts'}")
-                elif not os.access(hp, os.X_OK):
-                    warnings.append(f"hooks: {name} — found but not executable")
-            # doctor §8: the state-echo hook must truncate gate text
-            echo = root / "scripts" / "state-echo-hook"
-            if echo.is_file():
-                body = _read_regular_text(echo, cap=1 << 20) or ""
-                if "cut -c" not in body and "GATE_TEXT_STORE" not in body:
-                    warnings.append("hooks: gate text truncation — state-echo-hook has no truncation (gate text may grow unbounded)")
         else:
             warnings.append("no authoritative hooks.json resolved (CLAUDE_PLUGIN_ROOT unset and no sibling hooks/)")
+        # doctor §4's search order, first existing copy per hook — the SAME file
+        # doctor would report on (r3 sonnet#1)
+        hook_dirs = _doctor_hook_dirs(Path(project_path))
+        for name in ("state-echo-hook", "task-gate-hook", "command-guard-hook", "stop-hook"):
+            found = next((d / name for d in hook_dirs if (d / name).exists()), None)
+            if found is None:
+                warnings.append(f"hooks: {name} — missing (searched: {', '.join(str(d) for d in hook_dirs) or 'no hook dirs'})")
+            elif not os.access(found, os.X_OK):
+                warnings.append(f"hooks: {name} — found at {found.parent} but not executable")
+        # doctor §8: the FIRST found state-echo hook must truncate gate text
+        echo = next((d / "state-echo-hook" for d in hook_dirs if (d / "state-echo-hook").exists()), None)
+        if echo is not None:
+            body = _read_regular_text(echo, cap=1 << 20) or ""
+            if "cut -c" not in body and "GATE_TEXT_STORE" not in body:
+                warnings.append(f"hooks: gate text truncation — {echo} has no truncation (gate text may grow unbounded)")
         # doctor §4b: stale hook entries in ~/.claude/settings.json
         for stale in _stale_settings_hook_paths():
             warnings.append(f"hooks: stale ~/.claude/settings.json entry — {stale}")
@@ -816,6 +877,23 @@ def hooks_health(project_path: Path) -> "dict":
     except Exception as e:  # advisory — a dashboard must never crash on it
         warnings.append(f"hooks check skipped ({_one_line(e)})")
     return {"ok": not warnings, "warnings": warnings, "copy": copy, "version": version, "covers": covers}
+
+
+def _doctor_hook_dirs(project_path: Path, env: "dict | None" = None) -> "list[Path]":
+    """Doctor §4's `hooks_dirs`, in its order: project `scripts/`, `.claude/hooks/`,
+    `src/hooks/`, then `$CLAUDE_PLUGIN_ROOT/scripts` and the running code's own
+    `scripts/` (doctor's home-glob last resort is deliberately not reproduced —
+    it only applies when neither of those resolves, and then a dashboard should
+    say "missing" rather than guess at a cache)."""
+    env = os.environ if env is None else env
+    dirs = [project_path / "scripts", project_path / ".claude" / "hooks", project_path / "src" / "hooks"]
+    root = env.get("CLAUDE_PLUGIN_ROOT")
+    if root and (Path(root) / "scripts").is_dir():
+        dirs.append(Path(root) / "scripts")
+    own = Path(__file__).resolve().parent.parent / "scripts"
+    if own.is_dir():
+        dirs.append(own)
+    return [d for d in dirs if d.is_dir()]
 
 
 def _stale_settings_hook_paths(settings_path: "Path | None" = None) -> "list[str]":

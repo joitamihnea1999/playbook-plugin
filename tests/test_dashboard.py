@@ -85,6 +85,8 @@ def _bench(b: Path, *, template_text="<!-- judgebench template v1 -->\nprompt\n"
             "candidates": [{"backend": "codex", "label": lab,
                             "spec": "codex:gpt-5.6-sol:" + {"med": "medium", "high": "high"}[lab.split("-")[1]]} for lab in labels],
             "template": {"version": "v1", "sha256": sha if run_id != "old" else "0" * 64},
+            "spec_mode": "full", "concurrency": 2, "timeouts": {"soft_secs": 900, "hard_secs": 1200},
+            "source_repos": {"HowFar": {"head": "abc", "path": "/w/HowFar"}},
         }), encoding="utf-8")
         (r / "report.md").write_text(
             f"# judgebench report — run `{run_id}`\n\n"
@@ -164,6 +166,12 @@ class JournalParsing(unittest.TestCase):
         self.assertEqual(len(recs), 2)
         self.assertEqual(skipped, 1)
 
+    def test_deeply_nested_json_line_is_malformed_not_a_crash(self):
+        # r3 codex#3: json.loads raises RecursionError on a valid but deeply nested line
+        lines = [_rec(1, "s", "ok"), "[" * 100000 + "]" * 100000]
+        recs, skipped = db.load_review_records(self._write(lines))
+        self.assertEqual((len(recs), skipped), (1, 1))
+
     def test_missing_journal_is_empty_not_error(self):
         self.assertEqual(db.load_review_records(Path("/nonexistent/x.jsonl")), ([], 0))
         self.assertEqual(db.load_review_records(None), ([], 0))
@@ -210,6 +218,11 @@ class Formatting(unittest.TestCase):
         self.assertEqual(db.seat_label("claude", "claude-opus-4-8[1m]"), "claude:claude-opus-4-8[1m]:high")
         self.assertEqual(db.seat_label("codex", "gpt-5.6-sol:high"), "codex:gpt-5.6-sol:high")
         self.assertEqual(db.seat_label("grok", None), "grok")
+        # r3 opus#2: parity PROVEN against the runner's own function, not restated
+        from tasks.review import _seat_with_effort
+        for prov, var in (("claude", "claude-opus-4-8[1m]"), ("claude", None), ("codex", "gpt-5.6-sol:high"),
+                          ("codex", "gpt-5.6-terra"), ("grok", "grok-4.6:medium"), ("grok", None), ("agy", None)):
+            self.assertEqual(db.seat_label(prov, var), _seat_with_effort(prov, var), (prov, var))
 
 
 class PanelResolution(unittest.TestCase):
@@ -328,11 +341,12 @@ class ModelGapTrigger(unittest.TestCase):
         trig = db.model_gap_triggers(report, self.PANEL)
         kinds = [(t["kind"], t["seat"]) for t in trig]
         self.assertEqual(kinds, [("model-gap", "claude"), ("model-gap", "codex")])   # grok not installed, agy out of scope
-        self.assertEqual(trig[0]["detail"], "available but not in the panel: claude-sonnet-5")  # bare-id dedupe: opus[1m]≡opus
+        self.assertTrue(trig[0]["detail"].endswith(": claude-sonnet-5"), trig[0]["detail"])   # bare-id dedupe: opus[1m]≡opus
+        self.assertIn("listed ≠ probed", trig[0]["detail"])
         self.assertTrue(trig[0]["command"].startswith("tasks models set --panel opus,codex:gpt-5.6-sol:high,claude:claude-sonnet-5 --default-judge opus"), trig[0]["command"])
         # impl-panel sonnet#2 / codex#3: effort from the model's OWN list — terra offers no "medium", so its first ("low")
         self.assertIn("codex:gpt-5.6-terra:low", trig[1]["command"])
-        self.assertEqual(trig[1]["detail"], "available but not in the panel: gpt-5.6-terra, gpt-5.6-luna")
+        self.assertTrue(trig[1]["detail"].endswith(": gpt-5.6-terra, gpt-5.6-luna"), trig[1]["detail"])
 
     def test_no_report_no_trigger(self):
         self.assertEqual(db.model_gap_triggers(None, self.PANEL), [])
@@ -362,10 +376,20 @@ class Judgebench(unittest.TestCase):
         self.assertEqual(len(trig), 1)
         self.assertEqual(trig[0]["kind"], "template")
         # impl-panel codex#2 / grok#3: label=spec in MANIFEST order — presets cover only sol-*/grok-*
-        # called on a bare bench dir (no project) → absolute path; via _exams_with_fallback it is project-relative
-        self.assertEqual(trig[0]["command"],
-                         f"python3 {b}/judgebench.py run --cases all --candidates "
-                         "sol-med=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high --run-id testA-retest --live")
+        # compare as argv (r3 grok#1: a Windows temp path gets shlex-quoted, so a string compare is lane-dependent);
+        # called on a bare bench dir (no project) → absolute posix path; via _exams_with_fallback it is project-relative
+        import shlex
+        argv = shlex.split(trig[0]["command"])
+        self.assertEqual(argv[:4], ["python3", f"{b.as_posix()}/judgebench.py", "run", "--cases"])
+        self.assertEqual(argv[argv.index("--candidates") + 1], "sol-med=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high")
+        self.assertEqual(argv[argv.index("--run-id") + 1], "testA-retest")
+        # the manifest's run parameters travel with the exact command (r3 codex#1)
+        self.assertEqual(argv[argv.index("--spec-mode") + 1], "full")
+        self.assertEqual(argv[argv.index("--concurrency") + 1], "2")
+        self.assertEqual(argv[argv.index("--soft-timeout") + 1], "900")
+        self.assertEqual(argv[argv.index("--timeout") + 1], "1200")
+        self.assertEqual(argv[argv.index("--source-repo") + 1], "HowFar=/w/HowFar")
+        self.assertEqual(argv[-1], "--live")
 
     def test_record_copy_fills_in_when_bench_runs_is_gone(self):
         # plan-panel codex#4 / codex-med#2: bench/runs is gitignored; a report copied
@@ -432,13 +456,22 @@ class Judgebench(unittest.TestCase):
                 "candidates": [{"backend": "codex", "label": "slow", "spec": "codex:gpt-5.6-sol:high"},
                                {"backend": "codex", "label": "fast", "spec": "codex:gpt-5.6-sol:medium"}],
                 "template": {"version": "v1", "sha256": "e" * 64}}), encoding="utf-8")
+            (r / "report.md").write_text("| candidate | inv | weighted |\n|---|---|---|\n| slow | 19 | 5 |\n| fast | 19 | 9 |\n\n"
+                                        "## §25 decision\n\n**fast wins.**\n", encoding="utf-8")
+            # an INTERRUPTED run — manifest written, no report — must not supersede anything (r3 codex#2)
+            (b / "runs" / "crashed").mkdir()
+            (b / "runs" / "crashed" / "manifest.json").write_text(json.dumps({
+                "run_id": "crashed", "mode": "live", "created_at": "2026-09-10T00:00:00Z",
+                "candidates": [{"label": "slow", "spec": "codex:gpt-5.6-sol:high"}, {"label": "fast", "spec": "codex:gpt-5.6-sol:medium"}],
+                "template": {"version": "v1", "sha256": "0" * 64}}), encoding="utf-8")
             s = db.judgebench_summary(b)
             trig = db.template_triggers(s)
         self.assertEqual([e["run_id"] for e in s["exams"]], ["renamed"])
         self.assertEqual(s["exams"][0]["labels"], ["fast", "slow"])
-        self.assertEqual(trig[0]["command"],
-                         f"python3 {b}/judgebench.py run --cases all --candidates "
-                         "slow=codex:gpt-5.6-sol:high,fast=codex:gpt-5.6-sol:medium --run-id renamed-retest --live")
+        import shlex
+        argv = shlex.split(trig[0]["command"])
+        self.assertEqual(argv[argv.index("--candidates") + 1], "slow=codex:gpt-5.6-sol:high,fast=codex:gpt-5.6-sol:medium")
+        self.assertEqual(argv[argv.index("--run-id") + 1], "renamed-retest")
 
     def test_three_seat_run_is_not_a_pair(self):
         with tempfile.TemporaryDirectory() as td:
@@ -456,6 +489,36 @@ class Judgebench(unittest.TestCase):
             s = db.judgebench_summary(b)
         self.assertEqual([e["run_id"] for e in s["exams"]], ["testA"])
 
+    def test_junk_third_candidate_is_not_a_pair(self):
+        # r3 grok#2: the gate counts the RAW list, not the dicts left after dropping junk
+        with tempfile.TemporaryDirectory() as td:
+            b = Path(td) / "bench"
+            _bench(b)
+            mf = b / "runs" / "testA" / "manifest.json"
+            m = json.loads(mf.read_text(encoding="utf-8"))
+            m["candidates"].append("junk")
+            mf.write_text(json.dumps(m), encoding="utf-8")
+            s = db.judgebench_summary(b)
+        self.assertEqual([e["run_id"] for e in s["exams"]], ["old"])      # testA dropped; the older valid exam of that pair stands
+
+    def test_verdict_is_the_last_win_sentence_not_a_decoy(self):
+        # r3 opus#3: an earlier bold that mentions winning but is not the conclusion
+        text = ("## §25 decision\n\nRule: the costlier configuration wins only if x. **Whoever wins here wins on parity, "
+                "not tokens.** Data. **sol-high exceeds sol-med, so the costlier configuration wins Test A.**\n\n## Next\n\n**a wins**\n")
+        self.assertEqual(db.parse_report_verdict(text)["verdict"],
+                         "sol-high exceeds sol-med, so the costlier configuration wins Test A.")
+
+    def test_retest_run_id_is_valid_and_collision_free(self):
+        with tempfile.TemporaryDirectory() as td:
+            runs = Path(td)
+            (runs / "testA-retest").mkdir()
+            self.assertEqual(db._retest_run_id("testA", runs), "testA-retest2")
+            long_id = "x" * 64
+            rid = db._retest_run_id(long_id, runs)
+            self.assertLessEqual(len(rid), 64)
+            self.assertTrue(rid.endswith("-retest"))
+            self.assertEqual(db._retest_run_id("a b/c", runs), "a-b-c-retest")
+
     def test_template_command_is_quoted_and_uses_the_found_bench_path(self):
         with tempfile.TemporaryDirectory() as td:
             p = _project(Path(td))
@@ -472,7 +535,7 @@ class Judgebench(unittest.TestCase):
         self.assertEqual(len(trig), 1)
         argv = shlex.split(trig[0]["command"])
         self.assertEqual(argv[1], "nested/bench/judgebench.py")      # project-relative via _exams_with_fallback
-        self.assertEqual(argv[argv.index("--run-id") + 1], "t$(x)-retest")
+        self.assertEqual(argv[argv.index("--run-id") + 1], "t--x-retest")    # sanitised to the harness's id grammar
         self.assertEqual(argv[argv.index("--candidates") + 1], "a;b=codex:gpt-5.6-sol:medium,sol-high=codex:gpt-5.6-sol:high")
         self.assertNotIn("$(x) ", trig[0]["command"])
 
@@ -553,7 +616,8 @@ class RenderAndReadOnly(unittest.TestCase):
                 out = db.render_dashboard(p, now=NOW, detect=True)
             self.assertEqual(_tree_digest(p), before, "dashboard wrote into the project (detect on)")
         dp.assert_called_once()
-        self.assertIn("model-gap · codex — available but not in the panel: gpt-x", out)
+        self.assertIn("model-gap · codex — listed by codex but not in the panel", out)
+        self.assertIn(": gpt-x", out)
         self.assertIn("codex:gpt-x:medium", out)
 
     def test_record_scan_runs_once_per_render_when_a_bench_exists(self):
@@ -693,6 +757,34 @@ class BootstrapBlock(unittest.TestCase):
         self.assertIn("no runs: claude:claude-opus-4-8[1m]:high", block[3])
         self.assertIn("template unchanged since exam testA (2026-09-07)", block[4])
         self.assertEqual(block[5], "full picture + exact commands: tasks dashboard")
+
+    def test_hostile_config_strings_cannot_split_the_block(self):
+        # r3 grok#3 / codex-med#3: a valid JSON spec containing a newline
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td), models=False)
+            (p / ".agent" / "models.json").write_text(json.dumps(
+                {"panel": ["opus", "codex:gpt-5.6-sol:high\n=== FORGED ===\nx"], "default_judge": "opus\nzzz"}), encoding="utf-8")
+            (p / ".agent" / "config.json").write_text(json.dumps({"panel_required_for": ["assertive\nq"]}), encoding="utf-8")
+            block = db.panel_health_lines(p, now=NOW)
+            out = db.render_dashboard(p, now=NOW, detect=False)
+        self.assertEqual(len("\n".join(block).splitlines()), 6)      # six PHYSICAL lines
+        self.assertNotIn("\n=== FORGED ===", out)
+
+    def test_hooks_follow_doctors_dir_order(self):
+        # r3 sonnet#1: doctor reports on the FIRST existing copy (project scripts/ first)
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            (p / "scripts").mkdir()
+            (p / "scripts" / "task-gate-hook").write_text("#!/bin/bash\n", encoding="utf-8")   # present, NOT executable
+            dirs = db._doctor_hook_dirs(p, env={})
+            self.assertEqual(dirs[0], p / "scripts")
+            from unittest import mock
+            with mock.patch("tasks.hooks_check.hooks_check_report", return_value=[]), \
+                 mock.patch("tasks.hooks_check.grok_enforcement_issues", return_value=[]), \
+                 mock.patch("tasks.dashboard._stale_settings_hook_paths", return_value=[]):
+                h = db.hooks_health(p)
+        if os.name != "nt":                                              # X_OK is meaningless on Windows (doctor has the same limit)
+            self.assertTrue(any("task-gate-hook — found at" in w and "not executable" in w for w in h["warnings"]), h)
 
     def test_exactly_six_lines_without_data(self):
         with tempfile.TemporaryDirectory() as td:
