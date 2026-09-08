@@ -46,7 +46,7 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   `~~~` fence were moved. It now recognises fences through the shared CommonMark engine (fail
   closed on an unclosed opener, as before) and headings through the strict ATX matcher every
   other reader/writer uses, so closing-hash, tab-separated and 1-3-space-indented protected
-  headings are protected and fenced examples stay put — including an example nested in a list item (indented code is inert to the marker scan). One spec-driven delta: a ``` whose info string contains a backtick is not a fence, so markers after it are live.
+  headings are protected and fenced examples stay put — including an example nested in a list item (indented code is inert to the marker scan, and a marker indented more than 3 columns is never real — the same rule headings obey). One spec-driven delta: a ``` whose info string contains a backtick is not a fence, so markers after it are live.
 
 - **Fence-aware `## Status` — the stop-hook and the CLI read the same field (task 043,
   the V7 vector split from task 039).** `_extract_status`/`_set_status` select the LAST

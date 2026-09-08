@@ -355,6 +355,39 @@ class Compact(unittest.TestCase):
         self.assertNotIn("cold narrative", self.task_md.read_text(encoding="utf-8"))
         self.assertIn("cold narrative", (self.task_dir / "task-archive.md").read_text(encoding="utf-8"))
 
+    def test_tight_list_nested_fence_example_is_inert(self):
+        # Round-2 panel (grok): NO blank line before the indented example, so the
+        # engine's indented-code rule does not apply — the >=4-column MARKER rule
+        # (like ATX headings: at most 3 leading spaces) is what keeps it inert.
+        body = ("# 012\n- [x] gate\n- how the ritual looks:\n    ```\n    <!-- archive:start -->\n"
+                "    example narrative\n    <!-- archive:end -->\n    ```\nlive tail\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, _ = self._run("12")
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to compact", out, "a tight list-nested example must not be compacted")
+        self.assertEqual(self.task_md.read_text(encoding="utf-8"), body)
+
+    def test_unclosed_fence_decoy_cannot_launder_receipt_bullets(self):
+        # Round-2 panel (opus): the marker scan is fail-CLOSED and the protection
+        # scan is fail-OPEN; their combination is what makes this shape safe. An
+        # unclosed fence + a decoy `## x` between the receipt heading and its
+        # bullets cuts the (fail-open) protection span short — the post-opener
+        # markers must then be inert, or the bullets launder.
+        body = ("# 012\nlive\n\n## Verification Receipt\n\n"
+                "### 2026-01-01T00:00:00+00:00 · risk reversible · commit abc1234\n"
+                "```\n## decoy\n"
+                "<!-- archive:start -->\n    - [PASS] `python3 scripts/verify` (verify)\n"
+                "<!-- archive:end -->\n")
+        self.task_md.write_text(body, encoding="utf-8")
+        code, out, err = self._run("12")
+        self.assertIn(code, (0, 1))
+        if code == 0:
+            self.assertIn("Nothing to compact", out)
+        else:
+            self.assertIn("protected section", err)
+        self.assertIn("python3 scripts/verify", self.task_md.read_text(encoding="utf-8"))
+        self.assertFalse((self.task_dir / "task-archive.md").exists())
+
     def test_block_with_pre_panel_audit_is_refused(self):
         # Same reasoning for the audit receipt: the panel's freshness check reads
         # `## Pre-Panel Audit`, so it must not be archivable either.

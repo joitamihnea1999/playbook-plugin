@@ -31,7 +31,7 @@ from pathlib import Path
 
 from tasks.atomic import atomic_write
 from tasks.core import (_atx_h2_text, _closed_fence_line_indices,
-                        _iter_fenced_flags, resolve_agent_dir)
+                        _indent_columns, _iter_fenced_flags, resolve_agent_dir)
 from tasks.shared import find_project_root
 
 _START = "<!-- archive:start -->"
@@ -89,12 +89,18 @@ def _blocks(lines: "list[str]") -> "tuple[list[tuple[int, int]], str | None]":
     real markers are written at column 0). Disclosed delta: a backtick opener
     whose info string contains a backtick is not a fence per CommonMark, so the
     markers after it are live and do move — the old toggle hid them; recreating
-    that as a private rule would bring back the two-scanner disease."""
+    that as a private rule would bring back the two-scanner disease.
+
+    A marker is real only at <=3 columns of indentation (round-2 panel) — the
+    same rule ATX headings obey in `_atx_h2_text` — so a TIGHT list-nested
+    example (`- item:` then a 4-space ``` with no blank line, which CommonMark
+    does not read as indented code) is inert because its markers are indented,
+    not because a fence was detected. Real markers are written at column 0."""
     spans: "list[tuple[int, int]]" = []
     open_at = None
     fenced = _iter_fenced_flags(lines, unclosed_is_live=False, track_indented_code=True)
     for i, ln in enumerate(lines):
-        if fenced[i]:
+        if fenced[i] or _indent_columns(ln.lstrip("\ufeff")) > 3:
             continue
         s = ln.strip()
         if s == _START:
