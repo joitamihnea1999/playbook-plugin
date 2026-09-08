@@ -4,14 +4,17 @@
 Invariants:
   * changes no setting — rendering changes no existing byte under the project;
     its ONE write is `.agent/model-catalog.json` (the catalog baseline), only
-    with a provider listing and only when the catalog changed (task 054);
+    with a provider listing, only when the catalog changed, merged per provider,
+    and — in the CLI arm — only AFTER the screen was printed (task 054); the
+    tamper guard sanctions that one path (test_judge_isolation);
   * per-seat stats come from the review-spend journal over the health window —
     the last 14 days, cut at the most recent panel change (models.json mtime) —
     tolerant of every malformed line (skipped and counted, never raised on,
     never imputed);
   * exactly three trigger kinds, each with an exact command; drift needs a
-    baseline (no verdict without one); model-gap fires on a DEAD PIN (a seated
-    codex/grok id the catalog no longer lists) or an id NEW since the recorded
+    baseline (no verdict without one; none on a window cut at a panel change);
+    model-gap fires on a DEAD PIN (a seated codex/grok id a FRESH catalog no
+    longer lists — action: the confirming probe) or an id NEW since the recorded
     catalog — "available but not seated" is information, never a trigger —
     comparing bare ids so an alias-resolved seat is not a gap; template compares
     the live sha with the newest LIVE exam's recorded sha (fake runs are never
@@ -362,9 +365,10 @@ class ModelGapTrigger(unittest.TestCase):
                        {"spec": "codex:gpt-5.6-sol:high", "provider": "codex", "model": "gpt-5.6-sol", "label": "codex:gpt-5.6-sol:high", "error": ""}]}
     REPORT = {"providers": [
         {"name": "claude", "installed": True, "models": [{"id": "claude-opus-4-8[1m]"}, {"id": "claude-opus-4-8"}, {"id": "claude-sonnet-5"}]},
-        {"name": "codex", "installed": True, "models": [{"id": "gpt-5.6-sol", "efforts": ["medium", "high"]},
-                                                          {"id": "gpt-5.6-terra", "efforts": ["low", "high"]},
-                                                          {"id": "gpt-5.6-luna", "efforts": ["medium", "high"]}]},
+        {"name": "codex", "installed": True, "cache_age_days": 1.0,       # a FRESH catalog (task 054 r3)
+         "models": [{"id": "gpt-5.6-sol", "efforts": ["medium", "high"]},
+                    {"id": "gpt-5.6-terra", "efforts": ["low", "high"]},
+                    {"id": "gpt-5.6-luna", "efforts": ["medium", "high"]}]},
         {"name": "grok", "installed": False, "models": [{"id": "grok-4.6"}]},
         {"name": "agy", "installed": True, "models": [{"id": "gemini-x"}]},
     ]}
@@ -387,6 +391,7 @@ class ModelGapTrigger(unittest.TestCase):
     def test_dead_pin_fires_with_the_exact_drop_command(self):
         report = json.loads(json.dumps(self.REPORT))
         report["providers"][1]["models"] = [{"id": "gpt-5.6-terra", "efforts": ["low", "high"]}]   # sol vanished from codex's catalog
+        report["providers"][1]["cache_age_days"] = 0.5                                              # …and the catalog is fresh
         baseline = {"recorded_at": "2026-09-01T00:00:00Z", "providers": db.catalog_from_report(report)}
         trig = db.model_gap_triggers(report, self.PANEL, baseline)
         self.assertEqual([(t["kind"], t["seat"]) for t in trig], [("model-gap", "codex:gpt-5.6-sol:high")])
@@ -395,6 +400,26 @@ class ModelGapTrigger(unittest.TestCase):
         # is the confirming probe; the drop command is offered inside the detail, for after it
         self.assertEqual(trig[0]["command"], "tasks models check")
         self.assertIn("if confirmed, drop it: tasks models set --panel opus --default-judge opus", trig[0]["detail"])
+
+    def test_stale_or_undated_codex_catalog_gives_no_dead_pin_verdict(self):
+        # r2 sol-high#1 / sol-med#1: the codex listing is a local cache — only a FRESH one
+        # (fetched within STALE_CATALOG_DAYS) can call a seated model dead
+        report = json.loads(json.dumps(self.REPORT))
+        report["providers"][1]["models"] = [{"id": "gpt-5.6-terra", "efforts": ["high"]}]
+        report["providers"][1]["cache_age_days"] = 30.0
+        baseline = {"recorded_at": "2026-09-01T00:00:00Z", "providers": db.catalog_from_report(report)}
+        self.assertEqual(db.model_gap_triggers(report, self.PANEL, baseline), [])
+        info = db.model_gap_info(report, self.PANEL)
+        self.assertTrue(any("codex catalog is 30d old" in line and "dead pins not judged" in line for line in info), info)
+        report["providers"][1]["cache_age_days"] = None                    # undated cache → unknown, not fresh
+        self.assertEqual(db.model_gap_triggers(report, self.PANEL, baseline), [])
+        report["providers"][1]["cache_age_days"] = 2.5                     # fresh → the verdict stands
+        self.assertEqual(len(db.model_gap_triggers(report, self.PANEL, baseline)), 1)
+        # grok's listing is live (`grok models` runs the CLI): no age needed
+        panel = json.loads(json.dumps(self.PANEL))
+        panel["seats"].append({"spec": "grok:grok-4.6:medium", "provider": "grok", "model": "grok-4.6", "label": "grok:grok-4.6:medium", "error": ""})
+        report["providers"][2] = {"name": "grok", "installed": True, "models": [{"id": "grok-4.5"}]}
+        self.assertTrue(any(t["seat"] == "grok:grok-4.6:medium" for t in db.model_gap_triggers(report, panel, baseline)))
 
     def test_claude_listing_is_configured_not_a_catalog_so_never_a_dead_pin(self):
         report = json.loads(json.dumps(self.REPORT))
@@ -529,8 +554,20 @@ class HealthWindow(unittest.TestCase):
             mj = p / ".agent" / "models.json"
             data = json.loads(mj.read_text(encoding="utf-8"))
             data["_panel_changed"] = "2026-09-05T12:00:00Z"
+            data["_panel_changed_for"] = db.panel_digest(data["panel"])
             mj.write_text(json.dumps(data), encoding="utf-8")
             _touch(mj, NOW - timedelta(hours=1))                          # a default-judge-only rewrite
+            self.assertEqual(db.panel_changed_at(p), NOW - timedelta(days=3))
+            # r2 sol-high#2 / sol-med#3: a HAND edit of the seat list keeps the old stamp —
+            # the digest no longer matches, so the file's mtime (the edit) is the boundary
+            data["panel"] = data["panel"] + ["grok:grok-4.5:low"]
+            mj.write_text(json.dumps(data), encoding="utf-8")
+            _touch(mj, NOW - timedelta(hours=1))
+            self.assertEqual(db.panel_changed_at(p), NOW - timedelta(hours=1))
+            data["panel"] = data["panel"][:-1]                            # a stamp with no digest (older writer) is trusted
+            del data["_panel_changed_for"]
+            mj.write_text(json.dumps(data), encoding="utf-8")
+            _touch(mj, NOW - timedelta(hours=1))
             self.assertEqual(db.panel_changed_at(p), NOW - timedelta(days=3))
             data["_panel_changed"] = "garbage"
             mj.write_text(json.dumps(data), encoding="utf-8")
@@ -544,6 +581,7 @@ class HealthWindow(unittest.TestCase):
             mc._write_panel(path, {}, ["opus", "codex:gpt-5.6-sol:high"], "opus")
             first = json.loads(path.read_text(encoding="utf-8"))
             self.assertIsNotNone(db.parse_ts(first.get("_panel_changed")), first)
+            self.assertEqual(first.get("_panel_changed_for"), db.panel_digest(["opus", "codex:gpt-5.6-sol:high"]))
             stamp = first["_panel_changed"]
             mc._write_panel(path, dict(first), None, "codex:gpt-5.6-sol:high")          # default-judge only
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["_panel_changed"], stamp)
@@ -552,7 +590,9 @@ class HealthWindow(unittest.TestCase):
             cur = json.loads(path.read_text(encoding="utf-8"))
             cur["_panel_changed"] = "2020-01-01T00:00:00Z"                                 # make a change observable
             mc._write_panel(path, cur, ["opus"], None)                                    # seat dropped
-            self.assertNotEqual(json.loads(path.read_text(encoding="utf-8"))["_panel_changed"], "2020-01-01T00:00:00Z")
+            final = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotEqual(final["_panel_changed"], "2020-01-01T00:00:00Z")
+            self.assertEqual(final["_panel_changed_for"], db.panel_digest(["opus"]))
 
     def test_stats_and_drift_honour_the_bounded_window(self):
         lines = [_rec(10, "codex:gpt-5.6-sol:high"), _rec(5, "codex:gpt-5.6-sol:high", "timeout"),
@@ -910,9 +950,48 @@ class RenderAndReadOnly(unittest.TestCase):
             self.assertEqual(_tree_digest(p), digest)
             self.assertIn("model-gap [skipped (--no-detect)]", out3)
 
+    def test_baseline_is_written_only_after_the_screen_is_printed(self):
+        # r2 sol-high#3 / sol-med#4 / grok#2: commit-then-lost-response would swallow a
+        # new-id alarm on the retry — so the CLI prints first and records after; a
+        # duplicate alarm on retry beats a swallowed one
+        from unittest import mock
+        fake = {"providers": [{"name": "codex", "installed": True, "cache_age_days": 1.0,
+                               "models": [{"id": "gpt-5.6-sol", "efforts": ["high"]}, {"id": "gpt-x", "efforts": ["medium"]}]}]}
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            with mock.patch("tasks.models_check.detect_providers", return_value=fake):
+                text, record = db.build_dashboard(p, now=NOW, detect=True)
+            self.assertFalse(db.catalog_baseline_path(p).exists(), "build must not write")
+            self.assertNotIn("catalog baseline .agent/", text)          # the note is not part of the screen
+            note = record()
+            self.assertIn("recorded now", note)
+            self.assertTrue(db.catalog_baseline_path(p).exists())
+            # the CLI arm: screen, then the write, then its note as the last line
+            (db.catalog_baseline_path(p)).unlink()
+            buf = io.StringIO()
+            with mock.patch("tasks.models_check.detect_providers", return_value=fake), \
+                 mock.patch("tasks.dashboard.find_project_root", return_value=p), \
+                 contextlib.redirect_stdout(buf):
+                db.cmd_dashboard([])
+            lines = buf.getvalue().rstrip("\n").splitlines()
+            self.assertTrue(lines[-1].startswith("  catalog baseline .agent/model-catalog.json recorded now"), lines[-1])
+            self.assertTrue(db.catalog_baseline_path(p).exists())
+            # a lost stdout (broken pipe) before the write leaves the baseline untouched → the alarm re-fires
+            (db.catalog_baseline_path(p)).unlink()
+
+            class _Broken(io.StringIO):
+                def write(self, s):
+                    raise BrokenPipeError("client went away")
+            with mock.patch("tasks.models_check.detect_providers", return_value=fake), \
+                 mock.patch("tasks.dashboard.find_project_root", return_value=p), \
+                 contextlib.redirect_stdout(_Broken()):
+                with self.assertRaises(BrokenPipeError):
+                    db.cmd_dashboard([])
+            self.assertFalse(db.catalog_baseline_path(p).exists(), "a lost screen must not advance the baseline")
+
     def test_dead_pin_renders_with_its_seat_label(self):
         from unittest import mock
-        fake = {"providers": [{"name": "codex", "installed": True, "models": [{"id": "gpt-5.6-terra", "efforts": ["high"]}]}]}
+        fake = {"providers": [{"name": "codex", "installed": True, "cache_age_days": 1.0, "models": [{"id": "gpt-5.6-terra", "efforts": ["high"]}]}]}
         with tempfile.TemporaryDirectory() as td:
             p = _project(Path(td))
             with mock.patch("tasks.models_check.detect_providers", return_value=fake):

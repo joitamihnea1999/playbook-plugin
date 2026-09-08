@@ -126,6 +126,24 @@ class MergeGitignore(unittest.TestCase):
         self.assertEqual(out.count(".agent/models.json"), 1)
         self.assertIsNone(cmm.merge_gitignore(out), "complete block → no-op")
 
+    def test_inline_marker_mention_is_not_the_block_and_crlf_is_preserved(self):
+        # task 054 r2 sol-med#5: the marker must be matched as a LINE — an inline mention
+        # (a comment quoting it) is not a block, and must never crash init; a CRLF file
+        # keeps its line endings when entries are inserted
+        inline = "# see also: " + cmm.GITIGNORE_MARKER + " (docs)\n__pycache__/\n"
+        out = cmm.merge_gitignore(inline)
+        self.assertIsNotNone(out)
+        self.assertEqual(out.count(cmm.GITIGNORE_MARKER), 2)                 # the mention + the real block
+        self.assertIn("\n" + cmm.GITIGNORE_MARKER + "\n", out)
+        crlf = "# mine\r\n" + cmm.GITIGNORE_MARKER + "\r\n" + "\r\n".join(
+            e for e in cmm.GITIGNORE_ENTRIES if e != ".agent/model-catalog.json") + "\r\n"
+        out = cmm.merge_gitignore(crlf)
+        self.assertIsNotNone(out)
+        self.assertIn(cmm.GITIGNORE_MARKER + "\r\n.agent/model-catalog.json\r\n", out)
+        self.assertNotIn("\n\n", out.replace("\r\n", "\n").replace("\n\n", "\n\n"))   # no stray blank lines
+        self.assertEqual(out.count("\r\n"), out.count("\n"), "mixed line endings")
+        self.assertIsNone(cmm.merge_gitignore(out))
+
 
 class InitWritesBothFiles(unittest.TestCase):
     """The real scripts/init run — the seam the gauntlet found fragile."""

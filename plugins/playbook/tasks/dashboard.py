@@ -59,6 +59,7 @@ import stat as _stat
 import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from tasks.shared import find_project_root
 
@@ -74,6 +75,10 @@ _GAP_PROVIDERS = ("claude", "codex", "grok")     # providers the model-gap check
 # command — its "listing" is the model(s) configured in settings.json, so a
 # seat absent from it is unknown, never dead (only `tasks models check` probes).
 _CATALOG_PROVIDERS = frozenset({"codex", "grok"})
+# The codex catalog is ~/.codex/models_cache.json, refreshed when codex runs — a
+# stale one cannot call a seated model dead (r2 sol-high#1 / sol-med#1). `grok
+# models` is a live listing and needs no age.
+STALE_CATALOG_DAYS = 7
 CATALOG_BASELINE_REL = ".agent/model-catalog.json"
 _MAX_NUMERIC = 10 ** 15 - 1   # the producer's magnitude cap (pb_journal._cap_int)
 
@@ -308,6 +313,13 @@ def window_stats(records: "list[dict]", now: datetime,
     return seat_stats(_window(records, now - timedelta(days=days), now))
 
 
+def panel_digest(panel) -> str:
+    """Short digest of a seat list — `models_check._write_panel` stores it next
+    to `_panel_changed` so a hand edit of `panel` after the stamp is visible."""
+    items = [str(x) for x in panel] if isinstance(panel, list) else []
+    return hashlib.sha256(json.dumps(items).encode("utf-8")).hexdigest()[:16]
+
+
 def panel_changed_at(project_path: Path) -> "datetime | None":
     """When the panel last changed: the `_panel_changed` stamp in the
     `.agent/models.json` the panel is resolved from (the same walk-up
@@ -327,6 +339,13 @@ def panel_changed_at(project_path: Path) -> "datetime | None":
             data = _load_json_bounded(used)
             if isinstance(data, dict):
                 stamped = parse_ts(data.get("_panel_changed"))
+                bound = data.get("_panel_changed_for")
+                # a stamp bound to a DIFFERENT seat list = the panel was hand-edited
+                # after `models set` stamped it (r2 sol-high#2 / sol-med#3): the edit's
+                # mtime is the honest boundary; a stamp without a digest (older
+                # writer) is trusted as-is
+                if isinstance(bound, str) and bound != panel_digest(data.get("panel")):
+                    stamped = None
         except Exception:
             stamped = None
         if stamped is not None:
@@ -579,6 +598,32 @@ def catalog_from_report(detect_report: "dict | None") -> "dict[str, list[str]]":
     return {prov: sorted(b for _raw, b, _e in items) for prov, items in _listing(detect_report).items()}
 
 
+def _catalog_age(detect_report: "dict | None", prov: str) -> "float | None":
+    """Days since the provider's catalog was fetched: codex's cache stamp; 0 for
+    grok (a live listing); None when unknown (undated / not a number)."""
+    if prov == "grok":
+        return 0.0
+    for p in (detect_report or {}).get("providers", []) or []:
+        if isinstance(p, dict) and p.get("name") == prov:
+            age = p.get("cache_age_days")
+            return float(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else None
+    return None
+
+
+def _stale_catalog_note(detect_report: "dict | None", listing: dict) -> "list[str]":
+    out = []
+    for prov in sorted(listing):
+        if prov not in _CATALOG_PROVIDERS:
+            continue
+        age = _catalog_age(detect_report, prov)
+        if age is not None and age <= STALE_CATALOG_DAYS:
+            continue
+        aged = f"is {age:.0f}d old" if age is not None else "age is unknown"
+        out.append(f"{prov} catalog {aged} — dead pins not judged until it refreshes"
+                   + (" (any `codex` run rewrites ~/.codex/models_cache.json)" if prov == "codex" else ""))
+    return out
+
+
 def _seated(panel: "dict") -> "set[tuple[str, str]]":
     return {(s["provider"], _bare_model(s["model"])) for s in panel.get("seats", []) if s.get("model")}
 
@@ -606,6 +651,7 @@ def model_gap_info(detect_report: "dict | None", panel: "dict") -> "list[str]":
         shown = unseated[:MODEL_GAP_CAP]
         more = len(unseated) - len(shown)
         out.append(f"{prov}: {', '.join(shown)}" + (f" (+{more} more — tasks models detect)" if more else ""))
+    out.extend(_stale_catalog_note(detect_report, _listing(detect_report)))
     return out
 
 
@@ -614,12 +660,13 @@ def model_gap_triggers(detect_report: "dict | None", panel: "dict",
     """Two reasons fire, both kind `model-gap` (task 054):
 
     * dead pin — a seat whose provider is a CATALOG provider (codex/grok) that
-      is installed and listed models, but not the seated one. `seat` is the
-      seat's journal label; the command drops it (or, for a sole seat, is
-      `tasks models check`, the only executable remedy). Listed ≠ probed — the
-      detail says to confirm with `tasks models check` first. Claude's listing
-      is what settings.json configures, not a catalog → never a dead pin; an
-      uninstalled provider or an empty listing is unknown, not dead.
+      is installed, listed models, and whose catalog is FRESH (codex: cache
+      fetched within STALE_CATALOG_DAYS; grok: a live listing), but not the
+      seated one. `seat` is the seat's journal label; the ACTION is the
+      confirming `tasks models check` (listed ≠ probed) and the drop command
+      follows in the detail. Claude's listing is what settings.json configures,
+      not a catalog → never a dead pin; an uninstalled provider, an empty
+      listing or a stale/undated catalog is unknown, not dead.
     * new id — a listed bare id absent from `baseline["providers"][prov]`
       (the catalog the dashboard last recorded) and not already seated. One
       trigger per provider, ids capped at MODEL_GAP_CAP, the add command shown
@@ -638,6 +685,9 @@ def model_gap_triggers(detect_report: "dict | None", panel: "dict",
         items = listing.get(prov)
         if not items:
             continue                         # not installed / listed nothing → unknown, no verdict
+        age = _catalog_age(detect_report, prov)
+        if age is None or age > STALE_CATALOG_DAYS:
+            continue                         # stale/undated catalog → unknown, disclosed by model_gap_info
         bare = _bare_model(s["model"])
         if any(b == bare for _raw, b, _e in items):
             continue
@@ -1241,8 +1291,14 @@ def render_triggers(triggers: "list[dict]") -> "list[str]":
     return lines
 
 
-def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
-                     detect: bool = True) -> str:
+def build_dashboard(project_path: Path, *, now: "datetime | None" = None,
+                    detect: bool = True) -> "tuple[str, Callable[[], str]]":
+    """The screen text plus a deferred `record()` that writes the catalog
+    baseline and returns its note. The CLI prints the text BEFORE calling
+    `record()` (r2 sol-high#3 / sol-med#4 / grok#2): a crash or lost stdout after
+    the write would swallow a new-id alarm on the retry, while printing first
+    means at worst a duplicate alarm. `render_dashboard` does both for callers
+    that want one string."""
     now = now or datetime.now(timezone.utc)
     p = Path(project_path)
     panel = panel_seats(p)
@@ -1266,13 +1322,17 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
         except Exception as e:
             detect_note = f"provider listing failed ({_one_line(e)})"
 
-    # new-id verdicts compare with the PREVIOUS record; the record is refreshed after
+    # new-id verdicts compare with the PREVIOUS record; the record is refreshed AFTER
+    # the screen is delivered (see `record` below)
     baseline = load_catalog_baseline(catalog_baseline_path(p)) if detect_report else None
     triggers = (drift_triggers(records, now, panel, start=win_start)
                 + model_gap_triggers(detect_report, panel, baseline)
                 + template_triggers(bench))
     gap_info = model_gap_info(detect_report, panel)
-    baseline_note = record_catalog_baseline(p, detect_report, now) if detect else ""
+
+    def record() -> str:
+        """The deferred baseline write + its one-line note ("" under --no-detect)."""
+        return record_catalog_baseline(p, detect_report, now) if detect else ""
 
     L: "list[str]" = []
     L.append("=== PLAYBOOK DASHBOARD — nothing here changes a setting (read-only, except the model-catalog baseline it records) ===")
@@ -1347,9 +1407,15 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
     L.extend(render_triggers(triggers))
     if gap_info:
         L.append(f"  info: available but not seated — {' · '.join(gap_info)}   (not a trigger: a selective panel is a choice)")
-    if baseline_note:
-        L.append(f"  {baseline_note}")
-    return "\n".join(L)
+    return "\n".join(L), record
+
+
+def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
+                     detect: bool = True) -> str:
+    """`build_dashboard` + the baseline record, as one string (tests, embedding)."""
+    text, record = build_dashboard(project_path, now=now, detect=detect)
+    note = record()
+    return text + (f"\n  {note}" if note else "")
 
 
 def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> "list[str]":
@@ -1409,8 +1475,12 @@ def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> 
 
 
 def cmd_dashboard(cmd_args) -> None:
-    """The `tasks dashboard [--no-detect]` arm. Read-only by construction."""
+    """The `tasks dashboard [--no-detect]` arm: screen first, then the one write."""
     args = list(cmd_args or [])
     detect = "--no-detect" not in args
     project_path = find_project_root()
-    print(render_dashboard(project_path, detect=detect))
+    text, record = build_dashboard(project_path, detect=detect)
+    print(text, flush=True)          # the screen reaches the operator BEFORE the baseline moves
+    note = record()
+    if note:
+        print(f"  {note}")

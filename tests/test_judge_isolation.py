@@ -176,6 +176,30 @@ class TamperGuardTest(unittest.TestCase):
         self.assertEqual(treview._detect_tamper(d, tf, before), [],
                          "monitor state churn must not read as judge tampering")
 
+    def test_catalog_baseline_write_is_not_tamper(self):
+        # task 054 r2 opus#1: `tasks dashboard` writes `.agent/model-catalog.json` (create
+        # or update) and may run WHILE a panel runs; on an install whose .gitignore
+        # predates the entry the file is untracked, so its `??` line must be sanctioned
+        # the way the monitor dir is — never a voided paid panel
+        d = self._git_repo()
+        tf = d / "task.md"
+        tf.write_text("gate1\n")
+        (d / ".agent").mkdir()
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "init"], check=True)
+        before = treview._snapshot_repo_state(d, tf)
+        (d / ".agent" / "model-catalog.json").write_text('{"providers": {}}\n')     # created mid-panel, untracked
+        self.assertEqual(treview._detect_tamper(d, tf, before), [])
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "track it"], check=True)
+        (d / ".agent" / "model-catalog.json").write_text('{"providers": {"codex": ["x"]}}\n')   # dirty at snapshot
+        before = treview._snapshot_repo_state(d, tf)
+        (d / ".agent" / "model-catalog.json").write_text('{"providers": {"codex": ["x", "y"]}}\n')   # content churn
+        self.assertEqual(treview._detect_tamper(d, tf, before), [])
+        # negative control: a sibling file under .agent is NOT sanctioned
+        (d / ".agent" / "model-catalog.json.bak").write_text("x\n")
+        self.assertTrue(any("model-catalog.json.bak" in c for c in treview._detect_tamper(d, tf, before)))
+
     def test_non_monitor_agent_file_still_flags(self):
         # Negative control: the exclusion is the monitor dir ONLY — a new file
         # elsewhere under .agent (or anywhere) still trips the guard.

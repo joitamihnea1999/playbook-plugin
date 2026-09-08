@@ -650,6 +650,14 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     # LINES, one for the bare paths keyed in `dirty_hashes`.
     _monitor_re = re.compile(r"^..\s+\"?\.agent(/[^/]+)?/monitor/")
     _monitor_path_re = re.compile(r"^\.agent(/[^/]+)?/monitor/")
+    # task 054: `tasks dashboard` records the provider catalog baseline at
+    # `.agent/model-catalog.json` (create or update) and may legitimately run
+    # WHILE a panel runs (the 038 background-panel advisory suggests exactly
+    # that). On an install whose .gitignore predates the entry the file is
+    # untracked, so its `??` / ` M` line is sanctioned churn like the monitor
+    # dir — that ONE path only (a sibling file still flags).
+    _catalog_re = re.compile(r"^..\s+\"?\.agent/model-catalog\.json\"?$")
+    _catalog_path_re = re.compile(r"^\.agent/model-catalog\.json$")
     b_porc, a_porc = before.get("porcelain"), after.get("porcelain")
     # E1: the task's OWN record directory is sanctioned churn — a panel
     # legitimately writes judge.md / review artifacts / task.md updates there
@@ -716,13 +724,13 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
         # deleted an untracked one — also a working-tree mutation, and one the
         # content-hash diff below cannot see (the path is gone from `after`).
         for line in sorted(a_lines - b_lines):
-            if _monitor_re.match(line):
+            if _monitor_re.match(line) or _catalog_re.match(line):
                 continue
             if _taskdir_re and _taskdir_re.match(line):
                 continue
             changes.append(f"working tree: {line.strip()}")
         for line in sorted(b_lines - a_lines):
-            if _monitor_re.match(line):
+            if _monitor_re.match(line) or _catalog_re.match(line):
                 continue
             if _taskdir_re and _taskdir_re.match(line):
                 continue
@@ -743,7 +751,7 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     b_dirty = before.get("dirty_hashes") or {}
     a_dirty = after.get("dirty_hashes") or {}
     for rel in sorted(set(b_dirty) & set(a_dirty)):
-        if _monitor_path_re.match(rel) or rel == _task_rel:
+        if _monitor_path_re.match(rel) or _catalog_path_re.match(rel) or rel == _task_rel:
             continue
         if _taskdir_path_re and _taskdir_path_re.match(rel):
             continue

@@ -148,19 +148,22 @@ def merge_gitignore(existing: "str | None") -> "str | None":
     that already carries the marker gains any entry added since it was written
     (inserted right under the marker, once) — so an upgraded plugin's new
     machine-local files stay out of every already-inited clone's record too."""
-    if existing is not None and GITIGNORE_MARKER in existing:
-        present = {line.strip() for line in existing.splitlines()}
+    # the marker counts only as a whole LINE — an inline mention (a comment quoting
+    # it) is not the block (task 054 r2 sol-med#5); the file's own line ending is kept
+    nl = "\r\n" if existing is not None and "\r\n" in existing else "\n"
+    lines = existing.splitlines(keepends=True) if existing else []
+    at = next((i for i, line in enumerate(lines) if line.strip() == GITIGNORE_MARKER), None)
+    if at is not None:
+        present = {line.strip() for line in lines}
         missing = [e for e in GITIGNORE_ENTRIES if e not in present]
         if not missing:
             return None
-        lines = existing.splitlines()
-        at = next(i for i, line in enumerate(lines) if line.strip() == GITIGNORE_MARKER)
-        lines[at + 1:at + 1] = missing
-        return "\n".join(lines) + "\n"
-    block = GITIGNORE_MARKER + "\n" + "\n".join(GITIGNORE_ENTRIES) + "\n"
+        lines[at + 1:at + 1] = [e + nl for e in missing]
+        return "".join(lines)
+    block = GITIGNORE_MARKER + nl + nl.join(GITIGNORE_ENTRIES) + nl
     if existing is None or not existing.strip():
         return block
-    return existing.rstrip("\n") + "\n\n" + block
+    return existing.rstrip("\r\n") + nl + nl + block
 
 
 def main(argv: "list[str]") -> int:

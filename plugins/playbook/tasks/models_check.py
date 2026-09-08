@@ -823,8 +823,12 @@ def _write_panel(path: Path, existing: dict, new_panel: Optional[list[str]],
         # `_panel_changed` marks the most recent SEAT-LIST change (task 054): the
         # dashboard's health window starts there, so a default-judge-only or
         # same-panel rewrite must not move it (it still bumps `_updated`/mtime).
+        # `_panel_changed_for` binds the stamp to the seat list it describes, so a
+        # later HAND edit of `panel` (stamp untouched) is detectable by the reader.
         if existing.get("panel") != new_panel:
+            from tasks.dashboard import panel_digest
             existing["_panel_changed"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            existing["_panel_changed_for"] = panel_digest(new_panel)
         existing["panel"] = new_panel
     if default_judge:
         existing["default_judge"] = default_judge
@@ -1017,11 +1021,13 @@ def detect_providers(project_root: Optional[Path] = None) -> dict:
     codex_installed = shutil.which("codex") is not None
     codex_models: list[dict] = []
     codex_note = "codex CLI not on PATH."
+    codex_age: Optional[float] = None       # days since the cache was fetched (task 054: the dashboard's freshness bar)
     if codex_installed:
         cache = load_codex_cache()
         if cache:
             codex_models = [{"id": slug, "efforts": efforts}
                             for slug, efforts in cache["models"].items()]
+            codex_age = cache_age_days(cache.get("fetched_at"))
             codex_note = ("from ~/.codex/models_cache.json (a catalog — a listed "
                           "model can still 400 per-account; init's probe confirms).")
         else:
@@ -1029,6 +1035,7 @@ def detect_providers(project_root: Optional[Path] = None) -> dict:
     providers.append({
         "name": "codex", "installed": codex_installed,
         "models": codex_models, "efforts": [], "note": codex_note,
+        "cache_age_days": codex_age,
     })
 
     # agy — `agy models` lists display names; `-m` is inert (the UI selects the
