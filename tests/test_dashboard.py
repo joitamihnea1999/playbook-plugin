@@ -281,6 +281,22 @@ class DriftTrigger(unittest.TestCase):
             "tasks models set --panel opus,grok:grok-4.6:medium --default-judge opus"), trig[0]["command"])
         self.assertIn("was the default judge", trig[0]["command"])
 
+    def test_default_judge_matched_by_label_not_raw_spec(self):
+        # r4 codex#2 / grok#1: default judge as canonical spec, seat pinned by alias
+        panel = {"panel": ["opus", "codex:gpt-5.6-sol:high"], "default_judge": "claude:claude-opus-4-8[1m]",
+                 "seats": [{"spec": "opus", "label": "claude:claude-opus-4-8[1m]:high"},
+                           {"spec": "codex:gpt-5.6-sol:high", "label": "codex:gpt-5.6-sol:high"}]}
+        cmd = db._models_set_command(panel, drop_label="claude:claude-opus-4-8[1m]:high")
+        self.assertTrue(cmd.startswith("tasks models set --panel codex:gpt-5.6-sol:high --default-judge codex:gpt-5.6-sol:high"), cmd)
+
+    def test_sole_seat_drift_is_not_an_alarm(self):
+        # r4 codex#4: dropping the only seat has no executable remedy → no alarm
+        s = "codex:gpt-5.6-sol:high"
+        lines = [_rec(d, s, "timeout") for d in (1, 2, 3)] + [_rec(20 + d, s, "ok") for d in range(3)]
+        recs, _ = db.load_review_records(self._w(lines))
+        panel = {"panel": [s], "default_judge": s, "seats": [{"spec": s, "label": s}]}
+        self.assertEqual(db.drift_triggers(recs, NOW, panel), [])
+
     def test_no_baseline_means_no_verdict(self):
         s = "grok:grok-4.6:medium"
         lines = [_rec(d, s, "timeout") for d in (1, 2, 3)]           # 100% timeouts, but no prior-30d runs
@@ -508,6 +524,43 @@ class Judgebench(unittest.TestCase):
         self.assertEqual(db.parse_report_verdict(text)["verdict"],
                          "sol-high exceeds sol-med, so the costlier configuration wins Test A.")
 
+    def test_weighted_table_is_scoped_and_header_case_insensitive(self):
+        # r4 opus#1: a later numeric table must not pollute the pair; header may be capitalised
+        text = ("| Candidate | inv | Weighted |\n|---|---|---|\n| a | 19 | 5 |\n| b | 19 | 9 |\n\n"
+                "| other | n | weighted |\n|---|---|---|\n| c | 1 | 7 |\n\n## §25 decision\n\n**b wins.**\n")
+        v = db.parse_report_verdict(text)
+        self.assertEqual(v["weighted"], {"a": 5, "b": 9})
+        self.assertEqual(v["verdict"], "b wins.")
+
+    def test_bolded_trailing_caveat_does_not_displace_the_verdict(self):
+        # r4 opus#2: the conclusion names a candidate; a trailing bold caveat does not
+        text = ("| candidate | inv | weighted |\n|---|---|---|\n| sol-high | 19 | 133 |\n| sol-med | 19 | 98 |\n\n"
+                "## §25 decision\n\n**sol-high wins Test A.** **Whoever wins, nobody loses here.**\n")
+        self.assertEqual(db.parse_report_verdict(text)["verdict"], "sol-high wins Test A.")
+
+    def test_corpus_schema_is_validated(self):
+        # r4 codex#5: `"cases": 7` is valid JSON but not a case list
+        with tempfile.TemporaryDirectory() as td:
+            b = Path(td) / "bench"
+            _bench(b)
+            (b / "corpus" / "corpus.json").write_text(json.dumps({"version": 3, "cases": 7}), encoding="utf-8")
+            s = db.judgebench_summary(b)
+        self.assertEqual((s["corpus_version"], s["cases"]), (3, 0))
+
+    def test_rerun_uses_the_manifest_case_set(self):
+        # r4 codex#3 / codex-med#1: a subset exam re-runs the same subset, not `all`
+        with tempfile.TemporaryDirectory() as td:
+            b = Path(td) / "bench"
+            _bench(b, live_sha="f" * 64)
+            mf = b / "runs" / "testA" / "manifest.json"
+            m = json.loads(mf.read_text(encoding="utf-8"))
+            m["corpus"] = {"cases": ["c1", "c2"], "hashes": {}}
+            mf.write_text(json.dumps(m), encoding="utf-8")
+            trig = db.template_triggers(db.judgebench_summary(b))
+        import shlex
+        argv = shlex.split(trig[0]["command"])
+        self.assertEqual(argv[argv.index("--cases") + 1], "c1,c2")
+
     def test_retest_run_id_is_valid_and_collision_free(self):
         with tempfile.TemporaryDirectory() as td:
             runs = Path(td)
@@ -638,7 +691,8 @@ class RenderAndReadOnly(unittest.TestCase):
             sp.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [
                 {"type": "command", "command": f"bash {td}/gone/hooks/task-gate-hook"},
                 {"type": "command", "command": "echo ok"}]}]}}), encoding="utf-8")
-            self.assertEqual(db._stale_settings_hook_paths(sp), [f"{td}/gone/hooks/task-gate-hook"])
+            # str(Path(...)) — on Windows the separators normalise to backslashes (CI lane f1f2794)
+            self.assertEqual(db._stale_settings_hook_paths(sp), [str(Path(f"{td}/gone/hooks/task-gate-hook"))])
             self.assertEqual(db._stale_settings_hook_paths(Path(td) / "absent.json"), [])
 
     def test_ancestor_models_json_is_named_not_mislabelled(self):
@@ -651,6 +705,28 @@ class RenderAndReadOnly(unittest.TestCase):
             panel = db.panel_seats(child)
         self.assertEqual(panel["panel"], ["sonnet"])
         self.assertIn("ANCESTOR", panel["source"])
+
+    def test_verify_line_is_sanitised(self):
+        # r4 sonnet#1: a config command with an embedded newline must not forge a line
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            (p / ".agent" / "config.json").write_text(json.dumps({"verify": "echo x\n=== FORGED ===\nrm"}), encoding="utf-8")
+            out = db.render_dashboard(p, now=NOW, detect=False)
+        self.assertNotIn("\n=== FORGED ===", out)
+        self.assertIn("verify: echo x === FORGED === rm", out)
+
+    def test_panel_required_for_is_the_effective_policy(self):
+        # r4 codex#1: a malformed scalar reads as NO requirement at close time — say so
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td))
+            self.assertEqual(db.panel_required_for(p), ["assertive", "irreversible"])
+            (p / ".agent" / "config.json").write_text(json.dumps({"panel_required_for": "assertive"}), encoding="utf-8")
+            eff = db.panel_required_for(p)
+            (p / ".agent" / "config.json").write_text(json.dumps({"panel_required_for": "all"}), encoding="utf-8")
+            eff_all = db.panel_required_for(p)
+        self.assertEqual(eff[:0], [])
+        self.assertTrue(eff and eff[0].startswith("(raw"), eff)
+        self.assertEqual(eff_all, ["reversible", "assertive", "irreversible"])
 
     def test_effective_verify_per_risk_class(self):
         with tempfile.TemporaryDirectory() as td:
@@ -785,6 +861,18 @@ class BootstrapBlock(unittest.TestCase):
                 h = db.hooks_health(p)
         if os.name != "nt":                                              # X_OK is meaningless on Windows (doctor has the same limit)
             self.assertTrue(any("task-gate-hook — found at" in w and "not executable" in w for w in h["warnings"]), h)
+
+    def test_truncated_journal_marks_bootstrap_incomplete(self):
+        # r4 codex-med#2: partial windows must not read as complete counts or drift verdicts
+        from unittest import mock
+        lines = [_rec(1, "codex:gpt-5.6-sol:high", "ok", 100_000)]
+        with tempfile.TemporaryDirectory() as td:
+            p = _project(Path(td), journal_lines=lines)
+            with mock.patch("tasks.dashboard.load_review_journal", return_value=(db.load_review_records(db.journal_path(p))[0], 0, "truncated")):
+                block = db.panel_health_lines(p, now=NOW)
+        self.assertEqual(len(block), 6)
+        self.assertIn("journal TRUNCATED — counts incomplete", block[2])
+        self.assertIn("drift n/a (journal truncated)", block[4])
 
     def test_exactly_six_lines_without_data(self):
         with tempfile.TemporaryDirectory() as td:

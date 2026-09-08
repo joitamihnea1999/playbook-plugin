@@ -361,17 +361,22 @@ def panel_seats(project_path: Path) -> "dict":
 
 
 def panel_required_for(project_path: Path) -> "list[str]":
-    """The raw `panel_required_for` policy as a display list ("all" → ["all"])."""
+    """The EFFECTIVE close policy — which risk classes require a quorum panel —
+    resolved through `core.resolve_panel_required` (the close's own reader), not
+    the raw config value (r4 codex#1: a malformed scalar like `"assertive"` reads
+    as NO requirement at close time, and the dashboard must say so). A raw value
+    the resolver does not honour is flagged alongside."""
     try:
-        from tasks.core import load_config
+        from tasks.core import load_config, resolve_panel_required
+        effective = [r for r in ("reversible", "assertive", "irreversible")
+                     if resolve_panel_required(Path(project_path), r)]
         raw = load_config(Path(project_path)).get("panel_required_for")
     except Exception:
         return ["(unreadable)"]
-    if isinstance(raw, str):
-        return [raw]
-    if isinstance(raw, list):
-        return [str(x) for x in raw]
-    return []
+    out = list(effective)
+    if raw is not None and not effective:
+        out.append(f"(raw {_one_line(json.dumps(raw))} is not honoured by the close — no panel required)")
+    return out
 
 
 def review_knobs(project_path: Path) -> "dict":
@@ -397,8 +402,8 @@ def _models_set_command(panel: "dict", drop_label: "str | None" = None,
     if drop_label is not None:
         keep = [s["spec"] for s in panel.get("seats", []) if s["label"] != drop_label]
         if not keep:
-            return "(dropping the only seat leaves no panel — reseat by hand: tasks models set --panel <specs> --default-judge <spec>)"
-        dj_label = next((s["label"] for s in panel.get("seats", []) if s["spec"] == dj), dj)
+            return ""            # nothing executable to print — the caller suppresses the alarm (r4 codex#4)
+        dj_label = _label_of_spec(dj) or dj    # alias vs canonical spec compare by LABEL (r4 codex#2 / grok#1)
         if dj_label == drop_label:
             # the dropped seat IS the default judge: `models set` needs a new one,
             # so propose the first remaining seat and say so (plan-panel grok#2:
@@ -412,6 +417,16 @@ def _models_set_command(panel: "dict", drop_label: "str | None" = None,
     # untrusted text and must not become shell substitution when pasted.
     dj_part = f" --default-judge {shlex.quote(dj)}" if dj else ""
     return f"tasks models set --panel {shlex.quote(','.join(specs))}{dj_part}{note}"
+
+
+def _label_of_spec(spec: str) -> str:
+    """The journal seat label a panel spec resolves to ("" when unresolvable)."""
+    try:
+        from provider.sandbox import resolve_judge_spec
+        prov, variant = resolve_judge_spec(spec)
+        return seat_label(prov, variant)
+    except Exception:
+        return ""
 
 
 def drift_triggers(records: "list[dict]", now: datetime, panel: "dict") -> "list[dict]":
@@ -441,8 +456,10 @@ def drift_triggers(records: "list[dict]", now: datetime, panel: "dict") -> "list
             # to drop) — it stays visible as a "(not in panel)" row, but is not an
             # alarm (impl-panel codex#3: every alarm carries a real command).
             continue
-        out.append({"kind": "drift", "seat": seat, "detail": "; ".join(reasons),
-                    "command": _models_set_command(panel, drop_label=seat)})
+        cmd = _models_set_command(panel, drop_label=seat)
+        if not cmd:
+            continue             # the panel's only seat: no executable one-line remedy exists (r4 codex#4)
+        out.append({"kind": "drift", "seat": seat, "detail": "; ".join(reasons), "command": cmd})
     return out
 
 
@@ -542,28 +559,37 @@ def parse_report_verdict(report_text: str) -> "dict":
     the decision section that speaks of winning/losing without being the rule
     itself ("wins only if") — the conclusion follows any restatement. Missing
     pieces stay empty — never invented."""
-    verdict = ""
-    for m in _BOLD_RE.finditer(_decision_section(report_text)):
-        text = " ".join(m.group(1).split())
-        if _WIN_RE.search(text) and "only if" not in text:
-            verdict = text          # keep going: the CONCLUSION is the last such span (r3 opus#3 decoy)
+    # weighted table: the FIRST contiguous pipe-table whose header has (case-
+    # insensitive) `candidate` + `weighted` columns; collection stops at the first
+    # non-table line so a later numeric table cannot pollute it (r4 opus#1)
     weighted: "dict[str, int]" = {}
     header_idx = None
     for line in report_text.splitlines():
         m = _TABLE_ROW_RE.match(line)
         if not m:
+            if header_idx is not None:
+                break
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if header_idx is None:
-            if "weighted" in cells and "candidate" in cells:
-                header_idx = cells.index("weighted")
+            low = [c.lower() for c in cells]
+            if "weighted" in low and "candidate" in low:
+                header_idx = low.index("weighted")
             continue
         if set("".join(cells)) <= set("-: "):
             continue
         if header_idx < len(cells) and cells[header_idx].isdigit():
             weighted[cells[0]] = int(cells[header_idx])
-        elif cells and cells[0] == "case":
-            break
+    # verdict: among bold win/lose spans that are not the rule ("only if"), prefer
+    # the LAST one that names a candidate label (r4 opus#2: a bolded trailing
+    # caveat without a label cannot displace the conclusion); else the last span
+    spans = []
+    for m in _BOLD_RE.finditer(_decision_section(report_text)):
+        text = " ".join(m.group(1).split())
+        if _WIN_RE.search(text) and "only if" not in text:
+            spans.append(text)
+    named = [t for t in spans if any(lab and lab in t for lab in weighted)]
+    verdict = (named or spans or [""])[-1]
     return {"verdict": verdict, "weighted": weighted}
 
 
@@ -576,12 +602,12 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
         return None
     out: "dict" = {"corpus_version": None, "cases": 0, "exams": [],
                    "template_sha_now": "", "template_path": "", "bench_dir": Path(bench_dir).as_posix()}
-    try:
-        corpus = json.loads((bench_dir / "corpus" / "corpus.json").read_text(encoding="utf-8"))
-        out["corpus_version"] = corpus.get("version")
-        out["cases"] = len(corpus.get("cases") or [])
-    except (OSError, ValueError, AttributeError):
-        pass
+    corpus = _load_json_bounded(bench_dir / "corpus" / "corpus.json")
+    if isinstance(corpus, dict):
+        v = corpus.get("version")
+        out["corpus_version"] = v if isinstance(v, (int, str)) and not isinstance(v, bool) else None
+        cs = corpus.get("cases")
+        out["cases"] = len(cs) if isinstance(cs, list) else 0      # `"cases": 7` is not a case list (r4 codex#5)
     tpl = bench_dir / "lib" / "templates" / "judge_prompt.md"
     if tpl.is_file():
         try:
@@ -596,10 +622,7 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
             mf = run / "manifest.json"
             if not mf.is_file():
                 continue
-            try:
-                m = json.loads(mf.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
+            m = _load_json_bounded(mf)
             if not isinstance(m, dict) or m.get("mode") != "live":
                 continue
             raw_c = m.get("candidates")
@@ -632,8 +655,10 @@ def judgebench_summary(bench_dir: "Path | None") -> "dict | None":
                      "template_version": _one_line(tpl_info.get("version") or ""),
                      "verdict": verdict["verdict"] or "(no §25 verdict sentence in report.md)",
                      "weighted": verdict["weighted"],
-                     # the run parameters an EXACT re-run needs (r3 codex#1)
+                     # the run parameters an EXACT re-run needs (r3 codex#1, r4 codex#3: the case set too)
                      "run_params": {
+                         "cases": [_one_line(c) for c in (m.get("corpus") or {}).get("cases", [])
+                                   if isinstance(c, str)] if isinstance(m.get("corpus"), dict) and isinstance((m.get("corpus") or {}).get("cases"), list) else [],
                          "spec_mode": _one_line(m["spec_mode"]) if isinstance(m.get("spec_mode"), str) else "",
                          "concurrency": m["concurrency"] if _is_int(m.get("concurrency")) else None,
                          "soft_timeout": tmo["soft_secs"] if _is_int(tmo.get("soft_secs")) else None,
@@ -677,6 +702,18 @@ def merge_record_exams(bench: "dict | None", records: "list[dict]") -> "dict | N
     return base
 
 
+def _load_json_bounded(path: Path, cap: int = 4 * 1024 * 1024):
+    """JSON from a regular file, size-capped, never raising: None on any
+    problem (missing, non-regular, over cap, malformed, too deeply nested)."""
+    text, status = _read_regular_tagged(path, cap)
+    if text is None or status == "truncated":
+        return None
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+
+
 _RECORD_HEADER_RE = re.compile(r"^# judgebench report — run `([^`]+)`\s*$", re.M)
 _RECORD_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 
@@ -701,9 +738,11 @@ def record_exams(project_path: Path) -> "list[dict]":
         except OSError:
             continue
         for f in files:
-            text = _read_regular_text(f, cap=8 * 1024 * 1024)
-            if not text or "judgebench report" not in text:
+            # cheap sentinel probe first (r4 opus#3): most task markdown is not a report
+            head = _read_regular_text(f, cap=64 * 1024)
+            if not head or "judgebench report" not in head:
                 continue
+            text = _read_regular_text(f, cap=8 * 1024 * 1024) or ""
             for m in _RECORD_HEADER_RE.finditer(text):
                 seg = text[m.end():]
                 nxt = _RECORD_HEADER_RE.search(seg)
@@ -769,6 +808,7 @@ def template_triggers(bench: "dict | None") -> "list[dict]":
     bench_py = bench_root + "/judgebench.py"
     new_id = _retest_run_id(newest["run_id"], Path(bench.get("bench_dir") or bench_root) / "runs")
     rp = newest.get("run_params") or {}
+    cases = ",".join(rp.get("cases") or []) or "all"
     extra = ""
     if rp.get("spec_mode"):
         extra += f" --spec-mode {shlex.quote(rp['spec_mode'])}"
@@ -785,7 +825,7 @@ def template_triggers(bench: "dict | None") -> "list[dict]":
                         f"was {newest['template_sha'][:12]} at exam {newest['run_id']} "
                         f"({_date(newest['date'])}) — its verdict no longer describes the current exam prompt "
                         "(this tracks the bench instrument, not the live review.py panel prompt)"),
-             "command": (f"python3 {shlex.quote(bench_py)} run --cases all --candidates {shlex.quote(cands)} "
+             "command": (f"python3 {shlex.quote(bench_py)} run --cases {shlex.quote(cases)} --candidates {shlex.quote(cands)} "
                          f"--run-id {shlex.quote(new_id)}{extra} --live")}]
 
 
@@ -963,7 +1003,7 @@ def verify_command(project_path: Path) -> "list[str]":
     try:
         from tasks.core import load_config, resolve_verify_commands
         cfg = load_config(Path(project_path))
-        per = {r: [f"{c}" for _src, c in resolve_verify_commands(Path(project_path), r, cfg=cfg)]
+        per = {r: [_one_line(c) for _src, c in resolve_verify_commands(Path(project_path), r, cfg=cfg)]
                for r in ("reversible", "assertive", "irreversible")}
     except Exception as e:
         return [f"verify: (config unreadable — {_one_line(e)})"]
@@ -1057,7 +1097,7 @@ def render_dashboard(project_path: Path, *, now: "datetime | None" = None,
     hard = "unlimited" if knobs["hard"] is None else f"{knobs['hard']}s"
     L.append(f"review knobs: soft timeout {soft} · hard timeout {hard} · judge budget ${knobs['budget_usd']} (claude only)")
     if hooks["ok"]:
-        L.append(f"hooks (doctor's hook checks: {hooks['covers']}): OK · copy {hooks['copy'] or '?'}" + (f" v{hooks['version']}" if hooks["version"] else ""))
+        L.append(f"hooks (doctor's hook checks: {hooks['covers']}): OK on these checks · copy {hooks['copy'] or '?'}" + (f" v{hooks['version']}" if hooks["version"] else ""))
     else:
         L.append(f"hooks (doctor's hook checks: {hooks['covers']}): {len(hooks['warnings'])} warning(s) — run: tasks doctor")
         for wmsg in hooks["warnings"][:5]:
@@ -1102,12 +1142,15 @@ def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> 
     l2 = (f"panel: {', '.join(panel['panel']) or '(none)'} · default judge: {panel['default_judge'] or '(none)'} · "
           f"required for: {', '.join(panel['required_for']) or '(off)'}")
     runs = sum(s["runs"] for s in cur.values())
+    if jstatus == "truncated":
+        drift = []               # windows may be incomplete — no drift verdict (r4 codex-med#2)
     if runs:
         ok = sum(s["ok"] for s in cur.values())
         to = sum(s["timeout"] for s in cur.values())
         meds = [s["median_ms"] for s in cur.values() if s["median_ms"] is not None]
         l3 = (f"reviews: {runs} judge runs across {len(cur)} seat(s) · ok {pct(ok, runs)} · timeout {pct(to, runs)} · "
-              f"median of seat medians {fmt_ms(int(statistics.median(meds))) if meds else 'n/a'}")
+              f"median of seat medians {fmt_ms(int(statistics.median(meds))) if meds else 'n/a'}"
+              + (" · journal TRUNCATED — counts incomplete" if jstatus == "truncated" else ""))
         slow = max(cur.items(), key=lambda kv: (kv[1]["median_ms"] or -1))
         worst = max(cur.items(), key=lambda kv: (kv[1]["timeout"] / kv[1]["runs"] if kv[1]["runs"] else 0))
         silent = [s["label"] for s in panel["seats"] if s["label"] not in cur]
@@ -1129,7 +1172,8 @@ def panel_health_lines(project_path: Path, *, now: "datetime | None" = None) -> 
             tpl_part = f"last exam {e['run_id']} ({_date(e['date'])}) — template baseline n/a (record only)"
     else:
         tpl_part = "template: no live exam on record"
-    l5 = (f"triggers (offline): drift {len(drift)} fired · {tpl_part} · model-gap: needs the provider listing — see dashboard")
+    drift_part = ("drift n/a (journal truncated)" if jstatus == "truncated" else f"drift {len(drift)} fired")
+    l5 = (f"triggers (offline): {drift_part} · {tpl_part} · model-gap: needs the provider listing — see dashboard")
     l6 = "full picture + exact commands: tasks dashboard"
     return [l1, l2, l3, l4, l5, l6]
 
