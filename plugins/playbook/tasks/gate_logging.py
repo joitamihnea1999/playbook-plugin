@@ -81,9 +81,5 @@ def _task_is_done(task_md: Path) -> bool:
     its own fence-blind `## Status` regex with different skip rules, so doctor's
     gate-logging-gap check could count a fenced `## Status`/done example as a
     closed task. One reader for every consumer."""
-    from tasks.core import _status_from_lines
-    try:
-        lines = task_md.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return False
-    return _status_from_lines(lines).lower().startswith("done")
+    from tasks.core import _is_done
+    return _is_done(task_md)   # ONE predicate (case-sensitive, like the writer's token)

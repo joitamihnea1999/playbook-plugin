@@ -79,7 +79,24 @@ class DoneTaskNumbersTest(unittest.TestCase):
             "# 004\n\n## Docs\n```\n## Status\ndone\n```\n\n## Status\npending\n",
             encoding="utf-8")
         self._mk(root, "005-real", "done")
+        # And AFTER the live pending (the P-F LAST-wins class a fence-blind reader gets wrong).
+        d2 = root / "006-decoy-after"; d2.mkdir(parents=True)
+        (d2 / "task.md").write_text(
+            "# 006\n\n## Status\npending\n\n## Docs\n```\n## Status\ndone\n```\n",
+            encoding="utf-8")
         self.assertEqual(done_task_numbers(root), [5])
+
+    def test_done_predicate_is_the_shared_one(self):
+        # Round-4 panel (sonnet + grok): ONE `done` predicate. `Done` is a readable
+        # value but not the done state — in core AND here (case-sensitive, like the
+        # writer's token and task-gate-hook's `case done*`).
+        from tasks.core import _is_done
+        root = Path(tempfile.mkdtemp()) / ".agent" / "tasks"
+        self._mk(root, "007-cap", "Done")
+        self._mk(root, "008-low", "done")
+        self._mk(root, "009-dated", "done (2026-01-01)")
+        self.assertFalse(_is_done(root / "007-cap" / "task.md"))
+        self.assertEqual(done_task_numbers(root), [8, 9])
 
     def test_counts_only_done(self):
         root = Path(tempfile.mkdtemp()) / "tasks"

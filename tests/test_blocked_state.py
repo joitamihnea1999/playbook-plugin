@@ -719,5 +719,17 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertEqual(self.run_stop_hook().returncode, 2, "a blocked* prefix released the gate")
 
 
+    def test_work_done_force_is_not_an_escape_from_the_status_preflight(self):
+        # Round-4 panel (opus): --force overrides verify/review/freshness, never the
+        # status preflight — a close whose `done` cannot land is refused even forced.
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        body = ("# 012 - Decide\n\n```\n## Status\npending\n```\n\n"
+                "## Risk\nreversible\n\n## Work Plan\n- [x] gate\n")
+        self.task_file.write_text(body, encoding="utf-8")
+        r = self.run_tasks("work", "done", "--force", "--reason", "testing the preflight")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.task_file.read_text(encoding="utf-8"), body)
+
+
 if __name__ == "__main__":
     unittest.main()

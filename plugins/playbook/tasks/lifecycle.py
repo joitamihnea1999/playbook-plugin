@@ -672,8 +672,14 @@ def cmd_work(cmd_args):
             if done:
                 # Reopen: reset Status to in_progress so activation can proceed.
                 # Through the ONE fence-aware status writer (V7, task 043) — the
-                # same heading _is_done just read; atomic (I9).
-                _set_status(tf, "in_progress")
+                # same heading _is_done just read; atomic (I9). A False return is
+                # only reachable via a concurrent rewrite between the read and
+                # the write; refuse rather than activate a still-done task.
+                if not _set_status(tf, "in_progress"):
+                    print(f"Error: could not reopen task {task_num} — its live "
+                          "`## Status` disappeared between read and write; "
+                          "nothing changed.", file=sys.stderr)
+                    sys.exit(1)
                 print(f"Note: task {task_num} was marked done — reopening.")
                 task_file = tf
                 # Fall through to activation below
