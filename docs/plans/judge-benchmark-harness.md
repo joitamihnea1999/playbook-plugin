@@ -1,6 +1,6 @@
 # Judge Benchmark Harness — implementation plan (v1: Tests A & B)
 
-**Status:** plan only — nothing implemented. Written 2026-09-04 against nested repo commit `3a5035d` (v1.5.42).
+**Status:** IMPLEMENTED — the harness described here was built as `bench/` (task 046, merged to `main` in 1.5.43, 2026-09-09; operator doc `bench/README.md`). Kept as the plan of record; where it conflicts with the code, the code wins. Originally: plan only — nothing implemented. Written 2026-09-04 against nested repo commit `3a5035d` (v1.5.42).
 **Audience:** a fresh Claude Code session with NO access to the conversation that produced this plan. Everything needed is in this file plus the repository. Where this plan conflicts with the code at your HEAD, **the repository wins — document the discrepancy in your task file and adapt.**
 
 ## 1. Executive summary

@@ -143,4 +143,4 @@ Not everything needs a task. Questions, shell commands, docs, git - just ask. Th
 
 Works on macOS, Linux, and Windows (Git Bash / MSYS).
 
-<!-- readme-audit: v1.5.42 @ 2026-09-03 -->
+<!-- readme-audit: v1.5.43 @ 2026-09-09 -->

@@ -2,7 +2,14 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [Unreleased]
+## [1.5.43] — 2026-09-09
+
+Everything landed on the `bench/judge-harness` branch since 1.5.42 (tasks 043–056),
+fast-forwarded onto `main`: the fence-aware `## Status` and gate readers shared by the CLI
+and the enforcing hooks, `tasks compact` on the one task.md scanner, the read-only
+`tasks dashboard` + the PANEL HEALTH block in bootstrap, the `fingerprint_exclude` binding
+in the freshness fingerprint, and real per-call token usage for the codex and grok judge
+seats. `scripts/verify` unittest count 1864 → 2337.
 
 ### Added
 
@@ -13,8 +20,10 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   (`provider/usage.py`: last `turn.completed` for codex, the `usage` object for grok). Panel
   seats, single reviews and the tail-cert judge record `{"status":"known","in":N,"out":N}` with
   the CLI's reported `input_tokens`/`output_tokens` — copied, never derived or estimated; a
-  non-int/bool/negative count, a timeout, a spawn error or an unrecognized stdout stays
-  `unknown`. judge.md / judge-*.log keep holding prose. A recognized envelope with no review
+  non-int/bool/negative count, a spawn error or an unrecognized stdout stays `unknown`; a
+  seat killed at the timeout keeps the usage frame the CLI had already emitted before the kill
+  (`review.py` parses the partial stdout strictly) and is `unknown` only when no complete frame
+  was written. judge.md / judge-*.log keep holding prose. A recognized envelope with no review
   text (an error event that still exited 0) is a FAILED seat, never a clean review. Claude seats
   stay `unknown` (plain-text judge). Disclosed: `in` is the vendor's number as reported (codex
   includes cached input); a grok seat killed at the hard timeout no longer salvages partial prose
@@ -49,6 +58,16 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   session GC so it touches no task or session state. `--no-detect` skips the provider
   model listing. `tasks bootstrap` gains a six-line offline **PANEL HEALTH** block from the
   same data.
+
+- **Dev-only judge benchmark harness `bench/` (judgebench; never shipped in
+  `plugins/playbook/`).** `python3 bench/judgebench.py` gains `corpus validate|show`,
+  `run` (`--fake` | `--live`, `--resume`, `--spec-mode full|compact`), `adjudicate`,
+  `contamination` and `report`; a frozen corpus of 19 cases rebuilt from real playbook
+  review rounds with spec redaction and truth checkers; runs write under the gitignored
+  `bench/runs/`; a provider quota/credit refusal halts a run as `dnf`. Operator quickstart
+  in `bench/README.md`; the original plans (`docs/plans/judge-benchmark-harness.md`,
+  `docs/plans/judge-benchmark-corpus.md`) now carry a status line pointing at the built state. Adds no `tasks` subcommand, config key or
+  models.json field.
 
 ### Fixed
 

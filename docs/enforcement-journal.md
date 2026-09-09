@@ -124,7 +124,9 @@ vendor's reported `input_tokens` **as reported** (codex's includes cached input;
 grok's is its billed input) — recorded per vendor, not normalized across them;
 cached/reasoning/cost fields are not recorded (fixed schema). A codex/grok seat is
 `known` on success and also when the CLI emitted a usage frame before exiting
-nonzero (tokens were spent either way); it is `unknown` on timeouts, spawn errors,
+nonzero (tokens were spent either way), and on a timeout when the CLI had already
+emitted a complete usage frame before the kill (the partial stdout is parsed strictly);
+it is `unknown` on a timeout with no complete frame, on spawn errors,
 and whenever the stdout is not the expected envelope — a non-int, bool or negative
 count is `unknown`, never clamped into a number.
 

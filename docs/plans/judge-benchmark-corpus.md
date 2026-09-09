@@ -1,11 +1,11 @@
 # Judge Benchmark — corpus, rehearsal and live runs (plan v1, steps 9–10 + Tests A/B)
 
-**Status:** plan only — nothing in it is implemented. Written 2026-09-05 on branch `bench/judge-harness` at nested commit `542697f` (harness v1 complete, task 046). Companion to [`judge-benchmark-harness.md`](judge-benchmark-harness.md), whose §22 steps 1–8 are DONE; this plan is its §22 steps 9–10 plus §25.
+**Status:** IMPLEMENTED — Tasks A/B/C below were executed (tasks 048-050; corpus frozen at 19 cases under `bench/corpus/cases/`, merged to `main` in 1.5.43, 2026-09-09). Kept as the plan of record; where it conflicts with the code, the code wins. Originally: plan only — nothing in it is implemented. Written 2026-09-05 on branch `bench/judge-harness` at nested commit `542697f` (harness v1 complete, task 046). Companion to [`judge-benchmark-harness.md`](judge-benchmark-harness.md), whose §22 steps 1–8 are DONE; this plan is its §22 steps 9–10 plus §25.
 **Audience:** a fresh Claude Code session with NO access to the conversations that produced either plan. Everything needed is here plus the repository. **Where this plan conflicts with the code or the git history at your HEAD, the repository wins — document the discrepancy in your task file and adapt.** Every commit sha, size and candidate below is a POOL to re-verify, not a fact to trust.
 
 ## 1. Executive summary
 
-The harness exists and is tested (2013-test suite, 4-lane CI green) but the corpus is empty, so it has never measured anything. Three tasks finish the job:
+At writing time the harness existed and was tested (2013-test suite, 4-lane CI green) but the corpus was empty, so it had never measured anything (since built: 19 frozen cases, see the Status line). Three tasks finish the job:
 
 - **Task A — corpus (plan step 9), `assertive`.** Freeze 12–16 cases from two workspaces' historical tasks. The survey in §3 found the decisive fact: both repos commit the feature FIRST and the panel's fixes in SEPARATE later commits, so the reviewed diff, the tree the judge should see, and the ground truth are all exactly reconstructable from git plus the task record. Ground truth = the round's accepted findings whose fix is absent from the reviewed diff.
 - **Task B — rehearsal + ergonomics (plan step 10), `reversible`.** A per-case size/transport report (grok reads its prompt from argv and most historical diffs are too big), a compact spec mode, a post-run contamination scan (judges run on a machine that holds the historical `judge.md` files), and the `run --fake` rehearsal over the real corpus.
