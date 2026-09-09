@@ -131,8 +131,10 @@ def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
       * `status`      — "ok" | "fail" | "timeout" | "dnf" (did-not-finish/spawn error)
       * `usage`       — token usage WHERE the CLI reports it, else the explicit
                         marker `{"status":"unknown"}`. Numbers are NEVER fabricated:
-                        the claude judge runs in plain-text mode and codex/grok do
-                        not surface per-call tokens here, so `unknown` is the norm.
+                        codex/grok judge seats carry the CLI's own per-call counts
+                        (structured output, task 056); the claude judge runs in
+                        plain-text mode, so its seats — and every timeout, spawn
+                        error or unrecognized output — stay `unknown`.
 
     Every field is bounded so REAL records stay well under the 512-byte
     atomic-write floor: strings are byte-capped with control characters stripped,

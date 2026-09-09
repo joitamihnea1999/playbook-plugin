@@ -62,6 +62,34 @@ class ParseUsage(unittest.TestCase):
             self.assertIsNone(parse_usage(bad), repr(bad))
 
 
+class ExtractCodexRound1(unittest.TestCase):
+    """Impl round-1 panel (task 056): failure shapes of the codex envelope."""
+
+    def test_error_event_after_a_message_is_still_an_error(self):
+        mixed = CODEX_OK.replace(
+            '{"type":"turn.completed"',
+            '{"type":"turn.failed","error":{"message":"rate limited"}}\n{"type":"turn.completed"')
+        text, usage, errors = extract_codex(mixed)
+        self.assertEqual(text, "OK")
+        self.assertEqual(errors, ["rate limited"])
+
+    def test_malformed_final_turn_completed_forgets_the_earlier_usage(self):
+        two = CODEX_OK + '{"type":"turn.completed","usage":{"input_tokens":-1,"output_tokens":3}}\n'
+        self.assertIsNone(extract_codex(two)[1])
+        self.assertIsNone(parse_usage(two))
+
+    def test_protocol_detected_but_one_bad_line_is_not_prose(self):
+        from provider.usage import codex_protocol_detected
+        bad = CODEX_OK.replace('{"type":"turn.started"}', 'warning: something on stdout')
+        self.assertIsNone(extract_codex(bad), "strict parse must reject")
+        self.assertTrue(codex_protocol_detected(bad))
+        self.assertFalse(codex_protocol_detected("1. **Finding** — prose"))
+
+    def test_salvage_tolerates_one_truncated_trailing_line(self):
+        truncated = "\n".join(CODEX_OK.splitlines()[:3]) + '\n{"type":"turn.compl'
+        self.assertEqual(salvage_text("codex", truncated), "OK")
+
+
 class ExtractCodex(unittest.TestCase):
     def test_success(self):
         text, usage, errors = extract_codex(CODEX_OK)
@@ -103,6 +131,11 @@ class ExtractGrok(unittest.TestCase):
         self.assertIsNone(extract_grok("Findings: none.\n"))
         self.assertIsNone(extract_grok('["not", "an", "object"]'))
 
+    def test_a_json_object_that_is_not_the_envelope_is_unrecognized(self):
+        # Round-1 panel (grok): only `type: error` or a string `text` marks the envelope.
+        self.assertIsNone(extract_grok('{"ok": true}'))
+        self.assertIsNone(extract_grok('{"usage": {"input_tokens": 1, "output_tokens": 2}}'))
+
 
 class SalvageText(unittest.TestCase):
     """A judge killed at the hard timeout leaves PARTIAL stdout; the salvage must
@@ -137,10 +170,13 @@ class JudgeOutputCarrier(unittest.TestCase):
         # a carried usage that is not a valid known shape is ignored, not copied
         self.assertIsNone(_parse_judge_usage(JudgeOutput("x", usage={"status": "known", "in": -1, "out": 2})))
         self.assertIsNone(_parse_judge_usage(JudgeOutput("x", usage={"in": 1, "out": 2})))
-        # plain strings keep the envelope rules (task 042 contract)
+        # Plain strings NEVER carry usage (round-1 panel, codex-sol high): a
+        # plain-text judge that emits only a JSON usage envelope must not record
+        # `known` — only an adapter that requested structured output attaches it.
         self.assertIsNone(_parse_judge_usage("prose review"))
-        self.assertEqual(_parse_judge_usage(GROK_OK), {"status": "known", "in": 13443, "out": 26})
-        self.assertEqual(_parse_judge_usage(CODEX_OK), {"status": "known", "in": 13080, "out": 5})
+        self.assertIsNone(_parse_judge_usage(GROK_OK))
+        self.assertIsNone(_parse_judge_usage(CODEX_OK))
+        self.assertIsNone(_parse_judge_usage('{"usage":{"input_tokens":1,"output_tokens":2}}'))
 
 
 import subprocess  # noqa: E402
@@ -219,9 +255,11 @@ class _AdapterBase(unittest.TestCase):
 
     def test_structured_without_review_text_is_an_error_not_a_pass(self):
         out, _ = self._run(_cp(self.BAD, rc=0))
-        self.assertTrue(out.startswith("(error:"), out)
+        self.assertTrue(out.startswith("(FAILED — "), out)
         from tasks.models_check import judge_failed
         self.assertTrue(judge_failed(out))
+        from tasks.review import _judge_status
+        self.assertEqual(_judge_status(out), "fail", "tokens were spent: fail, never dnf")
 
     def test_unrecognized_stdout_is_returned_verbatim(self):
         out, _ = self._run(_cp("1. **Finding** — plain prose, flag ignored.\n"))
@@ -241,6 +279,22 @@ class CodexJudge(_AdapterBase):
     BAD = CODEX_BAD
     OK_USAGE = {"status": "known", "in": 13080, "out": 5}
 
+    def test_message_plus_failed_turn_on_exit_0_is_a_failed_review(self):
+        mixed = CODEX_OK.replace(
+            '{"type":"turn.completed"',
+            '{"type":"turn.failed","error":{"message":"rate limited"}}\n{"type":"turn.completed"')
+        out, _ = self._run(_cp(mixed, rc=0))
+        self.assertTrue(out.startswith("(FAILED — "), out)
+        self.assertIn("rate limited", out)
+        self.assertIn("OK", out, "the salvaged text stays as a diagnostic")
+        self.assertEqual(getattr(out, "usage", None), self.OK_USAGE)
+
+    def test_protocol_stream_with_a_bad_line_on_exit_0_is_a_failed_review(self):
+        bad = CODEX_OK.replace('{"type":"turn.started"}', 'warning: something on stdout')
+        out, _ = self._run(_cp(bad, rc=0))
+        self.assertTrue(out.startswith("(FAILED — "), out)
+        self.assertIsNone(getattr(out, "usage", None))
+
     def test_json_flag_precedes_the_stdin_dash(self):
         _out, calls = self._run(_cp(self.OK))
         argv = calls[0][1]
@@ -254,6 +308,11 @@ class GrokJudge(_AdapterBase):
     OK = GROK_OK
     BAD = GROK_BAD
     OK_USAGE = {"status": "known", "in": 13443, "out": 26}
+
+    def test_non_envelope_json_object_is_verbatim(self):
+        out, _ = self._run(_cp('{"ok": true}\n'))
+        self.assertEqual(out, '{"ok": true}\n')
+        self.assertIsNone(getattr(out, "usage", None))
 
     def test_stream_argv_keeps_streaming_json(self):
         argv = self.adapter.headless_argv("p", None, stream=True).argv

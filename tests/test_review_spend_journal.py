@@ -256,14 +256,20 @@ class SpendHelpers(unittest.TestCase):
         self.assertEqual(review._judge_status("(FAILED — exit 1)\n..."), "fail")
 
     def test_parse_usage_unknown_and_known(self):
-        self.assertIsNone(review._parse_judge_usage("plain review, no usage line"))
+        # Task 056 contract: usage is KNOWN only when carried by an adapter's
+        # JudgeOutput (structured CLI output it requested); a plain string —
+        # prose, an error marker, or even a bare JSON usage envelope — is unknown.
+        from provider.usage import JudgeOutput
+        self.assertIsNone(review._parse_judge_usage(None))
         self.assertIsNone(review._parse_judge_usage(""))
-        # Known usage is recognized ONLY from a structured JSON envelope, not prose.
-        got = review._parse_judge_usage(
-            '{"usage":{"input_tokens":123,"output_tokens":45}}')
-        self.assertEqual(got, {"status": "known", "in": 123, "out": 45})
-        # A JSON envelope without the usage shape → unknown (None).
-        self.assertIsNone(review._parse_judge_usage('{"result":"ok"}'))
+        self.assertIsNone(review._parse_judge_usage("1. **Note** — looks fine."))
+        self.assertIsNone(review._parse_judge_usage(
+            json.dumps({"result": "x", "usage": {"input_tokens": 120, "output_tokens": 30}})))
+        self.assertEqual(
+            review._parse_judge_usage(JudgeOutput("prose", usage={"status": "known", "in": 120, "out": 30})),
+            {"status": "known", "in": 120, "out": 30})
+        self.assertIsNone(review._parse_judge_usage(
+            JudgeOutput("prose", usage={"status": "known", "in": "120", "out": 30})))
 
     def test_parse_usage_prose_quote_is_never_fabricated(self):
         """The self-poison the impl panel (sonnet) caught: a judge that merely
@@ -717,6 +723,35 @@ class StructuredUsageE2E(_E2EBase):
         log = self.agent / "tasks" / "042-demo" / "judge-grok.log"
         self.assertIn("OK", log.read_text(encoding="utf-8"))
         self.assertNotIn('"usage"', log.read_text(encoding="utf-8"))
+
+    def test_panel_no_text_structured_seat_journals_fail_not_dnf(self):
+        # Round-1 panel (sonnet): tokens were spent → `fail`, the same label the
+        # single path records for this shape; never the no-cost `dnf`.
+        from provider.usage import JudgeOutput, extract_grok, judge_output_from_result
+        from provider.sandbox import format_judge_output
+        from provider.adapters.claude import ClaudeAdapter
+        from provider.adapters.grok import GrokAdapter
+        import subprocess
+        import unittest.mock as mock
+        (self.agent / "models.json").write_text(json.dumps({
+            "panel": ["claude:opus", "grok:grok-4.6:medium"], "default_judge": "claude:opus"}), encoding="utf-8")
+        bad = judge_output_from_result(
+            subprocess.CompletedProcess(["grok"], 0, stdout=self._fixture("GROK_BAD"), stderr=""),
+            extract_grok, format_judge_output)
+        patches = [
+            mock.patch.object(ClaudeAdapter, "is_available", classmethod(lambda cls: True)),
+            mock.patch.object(GrokAdapter, "is_available", classmethod(lambda cls: True)),
+            mock.patch.object(ClaudeAdapter, "run_headless_judge", lambda self, **kw: "1. fine\n"),
+            mock.patch.object(GrokAdapter, "run_headless_judge", lambda self, **kw: bad),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with _chdir(self.project):
+            with contextlib.suppress(SystemExit):
+                review.cmd_panel_review(["042", "--models", "claude:opus,grok:grok-4.6:medium"])
+        recs = {r["seat"]: r for r in _read_journal(self.agent) if r["hook"] == "review"}
+        self.assertEqual(recs["grok:grok-4.6:medium"]["status"], "fail", recs)
 
     def test_single_structured_error_with_exit_0_is_a_failed_review(self):
         _calls, recs, _printed = self._single("grok", self._fixture("GROK_BAD"), rc=0)

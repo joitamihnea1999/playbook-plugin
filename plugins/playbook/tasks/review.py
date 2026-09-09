@@ -135,32 +135,23 @@ def _parse_judge_usage(output_text):
     """Token usage for the spend record — else None (the caller then records
     `{"status":"unknown"}`). NEVER fabricates numbers.
 
-    Two sources, in order (task 056):
-      1. a usage CARRIED by the value itself — adapters return
-         `provider.usage.JudgeOutput` (a str subclass) whose `.usage` was parsed
-         from the CLI's structured stdout (codex `exec --json`, grok
-         `--output-format json`) before the review text was extracted; a plain
-         str (every legacy caller/test double, every timeout/error string) has
-         none;
-      2. the STRUCTURED-ENVELOPE parse of the text itself (`provider.usage.parse_usage`):
-         the whole output must be one JSON object carrying
-         `"usage":{"input_tokens":N,"output_tokens":N}` (grok json; claude's real
-         shape should a future path emit it) or codex JSONL with a `turn.completed`
-         usage frame. Free-form review prose never parses as either, so a judge
-         that merely QUOTES a usage-shaped string cannot poison the field
-         (impl-panel sonnet, task 042 — the bare substring search was self-poisoning).
-
-    The claude judge runs in PLAIN-TEXT mode, so its seats stay `unknown` by design."""
+    ONE source (task 056, impl round 1): the usage CARRIED by the value itself —
+    adapters that requested structured CLI output (codex `exec --json`, grok
+    `--output-format json`) return `provider.usage.JudgeOutput`, a str subclass
+    whose `.usage` was parsed from that structured stdout before the review text
+    was extracted. A plain str carries nothing: every legacy caller/test double,
+    every timeout/error string, and — deliberately — a plain-text judge whose
+    entire output happens to be a JSON usage envelope (a claude seat, or any seat
+    quoting one) stays `unknown`. Text is never parsed for usage: the review is
+    prose, prose can never poison the field (task 042's rule, now absolute).
+    Enabling structured output for claude is a one-line adapter change that would
+    attach the carrier — a deliberate decision, not an accident."""
     carried = getattr(output_text, "usage", None)
     if isinstance(carried, dict):
         from provider.usage import _valid_known
         if _valid_known(carried):
             return {"status": "known", "in": carried["in"], "out": carried["out"]}
-        return None
-    if not output_text:
-        return None
-    from provider.usage import parse_usage
-    return parse_usage(output_text)
+    return None
 
 
 def _next_review_round(project_path, task_file):
@@ -2308,7 +2299,7 @@ def cmd_single_review(cmd, cmd_args):
             _sandbox.format_judge_output)
         _spend_usage = _jo.usage
         if result.returncode == 0:
-            _rc = 1 if str(_jo).startswith("(error:") else 0
+            _rc = 1 if str(_jo).startswith("(FAILED") else 0
             _text = str(_jo)
             if _text and not _text.endswith("\n"):
                 _text += "\n"

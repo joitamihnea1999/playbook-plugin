@@ -70,17 +70,19 @@ def _json_object(raw: str) -> Optional[dict]:
     return obj if isinstance(obj, dict) else None
 
 
-def _jsonl_events(raw: str) -> Optional[list]:
+def _jsonl_events(raw: str, *, lenient_tail: bool = False) -> Optional[list]:
     """Parse codex ``--json`` JSONL: every non-blank line must be a JSON object with
-    a ``type`` — otherwise this is not the codex envelope (None)."""
+    a ``type`` — otherwise this is not the codex envelope (None). ``lenient_tail``
+    (salvage only) ignores ONE incomplete trailing line — the shape a hard-timeout
+    kill leaves behind; the usage/extraction parse stays strict."""
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     events = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for i, line in enumerate(lines):
         try:
             ev = json.loads(line)
         except (ValueError, TypeError):
+            if lenient_tail and i == len(lines) - 1 and events:
+                break
             return None
         if not isinstance(ev, dict) or not isinstance(ev.get("type"), str):
             return None
@@ -88,14 +90,33 @@ def _jsonl_events(raw: str) -> Optional[list]:
     return events or None
 
 
-def extract_codex(raw: str) -> "Optional[tuple[str, Optional[dict], list[str]]]":
+def codex_protocol_detected(raw: str) -> bool:
+    """True when the FIRST non-blank stdout line is a codex event object — i.e.
+    the CLI did emit the ``--json`` protocol. A protocol stream the strict parser
+    then rejects is MALFORMED structured output, not prose: it must fail the
+    seat, never be returned verbatim as a "review" (impl round 1, opus/codex)."""
+    for ln in (raw or "").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            ev = json.loads(ln)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(ev, dict) and isinstance(ev.get("type"), str)
+    return False
+
+
+def extract_codex(raw: str, *, lenient_tail: bool = False) -> "Optional[tuple[str, Optional[dict], list[str]]]":
     """codex ``exec --json`` stdout → ``(review_text, usage, error_messages)``;
     None when the stdout is not that envelope (e.g. plain prose from a CLI that
     ignored the flag). ``review_text`` is the LAST completed ``agent_message``
     (``""`` when none — e.g. a failed turn); ``usage`` from the LAST
-    ``turn.completed``; ``error_messages`` from ``error`` / ``turn.failed`` events
-    and ``item.completed`` items of type ``error``."""
-    events = _jsonl_events(raw or "")
+    ``turn.completed`` — the last one WINS even when invalid (a malformed final
+    frame yields None, never an earlier stale count); ``error_messages`` from
+    ``error`` / ``turn.failed`` events and ``item.completed`` items of type
+    ``error``."""
+    events = _jsonl_events(raw or "", lenient_tail=lenient_tail)
     if events is None:
         return None
     text, usage, errors = "", None, []
@@ -109,9 +130,7 @@ def extract_codex(raw: str) -> "Optional[tuple[str, Optional[dict], list[str]]]"
                 elif item.get("type") == "error" and isinstance(item.get("message"), str):
                     errors.append(item["message"])
         elif t == "turn.completed":
-            u = _usage_from_obj(ev.get("usage"))
-            if u is not None:
-                usage = u
+            usage = _usage_from_obj(ev.get("usage"))   # last wins, None if invalid
         elif t == "error" and isinstance(ev.get("message"), str):
             errors.append(ev["message"])
         elif t == "turn.failed":
@@ -132,7 +151,9 @@ def extract_grok(raw: str) -> "Optional[tuple[str, Optional[dict], list[str]]]":
         msg = obj.get("message")
         return "", None, [msg if isinstance(msg, str) else json.dumps(obj)[:500]]
     text = obj.get("text")
-    return (text if isinstance(text, str) else ""), _usage_from_obj(obj.get("usage")), []
+    if not isinstance(text, str):
+        return None          # some other JSON object — not grok's envelope (verbatim)
+    return text, _usage_from_obj(obj.get("usage")), []
 
 
 def parse_usage(raw) -> Optional[dict]:
@@ -154,20 +175,28 @@ def parse_usage(raw) -> Optional[dict]:
 def judge_output_from_result(result, extract, format_judge_output) -> JudgeOutput:
     """Turn a judge subprocess result into the review text the callers expect,
     CARRYING the usage parsed from the CLI's structured stdout. One rule for both
-    adapters (task 056, plan-panel convergent findings):
+    adapters (task 056, plan-panel + impl-round-1 convergent findings):
 
       * rc != 0  → `format_judge_output(result)` unchanged (`(FAILED — exit N)` +
                    labeled tails, so failure signatures stay scannable) — but the
                    usage frame, if the CLI emitted one before failing, is still
                    recorded: the tokens were spent.
       * empty    → `(no output)` (the T139 rule, via format_judge_output).
-      * stdout is NOT the structured envelope (a CLI that ignored the flag, plain
-                   prose) → returned verbatim, usage None — legacy behaviour.
-      * recognized envelope WITH review text → that text, usage carried.
-      * recognized envelope WITHOUT review text (an error event, a failed turn that
-                   still exited 0, an empty `text`) → `(error: …)` naming the CLI's
-                   messages, so `judge_failed` marks the seat failed and it can never
-                   count toward a quorum as a clean review.
+      * stdout is NOT the structured envelope and not a detected protocol stream
+                   (a CLI that ignored the flag, plain prose) → returned verbatim,
+                   usage None — legacy behaviour.
+      * a codex protocol stream the strict parser REJECTS (one non-JSON line, a
+                   truncated frame on exit 0) → `(FAILED — malformed …)`: frames are
+                   never handed out as a "review".
+      * recognized envelope WITH error events → `(FAILED — …reported an error: …)`
+                   even when a message text exists (kept after the marker as a
+                   diagnostic); usage carried.
+      * recognized envelope WITHOUT review text → `(FAILED — … no review text)`.
+      * recognized envelope WITH review text and no errors → that text, usage carried.
+
+    Every failure marker starts with `(FAILED — ` so `judge_failed` fails the seat
+    AND `_judge_status` journals `fail` (tokens spent) on the panel, single and
+    tail-cert paths alike — never the no-cost `dnf`, never a clean PASS.
     """
     raw = result.stdout or ""
     got = extract(raw) if raw.strip() else None
@@ -177,14 +206,20 @@ def judge_output_from_result(result, extract, format_judge_output) -> JudgeOutpu
     if not raw.strip():
         return JudgeOutput(format_judge_output(result))          # "(no output)"
     if got is None:
+        if extract is extract_codex and codex_protocol_detected(raw):
+            return JudgeOutput("(FAILED — malformed structured judge output: the codex "
+                               "event stream did not parse; nothing usable was returned)")
         return JudgeOutput(format_judge_output(result))          # verbatim prose
     text, _usage, errors = got
+    detail = ("; ".join(e.strip() for e in errors if e.strip()))[:800]
+    if errors:
+        msg = f"(FAILED — the judge CLI reported an error: {detail})"
+        if text.strip():
+            msg += f"\n\n[partial text before the failure]\n{text.strip()}"
+        return JudgeOutput(msg, usage=usage)
     if text.strip():
         return JudgeOutput(text.strip(), usage=usage)
-    detail = ("; ".join(e.strip() for e in errors if e.strip()))[:800]
-    msg = "(error: structured judge output carried no review text"
-    msg += f": {detail})" if detail else ")"
-    return JudgeOutput(msg, usage=usage)
+    return JudgeOutput("(FAILED — structured judge output carried no review text)", usage=usage)
 
 
 def salvage_text(provider: str, raw: str) -> str:
@@ -196,7 +231,7 @@ def salvage_text(provider: str, raw: str) -> str:
     today. Other providers pass through."""
     text = (raw or "").strip()
     if provider == "codex" and text:
-        got = extract_codex(text)
+        got = extract_codex(text, lenient_tail=True)   # a kill leaves one cut frame
         if got is not None and got[0].strip():
             return got[0].strip()
     return text
