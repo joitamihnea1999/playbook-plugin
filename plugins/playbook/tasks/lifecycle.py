@@ -246,9 +246,12 @@ def cmd_work(cmd_args):
             # "done" — preflight the live `## Status` value line FIRST and refuse
             # with nothing changed (the same land-together rule set_task_blocked
             # applies).
-            from tasks.core import _live_status_index
+            from tasks.core import _live_status_index, _physical_lines
             try:
-                _st_lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                # Physical `\n` lines — the SAME line model the writer (`_set_status`)
+                # uses, so the preflight cannot pass a `prose\x85## Status\x85pending`
+                # line the writer then refuses (task 055, round-3 panel).
+                _st_lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 _st_lines = []
             if _live_status_index(_st_lines) is None:
@@ -1059,7 +1062,8 @@ def cmd_handoff(cmd_args):
     # then be marked blocked. Check the live `## Status` value line BEFORE the
     # `## Handoff` write so a refusal leaves task.md byte-identical.
     try:
-        _hl = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        from tasks.core import _physical_lines as _plines   # same line model as set_task_blocked
+        _hl = _plines(task_file.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         _hl = []
     if _live_status_index(_hl) is None:

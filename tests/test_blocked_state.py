@@ -906,6 +906,52 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertNotIn("open gate(s)", r.stderr,
                          f"a fenced example tripped the head-position bounce: {r.stderr}")
 
+    def test_close_preflight_shares_the_writers_line_model(self):
+        """Round-3 panel (convergent): the close preflight fed `splitlines()` to
+        `_live_status_index` while `_set_status` splits physically, so a
+        `prose\\x85## Status\\x85pending` file passed preflight, verify ran, a receipt
+        was written, and only then did the status write refuse (receipt-without-
+        done). Preflight on the same physical lines → refused with nothing written."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        body = ("# 012 - Decide\n\nprose\u0085## Status\u0085pending\n\n"
+                "## Risk\nreversible\n\n## Work Plan\n- [x] gate\n")
+        self.task_file.write_text(body, encoding="utf-8")
+        r = self.run_tasks("work", "done")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.task_file.read_text(encoding="utf-8"), body,
+                         "a refused close must leave task.md byte-identical (no receipt)")
+        # Same for the handoff preflight: no `## Handoff` may land.
+        r = self.run_tasks("handoff", "--summary", "pause here")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.task_file.read_text(encoding="utf-8"), body)
+
+    def test_f3_reader_crash_blocks_instead_of_authorizing(self):
+        """Round-3 panel (opus + codex): a reader CRASH (tasks.core import-broken)
+        used to leave STATUS empty → authorize through a stale done pointer. The
+        payload guards pass whenever python3 exists, so this was reachable. Now a
+        non-zero reader exit BLOCKS, matching the stop-hook's fail-closed policy."""
+        self.task_file.write_text(TASK.format(n="012"), encoding="utf-8")
+        self.assertEqual(self._run_gate_hook("012").returncode, 0, "control: real reader authorizes")
+        shim = Path(tempfile.mkdtemp())
+        real = sys.executable.replace("\\", "/")
+        # Only the status read crashes; payload normalization keeps working.
+        (shim / "python3").write_text(
+            "#!/bin/sh\ncase \"$1\" in *task-status.py) echo 'task-status: cannot import tasks.core' >&2; exit 1;; esac\n"
+            f"exec \"{real}\" \"$@\"\n", encoding="utf-8")
+        os.chmod(shim / "python3", 0o755)
+        sd = self.project / ".agent" / "sessions" / SID
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "current_state").write_text("012\n", encoding="utf-8")
+        env = self._env()
+        env.pop("BASH_ENV", None)
+        env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+        payload = json.dumps({"tool_name": "Edit",
+                              "tool_input": {"file_path": str(self.project / "src/main.py")}})
+        r = subprocess.run([bash_or_skip(), str(SCRIPTS / "task-gate-hook")], input=payload,
+                           cwd=self.project, env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, f"a crashed status reader must BLOCK: {r.stderr}")
+        self.assertIn("could not read", r.stderr)
+
     FENCED_ONLY_STATUS = ("# 012 - Decide\n\n```\n## Status\npending\n```\n\n"
                           "## Work Plan\n- [ ] open gate\n")
 

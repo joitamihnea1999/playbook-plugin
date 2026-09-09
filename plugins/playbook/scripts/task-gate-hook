@@ -376,11 +376,25 @@ MSG
                     # edit; a fenced `## Status`/pending example after a live
                     # `done` let a STALE pointer authorize edits (043 round-4).
                     # Cost: one python spawn (~20-30 ms) per gated code edit.
-                    # An unreadable status (reader failed) is NOT "done" →
-                    # authorize (fail toward today's behavior, never a new false
-                    # block; unreachable in practice — this hook already failed
-                    # closed above when python3 could not read the payload).
-                    STATUS=$(python3 "$HOOK_DIR/task-status.py" "$RESOLVED" 2>/dev/null) || STATUS=""
+                    # A reader CRASH (non-zero exit: tasks.core import-broken,
+                    # unreadable file) is NOT "an active status": the payload
+                    # guards above already block when python cannot read the
+                    # payload, and the stop-hook fails closed on the same reader
+                    # crash — so F3 blocks too (round-3 panel: authorizing here
+                    # reopened the stale-done bypass whenever core was broken).
+                    # A status the reader DID print (`pending`, `unknown`, …) that
+                    # is not `done*` authorizes, as before.
+                    if ! STATUS=$(python3 "$HOOK_DIR/task-status.py" "$RESOLVED" 2>/dev/null); then
+                        journal_enforcement "$PB_JOURNAL_DIR" task-gate block "status unreadable" \
+                            "$SESSION_ID" "$TOOL_NAME" "$NORM_PATH"
+                        cat >&2 <<MSG
+BLOCKED: could not read the active task's ## Status via python3 ($HOOK_DIR/task-status.py).
+
+The task gate cannot tell whether task ${TASK} is still open, so no code edit is
+authorized. Restore python3/the Playbook plugin (tasks.core must import), then retry.
+MSG
+                        exit 2
+                    fi
                     STATUS=${STATUS%$'\r'}
                     # Match the CLI authority core._is_done (status STARTS WITH
                     # "done", so "done (2026-…)" counts). Empty/unparsable/unknown

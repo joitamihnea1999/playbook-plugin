@@ -3732,7 +3732,7 @@ def _live_gate_scan(lines: "list[str]") -> "tuple[int, int, str, int]":
     for i, line in enumerate(lines):
         if fenced[i]:
             continue
-        raw = line.rstrip("\r\n")
+        raw = line.lstrip("\ufeff").rstrip("\r\n")   # BOM-tolerant like every task.md reader
         m = _GATE_LINE_RE.match(raw)
         if not m:
             continue
