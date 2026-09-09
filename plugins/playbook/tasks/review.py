@@ -2298,13 +2298,18 @@ def cmd_single_review(cmd, cmd_args):
             result, extract_codex if backend == "codex" else extract_grok,
             _sandbox.format_judge_output)
         _spend_usage = _jo.usage
-        if result.returncode == 0:
-            _rc = 1 if str(_jo).startswith("(FAILED") else 0
-            _text = str(_jo)
-            if _text and not _text.endswith("\n"):
-                _text += "\n"
-            result = subprocess.CompletedProcess(
-                getattr(result, "args", None), _rc, stdout=_text, stderr=result.stderr or "")
+        # ALWAYS publish the formatted text (round 2): on rc≠0 it is the
+        # `(FAILED — exit N)` + tails the adapters/panel show, never raw JSON;
+        # on rc 0 a failure-classified text (`judge_failed`: `(FAILED`,
+        # `(no output)`, …) synthesizes rc 1 so the failure path — no saved
+        # log, journal `fail` — runs exactly as for a real nonzero exit.
+        from tasks.models_check import judge_failed as _jf_struct
+        _rc = result.returncode if result.returncode != 0 else (1 if _jf_struct(str(_jo)) else 0)
+        _text = str(_jo)
+        if _text and not _text.endswith("\n"):
+            _text += "\n"
+        result = subprocess.CompletedProcess(
+            getattr(result, "args", None), _rc, stdout=_text, stderr=result.stderr or "")
 
     # Clean tree: stream the judge's output for the operator (best-effort — a
     # closed sink must not crash a completed review).

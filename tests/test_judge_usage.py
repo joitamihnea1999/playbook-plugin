@@ -108,6 +108,9 @@ class ExtractCodex(unittest.TestCase):
         self.assertEqual(text, "")
         self.assertIsNone(usage)
         self.assertTrue(errors and any("not supported" in e for e in errors), errors)
+        # The item-level "Model metadata … not found" line is a diagnostic, not
+        # one of the fatal errors (round 2).
+        self.assertFalse(any("Model metadata" in e for e in errors), errors)
 
     def test_prose_is_unrecognized(self):
         self.assertIsNone(extract_codex("1. **Finding** — looks fine.\n"))
@@ -132,9 +135,16 @@ class ExtractGrok(unittest.TestCase):
         self.assertIsNone(extract_grok('["not", "an", "object"]'))
 
     def test_a_json_object_that_is_not_the_envelope_is_unrecognized(self):
-        # Round-1 panel (grok): only `type: error` or a string `text` marks the envelope.
+        # Round-1 panel (grok): only `type: error` or a string `text` marks the
+        # envelope (the RESULT helper then fails it closed — round 2).
         self.assertIsNone(extract_grok('{"ok": true}'))
         self.assertIsNone(extract_grok('{"usage": {"input_tokens": 1, "output_tokens": 2}}'))
+
+    def test_stop_reason_is_surfaced(self):
+        body = GROK_OK.replace('"stopReason": "end_turn"', '"stopReason": "max_tokens"')
+        text, usage, errors = extract_grok(body)
+        self.assertEqual(text, "OK")
+        self.assertTrue(errors and "max_tokens" in errors[0], errors)
 
 
 class SalvageText(unittest.TestCase):
@@ -289,6 +299,24 @@ class CodexJudge(_AdapterBase):
         self.assertIn("OK", out, "the salvaged text stays as a diagnostic")
         self.assertEqual(getattr(out, "usage", None), self.OK_USAGE)
 
+    def test_message_without_turn_completed_on_exit_0_is_incomplete(self):
+        # Round-2 panel (codex-medium): a complete prefix that never reached
+        # turn.completed is not a finished review.
+        prefix = "\n".join(CODEX_OK.splitlines()[:3]) + "\n"
+        out, _ = self._run(_cp(prefix, rc=0))
+        self.assertTrue(out.startswith("(FAILED — "), out)
+        self.assertIn("OK", out, "partial text kept as a diagnostic")
+
+    def test_item_level_error_item_is_a_diagnostic_not_fatal(self):
+        # Round-2 panel (codex-high): codex emits non-fatal item-level errors
+        # (app-server lag) before a good message; only error/turn.failed EVENTS fail.
+        body = ('{"type":"thread.started","thread_id":"t"}\n'
+                '{"type":"item.completed","item":{"id":"i0","type":"error","message":"app-server lag, retrying"}}\n'
+                + "\n".join(CODEX_OK.splitlines()[1:]) + "\n")
+        out, _ = self._run(_cp(body, rc=0))
+        self.assertEqual(out, "OK")
+        self.assertEqual(getattr(out, "usage", None), self.OK_USAGE)
+
     def test_protocol_stream_with_a_bad_line_on_exit_0_is_a_failed_review(self):
         bad = CODEX_OK.replace('{"type":"turn.started"}', 'warning: something on stdout')
         out, _ = self._run(_cp(bad, rc=0))
@@ -309,10 +337,23 @@ class GrokJudge(_AdapterBase):
     BAD = GROK_BAD
     OK_USAGE = {"status": "known", "in": 13443, "out": 26}
 
-    def test_non_envelope_json_object_is_verbatim(self):
-        out, _ = self._run(_cp('{"ok": true}\n'))
-        self.assertEqual(out, '{"ok": true}\n')
-        self.assertIsNone(getattr(out, "usage", None))
+    def test_non_envelope_or_malformed_json_is_a_failed_review(self):
+        # Round-2 panel (convergent): structured output was REQUESTED, so any
+        # JSON-looking stdout that is not the recognized envelope fails closed.
+        for body in ('{"ok": true}\n', '{"text": "cut', '{"response": "OK", "usage": {"input_tokens": 1, "output_tokens": 2}}\n',
+                     '[{"text": "OK"}]\n'):
+            out, _ = self._run(_cp(body))
+            self.assertTrue(out.startswith("(FAILED — "), (body, out))
+            self.assertIsNone(getattr(out, "usage", None))
+
+    def test_stop_reason_other_than_end_turn_is_a_failed_review(self):
+        for reason in ("max_tokens", "refusal", "cancelled", "max_turn_requests"):
+            body = GROK_OK.replace('"stopReason": "end_turn"', f'"stopReason": "{reason}"')
+            out, _ = self._run(_cp(body))
+            self.assertTrue(out.startswith("(FAILED — "), (reason, out))
+            self.assertIn(reason, out)
+            self.assertIn("OK", out, "partial text kept as a diagnostic")
+            self.assertEqual(getattr(out, "usage", None), self.OK_USAGE, "tokens were spent")
 
     def test_stream_argv_keeps_streaming_json(self):
         argv = self.adapter.headless_argv("p", None, stream=True).argv

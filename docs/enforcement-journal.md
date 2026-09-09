@@ -129,13 +129,17 @@ and whenever the stdout is not the expected envelope — a non-int, bool or nega
 count is `unknown`, never clamped into a number.
 
 The **claude** judge still runs in plain-text mode, so its seats are `unknown` by
-design (the parser already recognizes claude's `--output-format json` usage shape,
-so enabling it there is a deliberate one-line decision, not an accident). The
-text-side parser is **anchored to a structured envelope** — it recognizes a usage
-only when the judge's ENTIRE output parses as one JSON object (or as codex JSONL).
-This is deliberate: a bare substring search would let a judge that merely *quotes*
-a usage-shaped string in its prose poison the field with a fabricated number.
-Free-form review prose never parses as such an envelope, so it can never trip it.
+design. **Usage comes ONLY from the adapter-carried value** (`JudgeOutput.usage`,
+attached by an adapter that itself requested structured output). Judge TEXT is
+never parsed for usage: a review is prose, and prose — even a seat whose entire
+output happens to be a JSON usage envelope — can never poison the field. Enabling
+structured output for claude would be a deliberate adapter change that attaches
+the carrier (the shared parser already knows claude's `usage` shape), not an
+accident. Failure shapes fail closed: JSON-looking stdout that is not the
+recognized envelope, a codex event stream with a stray line or without a terminal
+`turn.completed`, a codex `error`/`turn.failed` event, or a grok `stopReason`
+other than `end_turn` all produce a `(FAILED — …)` result (partial text kept as a
+diagnostic, usage still recorded when a frame exists) — never a clean seat.
 A reader should still treat `unknown` as an ordinary value (claude seats,
 failures), never assume tokens are present.
 

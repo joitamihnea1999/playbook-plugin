@@ -760,6 +760,34 @@ class StructuredUsageE2E(_E2EBase):
         self.assertFalse((self.agent / "tasks" / "042-demo" / "judge-grok.log").exists(),
                          "a structured error must not be saved as a review")
 
+    def test_single_nonzero_exit_streams_the_failure_text_not_raw_json(self):
+        # Round-2 panel (grok/sonnet): a real CLI failure must reach the operator
+        # as the formatted `(FAILED …)` text, journal `fail`, and save no log.
+        for backend, fx, log in (("codex", "CODEX_BAD", "judge-codex.log"), ("grok", "GROK_BAD", "judge-grok.log")):
+            with self.subTest(backend):
+                _c, recs, printed = self._single(backend, self._fixture(fx), rc=1)
+                self.assertEqual(recs[-1]["status"], "fail", recs)
+                self.assertIn("(FAILED", printed)
+                self.assertNotIn('"type":"turn.failed"', printed.split("[stdout tail]")[0])
+                self.assertFalse((self.agent / "tasks" / "042-demo" / log).exists())
+
+    def test_single_exit_0_empty_stdout_is_not_saved_as_a_review(self):
+        # Round-2 panel (opus): `(no output)` is a failure for judge_failed and
+        # must not be persisted as the review log.
+        _c, recs, _p = self._single("grok", "", rc=0)
+        self.assertEqual(recs[-1]["status"], "fail", recs)
+        self.assertFalse((self.agent / "tasks" / "042-demo" / "judge-grok.log").exists())
+
+    def test_single_grok_timeout_salvages_the_raw_fragment_documented(self):
+        # Round-2 panel (opus): the accepted grok regression, pinned — json mode
+        # emits one object at the end, so a killed grok seat leaves a fragment.
+        _c, recs, _p = self._single("grok", "", timeout_partial='{"text": "cut')
+        self.assertEqual(recs[-1]["status"], "timeout")
+        self.assertEqual(recs[-1]["usage"], {"status": "unknown"})
+        plog = self.agent / "tasks" / "042-demo" / "judge-grok.partial.log"
+        self.assertTrue(plog.exists())
+        self.assertIn('{"text": "cut', plog.read_text(encoding="utf-8"))
+
     def test_single_codex_timeout_salvages_prose_not_frames(self):
         partial = "\n".join(self._fixture("CODEX_OK").splitlines()[:3]) + "\n"
         _calls, recs, _printed = self._single("codex", "", timeout_partial=partial)

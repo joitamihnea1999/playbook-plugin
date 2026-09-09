@@ -120,6 +120,7 @@ def extract_codex(raw: str, *, lenient_tail: bool = False) -> "Optional[tuple[st
     if events is None:
         return None
     text, usage, errors = "", None, []
+    completed = False
     for ev in events:
         t = ev.get("type")
         if t == "item.completed":
@@ -127,9 +128,11 @@ def extract_codex(raw: str, *, lenient_tail: bool = False) -> "Optional[tuple[st
             if isinstance(item, dict):
                 if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                     text = item["text"]
-                elif item.get("type") == "error" and isinstance(item.get("message"), str):
-                    errors.append(item["message"])
+                # item-level `error` items are DIAGNOSTICS (codex emits non-fatal
+                # app-server-lag notices before a good message — round 2); only
+                # `error` / `turn.failed` EVENTS are fatal.
         elif t == "turn.completed":
+            completed = True
             usage = _usage_from_obj(ev.get("usage"))   # last wins, None if invalid
         elif t == "error" and isinstance(ev.get("message"), str):
             errors.append(ev["message"])
@@ -137,6 +140,11 @@ def extract_codex(raw: str, *, lenient_tail: bool = False) -> "Optional[tuple[st
             err = ev.get("error")
             if isinstance(err, dict) and isinstance(err.get("message"), str):
                 errors.append(err["message"])
+    if not completed and not errors and not lenient_tail:
+        # A complete prefix that never reached turn.completed is not a finished
+        # review (round 2, codex-medium); the salvage path (lenient_tail) is
+        # exactly the place this shape is legitimate.
+        errors.append("incomplete codex event stream: no turn.completed")
     return text, usage, errors
 
 
@@ -152,8 +160,12 @@ def extract_grok(raw: str) -> "Optional[tuple[str, Optional[dict], list[str]]]":
         return "", None, [msg if isinstance(msg, str) else json.dumps(obj)[:500]]
     text = obj.get("text")
     if not isinstance(text, str):
-        return None          # some other JSON object — not grok's envelope (verbatim)
-    return text, _usage_from_obj(obj.get("usage")), []
+        return None          # some other JSON object — not grok's envelope
+    errors = []
+    stop = obj.get("stopReason")
+    if isinstance(stop, str) and stop != "end_turn":
+        errors.append(f"grok stopped: {stop}")   # max_tokens / refusal / cancelled … (round 2)
+    return text, _usage_from_obj(obj.get("usage")), errors
 
 
 def parse_usage(raw) -> Optional[dict]:
@@ -182,12 +194,13 @@ def judge_output_from_result(result, extract, format_judge_output) -> JudgeOutpu
                    usage frame, if the CLI emitted one before failing, is still
                    recorded: the tokens were spent.
       * empty    → `(no output)` (the T139 rule, via format_judge_output).
-      * stdout is NOT the structured envelope and not a detected protocol stream
-                   (a CLI that ignored the flag, plain prose) → returned verbatim,
-                   usage None — legacy behaviour.
-      * a codex protocol stream the strict parser REJECTS (one non-JSON line, a
-                   truncated frame on exit 0) → `(FAILED — malformed …)`: frames are
-                   never handed out as a "review".
+      * stdout is genuinely NON-JSON prose (a CLI that ignored the flag) →
+                   returned verbatim, usage None — legacy behaviour.
+      * JSON-looking stdout that is not the recognized envelope (a truncated
+                   object, another schema, a codex protocol stream with a stray
+                   line or a missing terminal `turn.completed`) → `(FAILED — …)`:
+                   structured output was requested, so garbage never becomes a
+                   "review" (round 2).
       * recognized envelope WITH error events → `(FAILED — …reported an error: …)`
                    even when a message text exists (kept after the marker as a
                    diagnostic); usage carried.
@@ -206,9 +219,15 @@ def judge_output_from_result(result, extract, format_judge_output) -> JudgeOutpu
     if not raw.strip():
         return JudgeOutput(format_judge_output(result))          # "(no output)"
     if got is None:
-        if extract is extract_codex and codex_protocol_detected(raw):
-            return JudgeOutput("(FAILED — malformed structured judge output: the codex "
-                               "event stream did not parse; nothing usable was returned)")
+        head = raw.lstrip()[:1]
+        if head in ("{", "[") or (extract is extract_codex and codex_protocol_detected(raw)):
+            # Structured output was REQUESTED: JSON-looking stdout that is not the
+            # recognized envelope (truncated object, a different schema, a stray
+            # line inside the event stream) fails closed — never a verbatim
+            # "review" (round 2, convergent). Only genuinely non-JSON prose
+            # (a CLI that ignored the flag) keeps the verbatim legacy path.
+            return JudgeOutput("(FAILED — malformed or unrecognized structured judge output: "
+                               f"{raw.strip()[:300]!r})")
         return JudgeOutput(format_judge_output(result))          # verbatim prose
     text, _usage, errors = got
     detail = ("; ".join(e.strip() for e in errors if e.strip()))[:800]
