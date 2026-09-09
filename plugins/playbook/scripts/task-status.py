@@ -49,24 +49,23 @@ def main(argv: "list[str]") -> int:
         return 1
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
-        from tasks.core import (_extract_status, _freehand_release_allowed,
-                                _live_gate_state, _physical_lines)
+        from tasks.core import (_freehand_release_allowed, _live_gate_state,
+                                _physical_lines, _status_from_lines)
     except Exception as exc:  # noqa: BLE001 — any import failure is "unreadable"
         print(f"task-status: cannot import tasks.core: {exc}", file=sys.stderr)
         return 1
-    status = _extract_status(task_file)
-    if status == "error":
-        print("task-status: could not read the task file", file=sys.stderr)
+    # ONE read: every field below derives from this single snapshot, so a
+    # concurrent atomic rewrite can never pair an old status with the new file's
+    # gates (round-2 panel). Physical `\n` lines only (never splitlines():
+    # U+0085/U+2028 must not mint a line the hook's grep fallback cannot see, nor
+    # a fake `## Status` pair).
+    try:
+        lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001 — unreadable file → non-zero, hook fails closed
+        print(f"task-status: could not read the task file: {exc}", file=sys.stderr)
         return 1
-    out = [status]
+    out = [_status_from_lines(lines)]
     if fields:
-        try:
-            # Physical `\n` lines only (never splitlines(): U+0085/U+2028 must
-            # not mint a line the hook's grep fallback cannot see).
-            lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
-        except OSError as exc:
-            print(f"task-status: could not read the task file: {exc}", file=sys.stderr)
-            return 1
         unchecked, _total, first = _live_gate_state(lines)
         # The gate text is ONE physical line, so it cannot carry `\n`; any other
         # separator char stays inside the field, and a stray CR is dropped so the

@@ -3077,9 +3077,10 @@ def _status_from_lines(lines: "list[str]") -> str:
 
 def _extract_status(task_file: Path) -> str:
     """Extract status from task file (line after the LAST live ## Status —
-    fence-aware, fail closed; `_status_from_lines`)."""
+    fence-aware, fail closed; `_status_from_lines`). Physical `\\n` lines — the
+    same line model as the gate reader (task 055, round-2 panel)."""
     try:
-        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
         return _status_from_lines(lines)
     except Exception:
         return "error"
@@ -3174,7 +3175,7 @@ def _set_status(task_file: Path, value: str) -> bool:
     written) — callers that must not silently lose a state change check it.
     A fenced `## Status` example is never the target, so a decoy can neither be
     clobbered nor stand in for the real field."""
-    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"), keepends=True)
     pair = _live_status_pair(lines)
     if pair is None:
         return False
@@ -3241,7 +3242,7 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
     # V7 (task 043, opus #2): status and reason must land TOGETHER or not at all.
     # Build the whole new file in memory, check the invariants on the candidate,
     # then write once — a refused block leaves task.md byte-identical.
-    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
     pair = _live_status_pair(lines)
     if pair is None:
         raise ValueError(
@@ -3286,7 +3287,7 @@ def resume_blocked_task(task_file: Path) -> None:
             "to resume a blocked task whose status could not be written; fix the "
             "heading/fence first, nothing was changed")
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
-    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
     # Fence-aware (P1): stamp only the LIVE ## Blocked section, never a fenced
     # `## Blocked` example. The stamp lands at the end of the section's body (right
     # before the next live H2 / EOF), byte-identical to the pre-fix placement.
@@ -3692,16 +3693,25 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
 _GATE_LINE_RE = re.compile(r"^[ \t]*- \[([ xX])\]")
 
 
-def _physical_lines(text: str) -> "list[str]":
+def _physical_lines(text: str, *, keepends: bool = False) -> "list[str]":
     """Split on PHYSICAL `\\n` only — never `str.splitlines()`, which also breaks
     on U+0085 / U+2028 / VT / FF (round-1 panel, codex). The hooks' no-python
     grep fallback sees newline-delimited lines; the Python reader must count the
     same lines or the fallback could UNDER-count (`prose\\x85- [ ] x` is one
-    physical line — zero gates — for grep). A trailing newline yields no phantom
-    empty line; `\\r` stays on the line (the readers strip it themselves)."""
+    physical line — zero gates — for grep). The STATUS reader and its writers
+    share this line model (round-2 panel): with `splitlines()` a
+    `prose\\x85## Status\\x85blocked` line minted a fake live pair that released
+    the stop-hook, and a writer's `join("\\n")` turned the `\\x85` into a real
+    newline. A trailing newline yields no phantom empty line; `\\r` stays on the
+    line (the readers strip it themselves). ``keepends`` keeps the `\\n` on each
+    line for a writer that re-joins with `""`."""
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
+    if keepends:
+        n = len(lines)
+        ends_with_nl = text.endswith("\n")
+        lines = [ln + "\n" if (i < n - 1 or ends_with_nl) else ln for i, ln in enumerate(lines)]
     return lines
 
 

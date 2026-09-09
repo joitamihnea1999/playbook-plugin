@@ -122,6 +122,10 @@ CASES = [
      "prose\u0085- [ ] x\n- [x] a\n", False),
     ("U+2028 / VT / FF are NOT line boundaries either",
      "p\u2028- [ ] x\x0b- [ ] y\x0c- [ ] z\n- [x] a\n", False),
+    # Round-2 panel (opus): all gates checked but an empty required field remains —
+    # no GATE is open (all readers agree), the head reports the field (documented extra).
+    ("all checked + empty required field: no open gate, head shows the field",
+     "- **Owner**:\n- [x] a\n", False),
 ]
 
 
@@ -136,29 +140,37 @@ class GateParserParity(unittest.TestCase):
                 checked, total = _gate_counts(content)
                 progress_open = total > checked
                 head = _extract_head_position(tf)
-                head_open = not head.startswith("(")
+                # head_open = "the head is an open GATE". An empty required field
+                # (`- **Field**:`) is the head's one documented extra — it is not
+                # a gate, so it does not count as open here; pinned below.
+                head_is_field = head.startswith("- **")
+                head_open = not head.startswith("(") and not head_is_field
+                if head_is_field:
+                    self.assertTrue(head.endswith(":"), f"head field shape: {label}")
                 _status, hook_count, hook_first, _release = hook_fields(tf)
                 hook_open = hook_count > 0
                 cli_unchecked, cli_total, cli_first = _live_gate_state(_physical_lines(content))
 
                 self.assertEqual(progress_open, expect_open, f"progress: {label}")
-                self.assertEqual(head_open, expect_open, f"head: {label}")
                 self.assertEqual(hook_open, expect_open, f"stop-hook: {label}")
-                # The property itself: all three identical.
-                self.assertEqual({progress_open, head_open, hook_open}, {expect_open},
-                                 f"consumers disagree: {label}")
+                if head_is_field:
+                    # The head stopped EARLY at a required field: it says nothing
+                    # about gates; the count and the hook still carry the truth.
+                    self.assertEqual(progress_open, hook_open, f"count vs hook: {label}")
+                else:
+                    self.assertEqual(head_open, expect_open, f"head: {label}")
+                    # The property itself: all three identical.
+                    self.assertEqual({progress_open, head_open, hook_open}, {expect_open},
+                                     f"consumers disagree: {label}")
                 # The hook's count and FIRST_GATE ARE the CLI's (`_live_gate_state`,
                 # same function, same fixture). `tasks status`'s head position takes
                 # its gate from the same scan but may stop EARLIER at an empty
                 # required field (`- **Field**:`) — the one documented difference.
                 self.assertEqual(hook_count, total - checked, f"hook count != CLI count: {label}")
                 self.assertEqual((hook_count, hook_first), (cli_unchecked, cli_first), f"hook != CLI: {label}")
-                if expect_open:
-                    if head.startswith("- **"):
-                        self.assertTrue(head.endswith(":"), f"head field shape: {label}")
-                    else:
-                        self.assertEqual(head, hook_first, f"head != hook first gate: {label}")
-                else:
+                if expect_open and not head_is_field:
+                    self.assertEqual(head, hook_first, f"head != hook first gate: {label}")
+                if not expect_open:
                     self.assertEqual(hook_first, "", f"no open gate → empty first: {label}")
                 # The no-python fallback may only OVER-count (fail closed).
                 self.assertGreaterEqual(grep_fallback_unchecked(tf), hook_count,

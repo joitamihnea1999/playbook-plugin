@@ -839,6 +839,73 @@ class BlockedEndToEnd(unittest.TestCase):
         r = self._run_gate_hook("012")
         self.assertEqual(r.returncode, 0, f"fenced done example blocked an active task: {r.stderr}")
 
+    def test_unicode_separator_cannot_mint_a_status_or_hide_a_gate(self):
+        """Round-2 panel (task 055, convergent): the status reader used
+        `splitlines()` while the gate reader splits on physical `\\n`, so
+        `prose\\x85## Status\\x85blocked` minted a fake live pair (U+0085 is a
+        line boundary for splitlines, not for grep or the gate reader) → the
+        hook released with an open gate; `## Status\\x85done` made F3 read done.
+        One line model for status AND gates: physical `\\n` only."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        body = ("# 012 - Decide\n\n## Status\npending\n\nprose\u0085## Status\u0085blocked\n\n"
+                "## Work Plan\n- [ ] G2: real work left\n")
+        self.task_file.write_text(body, encoding="utf-8")
+        self.assertEqual(_extract_status(self.task_file), "pending")
+        self._set_counters()
+        r = self.run_stop_hook()
+        self.assertEqual(r.returncode, 2, f"U+0085-minted status released the stop: {r.stderr}")
+        # F3: a U+0085-joined `## Status\x85done` is one physical line, not a done pair.
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\u0085done\n\n## Status\npending\n\n## Work Plan\n- [ ] G1\n",
+            encoding="utf-8")
+        self.assertEqual(_extract_status(self.task_file), "pending")
+        self.assertEqual(self._run_gate_hook("012").returncode, 0)
+        # Writers share the line model: a `\x85` byte inside a line survives a
+        # status write byte-for-byte (splitlines()+join would turn it into `\n`).
+        core = __import__("tasks.core", fromlist=["_set_status"])
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\nnote a\u0085note b\n\n## Work Plan\n- [ ] G1\n",
+            encoding="utf-8")
+        self.assertTrue(core._set_status(self.task_file, "blocked"))
+        self.assertIn("note a\u0085note b\n", self.task_file.read_text(encoding="utf-8"))
+        core.set_task_blocked(self.task_file, "pause")
+        self.assertIn("note a\u0085note b\n", self.task_file.read_text(encoding="utf-8"))
+
+    def test_fields_frame_is_one_snapshot(self):
+        """Round-2 panel (codex medium): `--fields` must derive all four fields
+        from ONE read of task.md, or a concurrent atomic rewrite between two
+        reads can pair an old `blocked` with the new file's gates."""
+        import re
+        src = (SCRIPTS / "task-status.py").read_text(encoding="utf-8")
+        body = src[src.index("def main"):]
+        self.assertEqual(len(re.findall(r"read_text\(", body)), 1,
+                         "task-status.py must read the task file exactly once")
+        self.assertNotIn("_extract_status(task_file)", body,
+                         "status must come from the same lines as the gates")
+
+    def test_work_done_count_is_fence_aware_at_the_command_level(self):
+        """Round-2 panel (codex high): lifecycle's close count (`_gate_counts`)
+        is exercised through the real `tasks work done` command — a fenced
+        `- [ ] example` must not trip the line-anchored refusal; a REAL open
+        gate must."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n## Work Plan\n"
+            "- [x] G1\n- [ ] G2: real work left\n", encoding="utf-8")
+        r = self.run_tasks("work", "done")
+        self.assertNotEqual(r.returncode, 0)
+        # The head-position bounce fires first; the line-anchored count is its
+        # belt. Either refusal names the open gate.
+        self.assertIn("open gate", r.stderr)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n## Work Plan\n"
+            "- [x] G1\n- [x] G2\n\n## Docs\n```\n- [ ] <describe the gate>\n```\n", encoding="utf-8")
+        r = self.run_tasks("work", "done")
+        self.assertNotIn("line-anchored count", r.stderr,
+                         f"a fenced example tripped the close count: {r.stderr}")
+        self.assertNotIn("open gate(s)", r.stderr,
+                         f"a fenced example tripped the head-position bounce: {r.stderr}")
+
     FENCED_ONLY_STATUS = ("# 012 - Decide\n\n```\n## Status\npending\n```\n\n"
                           "## Work Plan\n- [ ] open gate\n")
 

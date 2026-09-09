@@ -530,7 +530,7 @@
           "boundary": "unit",
           "negative_control": null,
           "limitations": [
-            "Runs task-gate-hook's F3 awk program — EXTRACTED from the live hook source at test time (StatusFenceAware.test_f3_awk_is_extracted_from_the_hook_not_copied fails loud if the extraction breaks) — on files written by _set_status AND by set_task_blocked directly (blank-padded, `## Status ##`, `##\\tStatus`, indented, canonical inputs): awk and Python read the same token. Skips if awk is absent."
+            "Files written by _set_status AND by set_task_blocked directly (blank-padded, `## Status ##`, `##\\tStatus`, indented, canonical inputs) read the same token through scripts/task-status.py — the reader task-gate-hook's F3 now calls (task 055) — and land in the canonical `## Status\\n<value>` layout."
           ]
         },
         {
@@ -540,7 +540,7 @@
           "boundary": "unit",
           "negative_control": null,
           "limitations": [
-            "Pins that the parity test's awk is the hook's own program (extracted, not a copy) and reads the canonical layout."
+            "Pins that task-gate-hook contains no status awk and calls `python3 \"$HOOK_DIR/task-status.py\" \"$RESOLVED\"`, and that the script reads the canonical layout. Source-level pin plus one control read; the behavioural proofs are the two F3 e2e tests."
           ]
         },
         {
@@ -7605,7 +7605,7 @@
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
         "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
         "Task 043 (V7): the status read depends on python3 >= 3.10 being on PATH (already required by task-gate-hook and the CLI); its absence makes a genuinely blocked task unable to end the turn via the blocked release (the one-shot stop_hook_active valve still ends a re-issued stop). Cost: one python spawn per Stop event (~30 ms import of tasks.core), not on the per-tool PreToolUse path. Task 055: the same spawn now also carries the gate count and first gate (`--fields`, 4 LF-only lines: status, count, first gate, `release`/`hold`; a partial, non-numeric or unknown-valued frame is unreadable → fail closed); still one spawn per Stop event, not on the per-tool path.",
-        "Task 043 round-5 panel (codex): the stop-hook's GATE discovery is fence-blind — the unchecked count (`grep -cE '^[[:space:]]*- \\[ \\]'`) and FIRST_GATE (`grep -m1`) read fenced lines as live, so a fenced `- [ ] Freehand example` quoted BEFORE a real open gate becomes FIRST_GATE and the `Freehand*` arm allows the stop with unfinished work (reproduced by the judge). Pre-existing, out of 043's scope (the `## Status` field): the gate grep is pinned equal to Python's `_gate_counts` regex by tests/test_gate_parser_parity.py (STOP_HOOK_GREP) and shared with gate-batch-check.py and task-gate-hook's batch guard, so a fence-aware fix is a lockstep hook ↔ Python ↔ parity-test change of its own — PARKED in task 043 with a spec (extend scripts/task-status.py into a one-spawn task-state reader: status + live unchecked count + first live gate), disclosed here until it ships."
+        "CLOSED in task 055 (043 round-5 panel vector): gate discovery no longer greps — status, live unchecked count, first live gate and the Freehand waiver come from ONE python spawn (`task-status.py --fields` → core._status_from_lines / _live_gate_state / _freehand_release_allowed over ONE read of the file, physical `\\n` lines only). The 055 impl panels (rounds 1-2) then closed: a blank-text first gate hiding a later Freehand gate, unclosed-fenced and indented Freehand decoys (the waiver is decided in Python: Freehand-prefixed, not `Freehand log`, indent < 4, no unclosed fence), `splitlines()` vs grep on U+0085/U+2028 (physical lines for gates AND the status reader/writers — a `prose\\x85## Status\\x85blocked` line can no longer mint a status), and a two-read snapshot in `--fields`. RESIDUAL, disclosed: when the reader cannot run the grep fallback counts fence-blind (over-counts only) and never releases; the other task.md scanners (risk, section spans, handoff, receipts, compact) still use `splitlines()` — not on the stop/F3 release path, parked as an engine-wide line-model vector alongside the HTML-comment item."
       ],
       "follow_up_phases": [
         8

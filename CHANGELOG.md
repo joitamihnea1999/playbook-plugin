@@ -54,7 +54,9 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   so hook and CLI cannot disagree by construction — pinned by `tests/test_gate_parser_parity.py`
   on a fenced-decoy table (closed ```/`~~~` decoys hidden; an UNCLOSED fence hides nothing so
   real gates stay counted; a nested `    - [ ] gate` after a blank line stays a gate; lines are
-  physical `\n` lines only, as grep sees them). `tasks status`'s head position takes its gate
+  physical `\n` lines only, as grep sees them — and so is the `## Status` reader with its
+  writers, so a U+0085-joined `prose\x85## Status\x85blocked` can no longer mint a status;
+  `--fields` derives every field from one read). `tasks status`'s head position takes its gate
   from the same scan and may only stop EARLIER, at an empty `- **Field**:` line. The grep
   survives only as the no-python fallback and is fail closed there (it can only over-count;
   the Freehand release is disabled). Cost: one ~20-30 ms python spawn per gated code edit
