@@ -111,8 +111,12 @@ fi
 # on the agent — let the turn end without a fabricated checkbox. Keyed on the
 # status marker (the line after `## Status`), NOT on gate text, so it can't
 # inherit the freehand bypass's first-unchecked-gate fragility.
-# The status, the live unchecked-gate count and the first live unchecked gate
-# are read by ONE spawn of scripts/task-status.py --fields, which calls the SAME
+# The status, the live unchecked-gate count, the first live unchecked gate and
+# the Freehand release decision (`release`/`hold`, core._freehand_release_allowed:
+# first live gate is `Freehand…` but not `Freehand log`, at indent < 4, and the
+# file has no unclosed fence — round-1 panel: the hook's own prefix test on the
+# gate text released on a blank-first-gate, an unclosed-fenced or an indented
+# decoy) are read by ONE spawn of scripts/task-status.py --fields, which calls the SAME
 # readers the CLI uses (core.py::_extract_status — LAST live `## Status` wins,
 # fence-aware, fail closed on an unclosed fence; core.py::_live_gate_state —
 # fence-aware line-anchored gates, an unclosed fence hides nothing). Until task
@@ -131,10 +135,12 @@ PB_STATE_READ=true
 STATUS_LINE=""
 UNCHECKED=""
 FIRST_GATE=""
+PB_RELEASE=""
 {
     IFS= read -r STATUS_LINE || PB_STATE_READ=false
     IFS= read -r UNCHECKED   || PB_STATE_READ=false
     IFS= read -r FIRST_GATE  || PB_STATE_READ=false
+    IFS= read -r PB_RELEASE  || PB_STATE_READ=false
 } < <(python3 "$HOOK_DIR/task-status.py" --fields "$TASK_FILE" 2>/dev/null) || PB_STATE_READ=false
 # A CRLF-translating python3 (native Windows) leaves `blocked\r` in the
 # fields; drop one trailing CR per field so the exact matches below hold (same
@@ -142,12 +148,18 @@ FIRST_GATE=""
 STATUS_LINE=${STATUS_LINE%$'\r'}
 UNCHECKED=${UNCHECKED%$'\r'}
 FIRST_GATE=${FIRST_GATE%$'\r'}
+PB_RELEASE=${PB_RELEASE%$'\r'}
 case "$UNCHECKED" in
     ''|*[!0-9]*) PB_STATE_READ=false ;;   # a partial/garbled frame is unreadable, not "0 gates"
+esac
+case "$PB_RELEASE" in
+    release|hold) ;;
+    *) PB_STATE_READ=false ;;              # an unknown 4th field is unreadable, never "release"
 esac
 if [ "$PB_STATE_READ" != true ]; then
     echo "[stop-hook] WARNING: could not read the task state via python3 ($HOOK_DIR/task-status.py --fields) — treating the status as unreadable, counting gates fence-blind (over-counts, never releases) and disabling the Freehand release" >&2
     STATUS_LINE=""
+    PB_RELEASE="hold"
     # Count unchecked gates (only real gates at line start, not inside blockquotes)
     UNCHECKED=$(grep -cE '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null) || UNCHECKED=0
     FIRST_GATE=$(grep -m1 -E '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null | sed 's/^[[:space:]]*- \[ \] *//')
@@ -175,22 +187,20 @@ if [ -f "$COUNTER_FILE" ]; then
     fi
 fi
 
-# Freehand mode: don't block when the FIRST LIVE unchecked gate's text starts
-# with "Freehand" — covers "Freehand", "Freehand — work is done", "Freehand
-# debrief — ...", and discussion-style variants observed in real task.md files.
-# The single exception is "Freehand log" (cleanup gate at cli.py:1620), which
-# must still block so its work runs before close. Only when the gate came from
-# the Python reader: a grep-derived first gate may be a fenced decoy.
-# Pattern stays in lockstep with scripts/state-echo-hook and src/provider/codex_hooks.py.
-if [ "$PB_STATE_READ" = true ]; then
-    case "$FIRST_GATE" in
-        "Freehand log"|"Freehand log"[!a-zA-Z0-9_]*)
-            : # cleanup gate — keep blocking
-            ;;
-        Freehand*)
-            exit 0
-            ;;
-    esac
+# Freehand mode: don't block when the Python reader says the block may be
+# waived — its rule: the FIRST LIVE unchecked gate's text starts with "Freehand"
+# (covers "Freehand", "Freehand — work is done", "Freehand debrief — ...", and
+# discussion-style variants observed in real task.md files; the single exception
+# is "Freehand log", the cleanup gate at cli.py:1620, which must still block so
+# its work runs before close), that gate sits at indent < 4 columns, and the
+# file has no unclosed fence. The decision is `core._freehand_release_allowed`,
+# never re-derived here from FIRST_GATE (round-1 panel: a bash prefix test on
+# the gate text released on decoys the count correctly kept live). Only when the
+# frame came from the Python reader — the grep fallback always holds.
+# scripts/state-echo-hook and provider/codex_hooks.py keep their own (advisory /
+# experimental) Freehand pattern — disclosed in the ledger, not lockstep.
+if [ "$PB_STATE_READ" = true ] && [ "$PB_RELEASE" = release ]; then
+    exit 0
 fi
 
 journal_enforcement "$PB_JOURNAL_DIR" stop block "unchecked gates" "$SESSION_ID"

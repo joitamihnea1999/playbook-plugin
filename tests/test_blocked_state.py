@@ -761,6 +761,23 @@ class BlockedEndToEnd(unittest.TestCase):
             encoding="utf-8")
         self._set_counters()
         self.assertEqual(self.run_stop_hook().returncode, 0)
+        # Round-1 panel (task 055): three more decoys that the COUNT keeps live
+        # but the Freehand RELEASE must not act on — decided in Python now.
+        decoys = {
+            "blank first gate then Freehand (sentinel bug)":
+                "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [ ]\n- [ ] Freehand — work is done\n",
+            "UNCLOSED-fenced Freehand example before real work":
+                "# 012 - Decide\n\n## Status\npending\n\n## Docs\n```\n- [ ] Freehand — example\n"
+                "## Work Plan\n- [ ] G2: real work left\n",
+            "indented Freehand example before real work":
+                "# 012 - Decide\n\n## Status\npending\n\n## Docs\n\n    - [ ] Freehand — example\n\n"
+                "## Work Plan\n- [ ] G2: real work left\n",
+        }
+        for name, body in decoys.items():
+            self.task_file.write_text(body, encoding="utf-8")
+            self._set_counters()
+            r = self.run_stop_hook()
+            self.assertEqual(r.returncode, 2, f"{name}: released the stop: {r.stderr}")
 
     def test_gate_discovery_fails_closed_without_python(self):
         """No python → the hook cannot read the live view. The grep fallback may
@@ -915,12 +932,12 @@ class BlockedEndToEnd(unittest.TestCase):
             encoding="utf-8")
         self._set_counters()
         shim = Path(tempfile.mkdtemp())
-        # The shim answers the `--fields` state read (status, count, first gate)
-        # with CRLF on every line and lets every other python3 call (the
-        # stop_hook_active JSON parse) fall through to the real one.
+        # The shim answers the `--fields` state read (status, count, first gate,
+        # freehand release) with CRLF on every line and lets every other python3
+        # call (the stop_hook_active JSON parse) fall through to the real one.
         real = sys.executable.replace("\\", "/")
         (shim / "python3").write_text(
-            "#!/bin/sh\ncase \"$2\" in *task-status.py) printf 'blocked\\r\\n1\\r\\nopen gate\\r\\n'; exit 0;; esac\n"
+            "#!/bin/sh\ncase \"$2\" in *task-status.py) printf 'blocked\\r\\n1\\r\\nopen gate\\r\\nhold\\r\\n'; exit 0;; esac\n"
             f"exec \"{real}\" \"$@\"\n", encoding="utf-8")
         os.chmod(shim / "python3", 0o755)
         env = self._env()

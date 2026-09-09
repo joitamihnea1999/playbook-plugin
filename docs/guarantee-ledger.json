@@ -674,7 +674,7 @@
     {
       "id": "PB-TASK-FREEHAND",
       "category": "task-lifecycle",
-      "statement": "The freehand transition is recorded in an auditable timestamped freehand log entry that the log reader parses. The stop-hook's Freehand release inspects the FIRST LIVE unchecked gate as read by the CLI's own fence-aware gate reader (scripts/task-status.py --fields → core._live_gate_state), so a `- [ ] Freehand…` line quoted inside a closed code fence can never be the gate that releases the stop; when that reader cannot run the release is disabled (fail closed).",
+      "statement": "The freehand transition is recorded in an auditable timestamped freehand log entry that the log reader parses. The stop-hook's Freehand release is DECIDED in Python (core._freehand_release_allowed, shipped as the 4th `--fields` line): the first LIVE unchecked gate — read by the CLI's own fence-aware gate reader (core._live_gate_scan, physical `\\n` lines only) — starts with `Freehand` (not the `Freehand log` cleanup gate), sits at indent < 4 columns, and the file has no unclosed code fence; so a `- [ ] Freehand…` line quoted inside a closed or UNCLOSED fence, an indented example, or a later Freehand gate behind a blank-text first gate can never be the gate that releases the stop; when the reader cannot run the release is disabled (fail closed).",
       "owner": [
         {
           "path": "plugins/playbook/tasks/lifecycle.py",
@@ -686,7 +686,7 @@
         },
         {
           "path": "plugins/playbook/scripts/stop-hook",
-          "reference": "case-arm:Freehand*"
+          "reference": "whole-file"
         },
         {
           "path": "plugins/playbook/scripts/task-status.py",
@@ -695,6 +695,10 @@
         {
           "path": "plugins/playbook/tasks/core.py",
           "reference": "symbol:_live_gate_state"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:_freehand_release_allowed"
         }
       ],
       "failure_consequence": "High",
@@ -732,6 +736,16 @@
           "limitations": [
             "Property over a fenced-decoy fixture table: progress count == head position == the hook's `--fields` reader (count AND first-gate text), and the fence-blind grep fallback never under-counts."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_gate_parser_parity.py",
+          "reference": "GateParserParity.test_freehand_release_rule_is_the_hooks_fourth_field",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "15-case table: python rule == the hook's 4th field, incl. the blank-first-gate, unclosed-fence, indented, `Freehand log` and CRLF shapes."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -748,7 +762,7 @@
         "Live provider and non-Linux platform cells are absent.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
         "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
-        "CLOSED in task 055 (043 round-5 panel vector, codex): the stop-hook no longer discovers gates with `grep -c`/`grep -m1`; it reads status + live unchecked count + first live unchecked gate from ONE spawn of scripts/task-status.py --fields (core._live_gate_state — the same function behind `_gate_counts`/`_extract_head_position`/the lifecycle close count), so hook and CLI agree by construction and the parity test pins them on fenced decoy tables. Fence view is FENCE-ONLY: a CLOSED fence hides its `- [ ]` lines; an UNCLOSED fence hides nothing (its gates stay counted → the stop still blocks); indented-code tracking is OFF so a nested `    - [ ] gate` after a blank line stays a gate (it must never vanish from the count — that would release the stop). The grep survives only as the no-python fallback: fence-blind can only OVER-count, and the Freehand release is disabled there. STILL fence-blind, disclosed: scripts/state-echo-hook's advisory counts (display only, not enforcing — parked), scripts/gate-batch-check.py's GATE_RE (batch-tick guard: can only over-block), retro.py's per-section gate scan (analytics), provider/codex_hooks._scan_gates (experimental provider; cannot import tasks.*). HTML-comment blocks remain live regions for every scanner (engine-wide vector, parked in 043 — not picked up here)."
+        "CLOSED in task 055 (043 round-5 panel vector, codex): the stop-hook no longer discovers gates with `grep -c`/`grep -m1`; it reads status + live unchecked count + first live unchecked gate from ONE spawn of scripts/task-status.py --fields (core._live_gate_state — the same function behind `_gate_counts`/`_extract_head_position`/the lifecycle close count), so hook and CLI agree by construction and the parity test pins them on fenced decoy tables. Fence view is FENCE-ONLY: a CLOSED fence hides its `- [ ]` lines; an UNCLOSED fence hides nothing (its gates stay counted → the stop still blocks); indented-code tracking is OFF so a nested `    - [ ] gate` after a blank line stays a gate (it must never vanish from the count — that would release the stop). Round-1 impl panel (055) then found the RELEASE (not the count) still fail-open on three shapes the count correctly kept live — a blank-text first gate hiding a later Freehand gate (sentinel bug), an unclosed-fenced Freehand decoy, an indented Freehand example — so the release decision moved into Python (`_freehand_release_allowed`, the 4th `--fields` line; hold on any unclosed fence or indent >= 4), and the gate reader splits on physical `\\n` only (`_physical_lines`; `splitlines()` would count a `prose\\x85- [ ] x` line grep cannot see, breaking the fallback's over-count property). `_extract_head_position` takes its gate from the same scan (an NBSP-led marker is a gate for no reader); its one documented extra is stopping earlier at an empty `- **Field**:` line. The grep survives only as the no-python fallback: fence-blind can only OVER-count, and the Freehand release is disabled there. STILL fence-blind, disclosed: scripts/state-echo-hook's advisory counts (display only, not enforcing — parked), scripts/gate-batch-check.py's GATE_RE (batch-tick guard: can only over-block), retro.py's per-section gate scan (analytics), provider/codex_hooks._scan_gates (experimental provider; cannot import tasks.*). HTML-comment blocks remain live regions for every scanner (engine-wide vector, parked in 043 — not picked up here)."
       ],
       "follow_up_phases": [
         3,
@@ -7515,7 +7529,7 @@
     {
       "id": "PB-HOOK-STOP-CLOSE",
       "category": "risk-and-close",
-      "statement": "Stop enforcement blocks a first stop while task completion requirements remain, fails closed on an unknowable lane, and uses its one-shot valve to avoid permanently trapping the session. The blocked-task release reads `## Status`, and the gate count + first unchecked gate are read, through the CLI's own fence-aware Python readers in ONE spawn (scripts/task-status.py --fields → core._extract_status + core._live_gate_state), never an independent awk/grep rule; when that reader cannot run the status is unreadable, gates are counted by a fence-blind grep that can only over-count, and the Freehand release is disabled (fail closed, loud).",
+      "statement": "Stop enforcement blocks a first stop while task completion requirements remain, fails closed on an unknowable lane, and uses its one-shot valve to avoid permanently trapping the session. The blocked-task release reads `## Status`, and the gate count + first unchecked gate are read, through the CLI's own fence-aware Python readers in ONE spawn (scripts/task-status.py --fields → core._extract_status + core._live_gate_state + core._freehand_release_allowed as a 4-line frame), never an independent awk/grep rule — the Freehand waiver is decided in Python, not by a bash prefix test on the gate text; when that reader cannot run the status is unreadable, gates are counted by a fence-blind grep that can only over-count, and the Freehand release is disabled (fail closed, loud).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/stop-hook",
@@ -7590,7 +7604,7 @@
         "Real provider Stop/close semantics and capability gaps are unverified.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
         "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
-        "Task 043 (V7): the status read depends on python3 >= 3.10 being on PATH (already required by task-gate-hook and the CLI); its absence makes a genuinely blocked task unable to end the turn via the blocked release (the one-shot stop_hook_active valve still ends a re-issued stop). Cost: one python spawn per Stop event (~30 ms import of tasks.core), not on the per-tool PreToolUse path. Task 055: the same spawn now also carries the gate count and first gate (`--fields`, 3 LF-only lines; a partial or non-numeric frame is unreadable); still one spawn per Stop event, not on the per-tool path.",
+        "Task 043 (V7): the status read depends on python3 >= 3.10 being on PATH (already required by task-gate-hook and the CLI); its absence makes a genuinely blocked task unable to end the turn via the blocked release (the one-shot stop_hook_active valve still ends a re-issued stop). Cost: one python spawn per Stop event (~30 ms import of tasks.core), not on the per-tool PreToolUse path. Task 055: the same spawn now also carries the gate count and first gate (`--fields`, 4 LF-only lines: status, count, first gate, `release`/`hold`; a partial, non-numeric or unknown-valued frame is unreadable → fail closed); still one spawn per Stop event, not on the per-tool path.",
         "Task 043 round-5 panel (codex): the stop-hook's GATE discovery is fence-blind — the unchecked count (`grep -cE '^[[:space:]]*- \\[ \\]'`) and FIRST_GATE (`grep -m1`) read fenced lines as live, so a fenced `- [ ] Freehand example` quoted BEFORE a real open gate becomes FIRST_GATE and the `Freehand*` arm allows the stop with unfinished work (reproduced by the judge). Pre-existing, out of 043's scope (the `## Status` field): the gate grep is pinned equal to Python's `_gate_counts` regex by tests/test_gate_parser_parity.py (STOP_HOOK_GREP) and shared with gate-batch-check.py and task-gate-hook's batch guard, so a fence-aware fix is a lockstep hook ↔ Python ↔ parity-test change of its own — PARKED in task 043 with a spec (extend scripts/task-status.py into a one-spawn task-state reader: status + live unchecked count + first live gate), disclosed here until it ships."
       ],
       "follow_up_phases": [

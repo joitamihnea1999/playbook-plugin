@@ -3112,22 +3112,27 @@ def _extract_problem(task_file: Path) -> str:
 
 
 def _extract_head_position(task_file: Path) -> str:
-    """Find the first unchecked checkbox or empty required field (fence-aware
-    since task 055: a `- [ ]` quoted inside a CLOSED code fence is an example,
-    not the head — the same live view `_gate_counts` and the stop-hook use)."""
+    """Find the first unchecked checkbox or empty required field. The GATE comes
+    from the shared scan `_live_gate_scan` (task 055, round-1 panel: this used to
+    re-walk the file with `line.strip().startswith("- [ ]")`, so an NBSP-led
+    marker was a head-position gate but not a counted gate). The one documented
+    extra: an empty required field (`- **Field**:`) that sits BEFORE the first
+    live gate is reported instead — `tasks status` may therefore stop earlier
+    than the hook's first gate, never on a different gate."""
     try:
-        lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
+        unchecked, _total, first, first_index = _live_gate_scan(lines)
         fenced = _iter_fenced_flags(lines, unclosed_is_live=True, track_indented_code=False)
-        for i, line in enumerate(lines):
+        stop = first_index if first_index >= 0 else len(lines)
+        for i in range(stop):
             if fenced[i]:
                 continue
-            stripped = line.strip()
-            # Unchecked checkbox
-            if stripped.startswith("- [ ]"):
-                return stripped[6:].strip()  # text after "- [ ] "
+            stripped = lines[i].rstrip("\r").strip()
             # Empty required field (line ending with : and nothing after)
             if stripped.endswith(":") and stripped.startswith("- **"):
                 return stripped
+        if first_index >= 0:
+            return first
         return "(all gates checked)"
     except Exception:
         return "(error reading)"
@@ -3687,33 +3692,91 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
 _GATE_LINE_RE = re.compile(r"^[ \t]*- \[([ xX])\]")
 
 
-def _live_gate_state(lines: "list[str]") -> "tuple[int, int, str]":
-    """Return ``(unchecked, total, first_unchecked_text)`` over the LIVE lines of
-    a task.md — the ONE gate reader behind `_gate_counts`, `_extract_progress`,
-    the lifecycle close count and `scripts/task-status.py --fields` (the stop-hook
-    and task-gate-hook). `first_unchecked_text` is the text after `- [ ] ` of the
-    first live unchecked gate (whitespace-trimmed; `""` when none), exactly what
-    the stop-hook's `Freehand*` release inspects."""
+def _physical_lines(text: str) -> "list[str]":
+    """Split on PHYSICAL `\\n` only — never `str.splitlines()`, which also breaks
+    on U+0085 / U+2028 / VT / FF (round-1 panel, codex). The hooks' no-python
+    grep fallback sees newline-delimited lines; the Python reader must count the
+    same lines or the fallback could UNDER-count (`prose\\x85- [ ] x` is one
+    physical line — zero gates — for grep). A trailing newline yields no phantom
+    empty line; `\\r` stays on the line (the readers strip it themselves)."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _live_gate_scan(lines: "list[str]") -> "tuple[int, int, str, int]":
+    """Return ``(unchecked, total, first_unchecked_text, first_unchecked_index)``
+    over the LIVE lines of a task.md — the ONE gate reader behind `_gate_counts`,
+    `_extract_progress`, `_extract_head_position`, the lifecycle close count,
+    `_freehand_release_allowed` and `scripts/task-status.py --fields` (the
+    stop-hook and task-gate-hook). `first_unchecked_text` is the text after
+    `- [ ]` of the first live unchecked gate (whitespace-trimmed; `""` when none
+    OR when that gate's text is blank — use `first_unchecked_index` (-1 = none)
+    to tell them apart: round-1 panel, a blank first gate must not let a later
+    `- [ ] Freehand…` gate masquerade as first)."""
     fenced = _iter_fenced_flags(lines, unclosed_is_live=True, track_indented_code=False)
     unchecked = total = 0
     first = ""
+    first_index = -1
     for i, line in enumerate(lines):
         if fenced[i]:
             continue
-        m = _GATE_LINE_RE.match(line.rstrip("\r\n"))
+        raw = line.rstrip("\r\n")
+        m = _GATE_LINE_RE.match(raw)
         if not m:
             continue
         total += 1
         if m.group(1) == " ":
             unchecked += 1
-            if not first:
-                first = line.rstrip("\r\n")[m.end():].strip()
+            if first_index < 0:
+                first_index = i
+                first = raw[m.end():].strip()
+    return unchecked, total, first, first_index
+
+
+def _live_gate_state(lines: "list[str]") -> "tuple[int, int, str]":
+    """``(unchecked, total, first_unchecked_text)`` — see `_live_gate_scan`."""
+    unchecked, total, first, _idx = _live_gate_scan(lines)
     return unchecked, total, first
+
+
+_FREEHAND_LOG_RE = re.compile(r"^Freehand log(?![A-Za-z0-9_])")
+
+
+def _freehand_release_allowed(lines: "list[str]") -> bool:
+    """The ONE Freehand-release rule for the stop-hook (task 055, round-1 panel),
+    shipped to it as the 4th `--fields` line so bash never re-derives it from the
+    first-gate text. True only when ALL hold:
+      * there is a live unchecked gate and the FIRST one's text starts with
+        `Freehand` — but not the cleanup gate `Freehand log…` (word boundary: the
+        hook's historical glob `"Freehand log"[!a-zA-Z0-9_]*`, so `Freehand
+        logging` still releases);
+      * that gate sits at indent < 4 columns (the template's Freehand gates are
+        column-0; a 4-column `    - [ ] Freehand example` is an indented-code
+        example the fence-only COUNT deliberately keeps live — fail closed for
+        the count, but it must not be the gate that RELEASES);
+      * the file has NO unclosed code fence: the count treats an unclosed
+        fence's lines as live (never hide a real gate), so an unclosed-fenced
+        `- [ ] Freehand example` is counted — and must not release either.
+    The count stays the authority for BLOCKING; this rule only ever says whether
+    a block may be waived, so every uncertainty resolves to `hold`."""
+    unchecked, _total, first, first_index = _live_gate_scan(lines)
+    if unchecked == 0 or first_index < 0:
+        return False
+    if not first.startswith("Freehand") or _FREEHAND_LOG_RE.match(first):
+        return False
+    raw = lines[first_index].lstrip("\ufeff").rstrip("\r\n")
+    if _indent_columns(raw) >= 4:
+        return False
+    if _has_unclosed_fence(lines):
+        return False
+    return True
 
 
 def _gate_counts(content: str) -> "tuple[int, int]":
     """Return (checked, total) line-anchored, fence-aware gate markers in `content`."""
-    unchecked, total, _first = _live_gate_state(content.splitlines())
+    unchecked, total, _first = _live_gate_state(_physical_lines(content))
     return total - unchecked, total
 
 

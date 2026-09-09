@@ -33,23 +33,29 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 PLUGIN = _HERE.parent / "plugins/playbook"
 sys.path.insert(0, str(PLUGIN))
-from tasks.core import _extract_head_position, _extract_progress, _gate_counts  # noqa: E402
+from tasks.core import (  # noqa: E402
+    _extract_head_position, _extract_progress, _freehand_release_allowed, _gate_counts,
+    _live_gate_state, _physical_lines,
+)
 
 TASK_STATUS = PLUGIN / "scripts" / "task-status.py"
 STOP_HOOK_GREP = r'^[[:space:]]*- \[ \]'   # the hook's NO-PYTHON fallback, copied verbatim
 
 
-def hook_fields(path: Path) -> "tuple[str, int, str]":
+def hook_fields(path: Path) -> "tuple[str, int, str, str]":
     """What the enforcing hooks read: `task-status.py --fields` → (status, live
-    unchecked count, first live unchecked gate text). Exactly the bytes the hook
-    consumes — LF-only, three lines."""
+    unchecked count, first live unchecked gate text, freehand `release`/`hold`).
+    Exactly the bytes the hook consumes — LF-only, four lines."""
     r = subprocess.run([sys.executable, str(TASK_STATUS), "--fields", str(path)],
                        capture_output=True)
     assert r.returncode == 0, r.stderr
     out = r.stdout.decode("utf-8")
     assert b"\r" not in r.stdout, "hook fields must be LF-only bytes"
-    status, count, first = out.split("\n", 3)[:3]
-    return status, int(count), first
+    parts = out.split("\n")
+    assert len(parts) == 5 and parts[4] == "", f"frame must be exactly 4 LF-terminated lines: {out!r}"
+    status, count, first, release = parts[:4]
+    assert release in ("release", "hold"), release
+    return status, int(count), first, release
 
 
 def hook_unchecked(path: Path) -> int:
@@ -105,6 +111,17 @@ CASES = [
     ("CRLF fenced example, all checked", "- [x] a\r\n```\r\n- [ ] ex\r\n```\r\n", False),
     ("NBSP after the closer does not close (V6) → unclosed → live",
      "```\n- [ ] live\n```\u00a0\n- [x] a\n", True),
+    # Round-1 panel (task 055)
+    ("blank-text first gate followed by a Freehand gate: the blank gate is FIRST",
+     "- [ ]\n- [ ] Freehand — work is done\n", True),
+    ("NBSP-leading marker is not a gate for ANY reader (sonnet/grok round 1)",
+     "- [x] a\n\u00a0- [ ] not a gate\n", False),
+    ("empty required field before a gate: head stops at the field, the gate is still the first gate",
+     "- **Owner**:\n- [ ] g\n", True),
+    ("U+0085 is NOT a line boundary — physical lines only, like grep (codex round 1)",
+     "prose\u0085- [ ] x\n- [x] a\n", False),
+    ("U+2028 / VT / FF are NOT line boundaries either",
+     "p\u2028- [ ] x\x0b- [ ] y\x0c- [ ] z\n- [x] a\n", False),
 ]
 
 
@@ -120,8 +137,9 @@ class GateParserParity(unittest.TestCase):
                 progress_open = total > checked
                 head = _extract_head_position(tf)
                 head_open = not head.startswith("(")
-                _status, hook_count, hook_first = hook_fields(tf)
+                _status, hook_count, hook_first, _release = hook_fields(tf)
                 hook_open = hook_count > 0
+                cli_unchecked, cli_total, cli_first = _live_gate_state(_physical_lines(content))
 
                 self.assertEqual(progress_open, expect_open, f"progress: {label}")
                 self.assertEqual(head_open, expect_open, f"head: {label}")
@@ -129,13 +147,59 @@ class GateParserParity(unittest.TestCase):
                 # The property itself: all three identical.
                 self.assertEqual({progress_open, head_open, hook_open}, {expect_open},
                                  f"consumers disagree: {label}")
-                # The hook's count IS the CLI's count, and its FIRST_GATE is the
-                # CLI's head position — same function, same fixture.
+                # The hook's count and FIRST_GATE ARE the CLI's (`_live_gate_state`,
+                # same function, same fixture). `tasks status`'s head position takes
+                # its gate from the same scan but may stop EARLIER at an empty
+                # required field (`- **Field**:`) — the one documented difference.
                 self.assertEqual(hook_count, total - checked, f"hook count != CLI count: {label}")
-                self.assertEqual(hook_first, head if expect_open else "", f"hook first gate: {label}")
+                self.assertEqual((hook_count, hook_first), (cli_unchecked, cli_first), f"hook != CLI: {label}")
+                if expect_open:
+                    if head.startswith("- **"):
+                        self.assertTrue(head.endswith(":"), f"head field shape: {label}")
+                    else:
+                        self.assertEqual(head, hook_first, f"head != hook first gate: {label}")
+                else:
+                    self.assertEqual(hook_first, "", f"no open gate → empty first: {label}")
                 # The no-python fallback may only OVER-count (fail closed).
                 self.assertGreaterEqual(grep_fallback_unchecked(tf), hook_count,
                                         f"grep fallback under-counted: {label}")
+
+    # (content, expect_release) — the ONE Freehand-release rule, decided in Python
+    # (`_freehand_release_allowed`) and shipped to the hook as the 4th field. The
+    # round-1 panel showed the hook's own `Freehand*` prefix test on the first-gate
+    # text released on decoys the COUNT correctly kept live.
+    RELEASE_CASES = [
+        ("real column-0 Freehand debrief gate", "## Debrief\n- [ ] Freehand — work is done\n", True),
+        ("bare Freehand", "- [ ] Freehand\n", True),
+        ("Freehand log is the cleanup gate — never released", "- [ ] Freehand log\n", False),
+        ("Freehand log with punctuation", "- [ ] Freehand log — flush\n", False),
+        ("Freehand logging (word continuation) IS released, like the hook's old glob",
+         "- [ ] Freehand logging\n", True),
+        ("no open gates → nothing to release", "- [x] Freehand\n", False),
+        ("blank first gate, Freehand second (sentinel bug)", "- [ ]\n- [ ] Freehand\n", False),
+        ("real gate first", "- [ ] work\n- [ ] Freehand\n", False),
+        ("closed-fenced Freehand decoy before a real gate", "```\n- [ ] Freehand\n```\n- [ ] work\n", False),
+        ("UNCLOSED-fenced Freehand decoy: counted (fail closed) but never released",
+         "```\n- [ ] Freehand\n- [ ] work\n", False),
+        ("unclosed fence ANYWHERE holds the release even for a real Freehand first gate",
+         "- [ ] Freehand\n```\nexample\n", False),
+        ("indented (4-space) Freehand example is counted but never released (grok round 1)",
+         "    - [ ] Freehand example\n- [ ] work\n", False),
+        ("tab-indented Freehand example: 4 columns → hold", "\t- [ ] Freehand\n", False),
+        ("1-3 space indent is still a live template gate", "   - [ ] Freehand\n", True),
+        ("CRLF real Freehand", "- [ ] Freehand — done\r\n", True),
+    ]
+
+    def test_freehand_release_rule_is_the_hooks_fourth_field(self):
+        for label, content, expect_release in self.RELEASE_CASES:
+            with self.subTest(label):
+                d = Path(tempfile.mkdtemp())
+                tf = d / "task.md"
+                tf.write_bytes(content.encode("utf-8"))
+                py = _freehand_release_allowed(_physical_lines(content))
+                self.assertEqual(py, expect_release, f"python rule: {label}")
+                _s, _c, _f, release = hook_fields(tf)
+                self.assertEqual(release == "release", expect_release, f"hook field: {label}")
 
     def test_reported_file_reports_71_71_not_71_74(self):
         d = Path(tempfile.mkdtemp())

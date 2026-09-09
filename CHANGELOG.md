@@ -47,11 +47,15 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   `- [ ] Freehand…` example quoted before a real open gate released the stop with work left.
   Now `core._live_gate_state` is the one gate reader (behind `_gate_counts`,
   `_extract_head_position`, the lifecycle close count and `tasks list`/`status` progress) and
-  `scripts/task-status.py --fields` returns status + live unchecked count + first live gate in
-  ONE spawn; the stop-hook consumes that frame and task-gate-hook's F3 calls the same script,
+  `scripts/task-status.py --fields` returns status + live unchecked count + first live gate +
+  the Freehand waiver (`release`/`hold`, decided by `core._freehand_release_allowed`: first live
+  gate is `Freehand…`, not `Freehand log`, indent < 4, no unclosed fence) in ONE spawn; the
+  stop-hook consumes that frame and task-gate-hook's F3 calls the same script,
   so hook and CLI cannot disagree by construction — pinned by `tests/test_gate_parser_parity.py`
   on a fenced-decoy table (closed ```/`~~~` decoys hidden; an UNCLOSED fence hides nothing so
-  real gates stay counted; a nested `    - [ ] gate` after a blank line stays a gate). The grep
+  real gates stay counted; a nested `    - [ ] gate` after a blank line stays a gate; lines are
+  physical `\n` lines only, as grep sees them). `tasks status`'s head position takes its gate
+  from the same scan and may only stop EARLIER, at an empty `- **Field**:` line. The grep
   survives only as the no-python fallback and is fail closed there (it can only over-count;
   the Freehand release is disabled). Cost: one ~20-30 ms python spawn per gated code edit
   (owner option (a) of 043's perf-vs-parity decision). Still fence-blind, disclosed in the
