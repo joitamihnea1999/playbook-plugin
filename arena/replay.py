@@ -34,14 +34,19 @@ _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parent                      # the playbook-plugin repo root
 _LIVE_SCRIPTS = _REPO / "plugins" / "playbook" / "scripts"
 _SCRIPTS_REL = "plugins/playbook/scripts"
+_PLUGIN_REL = "plugins/playbook"
 
 
 def _extract_baseline_scripts(ref: str, dest: Path) -> Path:
-    """Materialize plugins/playbook/scripts as of `ref` into dest; return its path.
-    Uses `git archive` (no worktree churn); the whole scripts/ dir comes along so
-    a hook's sourced gate-echo-lib.sh and sibling helpers resolve."""
+    """Materialize the WHOLE plugins/playbook tree as of `ref` into dest; return
+    its scripts/ path. Uses `git archive` (no worktree churn). The whole plugin
+    comes along — not only scripts/ — because the hooks call
+    scripts/task-status.py, which imports `tasks.core` from the plugin root
+    (task 043/055); with scripts/ alone the import fails and the fail-closed
+    task-gate-hook BLOCKS every code edit, which replayed as a false
+    `edit-code-with-active-task → BLOCK` delta on push (task 055)."""
     dest.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(["git", "archive", ref, "--", _SCRIPTS_REL],
+    proc = subprocess.run(["git", "archive", ref, "--", _PLUGIN_REL],
                           cwd=str(_REPO), capture_output=True)
     if proc.returncode != 0:
         raise RuntimeError(f"git archive {ref} failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
