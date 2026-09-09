@@ -132,44 +132,35 @@ def _judge_status(output, timed_out=False):
 
 
 def _parse_judge_usage(output_text):
-    """Best-effort token usage IF the judge output carries it — else None (the
-    caller then records `{"status":"unknown"}`). NEVER fabricates numbers.
+    """Token usage for the spend record — else None (the caller then records
+    `{"status":"unknown"}`). NEVER fabricates numbers.
 
-    The claude judge runs in PLAIN-TEXT mode (no `--output-format json`) and
-    codex/grok do not surface per-call tokens on this path, so this normally
-    returns None. It recognizes claude's REAL JSON usage shape
-    (`"usage":{"input_tokens":N,"output_tokens":N}`) should a future/other path
-    ever emit it — a real format, not an invented one.
+    Two sources, in order (task 056):
+      1. a usage CARRIED by the value itself — adapters return
+         `provider.usage.JudgeOutput` (a str subclass) whose `.usage` was parsed
+         from the CLI's structured stdout (codex `exec --json`, grok
+         `--output-format json`) before the review text was extracted; a plain
+         str (every legacy caller/test double, every timeout/error string) has
+         none;
+      2. the STRUCTURED-ENVELOPE parse of the text itself (`provider.usage.parse_usage`):
+         the whole output must be one JSON object carrying
+         `"usage":{"input_tokens":N,"output_tokens":N}` (grok json; claude's real
+         shape should a future path emit it) or codex JSONL with a `turn.completed`
+         usage frame. Free-form review prose never parses as either, so a judge
+         that merely QUOTES a usage-shaped string cannot poison the field
+         (impl-panel sonnet, task 042 — the bare substring search was self-poisoning).
 
-    ANCHORED to a structured envelope (impl-panel sonnet, task 042): the output
-    must PARSE AS A SINGLE JSON OBJECT carrying the usage shape. A bare substring
-    search over free-form judge prose was self-poisoning — a judge that merely
-    QUOTES a `"usage":{"input_tokens":…}` string (e.g. citing this task's own
-    test file) would have made us record ITS quote as real token spend,
-    fabricating a number. Free-form judge prose never parses as one JSON object,
-    so it can never trip this now."""
+    The claude judge runs in PLAIN-TEXT mode, so its seats stay `unknown` by design."""
+    carried = getattr(output_text, "usage", None)
+    if isinstance(carried, dict):
+        from provider.usage import _valid_known
+        if _valid_known(carried):
+            return {"status": "known", "in": carried["in"], "out": carried["out"]}
+        return None
     if not output_text:
         return None
-    s = output_text.strip()
-    if not (s.startswith("{") and s.endswith("}")):
-        return None
-    try:
-        obj = json.loads(s)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(obj, dict):
-        return None
-    usage = obj.get("usage")
-    if not isinstance(usage, dict):
-        return None
-    try:
-        _in = usage.get("input_tokens")
-        _out = usage.get("output_tokens")
-        if isinstance(_in, int) and isinstance(_out, int):
-            return {"status": "known", "in": _in, "out": _out}
-    except Exception:
-        return None
-    return None
+    from provider.usage import parse_usage
+    return parse_usage(output_text)
 
 
 def _next_review_round(project_path, task_file):
@@ -1129,7 +1120,10 @@ def cmd_panel_review(cmd_args):
             raw = getattr(expired, "stdout", None) or getattr(expired, "output", None) or ""
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", errors="replace")
-            raw = raw.strip()
+            # Structured judge stdout (codex `--json`) is protocol frames: salvage
+            # the completed message text, not the frames (task 056).
+            from provider.usage import salvage_text as _salvage
+            raw = _salvage(provider_name, raw.strip())
             marker = f"(timed out after hard {hard_timeout_label})"
             if raw:
                 return label, (
@@ -1917,7 +1911,8 @@ def cmd_single_review(cmd, cmd_args):
             raw = getattr(expired, "stdout", None) or getattr(expired, "output", None) or ""
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", errors="replace")
-            partial = raw.strip()
+            from provider.usage import salvage_text as _salvage
+            partial = _salvage(backend, raw.strip())   # codex frames → message text (task 056)
         saved_note = ""
         if partial:
             partial_log = task_file.parent / (
@@ -2069,6 +2064,7 @@ def cmd_single_review(cmd, cmd_args):
             "--ephemeral",
             "-C", str(project_path),
             "-o", str(codex_log),
+            "--json",   # JSONL events incl. turn.completed usage (task 056); `-o` still holds the final message
             "-",  # read prompt from stdin
         ]
 
@@ -2160,7 +2156,7 @@ def cmd_single_review(cmd, cmd_args):
         from provider.adapters.grok import GrokAdapter
         try:
             inv = GrokAdapter("judge", project_path).headless_argv(
-                prompt, model, context=system_context)
+                prompt, model, context=system_context, structured=True)   # json: text + usage (task 056)
         except ValueError as e:  # bad model:effort spec — fail pre-spawn
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -2296,6 +2292,29 @@ def cmd_single_review(cmd, cmd_args):
         _emit_tamper(_tamper_changes)
         sys.exit(1)
 
+    # Structured judge stdout (task 056): codex `--json` / grok `--output-format
+    # json` carry the real token usage. Extract ONCE here — before the operator
+    # stream, the budget/failure classifiers and the save block all read
+    # `result.stdout` — so every consumer sees the review PROSE, and the usage
+    # parsed from the ORIGINAL stdout rides into the spend record. Same rule as
+    # the adapters (`judge_output_from_result`): rc≠0 keeps its failure text; a
+    # recognized envelope with no review text becomes a FAILED result (never a
+    # saved review, never a clean seat); unrecognized stdout stays verbatim.
+    _spend_usage = None
+    if backend in ("codex", "grok"):
+        from provider.usage import extract_codex, extract_grok, judge_output_from_result
+        _jo = judge_output_from_result(
+            result, extract_codex if backend == "codex" else extract_grok,
+            _sandbox.format_judge_output)
+        _spend_usage = _jo.usage
+        if result.returncode == 0:
+            _rc = 1 if str(_jo).startswith("(error:") else 0
+            _text = str(_jo)
+            if _text and not _text.endswith("\n"):
+                _text += "\n"
+            result = subprocess.CompletedProcess(
+                getattr(result, "args", None), _rc, stdout=_text, stderr=result.stderr or "")
+
     # Clean tree: stream the judge's output for the operator (best-effort — a
     # closed sink must not crash a completed review).
     try:
@@ -2320,7 +2339,7 @@ def cmd_single_review(cmd, cmd_args):
         task=task_num, round_no=_spend_round,
         duration_ms=int((time.monotonic() - _spend_t0) * 1000),
         status=_judge_status(_sandbox.format_judge_output(result)),
-        usage=_parse_judge_usage(output))
+        usage=_spend_usage if _spend_usage is not None else _parse_judge_usage(output))
     # Budget exhaustion arrives as exit-0 stdout (task 012 L3): detect it
     # BEFORE saving so it never overwrites a prior good review, tell the
     # user how to raise the cap, and exit nonzero — it's not a review.

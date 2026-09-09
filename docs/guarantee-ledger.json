@@ -10166,7 +10166,7 @@
     {
       "id": "PB-REVIEW-SPEND-JOURNAL",
       "category": "judges-and-reviews",
-      "statement": "Every judge invocation the review runner makes — each panel seat, the single judge, and the tail-cert judge — appends, on its completion or timeout, one best-effort, log-only spend record to the lane-resolved .agent/<lane>/journal/enforcement.jsonl via pb_journal.append_review, sharing the enforcement envelope (hook=\"review\", decision=\"record\", reason=\"review spend\") plus the fields kind (panel|single|tail-cert), seat as model:effort, task, round, duration_ms, status (ok|fail|timeout|dnf), and usage. The one exception is a tamper hard-stop, which records nothing so the journal write can never precede and suppress the tamper banner. Token usage is recorded only WHERE the CLI reports it as a structured JSON envelope, else the explicit marker {\"status\":\"unknown\"}, and append_review normalizes usage to the fixed {status[,in,out]} schema — numbers are never fabricated and free-form judge prose can never poison the field. A journal write failure never changes or breaks a review or any decision, every field is bounded (strings byte-capped with control chars stripped, numerics magnitude-capped) so REAL records are a single O_APPEND line well under PIPE_BUF — a best-effort bound, not absolute (a pathologically escape-heavy field could exceed it, accepted and harmless since the write affects no decision), and the journal is not written through a symlinked/FIFO path (skipped, not followed).",
+      "statement": "Every judge invocation the review runner makes — each panel seat, the single judge, and the tail-cert judge — appends, on its completion or timeout, one best-effort, log-only spend record to the lane-resolved .agent/<lane>/journal/enforcement.jsonl via pb_journal.append_review, sharing the enforcement envelope (hook=\"review\", decision=\"record\", reason=\"review spend\") plus the fields kind (panel|single|tail-cert), seat as model:effort, task, round, duration_ms, status (ok|fail|timeout|dnf), and usage. The one exception is a tamper hard-stop, which records nothing so the journal write can never precede and suppress the tamper banner. Token usage is recorded only WHERE the CLI reports it as a structured envelope — the codex judge path runs `exec --json` (last `turn.completed` usage) and the grok judge path `--output-format json` (`usage` object), the adapters returning the review prose as a str that CARRIES the parsed usage (provider.usage.JudgeOutput) so every journal site (panel seat, single, tail-cert) records the CLI's own input_tokens/output_tokens as reported; claude seats and every timeout/spawn-error/unrecognized-stdout case record the explicit marker {\"status\":\"unknown\"}; append_review normalizes usage to the fixed {status[,in,out]} schema — numbers are never fabricated (non-int/bool/negative counts are unknown) and free-form judge prose can never poison the field. A journal write failure never changes or breaks a review or any decision, every field is bounded (strings byte-capped with control chars stripped, numerics magnitude-capped) so REAL records are a single O_APPEND line well under PIPE_BUF — a best-effort bound, not absolute (a pathologically escape-heavy field could exceed it, accepted and harmless since the write affects no decision), and the journal is not written through a symlinked/FIFO path (skipped, not followed).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/pb_journal.py",
@@ -10207,6 +10207,18 @@
         {
           "path": "plugins/playbook/tasks/review.py",
           "reference": "symbol:run_tail_cert_judge"
+        },
+        {
+          "path": "plugins/playbook/provider/usage.py",
+          "reference": "symbol:parse_usage"
+        },
+        {
+          "path": "plugins/playbook/provider/usage.py",
+          "reference": "symbol:judge_output_from_result"
+        },
+        {
+          "path": "plugins/playbook/provider/usage.py",
+          "reference": "symbol:JudgeOutput"
         }
       ],
       "failure_consequence": "Low",
@@ -10327,6 +10339,71 @@
           "limitations": [
             "POSIX-only (skipUnless mkfifo/symlink): a FIFO journal path fails fast under O_NONBLOCK instead of hanging (the test completing is the proof), and a symlinked path writes nothing outside the lane under O_NOFOLLOW."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_judge_usage.py",
+          "reference": "ParseUsage.test_codex_jsonl_turn_completed",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_judge_usage.py",
+            "reference": "ParseUsage.test_prose_quote_is_never_fabricated"
+          },
+          "limitations": [
+            "Verbatim codex-cli 0.153.4 `exec --json` capture → known 13080/5; the bad-model capture → None."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_judge_usage.py",
+          "reference": "ParseUsage.test_grok_json_object",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_judge_usage.py",
+            "reference": "ParseUsage.test_non_int_bool_negative_are_unknown"
+          },
+          "limitations": [
+            "Verbatim grok 1.0.13 `--output-format json` capture → known 13443/26; the bad-model capture → None."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_judge_usage.py",
+          "reference": "_AdapterBase.test_success_returns_prose_carrying_usage",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_judge_usage.py",
+            "reference": "_AdapterBase.test_structured_without_review_text_is_an_error_not_a_pass"
+          },
+          "limitations": [
+            "Shared adapter contract, run for BOTH CodexJudge and GrokJudge subclasses with sandbox.run faked: the judge argv carries the structured flag (`--json` / `--output-format json`, never on the streaming/subagent argv), the return is the prose carrying the fixture usage; rc≠0 keeps `(FAILED …)` (a usage frame emitted before the failure is still recorded); recognized-no-text → `(error: …)` that judge_failed catches; unrecognized stdout verbatim; empty → `(no output)`."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "StructuredUsageE2E.test_panel_records_known_usage_for_codex_and_grok_seats_only",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "StructuredUsageE2E.test_tail_cert_usage_is_per_call_never_stale"
+          },
+          "limitations": [
+            "Panel with claude+codex+grok fakes returning prose that carries usage: codex/grok records `known` with the fixture numbers, claude `unknown`; judge.md holds prose, no envelope."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_review_spend_journal.py",
+          "reference": "StructuredUsageE2E.test_single_codex_records_usage_streams_prose_and_saves_prose",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_review_spend_journal.py",
+            "reference": "StructuredUsageE2E.test_single_structured_error_with_exit_0_is_a_failed_review"
+          },
+          "limitations": [
+            "Single review (codex, grok) with the sandbox faked: dispatched argv carries the flag, the operator stream and the saved log are prose, the record is `known`; a structured error with exit 0 is a FAILED review (no log, `fail`); a codex timeout salvages the message text, not frames."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -10340,14 +10417,14 @@
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
         "Owner-ratified observability addition (decision 2026-09-01): review-spend records, same class and hard contract as the enforcement journal (PB-ENFORCEMENT-JOURNAL). Log-only; the reader/analytics (playbook-lens) is a SEPARATE repo and consumes this shape — no reader tooling ships here.",
-        "Token usage is honestly `unknown` in practice: the claude judge runs in plain-text mode (no --output-format json) and codex/grok do not surface per-call tokens on this path, so the usage parser (anchored to a whole-output JSON envelope, so free-form prose can never poison it) records {\"status\":\"unknown\"} unless a real structured usage envelope appears; it never fabricates numbers. Populating real token counts would require a future switch to structured judge output.",
         "The `round` field is best-effort: it sums panel rounds across judge.md + judge-archive.md + 1, so for single/tail-cert it is an approximate spend-correlation hint rather than an exact iteration index.",
         "Evidence exercises the provider-agnostic Python emit path via claude seats (panel + single + tail-cert). codex/grok/experimental seats traverse the identical emit (usage always unknown for them), so applicable_providers is scoped to claude where there is executable evidence.",
         "A tamper hard-stop on any review path records NO spend by design — the journal write must never precede the tamper banner (a hostile-tree hang inside it could suppress the banner). Pinned by TailCertSpendE2E.test_tail_cert_tamper_records_nothing + TamperRecordsNothing.test_panel_tamper_no_records.",
         "Atomicity bound (same HONEST bound as PB-ENFORCEMENT-JOURNAL's append): one O_APPEND os.write with no fsync/locking; concurrent appenders (parallel panel seats, multi-lane) do not interleave only while a record stays under PIPE_BUF (>=512 bytes; 4096 on Linux). String fields are byte-capped with control chars stripped and numerics magnitude-capped to 15 digits, so REAL records stay well under the bound — but it is best-effort, not absolute: a pathological caller could still exceed it (e.g. a field stuffed with quotes/backslashes, which JSON escapes 2x). Accepted and harmless because the write never affects a decision (impl-panel round 4).",
         "Hostile-tree write safety (impl-panel rounds 3-4): _write_record opens the journal O_NONBLOCK|O_NOFOLLOW and fstat-confirms a regular file, and lstat-skips a symlinked journal/ parent directory, so a rogue judge that swapped enforcement.jsonl (or its parent dir) for a FIFO/symlink cannot hang the next review or escape the lane — the unsafe sink is skipped. Residual (honestly bounded): a TOCTOU swap of the parent dir between the lstat and the open is a tiny window on a best-effort log; a dirfd/openat anchor would close it fully but is not portable to Windows-Git-Bash. This hardening is in the shared writer, so it also strengthens PB-ENFORCEMENT-JOURNAL.",
         "seat records model:effort. codex/grok already carry effort in the model variant; the claude judge runs at a fixed --effort high (in provider/adapters/claude.py::run_headless_judge and the single-judge claude branch) that _seat_with_effort appends. If that constant changes it must change in all three places, or the recorded effort drifts from the real one — a source-coupling bound, not a runtime one.",
-        "windows-git-bash / macos are not separately live-tested for this feature; the emitter is stdlib os.open with O_APPEND, identical to the enforcement journal's python path."
+        "windows-git-bash / macos are not separately live-tested for this feature; the emitter is stdlib os.open with O_APPEND, identical to the enforcement journal's python path.",
+        "Task 056: codex/grok usage is REAL and per-call (structured CLI output, verbatim fixtures 2026-09-09: codex-cli 0.153.4, grok 1.0.13). Disclosed bounds: `in` is the vendor's `input_tokens` as reported (codex includes cached input) — not normalized across vendors; cached/reasoning/cost fields are not recorded (fixed schema); claude seats stay `unknown` (plain-text judge — the parser already knows claude's json usage shape, so enabling it is a deliberate future switch); a grok seat killed at the hard timeout salvages no partial prose (json mode emits one object at the end) where plain mode salvaged partial text — accepted, cosmetic (status is `timeout` either way); a CLI format change degrades to `unknown`, never to a wrong number (the fail direction the fixture tests pin). Live correspondence: one real codex+grok panel run inspected at task 056's checkpoint (see its task.md); the numbers are whatever the CLI reports — no independent billing cross-check exists."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],

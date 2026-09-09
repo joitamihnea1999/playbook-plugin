@@ -6,6 +6,20 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Added
 
+- **Real per-call token usage for codex and grok judge seats (task 056).** The review-spend
+  journal's `usage` field was honestly `{"status":"unknown"}` for every seat; now the codex judge
+  path runs `codex exec --json` and the grok path `grok --output-format json`, and the adapters
+  return the review prose as a `str` that *carries* the usage parsed from the CLI's own JSON
+  (`provider/usage.py`: last `turn.completed` for codex, the `usage` object for grok). Panel
+  seats, single reviews and the tail-cert judge record `{"status":"known","in":N,"out":N}` with
+  the CLI's reported `input_tokens`/`output_tokens` — copied, never derived or estimated; a
+  non-int/bool/negative count, a timeout, a spawn error or an unrecognized stdout stays
+  `unknown`. judge.md / judge-*.log keep holding prose. A recognized envelope with no review
+  text (an error event that still exited 0) is a FAILED seat, never a clean review. Claude seats
+  stay `unknown` (plain-text judge). Disclosed: `in` is the vendor's number as reported (codex
+  includes cached input); a grok seat killed at the hard timeout no longer salvages partial prose
+  (json mode emits one object at the end). Provider mirror re-synced.
+
 - **`tasks dashboard` — a "what runs now" screen that changes no setting.** Plugin
   version, the effective verify command(s) per risk class, panel seats with effort +
   default judge + `panel_required_for`, review timeouts and judge budget, doctor's hook

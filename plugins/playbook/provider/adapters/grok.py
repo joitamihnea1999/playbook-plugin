@@ -245,7 +245,10 @@ class GrokAdapter(ProviderAdapter):
         import shutil
         if not shutil.which(self.binary_name()):
             return f"(error: {self.binary_name()} not found on PATH)"
-        inv = self.headless_argv(prompt, model, context=system_context)
+        # Judge path: `--output-format json` so the real per-call token usage
+        # travels with the review (task 056); `text` is the review, returned as a
+        # str that CARRIES the usage.
+        inv = self.headless_argv(prompt, model, context=system_context, structured=True)
         # Judge-only extra: grok's web tools are on by default — strip them
         # when the caller didn't ask for web search (codex is the inverse:
         # opt-in via --search).
@@ -283,7 +286,8 @@ class GrokAdapter(ProviderAdapter):
             input=None,
             capture_output=True, text=True, timeout=timeout_secs, encoding="utf-8",
         )
-        return _sandbox.format_judge_output(result)
+        from provider.usage import extract_grok, judge_output_from_result
+        return judge_output_from_result(result, extract_grok, _sandbox.format_judge_output)
 
     def headless_argv(
         self,
@@ -293,6 +297,7 @@ class GrokAdapter(ProviderAdapter):
         context: str = "",
         bare: bool = False,
         stream: bool = False,
+        structured: bool = False,
     ) -> Invocation:
         # Context is joined into the prompt (agy/pi pattern) — grok has no
         # append-system-prompt flag, only a full --system-prompt-override,
@@ -306,6 +311,8 @@ class GrokAdapter(ProviderAdapter):
                 argv += ["--reasoning-effort", effort]
         if stream:
             argv += ["--output-format", "streaming-json"]
+        elif structured:
+            argv += ["--output-format", "json"]   # one object: text + usage (judge path)
         return Invocation(argv, stdin=None)
 
     # ── Identity ─────────────────────────────────────────────────────────────

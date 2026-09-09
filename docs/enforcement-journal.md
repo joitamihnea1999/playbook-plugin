@@ -112,18 +112,37 @@ marker `{"status":"unknown"}`, or `{"status":"known","in":<int>,"out":<int>}`.
 is never copied verbatim (that would blow the PIPE_BUF bound), and a non-int
 token count degrades to `unknown`. **Numbers are never fabricated.**
 
-In practice `usage` is `unknown` almost always: the claude judge runs in
-plain-text mode (no `--output-format json`), and codex/grok do not surface
-per-call tokens on this path. The parser is **anchored to a structured
-envelope** — it recognizes claude's real JSON usage shape
-(`{"usage":{"input_tokens":…,"output_tokens":…}}`) only when the judge's ENTIRE
-output parses as that one JSON object. This is deliberate: a bare substring
-search would let a judge that merely *quotes* a usage-shaped string in its prose
-poison the field with a fabricated number. Free-form review prose never parses as
-a single JSON object, so it can never trip it. Populating real token counts would
-require a future switch to structured judge output — a reader should treat
-`unknown` as the common case and `known` as a bonus, never assume tokens are
-present.
+Where the numbers come from (task 056): the codex and grok judge paths ask the
+CLI for **structured output** — `codex exec --json` (JSONL; the LAST
+`turn.completed` event carries `usage.input_tokens` / `usage.output_tokens`) and
+`grok --output-format json` (one object with the review under `text` and
+`usage.input_tokens` / `usage.output_tokens`). The adapter parses the usage from
+that raw stdout and returns the review PROSE as a `str` subclass that *carries* the
+usage (`provider.usage.JudgeOutput`), so judge.md / judge-*.log hold prose while the
+spend record holds the CLI's own numbers — copied, never derived. `in` is the
+vendor's reported `input_tokens` **as reported** (codex's includes cached input;
+grok's is its billed input) — recorded per vendor, not normalized across them;
+cached/reasoning/cost fields are not recorded (fixed schema). A codex/grok seat is
+`known` on success and also when the CLI emitted a usage frame before exiting
+nonzero (tokens were spent either way); it is `unknown` on timeouts, spawn errors,
+and whenever the stdout is not the expected envelope — a non-int, bool or negative
+count is `unknown`, never clamped into a number.
+
+The **claude** judge still runs in plain-text mode, so its seats are `unknown` by
+design (the parser already recognizes claude's `--output-format json` usage shape,
+so enabling it there is a deliberate one-line decision, not an accident). The
+text-side parser is **anchored to a structured envelope** — it recognizes a usage
+only when the judge's ENTIRE output parses as one JSON object (or as codex JSONL).
+This is deliberate: a bare substring search would let a judge that merely *quotes*
+a usage-shaped string in its prose poison the field with a fabricated number.
+Free-form review prose never parses as such an envelope, so it can never trip it.
+A reader should still treat `unknown` as an ordinary value (claude seats,
+failures), never assume tokens are present.
+
+One disclosed trade-off: grok's json mode emits its single object at the END, so
+a grok seat killed at the hard timeout salvages no partial prose (its status is
+`timeout` either way); codex's JSONL partial stdout is salvaged as the last
+completed message text, not protocol frames.
 
 ### The `round` field — best-effort
 

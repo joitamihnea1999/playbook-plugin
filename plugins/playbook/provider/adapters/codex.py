@@ -115,7 +115,10 @@ class CodexAdapter(ProviderAdapter):
         import shutil
         if not shutil.which(self.binary_name()):
             return f"(error: {self.binary_name()} not found on PATH)"
-        inv = self.headless_argv(prompt, model, context=system_context)
+        # Judge path: structured output (`--json`) so the real per-call token
+        # usage travels with the review (task 056); the review text is extracted
+        # from the JSONL and returned as a str that CARRIES the usage.
+        inv = self.headless_argv(prompt, model, context=system_context, structured=True)
         # Judge-only extra: web search prepended before `exec`.
         agent_args = (["--search"] if web_search else []) + inv.argv
         env = os.environ.copy()
@@ -131,7 +134,8 @@ class CodexAdapter(ProviderAdapter):
             input=inv.stdin, capture_output=True, text=True,
             timeout=timeout_secs, encoding="utf-8",
         )
-        return _sandbox.format_judge_output(result)
+        from provider.usage import extract_codex, judge_output_from_result
+        return judge_output_from_result(result, extract_codex, _sandbox.format_judge_output)
 
     def headless_argv(
         self,
@@ -141,6 +145,7 @@ class CodexAdapter(ProviderAdapter):
         context: str = "",
         bare: bool = False,
         stream: bool = False,
+        structured: bool = False,
     ) -> Invocation:
         # codex reads its prompt from stdin (argv ends in "-"); context is
         # joined into the stdin payload. Bypass flag inserted after `exec` by
@@ -153,6 +158,8 @@ class CodexAdapter(ProviderAdapter):
             argv += ["-m", model_id]
             if effort:
                 argv += ["-c", f"model_reasoning_effort={effort}"]
+        if structured:
+            argv.append("--json")      # JSONL events incl. turn.completed usage (judge path)
         argv.append("-")
         return Invocation(argv, stdin=full_prompt)
 

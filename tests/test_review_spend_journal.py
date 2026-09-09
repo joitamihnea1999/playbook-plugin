@@ -587,3 +587,150 @@ class TamperRecordsNothing(_E2EBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StructuredUsageE2E(_E2EBase):
+    """Task 056: codex/grok seats carry REAL usage into the journal; claude stays
+    unknown; a timed-out codex judge's partial JSONL is salvaged as prose."""
+    CODEX_USAGE = {"status": "known", "in": 13080, "out": 5}
+    GROK_USAGE = {"status": "known", "in": 13443, "out": 26}
+
+    def _fixture(self, name):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_tj_fixtures", Path(__file__).resolve().parent / "test_judge_usage.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return getattr(mod, name)
+
+    def test_panel_records_known_usage_for_codex_and_grok_seats_only(self):
+        from provider.usage import JudgeOutput
+        from provider.adapters.claude import ClaudeAdapter
+        from provider.adapters.codex import CodexAdapter
+        from provider.adapters.grok import GrokAdapter
+        (self.agent / "models.json").write_text(json.dumps({
+            "panel": ["claude:opus", "codex:gpt-5.6-sol:medium", "grok:grok-4.6:medium"],
+            "default_judge": "claude:opus"}), encoding="utf-8")
+        import unittest.mock as mock
+        patches = [
+            mock.patch.object(ClaudeAdapter, "is_available", classmethod(lambda cls: True)),
+            mock.patch.object(CodexAdapter, "is_available", classmethod(lambda cls: True)),
+            mock.patch.object(GrokAdapter, "is_available", classmethod(lambda cls: True)),
+            # Production adapters return PROSE that CARRIES usage — never the JSON.
+            mock.patch.object(ClaudeAdapter, "run_headless_judge",
+                              lambda self, **kw: "1. **Note** — looks fine.\n"),
+            mock.patch.object(CodexAdapter, "run_headless_judge",
+                              lambda self, **kw: JudgeOutput("1. fine (codex)", usage=self.__class__._U)),
+            mock.patch.object(GrokAdapter, "run_headless_judge",
+                              lambda self, **kw: JudgeOutput("1. fine (grok)", usage=self.__class__._G)),
+        ]
+        CodexAdapter._U = self.CODEX_USAGE
+        GrokAdapter._G = self.GROK_USAGE
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with _chdir(self.project):
+            with contextlib.suppress(SystemExit):
+                review.cmd_panel_review(
+                    ["042", "--models", "claude:opus,codex:gpt-5.6-sol:medium,grok:grok-4.6:medium"])
+        recs = {r["seat"]: r for r in _read_journal(self.agent) if r["hook"] == "review"}
+        self.assertEqual(set(recs), {"claude:opus:high", "codex:gpt-5.6-sol:medium", "grok:grok-4.6:medium"}, recs)
+        self.assertEqual(recs["codex:gpt-5.6-sol:medium"]["usage"], self.CODEX_USAGE)
+        self.assertEqual(recs["grok:grok-4.6:medium"]["usage"], self.GROK_USAGE)
+        self.assertEqual(recs["claude:opus:high"]["usage"], {"status": "unknown"})
+        # judge.md carries the prose, never a JSON envelope
+        jm = (self.agent / "tasks" / "042-demo" / "judge.md").read_text(encoding="utf-8")
+        self.assertIn("1. fine (codex)", jm)
+        self.assertNotIn("turn.completed", jm)
+
+    def test_tail_cert_usage_is_per_call_never_stale(self):
+        from provider.usage import JudgeOutput
+        import unittest.mock as mock
+        tf = self.agent / "tasks" / "042-demo" / "task.md"
+        outs = [JudgeOutput("TAIL-CERT deadbeef: PASS", usage=self.GROK_USAGE),
+                "(error: tail-cert judge timed out)"]
+        patches = [
+            mock.patch.object(review, "_tail_cert_review_diff", lambda pp, snap: "diff --git a b\n+x\n"),
+            mock.patch.object(review, "_run_tail_cert_judge_raw", lambda pp, prompt, ts: outs.pop(0)),
+            mock.patch.object(review, "_snapshot_repo_state", lambda pp, t: {}),
+            mock.patch.object(review, "_detect_tamper_safe", lambda pp, t, b: []),
+            mock.patch.object(review, "_tail_cert_seat", lambda pp: "grok:grok-4.6:medium"),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with _chdir(self.project):
+            review.run_tail_cert_judge(self.project, {}, ["n"], "s", task_file=tf)
+            review.run_tail_cert_judge(self.project, {}, ["n"], "s", task_file=tf)
+        recs = [r for r in _read_journal(self.agent) if r["hook"] == "review" and r["kind"] == "tail-cert"]
+        self.assertEqual(len(recs), 2, recs)
+        self.assertEqual(recs[0]["usage"], self.GROK_USAGE)
+        self.assertEqual(recs[1]["usage"], {"status": "unknown"}, "an erroring call must never reuse a prior usage")
+
+    def _single(self, backend, stdout, *, rc=0, timeout_partial=None):
+        import shutil
+        import subprocess
+        import types
+        import unittest.mock as mock
+        from provider import sandbox
+        calls = []
+
+        def _run(agent, args, **kw):
+            calls.append(list(args))
+            if timeout_partial is not None:
+                raise subprocess.TimeoutExpired(cmd=agent, timeout=5, output=timeout_partial)
+            return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr="", args=list(args))
+        patches = [mock.patch.object(sandbox, "run", _run),
+                   mock.patch.object(shutil, "which", lambda name: "/usr/bin/" + name)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        argv = ["042", "--backend", backend, "--model", "gpt-5.6-sol:medium" if backend == "codex" else "grok-4.6:medium"]
+        if timeout_partial is not None:
+            argv += ["--timeout", "5"]
+        import io
+        buf = io.StringIO()
+        with _chdir(self.project), contextlib.redirect_stdout(buf):
+            with contextlib.suppress(SystemExit):
+                review.cmd_single_review("plan-review", argv)
+        recs = [r for r in _read_journal(self.agent) if r["hook"] == "review"]
+        return calls, recs, buf.getvalue()
+
+    def test_single_codex_records_usage_streams_prose_and_saves_prose(self):
+        calls, recs, printed = self._single("codex", self._fixture("CODEX_OK"))
+        self.assertTrue(any("--json" in c for c in calls), calls)
+        self.assertEqual(len(recs), 1, recs)
+        self.assertEqual(recs[0]["usage"], self.CODEX_USAGE)
+        self.assertEqual(recs[0]["status"], "ok")
+        self.assertNotIn("turn.completed", printed)
+        self.assertIn("OK", printed)
+        log = self.agent / "tasks" / "042-demo" / "judge-codex.log"
+        self.assertTrue(log.exists())
+        body = log.read_text(encoding="utf-8")
+        self.assertIn("OK", body)
+        self.assertNotIn("turn.completed", body)
+
+    def test_single_grok_records_usage_and_saves_prose(self):
+        calls, recs, printed = self._single("grok", self._fixture("GROK_OK"))
+        self.assertTrue(any("--output-format" in c and "json" in c for c in calls), calls)
+        self.assertEqual(recs[0]["usage"], self.GROK_USAGE)
+        log = self.agent / "tasks" / "042-demo" / "judge-grok.log"
+        self.assertIn("OK", log.read_text(encoding="utf-8"))
+        self.assertNotIn('"usage"', log.read_text(encoding="utf-8"))
+
+    def test_single_structured_error_with_exit_0_is_a_failed_review(self):
+        _calls, recs, _printed = self._single("grok", self._fixture("GROK_BAD"), rc=0)
+        self.assertEqual(recs[0]["status"], "fail")
+        self.assertEqual(recs[0]["usage"], {"status": "unknown"})
+        self.assertFalse((self.agent / "tasks" / "042-demo" / "judge-grok.log").exists(),
+                         "a structured error must not be saved as a review")
+
+    def test_single_codex_timeout_salvages_prose_not_frames(self):
+        partial = "\n".join(self._fixture("CODEX_OK").splitlines()[:3]) + "\n"
+        _calls, recs, _printed = self._single("codex", "", timeout_partial=partial)
+        self.assertEqual(recs[0]["status"], "timeout")
+        plog = self.agent / "tasks" / "042-demo" / "judge-codex.partial.log"
+        self.assertTrue(plog.exists())
+        body = plog.read_text(encoding="utf-8")
+        self.assertIn("OK", body)
+        self.assertNotIn("item.completed", body)
