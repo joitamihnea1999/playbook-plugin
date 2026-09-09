@@ -134,12 +134,16 @@ def extract_codex(raw: str, *, lenient_tail: bool = False) -> "Optional[tuple[st
         elif t == "turn.completed":
             completed = True
             usage = _usage_from_obj(ev.get("usage"))   # last wins, None if invalid
-        elif t == "error" and isinstance(ev.get("message"), str):
-            errors.append(ev["message"])
-        elif t == "turn.failed":
-            err = ev.get("error")
-            if isinstance(err, dict) and isinstance(err.get("message"), str):
-                errors.append(err["message"])
+        elif t in ("error", "turn.failed"):
+            # ANY fatal event fails the review (round 3): a malformed payload is
+            # still a failure — stringify it, bounded, so the reason survives.
+            payload = ev.get("message") if t == "error" else ev.get("error")
+            if isinstance(payload, dict) and isinstance(payload.get("message"), str):
+                errors.append(payload["message"])
+            elif isinstance(payload, str) and payload.strip():
+                errors.append(payload)
+            else:
+                errors.append(f"{t}: {json.dumps(payload, ensure_ascii=False)[:300]}")
     if not completed and not errors and not lenient_tail:
         # A complete prefix that never reached turn.completed is not a finished
         # review (round 2, codex-medium); the salvage path (lenient_tail) is
@@ -157,14 +161,17 @@ def extract_grok(raw: str) -> "Optional[tuple[str, Optional[dict], list[str]]]":
         return None
     if obj.get("type") == "error":
         msg = obj.get("message")
-        return "", None, [msg if isinstance(msg, str) else json.dumps(obj)[:500]]
+        # a late failure can still report spend (round 3): carry its usage
+        return "", _usage_from_obj(obj.get("usage")), [msg if isinstance(msg, str) else json.dumps(obj)[:500]]
     text = obj.get("text")
     if not isinstance(text, str):
         return None          # some other JSON object — not grok's envelope
     errors = []
-    stop = obj.get("stopReason")
-    if isinstance(stop, str) and stop != "end_turn":
-        errors.append(f"grok stopped: {stop}")   # max_tokens / refusal / cancelled … (round 2)
+    if "stopReason" in obj and obj.get("stopReason") != "end_turn":
+        # present → must be exactly end_turn (null / non-string / max_tokens /
+        # refusal / cancelled … fail); an ABSENT key is accepted so a future CLI
+        # dropping the field cannot fail every seat (round 2 + 3, disclosed).
+        errors.append(f"grok stopped: {obj.get('stopReason')!r}")
     return text, _usage_from_obj(obj.get("usage")), errors
 
 
@@ -219,13 +226,14 @@ def judge_output_from_result(result, extract, format_judge_output) -> JudgeOutpu
     if not raw.strip():
         return JudgeOutput(format_judge_output(result))          # "(no output)"
     if got is None:
-        head = raw.lstrip()[:1]
-        if head in ("{", "[") or (extract is extract_codex and codex_protocol_detected(raw)):
-            # Structured output was REQUESTED: JSON-looking stdout that is not the
-            # recognized envelope (truncated object, a different schema, a stray
-            # line inside the event stream) fails closed — never a verbatim
-            # "review" (round 2, convergent). Only genuinely non-JSON prose
-            # (a CLI that ignored the flag) keeps the verbatim legacy path.
+        looks_json = any(ln.lstrip()[:1] in ("{", "[") for ln in raw.splitlines() if ln.strip())
+        if looks_json or (extract is extract_codex and codex_protocol_detected(raw)):
+            # Structured output was REQUESTED: stdout with ANY JSON-looking line
+            # that is not the recognized envelope (truncated object, another
+            # schema, a stray line before or inside the event stream) fails
+            # closed — never a verbatim "review" (rounds 2-3, convergent). Only
+            # stdout with NO JSON-looking line (a CLI that ignored the flag and
+            # printed prose) keeps the verbatim legacy path.
             return JudgeOutput("(FAILED — malformed or unrecognized structured judge output: "
                                f"{raw.strip()[:300]!r})")
         return JudgeOutput(format_judge_output(result))          # verbatim prose

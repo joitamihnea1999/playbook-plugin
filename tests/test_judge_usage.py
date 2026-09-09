@@ -90,6 +90,38 @@ class ExtractCodexRound1(unittest.TestCase):
         self.assertEqual(salvage_text("codex", truncated), "OK")
 
 
+class Round3(unittest.TestCase):
+    """Impl round-3 panel (task 056) — the last round."""
+
+    def test_malformed_fatal_event_payloads_are_still_fatal(self):
+        for ev in ('{"type":"turn.failed","error":{}}', '{"type":"turn.failed","error":"rate limited"}',
+                   '{"type":"error"}', '{"type":"error","message":{"code":429}}'):
+            body = CODEX_OK.replace('{"type":"turn.completed"', ev + '\n{"type":"turn.completed"')
+            _t, _u, errors = extract_codex(body)
+            self.assertTrue(errors, (ev, errors))
+
+    def test_grok_stop_reason_present_must_be_end_turn(self):
+        for val in ('null', '42', '""'):
+            body = GROK_OK.replace('"stopReason": "end_turn"', f'"stopReason": {val}')
+            _t, _u, errors = extract_grok(body)
+            self.assertTrue(errors, (val, errors))
+        absent = GROK_OK.replace('  "stopReason": "end_turn",\n', '')
+        self.assertNotIn("stopReason", absent)
+        self.assertEqual(extract_grok(absent)[2], [], "an absent key is accepted (disclosed)")
+
+    def test_grok_error_envelope_carries_usage(self):
+        body = '{"type":"error","message":"late failure","usage":{"input_tokens":7,"output_tokens":1}}'
+        text, usage, errors = extract_grok(body)
+        self.assertEqual(text, "")
+        self.assertEqual(usage, {"status": "known", "in": 7, "out": 1})
+        self.assertEqual(errors, ["late failure"])
+
+    def test_timeout_partial_with_a_complete_usage_frame_parses(self):
+        # The CLI wrote turn.completed but was killed before exiting.
+        self.assertEqual(parse_usage(CODEX_OK), {"status": "known", "in": 13080, "out": 5})
+        self.assertIsNone(parse_usage(CODEX_OK + '{"type":"turn.compl'))   # strict: cut frame → unknown
+
+
 class ExtractCodex(unittest.TestCase):
     def test_success(self):
         text, usage, errors = extract_codex(CODEX_OK)
@@ -336,6 +368,12 @@ class GrokJudge(_AdapterBase):
     OK = GROK_OK
     BAD = GROK_BAD
     OK_USAGE = {"status": "known", "in": 13443, "out": 26}
+
+    def test_leading_noise_before_an_envelope_is_a_failed_review(self):
+        # Round-3 panel (grok): a stray "Loading..." line before the JSON must
+        # not turn the whole stdout into "prose" that passes verbatim.
+        out, _ = self._run(_cp("Loading...\n" + self.OK))
+        self.assertTrue(out.startswith("(FAILED — "), out)
 
     def test_non_envelope_or_malformed_json_is_a_failed_review(self):
         # Round-2 panel (convergent): structured output was REQUESTED, so any

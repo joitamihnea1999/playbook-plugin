@@ -1113,16 +1113,18 @@ def cmd_panel_review(cmd_args):
                 raw = raw.decode("utf-8", errors="replace")
             # Structured judge stdout (codex `--json`) is protocol frames: salvage
             # the completed message text, not the frames (task 056).
-            from provider.usage import salvage_text as _salvage
+            from provider.usage import JudgeOutput as _JO, parse_usage as _pu, salvage_text as _salvage
+            # A usage frame the CLI already wrote before the kill is real spend
+            # (round 3): parse it STRICTLY from the partial stdout and carry it.
+            _to_usage = _pu(raw)
             raw = _salvage(provider_name, raw.strip())
             marker = f"(timed out after hard {hard_timeout_label})"
             if raw:
-                return label, (
+                return label, _JO(
                     f"{marker}\n\n**INCOMPLETE** — killed mid-response; the "
                     f"findings below may be cut off and reached no conclusion:"
-                    f"\n\n{raw}"
-                ), _dur, True
-            return label, marker, _dur, True
+                    f"\n\n{raw}", usage=_to_usage), _dur, True
+            return label, _JO(marker, usage=_to_usage), _dur, True
         except Exception as e:
             return label, f"(error: {e})", int((time.monotonic() - _t0) * 1000), False
 
@@ -1607,8 +1609,12 @@ def _run_tail_cert_judge_raw(project_path, prompt, timeout_secs) -> str:
             prompt=prompt, model=variant, system_context="",
             web_search=False, timeout_secs=timeout_secs,
             budget_usd=resolve_judge_budget(project_path))
-    except subprocess.TimeoutExpired:
-        return "(error: tail-cert judge timed out)"
+    except subprocess.TimeoutExpired as _expired:
+        from provider.usage import JudgeOutput as _JO, parse_usage as _pu
+        _raw = getattr(_expired, "stdout", None) or getattr(_expired, "output", None) or ""
+        if isinstance(_raw, bytes):
+            _raw = _raw.decode("utf-8", errors="replace")
+        return _JO("(error: tail-cert judge timed out)", usage=_pu(_raw))   # spend survives (round 3)
     except Exception as e:
         return f"(error: tail-cert judge spawn failed: {e})"
 
@@ -1898,11 +1904,13 @@ def cmd_single_review(cmd, cmd_args):
         # dir must not turn this bail into an uncaught crash — the banner is
         # already out, and the exit code must still be reached.
         partial = ""
+        _to_usage = None
         if expired is not None:
             raw = getattr(expired, "stdout", None) or getattr(expired, "output", None) or ""
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", errors="replace")
-            from provider.usage import salvage_text as _salvage
+            from provider.usage import parse_usage as _pu, salvage_text as _salvage
+            _to_usage = _pu(raw)                        # a written usage frame is real spend (round 3)
             partial = _salvage(backend, raw.strip())   # codex frames → message text (task 056)
         saved_note = ""
         if partial:
@@ -1946,7 +1954,7 @@ def cmd_single_review(cmd, cmd_args):
                 project_path, kind="single", seat=_spend_seat,
                 task=task_num, round_no=_spend_round,
                 duration_ms=int((time.monotonic() - _spend_t0) * 1000),
-                status="timeout", usage=None)
+                status="timeout", usage=_to_usage)
         sys.exit(1)
 
     # Judge tamper guard (#1), same contract as the panel path: snapshot the

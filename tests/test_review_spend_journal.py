@@ -591,8 +591,6 @@ class TamperRecordsNothing(_E2EBase):
             "a tampered panel must record no spend (write must not precede the banner)")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class StructuredUsageE2E(_E2EBase):
@@ -788,6 +786,39 @@ class StructuredUsageE2E(_E2EBase):
         self.assertTrue(plog.exists())
         self.assertIn('{"text": "cut', plog.read_text(encoding="utf-8"))
 
+    def test_timeout_paths_record_a_usage_frame_the_cli_already_wrote(self):
+        # Round-3 panel (sonnet): killed after turn.completed but before exit —
+        # tokens were spent and reported; the record must say so.
+        import subprocess
+        import unittest.mock as mock
+        from provider.adapters.claude import ClaudeAdapter
+        from provider.adapters.codex import CodexAdapter
+        full = self._fixture("CODEX_OK")
+        (self.agent / "models.json").write_text(json.dumps({
+            "panel": ["claude:opus", "codex:gpt-5.6-sol:medium"], "default_judge": "claude:opus"}), encoding="utf-8")
+
+        def _boom(self, **kw):
+            raise subprocess.TimeoutExpired(cmd="codex", timeout=5, output=full)
+        patches = [
+            mock.patch.object(ClaudeAdapter, "is_available", classmethod(lambda cls: True)),
+            mock.patch.object(CodexAdapter, "is_available", classmethod(lambda cls: True)),
+            mock.patch.object(ClaudeAdapter, "run_headless_judge", lambda self, **kw: "1. fine\n"),
+            mock.patch.object(CodexAdapter, "run_headless_judge", _boom),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with _chdir(self.project):
+            with contextlib.suppress(SystemExit):
+                review.cmd_panel_review(["042", "--models", "claude:opus,codex:gpt-5.6-sol:medium", "--timeout", "5"])
+        recs = {r["seat"]: r for r in _read_journal(self.agent) if r["hook"] == "review"}
+        self.assertEqual(recs["codex:gpt-5.6-sol:medium"]["status"], "timeout")
+        self.assertEqual(recs["codex:gpt-5.6-sol:medium"]["usage"], self.CODEX_USAGE)
+        # single-review bail path, same shape
+        _c, srecs, _p = self._single("codex", "", timeout_partial=full)
+        self.assertEqual(srecs[-1]["status"], "timeout")
+        self.assertEqual(srecs[-1]["usage"], self.CODEX_USAGE)
+
     def test_single_codex_timeout_salvages_prose_not_frames(self):
         partial = "\n".join(self._fixture("CODEX_OK").splitlines()[:3]) + "\n"
         _calls, recs, _printed = self._single("codex", "", timeout_partial=partial)
@@ -797,3 +828,7 @@ class StructuredUsageE2E(_E2EBase):
         body = plog.read_text(encoding="utf-8")
         self.assertIn("OK", body)
         self.assertNotIn("item.completed", body)
+
+
+if __name__ == "__main__":
+    unittest.main()
