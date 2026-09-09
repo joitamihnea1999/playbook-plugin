@@ -111,28 +111,50 @@ fi
 # on the agent — let the turn end without a fabricated checkbox. Keyed on the
 # status marker (the line after `## Status`), NOT on gate text, so it can't
 # inherit the freehand bypass's first-unchecked-gate fragility.
-# The status is read by scripts/task-status.py, which calls the SAME reader the
-# CLI uses (core.py::_extract_status — LAST live `## Status` wins, fence-aware,
-# fail closed on an unclosed fence). Until task 043 this was an awk mirror of a
-# fence-blind rule, so a `## Status`/blocked pair quoted inside a code fence
-# released unchecked gates (P-F). One implementation, not two: Python and the
-# enforcing hook cannot disagree about the same file (the #09 disease).
-# If the reader cannot run (no python3, import failure) the status is UNREADABLE:
-# say so and fall through to the gate count — fail CLOSED, never guess `blocked`.
-if ! STATUS_LINE=$(python3 "$HOOK_DIR/task-status.py" "$TASK_FILE" 2>/dev/null); then
-    echo "[stop-hook] WARNING: could not read ## Status via python3 ($HOOK_DIR/task-status.py) — treating the status as unreadable and enforcing open gates" >&2
-    STATUS_LINE=""
-fi
+# The status, the live unchecked-gate count and the first live unchecked gate
+# are read by ONE spawn of scripts/task-status.py --fields, which calls the SAME
+# readers the CLI uses (core.py::_extract_status — LAST live `## Status` wins,
+# fence-aware, fail closed on an unclosed fence; core.py::_live_gate_state —
+# fence-aware line-anchored gates, an unclosed fence hides nothing). Until task
+# 043 the status was an awk mirror of a fence-blind rule, so a `## Status`/blocked
+# pair quoted inside a code fence released unchecked gates (P-F); until task 055
+# the gates were `grep -c` + `grep -m1`, so a fenced `- [ ] Freehand…` example
+# quoted before a real open gate became FIRST_GATE and the Freehand arm released
+# the stop with work left. One implementation, not two: Python and the enforcing
+# hook cannot disagree about the same file (the #09 disease).
+# If the reader cannot run (no python3, import failure) the state is UNREADABLE:
+# say so and fall back to the fence-blind grep for the COUNT only — it can only
+# over-count (a fence hides lines, never adds them), so the stop still blocks
+# (fail CLOSED); the status is never guessed `blocked` and the Freehand release is
+# NOT applied to a grep-derived first gate (it could be the decoy).
+PB_STATE_READ=true
+STATUS_LINE=""
+UNCHECKED=""
+FIRST_GATE=""
+{
+    IFS= read -r STATUS_LINE || PB_STATE_READ=false
+    IFS= read -r UNCHECKED   || PB_STATE_READ=false
+    IFS= read -r FIRST_GATE  || PB_STATE_READ=false
+} < <(python3 "$HOOK_DIR/task-status.py" --fields "$TASK_FILE" 2>/dev/null) || PB_STATE_READ=false
 # A CRLF-translating python3 (native Windows) leaves `blocked\r` in the
-# substitution; drop one trailing CR so the exact match below holds (same
+# fields; drop one trailing CR per field so the exact matches below hold (same
 # idiom as scripts/init's manifest reader).
 STATUS_LINE=${STATUS_LINE%$'\r'}
+UNCHECKED=${UNCHECKED%$'\r'}
+FIRST_GATE=${FIRST_GATE%$'\r'}
+case "$UNCHECKED" in
+    ''|*[!0-9]*) PB_STATE_READ=false ;;   # a partial/garbled frame is unreadable, not "0 gates"
+esac
+if [ "$PB_STATE_READ" != true ]; then
+    echo "[stop-hook] WARNING: could not read the task state via python3 ($HOOK_DIR/task-status.py --fields) — treating the status as unreadable, counting gates fence-blind (over-counts, never releases) and disabling the Freehand release" >&2
+    STATUS_LINE=""
+    # Count unchecked gates (only real gates at line start, not inside blockquotes)
+    UNCHECKED=$(grep -cE '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null) || UNCHECKED=0
+    FIRST_GATE=$(grep -m1 -E '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null | sed 's/^[[:space:]]*- \[ \] *//')
+fi
 case "$STATUS_LINE" in
     blocked) exit 0 ;;   # core._is_blocked: the EXACT token (the writer only ever writes the bare word)
 esac
-
-# Count unchecked gates (only real gates at line start, not inside blockquotes)
-UNCHECKED=$(grep -cE '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null) || UNCHECKED=0
 
 if [ "$UNCHECKED" -eq 0 ]; then
     exit 0
@@ -153,23 +175,23 @@ if [ -f "$COUNTER_FILE" ]; then
     fi
 fi
 
-# Find first unchecked gate for the message
-FIRST_GATE=$(grep -m1 -E '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null | sed 's/^[[:space:]]*- \[ \] *//')
-
-# Freehand mode: don't block when the gate text starts with "Freehand" —
-# covers "Freehand", "Freehand — work is done", "Freehand debrief — ...",
-# and discussion-style variants observed in real task.md files. The single
-# exception is "Freehand log" (cleanup gate at cli.py:1620), which must
-# still block so its work runs before close.
+# Freehand mode: don't block when the FIRST LIVE unchecked gate's text starts
+# with "Freehand" — covers "Freehand", "Freehand — work is done", "Freehand
+# debrief — ...", and discussion-style variants observed in real task.md files.
+# The single exception is "Freehand log" (cleanup gate at cli.py:1620), which
+# must still block so its work runs before close. Only when the gate came from
+# the Python reader: a grep-derived first gate may be a fenced decoy.
 # Pattern stays in lockstep with scripts/state-echo-hook and src/provider/codex_hooks.py.
-case "$FIRST_GATE" in
-    "Freehand log"|"Freehand log"[!a-zA-Z0-9_]*)
-        : # cleanup gate — keep blocking
-        ;;
-    Freehand*)
-        exit 0
-        ;;
-esac
+if [ "$PB_STATE_READ" = true ]; then
+    case "$FIRST_GATE" in
+        "Freehand log"|"Freehand log"[!a-zA-Z0-9_]*)
+            : # cleanup gate — keep blocking
+            ;;
+        Freehand*)
+            exit 0
+            ;;
+    esac
+fi
 
 journal_enforcement "$PB_JOURNAL_DIR" stop block "unchecked gates" "$SESSION_ID"
 cat >&2 <<MSG

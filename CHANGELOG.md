@@ -38,6 +38,27 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- **The enforcing hooks read task.md gates and F3 status through the CLI's own fence-aware
+  reader (task 055, from task 043's parked list).** Two fence-blind readers were left on the
+  enforcing path after 043: task-gate-hook's F3 done-check was a LAST-wins awk that erred both
+  ways (a fenced `## Status`/done example in the ACTIVE task blocked every code edit; a fenced
+  `## Status`/pending example after a live `done` let a STALE pointer authorize edits), and the
+  stop-hook counted gates with `grep -c` and picked FIRST_GATE with `grep -m1`, so a fenced
+  `- [ ] Freehand…` example quoted before a real open gate released the stop with work left.
+  Now `core._live_gate_state` is the one gate reader (behind `_gate_counts`,
+  `_extract_head_position`, the lifecycle close count and `tasks list`/`status` progress) and
+  `scripts/task-status.py --fields` returns status + live unchecked count + first live gate in
+  ONE spawn; the stop-hook consumes that frame and task-gate-hook's F3 calls the same script,
+  so hook and CLI cannot disagree by construction — pinned by `tests/test_gate_parser_parity.py`
+  on a fenced-decoy table (closed ```/`~~~` decoys hidden; an UNCLOSED fence hides nothing so
+  real gates stay counted; a nested `    - [ ] gate` after a blank line stays a gate). The grep
+  survives only as the no-python fallback and is fail closed there (it can only over-count;
+  the Freehand release is disabled). Cost: one ~20-30 ms python spawn per gated code edit
+  (owner option (a) of 043's perf-vs-parity decision). Still fence-blind, disclosed in the
+  ledger: state-echo-hook's advisory counts, gate-batch-check's batch-tick guard (over-blocks
+  only), retro's analytics, the experimental codex `_scan_gates`; HTML-comment blocks remain
+  live regions for every scanner (engine-wide, still parked).
+
 - **`tasks compact` uses the one shared task.md scanner (task 044, split from task 039).**
   Compaction protection decided "what is a fence" with a private ``` toggle (no `~~~`, an
   interior ``` closed a ```` fence) and "what is a heading" with raw `## ` string tests, so a

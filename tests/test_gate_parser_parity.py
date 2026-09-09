@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-consumer gate-parser parity (upstream issue #09).
+"""Cross-consumer gate-parser parity (upstream issue #09; fence-aware since task 055).
 
 Three pieces of code decide what an unchecked gate is, and they used to disagree:
 the `tasks list` progress count used a SUBSTRING (`content.count("- [ ]")`), while
@@ -7,11 +7,20 @@ head-position and the Stop hook were line-anchored. So a `- [ ]` in mid-line PRO
 was counted by the column the user sees and invisible to the gate that enforces —
 a task closed at 71/74 while `status` said "(all gates checked)".
 
-Testing the three one at a time is what let them drift. The invariant here is a
-PROPERTY over a fixture table: for every case,
-    progress_says_open  ==  head_is_a_gate  ==  stop_hook_grep_count > 0
-so a fourth parser cannot silently diverge again. The Stop hook's rule is exercised
-as the literal grep it runs (`^[[:space:]]*- \[ \]`), not a paraphrase.
+Task 055 added the second axis: a `- [ ]` quoted inside a CLOSED code fence is an
+example, not a gate. Before, all three counted it "wrong-together" — and the stop
+hook's `grep -m1` could pick a fenced `- [ ] Freehand…` example as FIRST_GATE and
+RELEASE the stop with real gates open. Now the hook no longer greps: it asks
+`scripts/task-status.py --fields`, which returns `core._live_gate_state` — the same
+function `_gate_counts`/`_extract_head_position` use — so hook and CLI cannot
+disagree by construction. The grep survives only as the hook's NO-PYTHON fallback,
+and its one guaranteed property is pinned here too: fence-blind can only OVER-count
+(a fence hides lines, never adds them), so the fallback fails CLOSED.
+
+The invariant is a PROPERTY over a fixture table: for every case,
+    progress_says_open == head_is_a_gate == hook_reader_count > 0 == expect_open
+    and grep_fallback_count >= hook_reader_count
+so a fourth parser cannot silently diverge again.
 
 Pure stdlib unittest. Run: python3 tests/test_gate_parser_parity.py
 """
@@ -22,14 +31,34 @@ import unittest
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
+PLUGIN = _HERE.parent / "plugins/playbook"
+sys.path.insert(0, str(PLUGIN))
 from tasks.core import _extract_head_position, _extract_progress, _gate_counts  # noqa: E402
 
-STOP_HOOK_GREP = r'^[[:space:]]*- \[ \]'   # copied verbatim from scripts/stop-hook
+TASK_STATUS = PLUGIN / "scripts" / "task-status.py"
+STOP_HOOK_GREP = r'^[[:space:]]*- \[ \]'   # the hook's NO-PYTHON fallback, copied verbatim
+
+
+def hook_fields(path: Path) -> "tuple[str, int, str]":
+    """What the enforcing hooks read: `task-status.py --fields` → (status, live
+    unchecked count, first live unchecked gate text). Exactly the bytes the hook
+    consumes — LF-only, three lines."""
+    r = subprocess.run([sys.executable, str(TASK_STATUS), "--fields", str(path)],
+                       capture_output=True)
+    assert r.returncode == 0, r.stderr
+    out = r.stdout.decode("utf-8")
+    assert b"\r" not in r.stdout, "hook fields must be LF-only bytes"
+    status, count, first = out.split("\n", 3)[:3]
+    return status, int(count), first
 
 
 def hook_unchecked(path: Path) -> int:
-    """The Stop hook's own count: grep -cE '^[[:space:]]*- \\[ \\]'."""
+    """The hook's own count (Python-backed)."""
+    return hook_fields(path)[1]
+
+
+def grep_fallback_unchecked(path: Path) -> int:
+    """The Stop hook's no-python fallback: grep -cE '^[[:space:]]*- \\[ \\]'."""
     r = subprocess.run(["grep", "-cE", STOP_HOOK_GREP, str(path)],
                        capture_output=True, text=True)
     # grep -c prints the count and exits 1 when zero matches.
@@ -55,10 +84,27 @@ CASES = [
     ("unicode gate text, one open", "- [x] éöк done\n- [ ] задача: run 测试\n", True),
     ("unicode gate text, all checked", "- [x] 完了 ✓\n", False),
     ("tab-indented open gate", "- [x] a\n\t- [ ] tabbed\n", True),
-    # Documented residual: a fenced line-start marker is counted by ALL three —
-    # consistently wrong, not silently divergent. Parity still holds (all True).
-    ("fenced line-start example (wrong-together, but agreeing)",
-     "## Work\n- [x] real\n```\n- [ ] <describe the gate>\n```\n", True),
+    # Task 055: a fenced line-start marker is an EXAMPLE for all three (was
+    # "wrong-together" — counted by all, and a Freehand decoy could release the
+    # stop). Fence rules are the shared engine's (core._iter_fenced_flags).
+    ("fenced line-start example after all-checked", "## Work\n- [x] real\n```\n- [ ] <describe the gate>\n```\n", False),
+    ("fenced Freehand decoy BEFORE a real open gate (the 043 round-5 vector)",
+     "## Work\n```\n- [ ] Freehand — example only\n```\n- [x] a\n- [ ] real work left\n", True),
+    ("tilde-fenced decoy", "~~~md\n- [ ] example\n~~~\n- [x] a\n", False),
+    ("longer closer still closes", "````\n- [ ] example\n`````\n- [x] a\n", False),
+    ("shorter closer does NOT close — but an UNCLOSED fence hides nothing (fail closed)",
+     "````\n- [ ] still live\n```\n- [x] a\n", True),
+    ("unclosed trailing fence: the real gate stays LIVE",
+     "- [x] a\n```\n- [ ] real gate inside a fence the author forgot to close\n", True),
+    ("indented (4-space) fence opener is NOT a fence — its example is live",
+     "- [x] a\n    ```\n    - [ ] counted\n    ```\n", True),
+    ("nested gate after a blank line is a GATE, not indented code",
+     "- [x] a\n\n    - [ ] nested real gate\n", True),
+    ("inline-code opener (backtick in info string) is not a fence",
+     "``` `x` ```\n- [ ] live\n", True),
+    ("CRLF fenced example, all checked", "- [x] a\r\n```\r\n- [ ] ex\r\n```\r\n", False),
+    ("NBSP after the closer does not close (V6) → unclosed → live",
+     "```\n- [ ] live\n```\u00a0\n- [x] a\n", True),
 ]
 
 
@@ -72,8 +118,10 @@ class GateParserParity(unittest.TestCase):
 
                 checked, total = _gate_counts(content)
                 progress_open = total > checked
-                head_open = not _extract_head_position(tf).startswith("(")
-                hook_open = hook_unchecked(tf) > 0
+                head = _extract_head_position(tf)
+                head_open = not head.startswith("(")
+                _status, hook_count, hook_first = hook_fields(tf)
+                hook_open = hook_count > 0
 
                 self.assertEqual(progress_open, expect_open, f"progress: {label}")
                 self.assertEqual(head_open, expect_open, f"head: {label}")
@@ -81,6 +129,13 @@ class GateParserParity(unittest.TestCase):
                 # The property itself: all three identical.
                 self.assertEqual({progress_open, head_open, hook_open}, {expect_open},
                                  f"consumers disagree: {label}")
+                # The hook's count IS the CLI's count, and its FIRST_GATE is the
+                # CLI's head position — same function, same fixture.
+                self.assertEqual(hook_count, total - checked, f"hook count != CLI count: {label}")
+                self.assertEqual(hook_first, head if expect_open else "", f"hook first gate: {label}")
+                # The no-python fallback may only OVER-count (fail closed).
+                self.assertGreaterEqual(grep_fallback_unchecked(tf), hook_count,
+                                        f"grep fallback under-counted: {label}")
 
     def test_reported_file_reports_71_71_not_71_74(self):
         d = Path(tempfile.mkdtemp())

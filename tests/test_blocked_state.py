@@ -18,6 +18,7 @@ Invariants (from the write-up):
 
 Run: python3 tests/test_blocked_state.py
 """
+import json
 import os
 import subprocess
 from tests._bashcheck import bash_or_skip
@@ -502,38 +503,28 @@ class StatusFenceAware(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, b"blocked\n")
 
-    @staticmethod
-    def _f3_awk_program():
-        """task-gate-hook's F3 `## Status` awk, EXTRACTED from the live hook source
-        (round-7 panel: a hard-coded copy would keep passing against a fossil)."""
-        import re
-        src = (SCRIPTS / "task-gate-hook").read_text(encoding="utf-8")
-        m = re.search(r"STATUS=\$\(awk '(.*?)'\s*\"\$RESOLVED\"", src, re.S)
-        assert m, "could not locate the F3 status awk in scripts/task-gate-hook"
-        return m.group(1)
-
     def _f3_reads(self, tf):
-        import shutil
-        awk = shutil.which("awk")
-        if awk is None:
-            self.skipTest("awk not available")
-        r = subprocess.run([awk, self._f3_awk_program(), str(tf)], capture_output=True, text=True)
-        return "".join(r.stdout.split())   # the hook pipes through tr -d '[:space:]'
+        """task-gate-hook's F3 done-check reads `## Status` through the SAME script
+        the stop-hook and the CLI use (task 055: `python3 task-status.py <file>`,
+        replacing a fence-blind LAST-wins awk that erred both ways)."""
+        r = subprocess.run([sys.executable, str(SCRIPTS / "task-status.py"), str(tf)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
 
-    def test_f3_awk_is_extracted_from_the_hook_not_copied(self):
-        prog = self._f3_awk_program()
-        self.assertIn("## Status", prog)
-        self.assertIn("flag", prog)
-        # A control read through the extracted program on the canonical layout.
+    def test_f3_reads_status_through_the_shared_script_not_awk(self):
+        src = (SCRIPTS / "task-gate-hook").read_text(encoding="utf-8")
+        self.assertFalse("STATUS=$(awk" in src, "F3 must not re-implement the status reader in awk")
+        self.assertRegex(src, r'python3 "\$HOOK_DIR/task-status\.py" "\$RESOLVED"',
+                         "F3 must read the resolved task through scripts/task-status.py")
         tf = self._task(TASK.format(n="012"))
         self.assertEqual(self._f3_reads(tf), "pending")
 
-    def test_written_status_layout_agrees_with_the_f3_awk(self):
-        # Every file playbook WRITES must read the same in Python and in the
-        # fence-blind F3 awk: blank lines after the heading are collapsed and the
-        # heading itself is canonicalized to `## Status` on write (round-6/7 panels:
-        # `## Status\n\ndone`, `## Status ##\ndone`, `##\tStatus\ndone` all read `""`
-        # in F3 → a stale done-pointer would authorize edits).
+    def test_written_status_layout_agrees_with_the_f3_reader(self):
+        # Every file playbook WRITES must read the same in Python and in the hook's
+        # F3 reader (now the same script — kept as the canonical-layout pin: blank
+        # lines after the heading are collapsed and the heading is canonicalized to
+        # `## Status` on write, round-6/7 panels of task 043).
         core = self._core()
         bodies = [
             "# T\n\n## Status\n\npending\n\n## Work Plan\n- [ ] G1\n",
@@ -740,6 +731,97 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertIn("status", r.stderr.lower(), "the fallback must be loud")
 
 
+    def test_fenced_gate_decoys_do_not_fool_the_stop_gate(self):
+        """Task 055 (043 round-5 vector): the stop-hook's gate discovery reads the
+        SAME fence-aware live view as the CLI (`task-status.py --fields` →
+        core._live_gate_state). A fenced `- [ ] Freehand…` example BEFORE a real
+        open gate used to become FIRST_GATE (grep -m1) and the `Freehand*` arm
+        released the stop with work left; a fenced `- [ ] example` after an
+        all-checked plan used to BLOCK a finished task."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        # (1) decoy before a real gate → must BLOCK (exit 2), naming the REAL gate.
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Docs\n```\n- [ ] Freehand — example only\n```\n"
+            "## Work Plan\n- [x] G1\n- [ ] G2: real work left\n", encoding="utf-8")
+        self._set_counters()
+        r = self.run_stop_hook()
+        self.assertEqual(r.returncode, 2, f"fenced Freehand decoy released the stop: {r.stderr}")
+        self.assertIn("G2: real work left", r.stderr)
+        self.assertIn("1 unchecked", r.stderr)
+        # (2) fenced example, every live gate checked → must ALLOW (exit 0).
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [x] G1\n- [x] G2\n\n"
+            "## Docs\n```\n- [ ] <describe the gate>\n```\n", encoding="utf-8")
+        self._set_counters()
+        r = self.run_stop_hook()
+        self.assertEqual(r.returncode, 0, f"a fenced example blocked a finished task: {r.stderr}")
+        # (3) control: a REAL live Freehand first gate still releases.
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Debrief\n- [ ] Freehand — work is done\n",
+            encoding="utf-8")
+        self._set_counters()
+        self.assertEqual(self.run_stop_hook().returncode, 0)
+
+    def test_gate_discovery_fails_closed_without_python(self):
+        """No python → the hook cannot read the live view. The grep fallback may
+        only OVER-count, and the `Freehand*` release is NOT applied to a
+        grep-derived first gate (it could be a fenced decoy): a Freehand-first
+        file that python would release stays BLOCKED, loudly."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Debrief\n- [ ] Freehand — work is done\n",
+            encoding="utf-8")
+        self._set_counters()
+        self.assertEqual(self.run_stop_hook().returncode, 0, "control: python releases Freehand")
+        shim = Path(tempfile.mkdtemp())
+        (shim / "python3").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        os.chmod(shim / "python3", 0o755)
+        env = self._env()
+        env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+        r = subprocess.run([bash_or_skip(), str(SCRIPTS / "stop-hook")],
+                           input='{"stop_hook_active": false}', cwd=self.project, env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, f"no-python fallback must not release: {r.stderr}")
+        self.assertIn("python", r.stderr.lower(), "the fallback must be loud")
+
+    def _run_gate_hook(self, task_pointer, code_path="src/main.py"):
+        """task-gate-hook on an Edit of a code file with `current_state` = pointer."""
+        sd = self.project / ".agent" / "sessions" / SID
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "current_state").write_text(task_pointer + "\n", encoding="utf-8")
+        env = self._env()
+        env.pop("BASH_ENV", None)
+        payload = json.dumps({"tool_name": "Edit",
+                              "tool_input": {"file_path": str(self.project / code_path)}})
+        return subprocess.run([bash_or_skip(), str(SCRIPTS / "task-gate-hook")], input=payload,
+                              cwd=self.project, env=env, capture_output=True, text=True)
+
+    def test_f3_stale_done_pointer_with_fenced_pending_decoy_blocks(self):
+        """Task 055 (043 round-4 panel, grok): a CLOSED task whose file quotes a
+        `## Status`/pending example AFTER the live `done` used to AUTHORIZE code
+        edits through a stale pointer (fence-blind LAST-wins awk read `pending`).
+        The hook now reads the same fence-aware status as the CLI: done → BLOCK."""
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\ndone (2026-09-09)\n\n## Work Plan\n- [x] G1\n\n"
+            "## Docs\n```\n## Status\npending\n```\n", encoding="utf-8")
+        self.assertEqual(_extract_status(self.task_file), "done (2026-09-09)")
+        r = self._run_gate_hook("012")
+        self.assertEqual(r.returncode, 2, f"stale done pointer authorized an edit: {r.stderr}")
+        # Control: the pointer to a genuinely pending task authorizes.
+        self.task_file.write_text(TASK.format(n="012"), encoding="utf-8")
+        self.assertEqual(self._run_gate_hook("012").returncode, 0)
+
+    def test_f3_active_task_with_fenced_done_example_authorizes(self):
+        """The other fail direction: an ACTIVE task whose file quotes a
+        `## Status`/done example in a code fence used to be read as done and
+        BLOCK every code edit (loud, but wrong). Fence-aware → live pending → allow."""
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [ ] G1\n\n"
+            "## Docs\n```\n## Status\ndone\n```\n", encoding="utf-8")
+        self.assertEqual(_extract_status(self.task_file), "pending")
+        r = self._run_gate_hook("012")
+        self.assertEqual(r.returncode, 0, f"fenced done example blocked an active task: {r.stderr}")
+
     FENCED_ONLY_STATUS = ("# 012 - Decide\n\n```\n## Status\npending\n```\n\n"
                           "## Work Plan\n- [ ] open gate\n")
 
@@ -833,11 +915,12 @@ class BlockedEndToEnd(unittest.TestCase):
             encoding="utf-8")
         self._set_counters()
         shim = Path(tempfile.mkdtemp())
-        # The shim answers the STATUS read with CRLF and lets every other python3
-        # call (the stop_hook_active JSON parse) fall through to the real one.
+        # The shim answers the `--fields` state read (status, count, first gate)
+        # with CRLF on every line and lets every other python3 call (the
+        # stop_hook_active JSON parse) fall through to the real one.
         real = sys.executable.replace("\\", "/")
         (shim / "python3").write_text(
-            "#!/bin/sh\ncase \"$1\" in *task-status.py) printf 'blocked\\r\\n'; exit 0;; esac\n"
+            "#!/bin/sh\ncase \"$2\" in *task-status.py) printf 'blocked\\r\\n1\\r\\nopen gate\\r\\n'; exit 0;; esac\n"
             f"exec \"{real}\" \"$@\"\n", encoding="utf-8")
         os.chmod(shim / "python3", 0o755)
         env = self._env()

@@ -3112,10 +3112,15 @@ def _extract_problem(task_file: Path) -> str:
 
 
 def _extract_head_position(task_file: Path) -> str:
-    """Find the first unchecked checkbox or empty required field."""
+    """Find the first unchecked checkbox or empty required field (fence-aware
+    since task 055: a `- [ ]` quoted inside a CLOSED code fence is an example,
+    not the head — the same live view `_gate_counts` and the stop-hook use)."""
     try:
         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        for line in lines:
+        fenced = _iter_fenced_flags(lines, unclosed_is_live=True, track_indented_code=False)
+        for i, line in enumerate(lines):
+            if fenced[i]:
+                continue
             stripped = line.strip()
             # Unchecked checkbox
             if stripped.startswith("- [ ]"):
@@ -3661,14 +3666,55 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
 # still counted, consistently, by all three consumers; making the whole family
 # fence-aware (as `_node_starts` is on the mind-map side) needs the bash Stop hook
 # to agree too and is a separate design decision.
-_GATE_LINE_RE = re.compile(r"^[ \t]*- \[([ xX])\]", re.MULTILINE)
+
+# One gate parser for the progress column, the head-position parser, the close
+# count (lifecycle) AND the enforcing stop-hook (via scripts/task-status.py), so
+# they cannot disagree about what a gate is (issue #09; task 055 for the hook).
+# A `- [ ]` in mid-line PROSE ("the convention is `- [ ]` until…") is NOT a gate
+# — the old substring count treated it as one, so a task could close at 71/74
+# while `status` said "(all gates checked)": the count that does not gate, and the
+# gate that does not count. Line-anchored, same shape as the hook's grep fallback
+# `^[[:space:]]*- \[ \]` and retro.py's gate scan.
+#
+# Fence-aware (task 055): a marker inside a properly CLOSED CommonMark code fence
+# is an EXAMPLE (template text, a quoted `- [ ] Freehand…` decoy), not a gate.
+# The view is FENCE-ONLY through the shared engine `_iter_fenced_flags` with
+# `unclosed_is_live=True` (an unclosed fence hides NOTHING — its gates stay
+# counted, so the stop still blocks: fail CLOSED for the gate) and
+# `track_indented_code=False` (a real nested gate after a blank line,
+# `    - [ ] nested`, must never vanish from the count — that would RELEASE the
+# stop). The bash hooks never re-implement this: they call task-status.py.
+_GATE_LINE_RE = re.compile(r"^[ \t]*- \[([ xX])\]")
+
+
+def _live_gate_state(lines: "list[str]") -> "tuple[int, int, str]":
+    """Return ``(unchecked, total, first_unchecked_text)`` over the LIVE lines of
+    a task.md — the ONE gate reader behind `_gate_counts`, `_extract_progress`,
+    the lifecycle close count and `scripts/task-status.py --fields` (the stop-hook
+    and task-gate-hook). `first_unchecked_text` is the text after `- [ ] ` of the
+    first live unchecked gate (whitespace-trimmed; `""` when none), exactly what
+    the stop-hook's `Freehand*` release inspects."""
+    fenced = _iter_fenced_flags(lines, unclosed_is_live=True, track_indented_code=False)
+    unchecked = total = 0
+    first = ""
+    for i, line in enumerate(lines):
+        if fenced[i]:
+            continue
+        m = _GATE_LINE_RE.match(line.rstrip("\r\n"))
+        if not m:
+            continue
+        total += 1
+        if m.group(1) == " ":
+            unchecked += 1
+            if not first:
+                first = line.rstrip("\r\n")[m.end():].strip()
+    return unchecked, total, first
 
 
 def _gate_counts(content: str) -> "tuple[int, int]":
-    """Return (checked, total) line-anchored gate markers in `content`."""
-    marks = _GATE_LINE_RE.findall(content)
-    checked = sum(1 for m in marks if m in ("x", "X"))
-    return checked, len(marks)
+    """Return (checked, total) line-anchored, fence-aware gate markers in `content`."""
+    unchecked, total, _first = _live_gate_state(content.splitlines())
+    return total - unchecked, total
 
 
 def _extract_progress(task_file: Path) -> str:
