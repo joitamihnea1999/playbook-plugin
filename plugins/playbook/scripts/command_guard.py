@@ -100,7 +100,7 @@ def _segment_checks(seg: str):
 # clearly issued to a DB client (so `grep "DROP TABLE"` is NOT flagged).
 _WHOLE = [
     ("pipe-to-shell",
-     re.compile(r"\b(curl|wget|fetch)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh|ksh|python3?|perl|ruby)\b", re.I),
+     re.compile(r"\b(curl|wget|fetch)\b[^|]*\|\s*(?:(?:sudo|env|command|nice|nohup)(?:\s+-\S+)*\s+)*(sh|bash|zsh|ksh|python3?|perl|ruby)\b", re.I),
      "piping a downloaded script straight into a shell runs unreviewed remote code"),
     ("sql-destructive",
      # Either order (task 073 round 2: a statement echoed INTO the client from the
@@ -144,7 +144,7 @@ _EXPANSION = re.compile(r"\$\(|`|\$\{|<\(|>\(")
 # to a plain file with NO pipe, no expansion and no process substitution anywhere
 # on the line — a quote-blind matcher cannot tell `"a | sh"` from ` | sh`, so any
 # `|` on the line keeps the text (impl-panel round 2: `echo '… | sh' | bash`).
-_DATA_LINE = re.compile(r"^\s*(?:echo|printf)\b[^|<>()`$]*>{1,2}\s*" + _PATH + r"\s*$")
+_DATA_LINE = re.compile(r"^\s*(?:echo|printf)\b[^|;&<>()`$]*>{1,2}\s*" + _PATH + r"\s*$")   # single simple command only (round 3)
 
 
 def _strip_data_regions(command):
