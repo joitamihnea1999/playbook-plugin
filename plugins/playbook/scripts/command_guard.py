@@ -103,8 +103,10 @@ _WHOLE = [
      re.compile(r"\b(curl|wget|fetch)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh|ksh|python3?|perl|ruby)\b", re.I),
      "piping a downloaded script straight into a shell runs unreviewed remote code"),
     ("sql-destructive",
-     re.compile(r"\b(psql|mysql|mariadb|sqlite3?|mongo(?:sh)?|clickhouse|cockroach)\b"
-                r".*\b(drop\s+(database|table|schema)|truncate\b|delete\s+from)\b", re.I | re.S),
+     # Either order (task 073 round 2: a statement echoed INTO the client from the
+     # left never matched before), spanning lines.
+     re.compile(r"(?:\b(?:psql|mysql|mariadb|sqlite3?|mongo(?:sh)?|clickhouse|cockroach)\b.*\b(?:drop\s+(?:database|table|schema)|truncate\b|delete\s+from)\b)"
+                r"|(?:\b(?:drop\s+(?:database|table|schema)|truncate\b|delete\s+from)\b.*\b(?:psql|mysql|mariadb|sqlite3?|mongo(?:sh)?|clickhouse|cockroach)\b)", re.I | re.S),
      "a DB drop/truncate/delete issued to a client is irreversible"),
 ]
 
@@ -132,16 +134,26 @@ def _unwrap_shell_c(seg: str) -> "str | None":
 #    body has any;
 #  * an unterminated heredoc masks nothing;
 #  * echo/printf arguments are masked only when they carry no expansion.
+# A redirect target must be a PLAIN PATH — `>(sh)` is a process substitution
+# that executes the "data" (impl-panel round 2).
+_PATH = r"[^\s()<>|&;`$]+"
 _HEREDOC_SINK = re.compile(
-    r"^\s*(?:cat|tee)\b[^|;&<>]*(?:>{1,2}\s*\S+\s*)?<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)\s*(?:>{1,2}\s*\S+\s*)?$")
-_EXPANSION = re.compile(r"\$\(|`|\$\{")
-_DATA_ARGS = re.compile(r"(^|[;&|]\s*|\n\s*)((?:echo|printf)\b[^\n;&|]*)")
+    r"^\s*(?:cat|tee)\b[^|;&<>()`$]*(?:>{1,2}\s*" + _PATH + r"\s*)?<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)\s*(?:>{1,2}\s*" + _PATH + r"\s*)?$")
+_EXPANSION = re.compile(r"\$\(|`|\$\{|<\(|>\(")
+# An echo/printf line is inert only when it is a single simple command redirected
+# to a plain file with NO pipe, no expansion and no process substitution anywhere
+# on the line — a quote-blind matcher cannot tell `"a | sh"` from ` | sh`, so any
+# `|` on the line keeps the text (impl-panel round 2: `echo '… | sh' | bash`).
+_DATA_LINE = re.compile(r"^\s*(?:echo|printf)\b[^|<>()`$]*>{1,2}\s*" + _PATH + r"\s*$")
 
 
 def _strip_data_regions(command):
-    """Return the command text with inert DATA removed, for the whole-command
-    rules: a data-sink heredoc body (quoted tag, or no expansion inside) and the
-    literal arguments of echo/printf. Everything that could run stays."""
+    """Return the command text with inert DATA removed, for the WHOLE-command
+    rules only (the segment rules are line-split and never masked — a heredoc
+    body line `rm -rf /` still blocks, conservatively): a `cat`/`tee` heredoc
+    body written to a plain file (quoted tag, or no expansion inside) and an
+    echo/printf line redirected to a plain file with no pipe/expansion on it.
+    Everything that could run stays."""
     lines = str(command).split("\n")
     out = []
     i = 0
@@ -162,10 +174,7 @@ def _strip_data_regions(command):
             continue                                   # expansions would run
         i = j + 1                                      # drop body + closing tag
 
-    def _mask(mm):
-        seg = mm.group(2)
-        return mm.group(1) + ("echo" if not _EXPANSION.search(seg) else seg)
-    return _DATA_ARGS.sub(_mask, "\n".join(out))
+    return "\n".join("echo > file" if _DATA_LINE.match(l) else l for l in out)
 
 
 def classify_command(command, extra_patterns=None, _depth=0):
@@ -302,8 +311,11 @@ def _active_task_is_irreversible(root):
         plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if plugin_dir not in sys.path:
             sys.path.insert(0, plugin_dir)
-        from tasks.core import extract_risk                    # fence-aware, the CLI's reader
+        from tasks.core import extract_risk, _status_from_lines, _physical_lines   # fence-aware readers
         from pathlib import Path as _P
+        _text = _P(task_md).read_text(encoding="utf-8", errors="replace")
+        if str(_status_from_lines(_physical_lines(_text))).strip().lower() != "in_progress":
+            return False        # a done/blocked/pending task in a stale pointer never acknowledges (round 2)
         return str(extract_risk(_P(task_md))).strip().lower() == "irreversible"
     except Exception:
         return False
@@ -329,8 +341,8 @@ def main() -> int:
     cfg = _load_cfg(root)
     if cfg.get("command_guard") is False:
         return 0
-    if os.environ.get("PLAYBOOK_ALLOW_DANGEROUS"):     # human-acknowledged
-        return 0
+    if os.environ.get("PLAYBOOK_ALLOW_DANGEROUS", "").strip().lower() in ("1", "true", "yes", "on"):
+        return 0                                        # operator-acknowledged (round 2: `=0` is not an ack)
 
     extra = cfg.get("dangerous_commands")
     extra = extra if isinstance(extra, list) else []

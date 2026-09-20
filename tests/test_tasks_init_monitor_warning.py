@@ -59,6 +59,19 @@ class TasksInitMonitorWarning(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_nested_settings_shapes_do_not_crash(self):
+        # impl-panel round 2 (codex ×2): every container level may be malformed
+        for shape in ('{"hooks": ["x"]}', '{"hooks": {"PostToolUse": "x"}}',
+                      '{"hooks": {"PostToolUse": [{"hooks": ["bad"]}]}}',
+                      '{"hooks": {"PostToolUse": [{"hooks": [{"command": 5}]}]}}', '{"hooks": null}'):
+            with self.subTest(shape=shape):
+                d = Path(tempfile.mkdtemp())
+                (d / ".claude").mkdir()
+                (d / ".claude" / "settings.json").write_text(shape, encoding="utf-8")
+                r = self._run_init(d)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

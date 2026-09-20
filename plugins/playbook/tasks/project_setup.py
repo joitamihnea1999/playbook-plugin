@@ -88,12 +88,19 @@ def cmd_init(cmd_args):
             # The monitor-nudge PostToolUse registration is SANCTIONED — scripts/init
             # writes it (task 073 finding C8: this warning told users to delete it).
             def _foreign(entries):
-                for e in entries if isinstance(entries, list) else []:
-                    for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
-                        if "monitor-nudge.sh" not in str((h or {}).get("command", "")):
+                if not isinstance(entries, list):
+                    return True                      # unknown shape → report it
+                for e in entries:
+                    hooks = e.get("hooks") if isinstance(e, dict) else None
+                    if not isinstance(hooks, list):
+                        return True
+                    for h in hooks:
+                        cmd = h.get("command") if isinstance(h, dict) else None
+                        if "monitor-nudge.sh" not in str(cmd or ""):
                             return True
                 return False
-            hook_events = [ev for ev, entries in (settings.get("hooks") or {}).items()
+            _hooks = settings.get("hooks")
+            hook_events = [ev for ev, entries in (_hooks.items() if isinstance(_hooks, dict) else [])
                            if _foreign(entries)]
             if hook_events:
                 print(f"  ⚠ .claude/settings.json has local hook registrations: {', '.join(hook_events)}")

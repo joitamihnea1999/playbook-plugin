@@ -219,12 +219,17 @@ irreversible shell commands — `rm -rf` on a dangerous path, `git push --force`
 `DROP`/`TRUNCATE` — before they run, because the sandbox contains filesystem
 blast radius but not outward/logical irreversibility, and judgment alone is not a
 guarantee. It is **conservative** (matches only at a command position, so an
-`echo`/`grep` of dangerous text is fine — including inside a `cat`/`tee` heredoc
-body (quoted tag, or no `$(…)`/backtick expansion in the body) or an
-`echo`/`printf` string without an expansion (task 073: the two whole-command
-rules, pipe-to-shell and DB drop, skip exactly those inert data regions; a
-heredoc fed to `bash`/`sh`/`psql`/`python3`, an expansion, an unterminated
-heredoc or a `<<` inside a string are still seen); a relative `rm -rf ./build` is fine;
+`echo`/`grep` of dangerous text is fine for the command-position rules; for the
+two WHOLE-command rules (pipe-to-shell, DB drop) only these inert data regions
+are skipped (task 073): a `cat`/`tee` heredoc body written to a plain file
+(quoted tag, or no `$(…)`/backtick/process-substitution expansion in the body),
+and an `echo`/`printf` line redirected to a plain file with no `|` or expansion
+anywhere on the line — a heredoc fed to `bash`/`sh`/`psql`/`python3`, `tee >(sh)`,
+an `echo … | sh`, an expansion, an unterminated heredoc or a `<<` inside a string
+are all still seen, and a quoted `"… | sh"` inside an `echo` still blocks
+(conservative — write such fixtures with a `cat` heredoc). The command-position
+rules are line-split and never masked: a heredoc body LINE that is itself
+`rm -rf /` still blocks. A relative `rm -rf ./build` is fine;
 `--force-with-lease` is allowed), and it **fails OPEN** on any internal error so
 it can never wedge a session.
 

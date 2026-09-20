@@ -22,9 +22,13 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     (downloader piped into a shell, DB drop) matched DATA — heredoc bodies and `echo`/`printf`
     strings — so writing a fixture or a note about such a command was blocked (seven live
     blocks while writing this very batch); only inert data is masked — a `cat`/`tee` heredoc
-    body (quoted tag or no expansion) and expansion-free `echo`/`printf` arguments — after
-    the impl panel showed the first cut re-allowed `bash <<EOF`, `echo "$(…)"` and unquoted
-    heredocs with expansions (caught before merge; all pinned as must-block). (b) The block
+    body written to a plain file (quoted tag or no expansion) and an `echo`/`printf` line
+    redirected to a plain file with no pipe or expansion on it — after two impl-panel rounds
+    showed the earlier cuts re-allowed `bash <<EOF`, `echo "$(…)"`, unquoted heredocs with
+    expansions, `echo '… | sh' | bash` and `tee >(sh)` (all caught before merge, all pinned
+    as must-block; the command-position rules are never masked). Also: `PLAYBOOK_ALLOW_DANGEROUS=0`
+    is no longer an acknowledgement, and the irreversible-task path requires a live
+    `in_progress` status (a stale pointer to a done task never acknowledges). (b) The block
     message and docs said "re-run with `PLAYBOOK_ALLOW_DANGEROUS=1`" — unreachable from inside
     a session (the hook reads its own environment). (c) The documented in-session path — an
     `irreversible`-classified active task stands the interlock down — had NEVER been
@@ -47,7 +51,7 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     docs/cli.md `prepare-merge` signature. Ledger PB-COMMAND-DANGEROUS restated. Not exercised
     by the gauntlet (disclosed): provider wrappers launching a real codex/grok agent session,
     `monitor start`, the slash-command prompt files as prompts, macOS/Windows live (CI covers
-    the suite). Tests 2368 → 2386.
+    the suite). Tests 2368 → 2389.
 
 - **The panel-freshness fingerprint tells the truth in six bounded cases** (task 060; parked
   T019/T023/T036, owner batch 2026-09-20; plan panel PASS 5/5 with 24 findings that reshaped
