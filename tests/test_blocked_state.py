@@ -731,6 +731,7 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertIn("status", r.stderr.lower(), "the fallback must be loud")
 
     def _run_stop_hook_with_shims(self, shims: dict, *, stop_active: bool = False,
+                                  payload: "str | None" = None,
                                   ) -> "subprocess.CompletedProcess":
         """Run the hook with PATH-prepended executables (name -> script body)."""
         shim = Path(tempfile.mkdtemp())
@@ -739,7 +740,8 @@ class BlockedEndToEnd(unittest.TestCase):
             os.chmod(shim / name, 0o755)
         env = self._env()
         env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
-        payload = '{"stop_hook_active": %s}' % ("true" if stop_active else "false")
+        if payload is None:
+            payload = '{"stop_hook_active": %s}' % ("true" if stop_active else "false")
         return subprocess.run([bash_or_skip(), str(SCRIPTS / "stop-hook")],
                               input=payload, cwd=self.project,
                               env=env, capture_output=True, text=True)
@@ -762,9 +764,23 @@ class BlockedEndToEnd(unittest.TestCase):
         second = self._run_stop_hook_with_shims(shims, stop_active=True)
         self.assertEqual(second.returncode, 0,
                          f"the valve must end a re-issued stop without python3: {second.stderr}")
-        # And the valve must not be a substring guess: `false` stays blocked.
-        third = self._run_stop_hook_with_shims(shims)
-        self.assertEqual(third.returncode, 2)
+        # And the valve must not be a substring guess (round-2 grok): payloads a
+        # looser `.*true` match would release must stay BLOCKED.
+        for label, payload in [
+            ("false stays blocked", '{"stop_hook_active": false}'),
+            ("quoted string true is not the boolean", '{"stop_hook_active": "true"}'),
+            ("another true field does not leak in", '{"stop_hook_active": false, "other": true}'),
+            ("key missing", '{"session_id": "x", "transcript": true}'),
+        ]:
+            with self.subTest(label):
+                r = self._run_stop_hook_with_shims(shims, payload=payload)
+                self.assertEqual(r.returncode, 2, f"{label}: {r.stderr}")
+        # Round-2 codex-medium: the valve must be SHELL-NATIVE — with python3 AND
+        # grep both broken the re-issued stop still has to end the turn.
+        both = {"python3": "#!/bin/sh\nexit 1\n", "grep": "#!/bin/sh\nexit 2\n"}
+        self.assertEqual(self._run_stop_hook_with_shims(both).returncode, 2)
+        r = self._run_stop_hook_with_shims(both, stop_active=True)
+        self.assertEqual(r.returncode, 0, f"valve must not depend on grep either: {r.stderr}")
 
     def test_no_python_fallback_keeps_the_conversational_bypass(self):
         """Task 072 impl panel (opus/codex-high): the counter-gated conversational
@@ -799,7 +815,18 @@ class BlockedEndToEnd(unittest.TestCase):
         })
         self.assertEqual(r.returncode, 2,
                          f"a failed grep must BLOCK (fail closed), not release: {r.stderr}")
-        self.assertIn("grep", r.stderr.lower(), "the grep failure must be disclosed on stderr")
+        self.assertIn("grep could not count the gates", r.stderr,
+                      "the hook's OWN warning (not the shim's stderr) must disclose the failure")
+        # Round-2 codex-high: a count the hook could NOT take must not be released
+        # by the conversational heuristic either — low counters, still BLOCK.
+        sd = self.project / ".agent" / "sessions" / SID
+        (sd / "counters").write_text("writes=0\ntools=1\n", encoding="utf-8")
+        r = self._run_stop_hook_with_shims({
+            "python3": "#!/bin/sh\nexit 1\n",
+            "grep": "#!/bin/sh\nexit 2\n",
+        })
+        self.assertEqual(r.returncode, 2,
+                         f"a failed count must not be released by the low-activity bypass: {r.stderr}")
 
     def test_no_python_fallback_counts_a_bom_prefixed_gate(self):
         """Task 072 (070 release panel, codex-medium #3): core._live_gate_scan strips
@@ -817,6 +844,28 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 2,
                          f"no-python fallback under-counted a BOM-prefixed gate (released): {r.stderr}")
         self.assertIn("1 unchecked", r.stderr)
+        # Round-2 opus: the parity table proves the pattern through `grep -f`; the
+        # shipped hook passes it INLINE on argv. Drive every BOM shape through the
+        # real invocation too, so the argv byte path is proven on every CI lane.
+        for label, gate in [
+            ("doubled BOM", "\ufeff\ufeff- [ ] G2\n"),
+            ("BOM + indent", "\ufeff    - [ ] G2\n"),
+            ("BOM + tab", "\ufeff\t- [ ] G2\n"),
+            ("BOM + CRLF", "\ufeff- [ ] G2\r\n"),
+            ("file BOM on the first line", None),
+        ]:
+            with self.subTest(label):
+                body = "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [x] G1\n" + (gate or "")
+                if gate is None:
+                    body = "\ufeff- [ ] G0 first line\n" + body
+                self.task_file.write_bytes(body.encode("utf-8"))
+                r = self._run_stop_hook_with_shims({"python3": "#!/bin/sh\nexit 1\n"})
+                self.assertEqual(r.returncode, 2, f"{label}: released: {r.stderr}")
+                self.assertIn("1 unchecked", r.stderr, label)
+                # all-checked BOM file must still RELEASE (no over-block on the BOM itself)
+                self.task_file.write_bytes(("\ufeff- [x] done\n").encode("utf-8"))
+                r = self._run_stop_hook_with_shims({"python3": "#!/bin/sh\nexit 1\n"})
+                self.assertEqual(r.returncode, 0, f"{label}: BOM on a checked gate over-blocked: {r.stderr}")
 
 
     def test_fenced_gate_decoys_do_not_fool_the_stop_gate(self):

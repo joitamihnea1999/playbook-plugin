@@ -68,7 +68,9 @@ def hook_unchecked(path: Path) -> int:
 
 
 def grep_fallback_unchecked(path: Path) -> int:
-    """The Stop hook's no-python fallback: grep -cE '^[[:space:]]*- \\[ \\]'."""
+    """The Stop hook's no-python fallback count: `LC_ALL=C grep -cE <STOP_HOOK_GREP>`
+    (BOM-tolerant since task 072; the hook passes the pattern inline, the
+    end-to-end BOM shapes through that exact invocation live in test_blocked_state)."""
     # The pattern goes through `-f <file>` as exact UTF-8 bytes: a U+FEFF in an
     # argv string is re-encoded by the platform (UTF-16 on Windows), a file is not.
     pat = path.parent / "gate.ere"

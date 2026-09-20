@@ -24,10 +24,12 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   and HTML-comment-blind (over-counts only) — precision is the Python arm's job, blocking is
   this arm's. Impl panel follow-ups: the `stop_hook_active` one-shot valve was ALSO parsed
   with python3, so a no-python session blocked by this arm could never end its turn (no CLI
-  to check a gate, no valve to end the stop) — now read byte-wise with grep when python3
-  cannot run (watched red); and the ledger sentence is scoped honestly: the counter-gated
-  conversational bypass (writes=0, tools<5) releases a low-activity turn on both arms — a
-  documented bound, now pinned by a test. `scripts/verify` unittest count 2337 → 2342.
+  to check a gate, no valve to end the stop) — now read with a bash-builtin regex when
+  python3 cannot run (no python3, no grep; watched red twice); the counter-gated
+  conversational bypass (writes=0, tools<5) is disarmed when the count itself failed and is
+  otherwise named in the ledger as the documented release for chat replies on both arms
+  (pinned); every BOM shape is driven through the hook's real inline grep on all four CI
+  lanes. `scripts/verify` unittest count 2337 → 2342.
 
 ## [1.5.43] — 2026-09-09
 

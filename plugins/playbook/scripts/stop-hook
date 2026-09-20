@@ -46,10 +46,16 @@ if [ -z "$STOP_ACTIVE" ]; then
     # python3 missing/broken (task 072 impl panel, grok): the no-python fallback
     # below blocks on >= 1 open gate and nothing can check a gate without the
     # CLI, so the one-shot valve is the ONLY way such a session ends its turn —
-    # it must not depend on the same python3. Read the flag byte-wise: a JSON
-    # `true` for exactly this key (a `false`, a missing key or a quoted "true"
-    # stay False, never a substring guess).
-    if printf '%s' "$INPUT" | LC_ALL=C grep -Eq '"stop_hook_active"[[:space:]]*:[[:space:]]*true([[:space:]]*[,}]|[[:space:]]*$)'; then
+    # it must not depend on python3, and (round 2, codex) not on grep either:
+    # a bash-builtin regex (bash 3.2 has `=~`; the pattern sits in a variable so
+    # 3.2's quoting rule holds). Byte-wise: a JSON `true` for exactly this key
+    # followed by `,` / `}` / end (a `false`, a missing key, a quoted "true" or
+    # another field's `true` stay False — never a substring guess). Disclosed
+    # bound: the shell cannot tell nesting depth, so a NESTED object carrying
+    # this key would count — the Stop payload is produced by the host, not by
+    # the agent, so that is not an attack surface here.
+    PB_VALVE_RE='"stop_hook_active"[[:space:]]*:[[:space:]]*true[[:space:]]*([,}]|$)'
+    if [[ "$INPUT" =~ $PB_VALVE_RE ]]; then
         STOP_ACTIVE="True"
     else
         STOP_ACTIVE="False"
@@ -142,10 +148,13 @@ fi
 # If the reader cannot run (no python3, import failure) the state is UNREADABLE:
 # say so and fall back to the fence-blind grep for the COUNT only — it can only
 # over-count (a fence hides lines, never adds them; the grep is BOM-tolerant like
-# the Python reader, and a grep ERROR counts as >= 1 open gate — task 072), so the
-# stop still blocks (fail CLOSED); the status is never guessed `blocked` and the
+# the Python reader, and a grep ERROR counts as >= 1 open gate AND disarms the
+# conversational bypass — task 072), so an open gate still blocks the first stop
+# (fail CLOSED; the low-activity bypass below remains the documented release for
+# a COUNTED tree on both arms); the status is never guessed `blocked` and the
 # Freehand release is NOT applied to a grep-derived first gate (it could be the decoy).
 PB_STATE_READ=true
+PB_GREP_RC=0
 STATUS_LINE=""
 UNCHECKED=""
 FIRST_GATE=""
@@ -171,7 +180,7 @@ case "$PB_RELEASE" in
     *) PB_STATE_READ=false ;;              # an unknown 4th field is unreadable, never "release"
 esac
 if [ "$PB_STATE_READ" != true ]; then
-    echo "[stop-hook] WARNING: could not read the task state via python3 ($HOOK_DIR/task-status.py --fields) — treating the status as unreadable, counting gates fence-blind (over-counts, never releases) and disabling the Freehand release" >&2
+    echo "[stop-hook] WARNING: could not read the task state via python3 ($HOOK_DIR/task-status.py --fields) — treating the status as unreadable, counting gates fence-blind (over-counts, never under-counts) and disabling the Freehand release" >&2
     STATUS_LINE=""
     PB_RELEASE="hold"
     # Count unchecked gates fence-blind — a LINE count that may only OVER-count
@@ -189,13 +198,13 @@ if [ "$PB_STATE_READ" != true ]; then
     #    neither abort the hook open (I1) nor be mistaken for a count.
     PB_BOM=$(printf '\357\273\277')
     PB_GATE_ERE="^(${PB_BOM})*[[:space:]]*- \[ \]"
-    PB_GREP_RC=0
     if UNCHECKED=$(LC_ALL=C grep -cE "$PB_GATE_ERE" "$TASK_FILE" 2>/dev/null); then :; else PB_GREP_RC=$?; fi
     case "$PB_GREP_RC:$UNCHECKED" in
         0:[0-9]*|1:[0-9]*) ;;
         *)
             echo "[stop-hook] WARNING: grep could not count the gates in $TASK_FILE (exit $PB_GREP_RC) — assuming at least one open gate (fail closed)" >&2
             UNCHECKED=1
+            [ "$PB_GREP_RC" -le 1 ] && PB_GREP_RC=2   # garbled output = a count NOT taken
             FIRST_GATE="(unreadable — python3 and grep both unavailable; open task.md)"
             ;;
     esac
@@ -213,8 +222,11 @@ fi
 
 # Counter-gated bypass: allow stop for conversational replies (low tool activity)
 # Missing counter file = assume work was done (block)
+# Not when the gate COUNT itself failed (task 072 round 2, codex): a heuristic
+# must not release a tree the hook could not count — "never releases on a count
+# it could not take" is the ledger's exact sentence.
 COUNTER_FILE="$SESSION_DIR/counters"
-if [ -f "$COUNTER_FILE" ]; then
+if [ -f "$COUNTER_FILE" ] && [ "${PB_GREP_RC:-0}" -le 1 ]; then
     # read_counter_int (not read_counter): coerce the .agent/-resident counter
     # bytes to integers before the `[ -eq ]`/`[ -lt ]` tests — parity with the
     # C5 hardening elsewhere (the `[` builtin doesn't command-substitute like
