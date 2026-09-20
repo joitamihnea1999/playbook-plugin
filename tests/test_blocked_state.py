@@ -827,6 +827,19 @@ class BlockedEndToEnd(unittest.TestCase):
         })
         self.assertEqual(r.returncode, 2,
                          f"a failed count must not be released by the low-activity bypass: {r.stderr}")
+        # Round-3 codex (both seats): a grep that exits 0 but prints GARBAGE is a
+        # count NOT taken — `[0-9]*` as a shell glob is "one digit then anything",
+        # so `1garbage` used to pass the shape check, crash `[ -eq ]`, and the
+        # low counters released the stop. Digits-only, or fail closed.
+        for label, out in [("digit then garbage", "1garbage"), ("garbage", "xyz"),
+                           ("empty stdout on exit 0", ""), ("two numbers", "1 2")]:
+            with self.subTest(label):
+                r = self._run_stop_hook_with_shims({
+                    "python3": "#!/bin/sh\nexit 1\n",
+                    "grep": "#!/bin/sh\nprintf '%s\\n' '" + out + "'\nexit 0\n",
+                })
+                self.assertEqual(r.returncode, 2, f"{label}: garbled count released: {r.stderr}")
+                self.assertIn("grep could not count the gates", r.stderr, label)
 
     def test_no_python_fallback_counts_a_bom_prefixed_gate(self):
         """Task 072 (070 release panel, codex-medium #3): core._live_gate_scan strips

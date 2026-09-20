@@ -199,8 +199,14 @@ if [ "$PB_STATE_READ" != true ]; then
     PB_BOM=$(printf '\357\273\277')
     PB_GATE_ERE="^(${PB_BOM})*[[:space:]]*- \[ \]"
     if UNCHECKED=$(LC_ALL=C grep -cE "$PB_GATE_ERE" "$TASK_FILE" 2>/dev/null); then :; else PB_GREP_RC=$?; fi
-    case "$PB_GREP_RC:$UNCHECKED" in
-        0:[0-9]*|1:[0-9]*) ;;
+    # Digits-only: a shell glob `[0-9]*` is "one digit then ANYTHING", so the
+    # shape must be tested with the `*[!0-9]*` idiom (round-3 codex ×2).
+    PB_COUNT_OK=false
+    case "$PB_GREP_RC" in 0|1)
+        case "$UNCHECKED" in ''|*[!0-9]*) ;; *) PB_COUNT_OK=true ;; esac
+    ;; esac
+    case "$PB_COUNT_OK" in
+        true) ;;
         *)
             echo "[stop-hook] WARNING: grep could not count the gates in $TASK_FILE (exit $PB_GREP_RC) — assuming at least one open gate (fail closed)" >&2
             UNCHECKED=1
