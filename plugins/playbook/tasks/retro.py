@@ -261,15 +261,17 @@ def bash_history_ts_to_utc(ts: str) -> str:
     stamped UTC. Every consumer that compares the two must convert first (task
     073, live gauntlet finding C12: on a UTC+3 machine an activation read 3 h
     AFTER the messages typed right after it, so they attributed to the PREVIOUS
-    task). Returns the chat_log form (`YYYY-MM-DD HH:MM:SS UTC`); an unparseable
-    stamp is returned unchanged."""
+    task). Returns the bare `YYYY-MM-DD HH:MM:SS` UTC form (no suffix, so it
+    compares cleanly with the digits a message header carries — impl panel:
+    `…SS UTC` sorted after `…SS` at an exact-second tie); an unparseable stamp
+    is returned unchanged."""
     from datetime import datetime, timezone
     try:
         naive = datetime.strptime(ts.strip(), "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return ts
     try:
-        return naive.astimezone().astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return naive.astimezone().astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     except (OverflowError, OSError, ValueError):
         return ts
 

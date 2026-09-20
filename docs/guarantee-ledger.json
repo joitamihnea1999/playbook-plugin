@@ -1918,7 +1918,7 @@
     {
       "id": "PB-COMMAND-DANGEROUS",
       "category": "command-safety",
-      "statement": "The command interlock blocks its enumerated high-blast command forms at command position — and, for the two whole-command rules (a downloader piped into a shell, a DB drop/truncate/delete issued to a client), anywhere in what could RUN, with heredoc bodies and echo/printf arguments masked first so a fixture or note ABOUT such a command is data, not a command (task 073) — allows the documented benign look-alikes, and lets an explicitly acknowledged command through, where acknowledgement means either an `irreversible`-classified active task or PLAYBOOK_ALLOW_DANGEROUS set in the HOOK'S OWN environment by the operator (a command-line prefix typed by the agent cannot set it — the block message says so).",
+      "statement": "The command interlock blocks its enumerated high-blast command forms at command position — and, for the two whole-command rules (a downloader piped into a shell, a DB drop/truncate/delete issued to a client), anywhere in what could RUN, with the inert DATA regions masked first — a `cat`/`tee` heredoc body whose tag is quoted or whose body carries no `$(`/backtick/`${` expansion, and echo/printf arguments without such an expansion — so a fixture or note ABOUT such a command is data, not a command, while a heredoc fed to an interpreter or DB client, an expansion, an unterminated heredoc or a `<<` inside a string are all still seen (task 073) — allows the documented benign look-alikes, and lets an explicitly acknowledged command through, where acknowledgement means either an ACTIVE task whose live `## Risk` reads `irreversible` (resolved through this session's `current_state` and the CLI's fence-aware `extract_risk`; logged as an `allow` with reason `ack-irreversible-task:<rule>`) or PLAYBOOK_ALLOW_DANGEROUS set in the HOOK'S OWN environment by the operator (a command-line prefix typed by the agent cannot set it — the block message says so).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/command_guard.py",
@@ -1994,7 +1994,7 @@
             "reference": "GauntletDataIsNotACommand.test_real_pipe_to_shell_still_blocks"
           },
           "limitations": [
-            "Task 073 (live gauntlet): the whole-command rules blocked heredoc bodies and echo/printf strings that merely CONTAINED a piped installer or a DB drop — the agent could not write the plugin's own guard test fixtures or a findings note from inside a session (7 live blocks). Data regions are masked before the whole-command match; a real pipe on the heredoc's opener line, in a `bash -c` string, or after the closing tag still blocks. Quoted strings that are not echo/printf arguments (e.g. a python -c program) are NOT masked — conservative direction."
+            "Task 073 (live gauntlet, then tightened by its impl panel): the whole-command rules blocked heredoc bodies and echo/printf strings that merely CONTAINED a piped installer or a DB drop. The first fix masked every heredoc body and every echo/printf argument — the panel showed that re-allowed `bash <<EOF … EOF`, `echo \"$(…)\"` and an unquoted heredoc with an expansion (a security regression caught before merge). Now only a `cat`/`tee` sink heredoc (quoted tag, or no expansion in the body) and expansion-free echo/printf arguments are masked; GAUNTLET_STILL_BLOCK pins interpreter heredocs, substitutions, a fake `<<` inside a string and an unterminated heredoc. CONSERVATIVE bound: an interpreter heredoc (`python3 - <<PY`) whose body only quotes dangerous text still blocks — write such fixtures with `cat`, or assemble the string."
           ]
         },
         {
@@ -2009,6 +2009,19 @@
           "limitations": [
             "Task 073 (B1): the block message and docs/configuration.md said 're-run with PLAYBOOK_ALLOW_DANGEROUS=1' — unreachable from inside the session (the hook reads its own environment; `export X=1; cmd` in the agent's command text was blocked identically, live). Message + docs now name the two real paths (irreversible task; operator env). No test can prove an operator's shell export from inside the suite — the env path is source-read + the pre-existing acknowledged-command proof."
           ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_command_guard.py",
+          "reference": "GuardIrreversibleTaskAck.test_irreversible_active_task_acknowledges",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "GuardIrreversibleTaskAck.test_other_risks_and_no_task_still_block"
+          },
+          "limitations": [
+            "Task 073 impl panel (codex-high): the 'irreversible task' acknowledgement had been DOCUMENTED since 1.5.30 but never implemented — main() read only config and the env var. Implemented in this task and pinned: reversible/assertive/unclassified, no active task, and a FENCED `## Risk` irreversible decoy all still block; only the live risk of the session's active task stands the interlock down. Real-provider (Claude Code) live path: the session id reaches the hook through CLAUDE_ENV_FILE as everywhere else — source-read, not live-proven here."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2022,7 +2035,8 @@
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
-        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."
+        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
+        "Task 073 impl panel, PARKED (codex-high #3): bash-log.sh stamps bash_history in offset-free LOCAL time and readers convert with the reader's current zone, so a DST fold hour or a timezone change between writing and reading can still misattribute; emitting an explicit UTC stamp at write time is a persisted-log FORMAT change (every consumer regex + the 274-case wrapper fixture) that needs its own task with legacy-line handling — the conversion added here fixes the every-day 3-hour class, not the once-a-year fold."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],

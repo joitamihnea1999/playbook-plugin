@@ -83,6 +83,8 @@ def cmd_init(cmd_args):
         import json
         try:
             settings = json.loads(settings_file.read_text(encoding="utf-8"))
+            if not isinstance(settings, dict):       # `[]` is valid JSON (impl panel)
+                settings = {}
             # The monitor-nudge PostToolUse registration is SANCTIONED — scripts/init
             # writes it (task 073 finding C8: this warning told users to delete it).
             def _foreign(entries):

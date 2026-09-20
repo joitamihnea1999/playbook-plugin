@@ -281,3 +281,44 @@ class GauntletTimezone(unittest.TestCase):
                              f"message typed 1 s after `tasks work 7` attributed to {msgs[0].get('task')} "
                              f"(windows={w}) — local/UTC stamps compared as strings")
         self._with_tz("Europe/Bucharest", run)   # UTC+3 in September (EEST)
+
+
+class GauntletTaggerAndTies(unittest.TestCase):
+    """Impl-panel round 1 (task 073): the C12 conversion missed `tasks tagger`
+    (sonnet #2 / codex-medium #5) and left an exact-second tie in `tasks tag`
+    comparing `…SS UTC` against `…SS` (sonnet #3)."""
+
+    def _proj(self):
+        from datetime import datetime, timezone
+        d = Path(tempfile.mkdtemp())
+        agent = d / ".agent"; (agent / "tasks").mkdir(parents=True)
+        t_act = datetime(2026, 9, 20, 20, 43, 27, tzinfo=timezone.utc)
+        loc = t_act.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        (agent / "bash_history").write_text(f"{loc} | AGENT | .claude/bin/tasks work 7\n", encoding="utf-8")
+        (agent / "chat_log.md").write_text(
+            "# Project Chat Log\n\n---\n\n"
+            "**[M001]** [2026-09-20 20:43:00 UTC] `HOST` (claude/pid-x)\n\nbefore activation\n\n---\n\n"
+            "**[M002]** [2026-09-20 20:43:27 UTC] `HOST` (claude/pid-x)\n\nsame second as activation\n\n---\n\n"
+            "**[M003]** [2026-09-20 20:43:28 UTC] `HOST` (claude/pid-x)\n\nafter activation\n\n---\n",
+            encoding="utf-8")
+        return d
+
+    def _run(self, d, *args):
+        env = dict(os.environ, PYTHONPATH=str(PLUGIN), PLAYBOOK_SESSION_ID="pid-x")
+        return subprocess.run([sys.executable, "-m", "tasks.cli", *args], cwd=d, env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_tagger_orders_a_local_activation_among_utc_messages(self):
+        out = self._run(self._proj(), "tagger").stdout.splitlines()
+        i_act = next(i for i, l in enumerate(out) if "tasks work 7" in l)
+        i_before = next(i for i, l in enumerate(out) if "before activation" in l)
+        i_after = next(i for i, l in enumerate(out) if "after activation" in l)
+        self.assertLess(i_before, i_act, out)
+        self.assertLess(i_act, i_after, out)
+
+    def test_tag_attributes_the_same_second_message_to_the_new_task(self):
+        d = self._proj()
+        r = self._run(d, "tag")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log = (d / ".agent" / "chat_log.md").read_text(encoding="utf-8")
+        self.assertLess(log.index("<!-- T007 -->"), log.index("**[M002]**"), log)

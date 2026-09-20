@@ -14,26 +14,40 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   - *Attribution timezone* (Important): `.agent/bash_history` is stamped in LOCAL time by
     bash-log.sh, `chat_log.md` in UTC; `build_task_windows` and `tasks tag` compared them as
     strings, so on a UTC+3 machine a task's first hours of chat attributed to the PREVIOUS task
-    (`context`, `intent`, `retro`). Bash stamps are now converted to UTC before comparison.
+    (`context`, `intent`, `retro`, `tag`, `tagger`). Bash stamps are now converted to UTC before
+    comparison, tie-safe at the exact second. Bound (parked): a DST fold hour or a timezone
+    change between write and read can still misattribute — an explicit UTC stamp at write
+    time is a persisted-log format change for its own task.
   - *Destructive-command interlock* (Important ×2): (a) the two whole-command rules
     (downloader piped into a shell, DB drop) matched DATA — heredoc bodies and `echo`/`printf`
     strings — so writing a fixture or a note about such a command was blocked (seven live
-    blocks while writing this very batch); data regions are masked before that match, a real
-    pipe still blocks. (b) The block message and docs said "re-run with
-    `PLAYBOOK_ALLOW_DANGEROUS=1`" — unreachable from inside a session (the hook reads its own
-    environment); message + docs now name the two real paths (irreversible task; operator env).
+    blocks while writing this very batch); only inert data is masked — a `cat`/`tee` heredoc
+    body (quoted tag or no expansion) and expansion-free `echo`/`printf` arguments — after
+    the impl panel showed the first cut re-allowed `bash <<EOF`, `echo "$(…)"` and unquoted
+    heredocs with expansions (caught before merge; all pinned as must-block). (b) The block
+    message and docs said "re-run with `PLAYBOOK_ALLOW_DANGEROUS=1`" — unreachable from inside
+    a session (the hook reads its own environment). (c) The documented in-session path — an
+    `irreversible`-classified active task stands the interlock down — had NEVER been
+    implemented (docs since 1.5.30, no code); it now is: the guard reads the active task's
+    live `## Risk` through the CLI's fence-aware reader and logs the acknowledged allow.
   - `tasks freehand` on a `light` task appended its block inside `## Parked`, so `tasks parked`
-    and the close listed the Freehand gates as parked debt; it now lands before `## Parked`.
+    and the close listed the Freehand gates as parked debt; it now lands before `## Parked`,
+    locating sections fence-aware (a fenced `## Work` example cannot capture it).
   - `tasks init` told users to delete the monitor-nudge hook that `scripts/init` creates; the
-    sanctioned registration/file is exempt, foreign copies still warn.
+    sanctioned registration/file is exempt, foreign copies still warn; a non-object
+    `settings.json` no longer crashes it.
   - state-echo logged the previous gate as `- [x]` on a TASK SWITCH (an open gate recorded as
-    done); a switch now logs `- [ ] … (left open — switched to task N)`.
+    done) and told the session "✓ previous gate done"; a switch now logs
+    `- [ ] … (left open — switched to task N)` and echoes "↷ switched from task N".
   - `work done` spent a paid tail-certification judge after the declared verify had already
     failed; a failed verify now blocks before any freshness work.
   - Cosmetics: `tasks --version`; `list` separator width and "in progress" instead of "other";
     `timeline` says when nothing is recorded; consultation-mode wording; retro types `light`
     correctly; `scripts/init` reports regenerated managed wrappers separately from created files;
-    docs/cli.md `prepare-merge` signature. Ledger PB-COMMAND-DANGEROUS restated. Tests 2368 → 2379.
+    docs/cli.md `prepare-merge` signature. Ledger PB-COMMAND-DANGEROUS restated. Not exercised
+    by the gauntlet (disclosed): provider wrappers launching a real codex/grok agent session,
+    `monitor start`, the slash-command prompt files as prompts, macOS/Windows live (CI covers
+    the suite). Tests 2368 → 2386.
 
 - **The panel-freshness fingerprint tells the truth in six bounded cases** (task 060; parked
   T019/T023/T036, owner batch 2026-09-20; plan panel PASS 5/5 with 24 findings that reshaped

@@ -104,7 +104,7 @@ _WHOLE = [
      "piping a downloaded script straight into a shell runs unreviewed remote code"),
     ("sql-destructive",
      re.compile(r"\b(psql|mysql|mariadb|sqlite3?|mongo(?:sh)?|clickhouse|cockroach)\b"
-                r".*\b(drop\s+(database|table|schema)|truncate\b|delete\s+from)\b", re.I),
+                r".*\b(drop\s+(database|table|schema)|truncate\b|delete\s+from)\b", re.I | re.S),
      "a DB drop/truncate/delete issued to a client is irreversible"),
 ]
 
@@ -124,33 +124,48 @@ def _unwrap_shell_c(seg: str) -> "str | None":
     return inner
 
 
-_HEREDOC_OPEN = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-_DATA_CMD = re.compile(r"^\s*(?:echo|printf)\b")
-_DATA_ARGS = re.compile(r"(^|[;&|]\s*|\n\s*)(?:echo|printf)\b[^\n;&|]*")
+# Task 073 data-region masking, tightened by the impl panel (round 1):
+#  * only a DATA SINK's heredoc is inert — `cat`/`tee` (optionally redirected)
+#    with `<<TAG` as the LAST thing on the line; `bash <<EOF`, `sh`, `psql`,
+#    `python3 -`, `ssh host` … RUN their body and keep it;
+#  * an UNQUOTED heredoc expands `$(…)`, backticks and `${…}` — kept when the
+#    body has any;
+#  * an unterminated heredoc masks nothing;
+#  * echo/printf arguments are masked only when they carry no expansion.
+_HEREDOC_SINK = re.compile(
+    r"^\s*(?:cat|tee)\b[^|;&<>]*(?:>{1,2}\s*\S+\s*)?<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)\s*(?:>{1,2}\s*\S+\s*)?$")
+_EXPANSION = re.compile(r"\$\(|`|\$\{")
+_DATA_ARGS = re.compile(r"(^|[;&|]\s*|\n\s*)((?:echo|printf)\b[^\n;&|]*)")
 
 
 def _strip_data_regions(command):
-    """Drop heredoc BODIES and the arguments of echo/printf segments so the
-    whole-command patterns see only what could run (task 073, B0). A line that
-    opens a heredoc keeps its command part, so a piped installer written on the
-    same line as the opener is still seen."""
-    out_lines = []
+    """Return the command text with inert DATA removed, for the whole-command
+    rules: a data-sink heredoc body (quoted tag, or no expansion inside) and the
+    literal arguments of echo/printf. Everything that could run stays."""
     lines = str(command).split("\n")
+    out = []
     i = 0
     while i < len(lines):
         line = lines[i]
-        m = _HEREDOC_OPEN.search(line)
-        out_lines.append(line)
+        out.append(line)
         i += 1
-        if m:
-            tag = m.group(2)
-            while i < len(lines) and lines[i].strip() != tag:
-                i += 1
-            i += 1                                    # the closing tag line
-    text = "\n".join(out_lines)
-    # Mask the ARGUMENTS of an echo/printf segment (up to the next separator),
-    # keeping every separator so a real pipe elsewhere in the text is still seen.
-    return _DATA_ARGS.sub(r"\1echo", text)
+        m = _HEREDOC_SINK.match(line)
+        if not m:
+            continue
+        tag, quoted = m.group("tag"), bool(m.group("q"))
+        j = i
+        while j < len(lines) and lines[j].strip() != tag:
+            j += 1
+        if j >= len(lines):
+            continue                                   # unterminated → keep all
+        if not quoted and _EXPANSION.search("\n".join(lines[i:j])):
+            continue                                   # expansions would run
+        i = j + 1                                      # drop body + closing tag
+
+    def _mask(mm):
+        seg = mm.group(2)
+        return mm.group(1) + ("echo" if not _EXPANSION.search(seg) else seg)
+    return _DATA_ARGS.sub(_mask, "\n".join(out))
 
 
 def classify_command(command, extra_patterns=None, _depth=0):
@@ -262,6 +277,38 @@ def _normalize_payload(payload):
         return payload
 
 
+def _active_task_is_irreversible(root):
+    """True iff this session's ACTIVE task (lane/sessions/<sid>/current_state →
+    lane/tasks/<N>-*/task.md) carries a live `## Risk` of `irreversible`, read
+    with the CLI's fence-aware reader. Any failure → False (the block stands)."""
+    try:
+        if not root:
+            return False
+        sid = os.environ.get("PLAYBOOK_SESSION_ID", "").strip()
+        if not sid or "/" in sid or "\\" in sid or ".." in sid:
+            return False
+        j = _load_journal()
+        lane = j.resolve_lane_dir(root) if j is not None else None
+        lane = str(lane) if lane else os.path.join(root, ".agent")
+        with open(os.path.join(lane, "sessions", sid, "current_state"), encoding="utf-8") as fh:
+            num = fh.read().strip()
+        if not num.isdigit():
+            return False
+        tasks_dir = os.path.join(lane, "tasks")
+        cands = sorted(d for d in os.listdir(tasks_dir) if d.startswith(num + "-"))
+        if not cands:
+            return False
+        task_md = os.path.join(tasks_dir, cands[0], "task.md")
+        plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if plugin_dir not in sys.path:
+            sys.path.insert(0, plugin_dir)
+        from tasks.core import extract_risk                    # fence-aware, the CLI's reader
+        from pathlib import Path as _P
+        return str(extract_risk(_P(task_md))).strip().lower() == "irreversible"
+    except Exception:
+        return False
+
+
 def main() -> int:
     # FAIL-OPEN: any failure to read/parse must allow (never wedge a session).
     try:
@@ -295,6 +342,21 @@ def main() -> int:
         return 0
 
     shown = command if isinstance(command, str) else " ".join(str(p) for p in command)
+
+    if _active_task_is_irreversible(root):
+        # The documented in-session acknowledgement (task 073, impl panel: it was
+        # a claim without code until now): the ACTIVE task is classified
+        # `## Risk: irreversible`, read fence-aware through tasks.core. Logged.
+        try:
+            j = _load_journal()
+            if j is not None:
+                j.append(j.resolve_lane_dir(root), "command-guard", "allow",
+                         f"ack-irreversible-task:{name or 'dangerous-command'}",
+                         session_id=os.environ.get("PLAYBOOK_SESSION_ID", ""),
+                         tool=payload.get("tool_name", ""), command=shown)
+        except Exception:
+            pass
+        return 0
 
     # Enforcement-journal (log-only, best-effort): record the block. Wrapped AND
     # the helper itself swallows errors — journalling can never change the block.

@@ -50,6 +50,15 @@ class TasksInitMonitorWarning(unittest.TestCase):
         self.assertIn("stale copies", r.stdout)
         self.assertIn("task-gate-hook", r.stdout)
 
+    def test_non_object_settings_json_does_not_crash(self):
+        # impl-panel round 1 (codex-medium): `[]` is valid JSON; `.get()` on it raised.
+        d = Path(tempfile.mkdtemp())
+        (d / ".claude").mkdir()
+        (d / ".claude" / "settings.json").write_text("[]", encoding="utf-8")
+        r = self._run_init(d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

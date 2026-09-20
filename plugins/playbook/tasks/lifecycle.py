@@ -1362,23 +1362,39 @@ def cmd_freehand(cmd_args):
         # finding B8: the light shape has no `## Work Plan`, so the block used to
         # land at EOF, INSIDE the trailing `## Parked` section, and `tasks parked`
         # listed the Freehand gates as parked debt). Never after `## Parked`.
-        work_plan_match = re.search(r'^## Work( Plan)?\b', task_text, re.MULTILINE)
-        parked_match = re.search(r'^## Parked\b', task_text, re.MULTILINE)
-        if work_plan_match:
-            after_wp = task_text[work_plan_match.start():]
-            gate_match = re.search(r'^- \[ \]', after_wp, re.MULTILINE)
-            if gate_match:
-                insert_pos = work_plan_match.start() + gate_match.start()
+        # Fence-aware (impl panel of task 073): a fenced example that quotes
+        # `## Work` / a gate / `## Parked` must never receive the block.
+        from tasks.core import _iter_fenced_flags, _physical_lines
+        _pl = _physical_lines(task_text, keepends=True)
+        _fenced = _iter_fenced_flags([l.rstrip("\r\n") for l in _pl],
+                                     unclosed_is_live=True, track_indented_code=False)
+        _offsets = []
+        _acc = 0
+        for _l in _pl:
+            _offsets.append(_acc)
+            _acc += len(_l)
+
+        def _first_live(pattern, start=0):
+            for _idx in range(start, len(_pl)):
+                if not _fenced[_idx] and re.match(pattern, _pl[_idx].rstrip("\r\n")):
+                    return _idx
+            return None
+
+        wp_idx = _first_live(r'## Work( Plan)?\b')
+        parked_idx = _first_live(r'## Parked\b')
+        if wp_idx is not None:
+            gate_idx = _first_live(r'- \[ \]', wp_idx + 1)
+            sep_idx = _first_live(r'---\s*$', wp_idx + 1)
+            if gate_idx is not None and (parked_idx is None or gate_idx < parked_idx):
+                insert_pos = _offsets[gate_idx]
+            elif sep_idx is not None and (parked_idx is None or sep_idx < parked_idx):
+                insert_pos = _offsets[sep_idx]
+            elif parked_idx is not None and parked_idx > wp_idx:
+                insert_pos = _offsets[parked_idx]
             else:
-                sep_match = re.search(r'\n---\n', after_wp)
-                if sep_match:
-                    insert_pos = work_plan_match.start() + sep_match.start()
-                elif parked_match and parked_match.start() > work_plan_match.start():
-                    insert_pos = parked_match.start()
-                else:
-                    insert_pos = len(task_text)
-        elif parked_match:
-            insert_pos = parked_match.start()
+                insert_pos = len(task_text)
+        elif parked_idx is not None:
+            insert_pos = _offsets[parked_idx]
         else:
             insert_pos = len(task_text)
 

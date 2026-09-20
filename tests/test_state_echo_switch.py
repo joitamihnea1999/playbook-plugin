@@ -38,7 +38,10 @@ class StateEchoTaskSwitch(unittest.TestCase):
         self.assertEqual(run("work", "1").returncode, 0)
         echo()
         self.assertEqual(run("work", "2", "--force").returncode, 0)
-        echo()
+        second = echo()
+        # impl-panel round 1 (codex-medium / grok): the hook's own echo must not
+        # tell the session the gate completed either.
+        self.assertNotIn("previous gate done", second.stdout)
         log = (d / ".agent" / "chat_log.md").read_text(encoding="utf-8")
         self.assertIn("**[G001:", log, "the switch must still leave a G-entry for task 001")
         g_block = log[log.index("**[G001:"):]

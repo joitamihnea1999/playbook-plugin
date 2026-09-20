@@ -219,15 +219,20 @@ irreversible shell commands — `rm -rf` on a dangerous path, `git push --force`
 `DROP`/`TRUNCATE` — before they run, because the sandbox contains filesystem
 blast radius but not outward/logical irreversibility, and judgment alone is not a
 guarantee. It is **conservative** (matches only at a command position, so an
-`echo`/`grep` of dangerous text is fine — including inside a heredoc body or an
-`echo`/`printf` string being written to a file (task 073: the two whole-command
-rules, pipe-to-shell and DB drop, now skip those data regions too); a relative `rm -rf ./build` is fine;
+`echo`/`grep` of dangerous text is fine — including inside a `cat`/`tee` heredoc
+body (quoted tag, or no `$(…)`/backtick expansion in the body) or an
+`echo`/`printf` string without an expansion (task 073: the two whole-command
+rules, pipe-to-shell and DB drop, skip exactly those inert data regions; a
+heredoc fed to `bash`/`sh`/`psql`/`python3`, an expansion, an unterminated
+heredoc or a `<<` inside a string are still seen); a relative `rm -rf ./build` is fine;
 `--force-with-lease` is allowed), and it **fails OPEN** on any internal error so
 it can never wedge a session.
 
 - **Acknowledge** a command you've confirmed: run it inside a task classified
-  `## Risk: irreversible` with a rollback plan (the interlock stands down for that
-  task — this is the in-session path), or have the OPERATOR set
+  `## Risk: irreversible` with a rollback plan (the interlock reads the ACTIVE
+  task's live risk and stands down for it, logging an `allow` — this is the
+  in-session path; implemented in task 073, it had been documented but absent),
+  or have the OPERATOR set
   `PLAYBOOK_ALLOW_DANGEROUS=1` in the environment the hook runs in (the shell that
   started the agent, or the harness's env settings). The hook reads its own
   environment: a `PLAYBOOK_ALLOW_DANGEROUS=1 <cmd>` prefix typed by the agent

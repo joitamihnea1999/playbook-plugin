@@ -304,7 +304,11 @@ elif [ -n "$GATE_LINE" ]; then
         # Gate changed — log the completed gate
         PREV_TASK="${PREV_KEY%%:*}"
         PREV_LINE="${PREV_KEY##*:}"
-        TRANSITION_MSG="# ✓ previous gate done (${PREV_COUNT} tool calls)"
+        if [ -n "$TASK" ] && [ "$PREV_TASK" != "$TASK" ]; then
+            TRANSITION_MSG="# ↷ switched from task ${PREV_TASK} — its gate was left open (${PREV_COUNT} tool calls)"
+        else
+            TRANSITION_MSG="# ✓ previous gate done (${PREV_COUNT} tool calls)"
+        fi
         if [ "$AGENT_WRITABLE" = true ]; then
             {
                 echo "---"

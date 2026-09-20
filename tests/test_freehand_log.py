@@ -84,3 +84,30 @@ class GauntletFreehandPlacement(unittest.TestCase):
                         "freehand block must sit before ## Parked, not inside it")
         self.assertEqual(open_parked_items(text), [],
                          "the Freehand gates must not read as parked debt")
+
+
+class GauntletFreehandFenceAware(unittest.TestCase):
+    def test_fenced_decoy_sections_do_not_capture_the_freehand_block(self):
+        # impl-panel round 1 (codex-medium #4): the insertion searched `## Work`,
+        # gates and `## Parked` with fence-blind regexes; a fenced example above the
+        # live sections could receive the block (and hide its gates).
+        import subprocess, sys, os
+        d = Path(tempfile.mkdtemp())
+        env = dict(os.environ, PYTHONPATH=str(PLUGIN), PLAYBOOK_SESSION_ID="pid-fh073b")
+        def run(*a):
+            return subprocess.run([sys.executable, "-m", "tasks.cli", *a], cwd=d, env=env,
+                                  capture_output=True, text=True, timeout=60)
+        run("init")
+        self.assertEqual(run("new", "light", "lt", "light task").returncode, 0)
+        tf = next((d / ".agent" / "tasks").glob("001-*/task.md"))
+        text = tf.read_text(encoding="utf-8")
+        decoy = "\n```\n## Work\n- [ ] decoy gate inside a fence\n## Parked\n```\n"
+        text = text.replace("## Intent\n", "## Intent\n" + decoy, 1)
+        tf.write_text(text, encoding="utf-8")
+        self.assertEqual(run("work", "1").returncode, 0)
+        self.assertEqual(run("freehand").returncode, 0)
+        after = tf.read_text(encoding="utf-8")
+        fence_end = after.index("## Parked\n```\n") + len("## Parked\n```\n")
+        self.assertGreater(after.index("### Freehand"), fence_end,
+                           "freehand block landed inside the fenced decoy")
+        self.assertLess(after.index("### Freehand"), after.rindex("## Parked"))

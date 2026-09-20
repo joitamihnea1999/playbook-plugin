@@ -322,13 +322,14 @@ def cmd_tagger(cmd_args):
         r'(?:.*/)?(tasks (?:work|new) .+)$'
     )
     seen = set()
+    from tasks.retro import bash_history_ts_to_utc
     for line in bash_history.read_text(encoding="utf-8", errors="replace").splitlines():
         m = task_pattern.match(line)
         if m:
             task_cmd = m.group(2)
             if task_cmd not in seen:
                 seen.add(task_cmd)
-                entries.append((m.group(1), 1, f"--- {task_cmd} ---"))
+                entries.append((bash_history_ts_to_utc(m.group(1)), 1, f"--- {task_cmd} ---"))   # local → UTC (073)
             else:
                 seen.discard(task_cmd)
 
