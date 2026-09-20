@@ -831,6 +831,65 @@ class FingerprintRobustness060(unittest.TestCase):
         self.assertTrue(any(p.endswith("app.py") for p in beh),
                         f"subdir dirty code edit invisible to tail-cert: can={can} beh={beh} non={non}")
 
+    def test_subdir_project_under_tests_does_not_classify_code_as_tests(self):
+        # impl-panel r2 (codex-high #1): dirty-map keys and F0..HEAD diff paths were
+        # TOPLEVEL-relative, so a project rooted at `<repo>/tests/product` saw
+        # `tests/product/app.py` — a `tests/` segment → non-behavioral → a code
+        # edit certified. Paths must be PROJECT-relative before classification.
+        from tasks.core import build_panel_snapshot, tail_cert_delta
+        d = _repo()
+        proj = d / "tests" / "product"
+        (proj / "docs").mkdir(parents=True)
+        (proj / "app.py").write_text("v = 1\n", encoding="utf-8")
+        (proj / "docs" / "n.md").write_text("a\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "project under tests/")
+        (proj / "app.py").write_text("v = 2\n", encoding="utf-8")            # dirty at F0
+        fp0 = tree_state_fingerprint(proj)
+        snap = build_panel_snapshot(proj, fp0)
+        self.assertIn("app.py", snap["scopes"][""]["dirty"], "dirty-map keys must be project-relative")
+        (proj / "app.py").write_text("v = 3\n", encoding="utf-8")            # code edit after F0
+        (proj / "docs" / "n.md").write_text("b\n", encoding="utf-8")
+        _git(d, "add", "tests/product/docs/n.md")
+        _git(d, "commit", "-qm", "doc after panel")
+        can, beh, non = tail_cert_delta(proj, snap, fp0)
+        self.assertIn("app.py", beh, f"code under a tests/-rooted project certified: can={can} beh={beh} non={non}")
+        # committed code edit is also project-relative in the F0..HEAD leg
+        (proj / "lib.py").write_text("z = 1\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "code commit")
+        can, beh, non = tail_cert_delta(proj, snap, fp0)
+        self.assertIn("lib.py", beh)
+
+    def test_tail_cert_refuses_code_that_passed_through_an_exclude(self):
+        # impl-panel r2 (grok #1): a `.py` committed under a standing exclude
+        # (`journal/`) after F0 and deleted again before close never enters the
+        # F0..HEAD delta (the diff carries `:(exclude)`), and the close-time
+        # ls-files/ls-tree check sees nothing — a docs touch would certify.
+        from tasks.core import build_panel_snapshot, tail_cert_delta
+        d = _repo()
+        (d / "journal").mkdir()
+        (d / "docs").mkdir()
+        (d / "journal" / "log.md").write_text("x\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "journal")
+        (d / ".agent").mkdir()
+        (d / ".agent" / "config.json").write_text(json.dumps({"fingerprint_exclude": ["journal/"]}),
+                                                  encoding="utf-8")
+        fp0 = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp0)
+        self.assertIsNotNone(snap)
+        (d / "journal" / "sneak.py").write_text("import os\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "code through the exclude")
+        _git(d, "rm", "-q", "journal/sneak.py")
+        _git(d, "commit", "-qm", "and gone again")
+        (d / "docs" / "note.md").write_text("doc\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "docs")
+        can, beh, non = tail_cert_delta(d, snap, fp0)
+        self.assertFalse(can, "code that passed through an exclude between F0 and close certified")
+
     def test_tail_cert_refuses_when_exclude_covers_source(self):
         from tasks.core import build_panel_snapshot, tail_cert_delta
         d = _repo()
@@ -1312,6 +1371,49 @@ class ClosePathMatrix(unittest.TestCase):
         self.assertNotIn("Task 001 done.", r.stdout,
                          f"NO-STAMP bypassed via an external GIT_DIR: {r.stdout} {r.stderr}")
         self.assertIn("no stamp", (r.stdout + r.stderr).lower())
+
+    def test_owner_exclude_semantics_are_existence_based(self):
+        # impl-panel r2 (opus #1/#2): the block is on the EXISTENCE of code-shaped
+        # paths under an owner exclude — the fingerprint cannot see changes there,
+        # so such a config is unverifiable until fixed — not on a post-F0 change.
+        # Pin both shapes so a later "relaxation" cannot flip silently.
+        for label, edit in (("stable excluded source, no edit", False),
+                            ("changed excluded source", True)):
+            with self.subTest(label):
+                d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],
+                                         change_after=False,
+                                         tracked_files={"src/x.py": "v = 1\n"},
+                                         extra_cfg={"fingerprint_exclude": ["src/"]})
+                if edit:
+                    (d / "src" / "x.py").write_text("v = 2\n", encoding="utf-8")
+                r = self._close(d, env)
+                self.assertNotIn("Task 001 done.", r.stdout, f"{label}: {r.stdout} {r.stderr}")
+                self.assertIn("EXCLUDE-COVERS-CODE", r.stdout + r.stderr)
+
+    @unittest.skipIf(os.name == "nt", "non-UTF-8 bytes are illegal in Windows filenames")
+    def test_owner_exclude_override_survives_a_non_utf8_source_name(self):
+        # impl-panel r2 (codex-high #4): the EXCLUDE-COVERS-CODE receipt/console
+        # text carried surrogate-decoded raw names; the strict UTF-8 receipt write
+        # raised UnicodeEncodeError on `--stale-panel-ok`, leaving the task pending.
+        d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],
+                                 change_after=False,
+                                 tracked_files={"src/x.py": "v = 1\n"},
+                                 extra_cfg={"fingerprint_exclude": ["src/"]})
+        raw = os.path.join(os.fsencode(str(d)), b"src", b"a\xffb.py")
+        try:
+            with open(raw, "wb") as f:
+                f.write(b"V = 1\n")
+        except OSError:
+            self.skipTest("filesystem rejects non-UTF-8 filenames")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "raw name under the exclude")
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        r = self._close(d, env, "--stale-panel-ok", "--reason", "raw-named source reviewed by hand")
+        self.assertIn("Task 001 done.", r.stdout, f"override crashed on a non-UTF-8 name: {r.stderr}")
+        rec = self._receipt(td)
+        self.assertIn("EXCLUDE-COVERS-CODE", rec)
+        self.assertIn("src/a", rec)
 
     def test_owner_exclude_covering_only_docs_does_not_block(self):
         d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],

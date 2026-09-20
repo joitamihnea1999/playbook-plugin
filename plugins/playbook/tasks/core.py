@@ -1414,6 +1414,48 @@ def _git_toplevel(repo_path: Path) -> "Path | None":
     return Path(os.fsdecode(top_b))
 
 
+def _toplevel_prefix(repo_path: Path, toplevel: Path) -> str:
+    """`repo_path` relative to the repo toplevel as a posix string (`.` when the
+    project IS the toplevel). Task 060 (impl-panel r2 codex-high #1): git names
+    paths toplevel-relative, but the tail-cert file-class table must see
+    PROJECT-relative paths — a project rooted at `<repo>/tests/product` saw
+    `tests/product/app.py`, whose `tests/` segment classified production code as
+    non-behavioral."""
+    try:
+        return os.path.relpath(os.path.realpath(repo_path),
+                               os.path.realpath(toplevel)).replace(os.sep, "/")
+    except (ValueError, OSError, RuntimeError):
+        return "."
+
+
+def _project_relative(rel: str, prefix: str) -> str:
+    """Strip the toplevel→project `prefix` from a git-emitted toplevel-relative
+    path. A path outside the project (cannot arise with a `-- .` pathspec) is
+    returned unchanged so it still classifies (behavioral by default)."""
+    if prefix in ("", "."):
+        return rel
+    if rel.startswith(prefix + "/"):
+        return rel[len(prefix) + 1:]
+    return rel
+
+
+def _printable_path(rel: str) -> str:
+    """A path for console/receipt text: surrogate-escaped raw bytes from a
+    non-UTF-8 filename become backslash-u escapes (`\\udcXX`) instead of crashing the strict
+    UTF-8 receipt write (impl-panel r2 codex-high #4)."""
+    return rel.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _owner_exclude_specs(cfg: dict) -> "list[str]":
+    """The owner's RAW `fingerprint_exclude` strings (validated like
+    `_fingerprint_exclude_pathspecs`, but WITHOUT the `:(exclude)` magic) — for
+    the positive-pathspec checks that ask what an exclude COVERS."""
+    raw = cfg.get("fingerprint_exclude") if isinstance(cfg, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [p.strip() for p in raw if isinstance(p, str) and p.strip() and "\x00" not in p]
+
+
 def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
                                strict: bool = False) -> "str | None":
     """The fingerprint MATERIAL for a single git repo: HEAD + porcelain + working
@@ -1652,10 +1694,7 @@ def owner_exclude_covers_behavioral(project_path: Path,
     Returns `(covers, paths)`: any source path → `(True, [<scope>/<path>, …])`;
     a git error → `(True, ["<scope>: git error"])` (unknown = covers, fail
     closed); no owner excludes → `(False, [])`. Never raises."""
-    raw = cfg.get("fingerprint_exclude") if isinstance(cfg, dict) else None
-    if not isinstance(raw, list):
-        return (False, [])
-    specs = [p.strip() for p in raw if isinstance(p, str) and p.strip() and "\x00" not in p]
+    specs = _owner_exclude_specs(cfg)
     if not specs:
         return (False, [])
     hits: "list[str]" = []
@@ -1692,9 +1731,15 @@ def owner_exclude_covers_behavioral(project_path: Path,
             hits.append(f"{prefix or '.'}: git error")
             continue
         found |= {os.fsdecode(t) for t in rt.stdout.split(b"\0") if t}
-        paths = sorted(found)
+        # ls-files/ls-tree from the scope's cwd are already project-relative for
+        # a toplevel scope; a subdir project gets toplevel-relative names from
+        # `-z`? No — ls-files prints relative to cwd. Normalise anyway (cheap,
+        # idempotent) so the file-class table sees project-relative paths.
+        _top = _git_toplevel(repo)
+        _pre = _toplevel_prefix(repo, _top) if _top is not None else "."
+        paths = sorted({_project_relative(x, _pre) for x in found})
         beh, _non = classify_delta_paths(paths, is_outer_scope=(name == ""))
-        hits.extend(prefix + b for b in beh
+        hits.extend(_printable_path(prefix + b) for b in beh
                     if not b.lower().endswith(_BOOKKEEPING_SUFFIXES))
     return (bool(hits), sorted(hits))
 
@@ -1976,9 +2021,11 @@ def _dirty_path_content_map(repo_path: Path,
     _top = _git_toplevel(Path(repo_path))
     if _top is None:
         return None
+    _pre = _toplevel_prefix(Path(repo_path), _top)
     out: "dict[str, str]" = {}
-    for rel in paths:
-        p = _top / rel
+    for rel_top in paths:
+        p = _top / rel_top
+        rel = _project_relative(rel_top, _pre)     # keys are PROJECT-relative (r2)
         # A SYMLINK is tokened by its LINK TEXT (impl-panel r5 codex:sol#2: a
         # retargeted untracked `code.py` symlink used to collapse to a constant
         # `absent` both times and slip the content-token comparison; the tamper
@@ -2124,6 +2171,13 @@ def _enumerate_scope_delta(repo: Path, f0_commit: str, f0_dirty: dict,
     an identical tree) yields the empty set here; the caller treats empty-while-
     stale as fail-closed (finding A)."""
     paths: "set[str]" = set()
+    # Task 060 r2: git names diff paths toplevel-relative; the file-class table
+    # needs PROJECT-relative ones (a project under `<repo>/tests/` must not see
+    # its own code as `tests/…`). No toplevel → git error → fail closed.
+    _top = _git_toplevel(Path(repo))
+    if _top is None:
+        return None
+    _pre = _toplevel_prefix(Path(repo), _top)
     # (a) commits made SINCE F0 (`--name-status -z -M`, both rename endpoints) —
     # working-tree diffs compare to the NEW HEAD and would miss these.
     try:
@@ -2133,7 +2187,7 @@ def _enumerate_scope_delta(repo: Path, f0_commit: str, f0_dirty: dict,
             cwd=repo, capture_output=True)
         if r.returncode != 0:
             return None
-        paths |= _parse_name_status_z(r.stdout)
+        paths |= {_project_relative(x, _pre) for x in _parse_name_status_z(r.stdout)}
     except (OSError, subprocess.SubprocessError):
         return None
     # (b) F0-vs-close content-token comparison over the union of F0-dirty and
@@ -2227,6 +2281,42 @@ def tail_cert_delta(project_path: Path, snapshot: "dict | None",
         scope_paths = _enumerate_scope_delta(repo, f0_commit, f0_dirty, exclude)
         if scope_paths is None:
             return (False, [], [])      # any git error → fail closed
+        # Task 060 r2 (grok #1): code that passed THROUGH an owner exclude between
+        # F0 and HEAD (committed under `journal/`, deleted again before close)
+        # never enters the `:(exclude)`-filtered delta and is gone from the
+        # ls-files/ls-tree check. A two-endpoint `F0..HEAD` diff misses it too
+        # (added then removed = net nothing), so walk EVERY commit since F0 and
+        # ask each one what it touched under the owner's raw specs; any source
+        # hit → refuse. Bounded: more than 500 commits since F0 → refuse.
+        _specs = _owner_exclude_specs(cfg)
+        if _specs:
+            try:
+                rl = subprocess.run(["git", "rev-list", f"{f0_commit}..HEAD"],
+                                    cwd=repo, capture_output=True, text=True,
+                                    errors="surrogateescape")
+                if rl.returncode != 0:
+                    return (False, [], [])
+                _commits = [c for c in rl.stdout.split() if c]
+                if len(_commits) > 500:
+                    return (False, [], [])
+                _top = _git_toplevel(repo)
+                _pre = _toplevel_prefix(repo, _top) if _top is not None else "."
+                _through: "set[str]" = set()
+                for _c in _commits:
+                    rx = subprocess.run(
+                        ["git", "diff-tree", "--no-commit-id", "--name-only", "-z",
+                         "-r", "-m", _c, "--", *_specs],
+                        cwd=repo, capture_output=True)
+                    if rx.returncode != 0:
+                        return (False, [], [])
+                    _through |= {_project_relative(os.fsdecode(t), _pre)
+                                 for t in rx.stdout.split(b"\0") if t}
+            except (OSError, subprocess.SubprocessError):
+                return (False, [], [])
+            _beh_through, _ = classify_delta_paths(sorted(_through),
+                                                   is_outer_scope=(name == ""))
+            if any(not b.lower().endswith(_BOOKKEEPING_SUFFIXES) for b in _beh_through):
+                return (False, [], [])
         beh, non = classify_delta_paths(sorted(scope_paths),
                                         is_outer_scope=(name == ""))
         prefix = (name + "/") if name else ""
