@@ -1401,9 +1401,9 @@ def _git_toplevel(repo_path: Path) -> "Path | None":
     bug, so a subdir project's tail-cert delta under-enumerated)."""
     try:
         r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                           cwd=repo_path, capture_output=True)
+                           cwd=repo_path, capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None                      # incl. TimeoutExpired (impl-panel r3 opus)
     top_b = r.stdout
     if top_b.endswith(b"\n"):
         top_b = top_b[:-1]
@@ -1414,7 +1414,7 @@ def _git_toplevel(repo_path: Path) -> "Path | None":
     return Path(os.fsdecode(top_b))
 
 
-def _toplevel_prefix(repo_path: Path, toplevel: Path) -> str:
+def _toplevel_prefix(repo_path: Path, toplevel: Path) -> "str | None":
     """`repo_path` relative to the repo toplevel as a posix string (`.` when the
     project IS the toplevel). Task 060 (impl-panel r2 codex-high #1): git names
     paths toplevel-relative, but the tail-cert file-class table must see
@@ -1425,7 +1425,7 @@ def _toplevel_prefix(repo_path: Path, toplevel: Path) -> str:
         return os.path.relpath(os.path.realpath(repo_path),
                                os.path.realpath(toplevel)).replace(os.sep, "/")
     except (ValueError, OSError, RuntimeError):
-        return "."
+        return None   # callers that CLASSIFY git names must fail closed (r3 grok)
 
 
 def _project_relative(rel: str, prefix: str) -> str:
@@ -1708,7 +1708,7 @@ def owner_exclude_covers_behavioral(project_path: Path,
             r = subprocess.run(
                 ["git", "ls-files", "-z", "--cached", "--others",
                  "--exclude-standard", "--", *specs],
-                cwd=repo, capture_output=True)
+                cwd=repo, capture_output=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
             hits.append(f"{prefix or '.'}: git error")
             continue
@@ -1723,7 +1723,7 @@ def owner_exclude_covers_behavioral(project_path: Path,
         try:
             rt = subprocess.run(
                 ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD", "--", *specs],
-                cwd=repo, capture_output=True)
+                cwd=repo, capture_output=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
             hits.append(f"{prefix or '.'}: git error")
             continue
@@ -1736,7 +1736,10 @@ def owner_exclude_covers_behavioral(project_path: Path,
         # `-z`? No — ls-files prints relative to cwd. Normalise anyway (cheap,
         # idempotent) so the file-class table sees project-relative paths.
         _top = _git_toplevel(repo)
-        _pre = _toplevel_prefix(repo, _top) if _top is not None else "."
+        _pre = _toplevel_prefix(repo, _top) if _top is not None else None
+        if _pre is None:
+            hits.append(f"{prefix or '.'}: git error")     # cannot classify → covers
+            continue
         paths = sorted({_project_relative(x, _pre) for x in found})
         beh, _non = classify_delta_paths(paths, is_outer_scope=(name == ""))
         hits.extend(_printable_path(prefix + b) for b in beh
@@ -2022,6 +2025,8 @@ def _dirty_path_content_map(repo_path: Path,
     if _top is None:
         return None
     _pre = _toplevel_prefix(Path(repo_path), _top)
+    if _pre is None:
+        return None
     out: "dict[str, str]" = {}
     for rel_top in paths:
         p = _top / rel_top
@@ -2178,6 +2183,8 @@ def _enumerate_scope_delta(repo: Path, f0_commit: str, f0_dirty: dict,
     if _top is None:
         return None
     _pre = _toplevel_prefix(Path(repo), _top)
+    if _pre is None:
+        return None
     # (a) commits made SINCE F0 (`--name-status -z -M`, both rename endpoints) —
     # working-tree diffs compare to the NEW HEAD and would miss these.
     try:
@@ -2291,22 +2298,27 @@ def tail_cert_delta(project_path: Path, snapshot: "dict | None",
         _specs = _owner_exclude_specs(cfg)
         if _specs:
             try:
-                rl = subprocess.run(["git", "rev-list", f"{f0_commit}..HEAD"],
+                # Only commits that TOUCH the owner's specs (r3 opus #3: a bare
+                # rev-list counted every commit of a busy monorepo since F0).
+                rl = subprocess.run(["git", "rev-list", f"{f0_commit}..HEAD",
+                                     "--", *_specs],
                                     cwd=repo, capture_output=True, text=True,
-                                    errors="surrogateescape")
+                                    errors="surrogateescape", timeout=120)
                 if rl.returncode != 0:
                     return (False, [], [])
                 _commits = [c for c in rl.stdout.split() if c]
                 if len(_commits) > 500:
                     return (False, [], [])
                 _top = _git_toplevel(repo)
-                _pre = _toplevel_prefix(repo, _top) if _top is not None else "."
+                _pre = _toplevel_prefix(repo, _top) if _top is not None else None
+                if _pre is None:
+                    return (False, [], [])   # cannot classify git names → refuse (r3 grok)
                 _through: "set[str]" = set()
                 for _c in _commits:
                     rx = subprocess.run(
                         ["git", "diff-tree", "--no-commit-id", "--name-only", "-z",
                          "-r", "-m", _c, "--", *_specs],
-                        cwd=repo, capture_output=True)
+                        cwd=repo, capture_output=True, timeout=60)
                     if rx.returncode != 0:
                         return (False, [], [])
                     _through |= {_project_relative(os.fsdecode(t), _pre)

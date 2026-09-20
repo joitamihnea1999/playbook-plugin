@@ -890,6 +890,35 @@ class FingerprintRobustness060(unittest.TestCase):
         can, beh, non = tail_cert_delta(d, snap, fp0)
         self.assertFalse(can, "code that passed through an exclude between F0 and close certified")
 
+    def test_tail_cert_refuses_code_through_an_exclude_in_a_tests_rooted_subdir(self):
+        # impl-panel r3 (grok #2): the through-walk emits toplevel-relative names;
+        # for a project at `<repo>/tests/product` an un-stripped
+        # `tests/product/journal/sneak.py` would classify as the test tree.
+        from tasks.core import build_panel_snapshot, tail_cert_delta
+        d = _repo()
+        proj = d / "tests" / "product"
+        (proj / "journal").mkdir(parents=True)
+        (proj / "docs").mkdir()
+        (proj / "journal" / "log.md").write_text("x\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "project under tests/")
+        (proj / ".agent").mkdir()
+        (proj / ".agent" / "config.json").write_text(
+            json.dumps({"fingerprint_exclude": ["journal/"]}), encoding="utf-8")
+        fp0 = tree_state_fingerprint(proj)
+        snap = build_panel_snapshot(proj, fp0)
+        self.assertIsNotNone(snap)
+        (proj / "journal" / "sneak.py").write_text("import os\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "code through the exclude")
+        _git(d, "rm", "-q", "tests/product/journal/sneak.py")
+        _git(d, "commit", "-qm", "gone again")
+        (proj / "docs" / "note.md").write_text("doc\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "docs")
+        can, beh, non = tail_cert_delta(proj, snap, fp0)
+        self.assertFalse(can, "code through an exclude certified in a tests/-rooted subdir project")
+
     def test_tail_cert_refuses_when_exclude_covers_source(self):
         from tasks.core import build_panel_snapshot, tail_cert_delta
         d = _repo()
