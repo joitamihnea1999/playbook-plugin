@@ -42,6 +42,12 @@ fi
 # Read stdin (Stop JSON) — extract stop_hook_active
 INPUT=$(cat)
 STOP_ACTIVE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stop_hook_active', False))" 2>/dev/null) || STOP_ACTIVE=""
+if [ -z "$STOP_ACTIVE" ] && python3 -c pass 2>/dev/null; then
+    # python3 RUNS but could not parse the payload (round-4 codex-medium): that
+    # is a malformed Stop JSON, not a missing interpreter — the flag is simply
+    # not set. The shell regex below is for a missing/broken python3 only.
+    STOP_ACTIVE="False"
+fi
 if [ -z "$STOP_ACTIVE" ]; then
     # python3 missing/broken (task 072 impl panel, grok): the no-python fallback
     # below blocks on >= 1 open gate and nothing can check a gate without the
@@ -215,7 +221,8 @@ if [ "$PB_STATE_READ" != true ]; then
             ;;
     esac
     if [ "$PB_GREP_RC" -le 1 ]; then
-        FIRST_GATE=$(LC_ALL=C grep -m1 -E "$PB_GATE_ERE" "$TASK_FILE" 2>/dev/null | LC_ALL=C sed -E "s/^(${PB_BOM})*[[:space:]]*- \[ \] *//") || FIRST_GATE=""
+        FIRST_GATE=$(LC_ALL=C grep -m1 -E "$PB_GATE_ERE" "$TASK_FILE" 2>/dev/null | LC_ALL=C sed -E "s/^(${PB_BOM})*[[:space:]]*- \[ \] *//") \
+            || FIRST_GATE="(unreadable — the first-gate read failed after the count; open task.md)"
     fi
 fi
 case "$STATUS_LINE" in

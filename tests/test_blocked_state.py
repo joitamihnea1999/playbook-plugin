@@ -775,6 +775,17 @@ class BlockedEndToEnd(unittest.TestCase):
             with self.subTest(label):
                 r = self._run_stop_hook_with_shims(shims, payload=payload)
                 self.assertEqual(r.returncode, 2, f"{label}: {r.stderr}")
+        # Round-4 codex-medium: the shell regex is the fallback for a MISSING
+        # python3, not for a payload python3 could not parse — with python3
+        # present a malformed payload must read as "not active" and BLOCK.
+        for label, payload in [
+            ("unclosed object", '{"stop_hook_active": true'),
+            ("trailing garbage", '{"stop_hook_active": true, garbage'),
+            ("not JSON at all", 'stop_hook_active: true'),
+        ]:
+            with self.subTest("python present, " + label):
+                r = self._run_stop_hook_with_shims({}, payload=payload)
+                self.assertEqual(r.returncode, 2, f"{label}: malformed payload released: {r.stderr}")
         # Round-2 codex-medium: the valve must be SHELL-NATIVE — with python3 AND
         # grep both broken the re-issued stop still has to end the turn.
         both = {"python3": "#!/bin/sh\nexit 1\n", "grep": "#!/bin/sh\nexit 2\n"}
