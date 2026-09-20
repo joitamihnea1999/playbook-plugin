@@ -127,7 +127,14 @@ then fails closed on the changed exclude set — a fresh panel is required — s
 exclude cannot be added post-panel to hide a path that was clean at the panel. Malformed entries are skipped with a
 printed warning, never silently. Exclude only true bookkeeping: anything
 excluded here can change after a panel without anyone being told, so a path
-that can carry claims or code does NOT belong in this list. Commit the file —
+that can carry claims or code does NOT belong in this list — and since task
+060 that is enforced for code: if an exclude covers a **source** path (anything
+behavioral by file class that is not bookkeeping-shaped `.md`/`.txt`/`.rst`/`.log`,
+e.g. a `.py`, a script, a `.json` or lock file, an extension-less file — in the
+outer tree or in any `code_roots` root), a high-consequence close blocks with
+`EXCLUDE-COVERS-CODE` naming the paths, the panel stamp warns and records no
+descriptor, and tail certification refuses. `journal/*.md` stays fine; a
+`journal/helper.py` does not. Commit the file —
 stamp and close must agree across clones.
 
 ## `.agent/config.json` — `code_roots` (project policy)

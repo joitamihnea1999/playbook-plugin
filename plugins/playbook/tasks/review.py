@@ -1260,7 +1260,25 @@ def cmd_panel_review(cmd_args):
                 build_panel_snapshot, format_panel_snapshot_line,
                 tree_state_fingerprint as _tsf,
             )
-            _snap = build_panel_snapshot(project_path, _fp)
+            # Task 060: an owner `fingerprint_exclude` that hides SOURCE makes
+            # this stamp blind to that code. Say so loudly and emit NO
+            # descriptor (the close blocks EXCLUDE-COVERS-CODE regardless; a
+            # missing descriptor is the belt to that brace).
+            from tasks.core import load_config as _lc060, owner_exclude_covers_behavioral
+            try:
+                _cov060, _hits060 = owner_exclude_covers_behavioral(
+                    project_path, _lc060(Path(project_path)))
+            except Exception:
+                _cov060, _hits060 = True, ["<config unreadable>"]
+            if _cov060:
+                print("  ⚠ fingerprint_exclude hides BEHAVIORAL paths from the "
+                      "freshness fingerprint (" + ", ".join(_hits060[:5])
+                      + ") — this stamp cannot vouch for that code; the close "
+                      "will block EXCLUDE-COVERS-CODE until the exclude is fixed",
+                      file=sys.stderr, flush=True)
+                _snap = None
+            else:
+                _snap = build_panel_snapshot(project_path, _fp)
             # Panel-time TOCTOU compare-and-swap (impl-panel sonnet#1 / codex#2 /
             # grok#2): build_panel_snapshot makes its OWN git calls after the
             # stamp above, so a code edit in the gap could be baked into the F0

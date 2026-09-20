@@ -6,6 +6,38 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- **The panel-freshness fingerprint tells the truth in six bounded cases** (task 060; parked
+  T019/T023/T036, owner batch 2026-09-20; plan panel PASS 5/5 with 24 findings that reshaped
+  the plan — every fix below was watched red first). (1) A project living in a SUBDIRECTORY
+  of a larger repo hashed every untracked file as `unreadable` (porcelain paths are
+  toplevel-relative, the base was `repo_path`) — edits invisible, a false FRESH; untracked
+  content now resolves against `git rev-parse --show-toplevel` (bytes; a resolver failure is
+  unavailable material, never a `repo_path` fallback). (2) `core.quotePath=false` + a
+  non-UTF-8 name crashed the close with `UnicodeDecodeError`; every git text read and the
+  final material encode are `surrogateescape` (and two raw names no longer collide as
+  `a?.py`). (3) The OUTER tree ignored git return codes: a truncated index makes
+  `status`/`diff` exit 128 with EMPTY output while `rev-parse HEAD` succeeds, so the
+  material hashed as a clean tree — equal to a clean panel's stamp — and a corrupt repo
+  closed FRESH. Return codes are read; a stamped round whose tree cannot be fingerprinted
+  at close is now **UNREADABLE** and blocks a high-consequence carrying close (message
+  names git, not "code changed"; receipt line on the override path), and **NO-STAMP** on
+  such a close in a git repo blocks too (was record-only — with UNREADABLE blocking, a
+  missing stamp would be the cheaper path through the strict gate; a non-git project keeps
+  the advisory record). (4) An untracked SYMLINK hashed as the constant `unreadable`, so a
+  retarget as the sole change was invisible; tokened by link text like the dirty-map.
+  (5) An owner `fingerprint_exclude` covering SOURCE filtered it out of the material while
+  the exclude-set hash stayed equal since F0, so an edit under it read FRESH for the WHOLE
+  gate (tail-cert never ran — four plan judges); the close now blocks
+  **EXCLUDE-COVERS-CODE** naming the paths, the panel stamp warns and emits no descriptor,
+  and tail-cert refuses. Bookkeeping prose under an exclude (`journal/*.md`, the documented
+  use) stays allowed. (6) A `code_roots` scope was keyed by its config NAME, so a symlink
+  repoint to a same-HEAD clone read FRESH; the scope's resolved identity is bound into the
+  material and the tail-cert descriptor. Byte-identity: unchanged for every repo without a
+  subdir layout / non-UTF-8 name / untracked symlink / `code_roots` (oracle test green);
+  affected repos read STALE once and self-heal — this workspace (code_roots) included.
+  Ledger PB-PANEL-FRESHNESS re-stated with each exception. `scripts/verify` unittest count
+  2342 → 2360.
+
 - **The stop-hook's no-python fallback is now actually fail-closed** (task 072; the 1.5.43
   entry below said "it can only over-count" and the 1.5.43 release panel disproved it on two
   vectors). In the arm reached only when `scripts/task-status.py --fields` cannot run

@@ -275,11 +275,12 @@ class FingerprintCoverage(unittest.TestCase):
                             "content edit to a leading-whitespace untracked file "
                             "is invisible to the fingerprint")
 
-    def test_z_failure_falls_back_to_legacy_parse(self):
-        # R2 impl-panel round-2 (sonnet #1): the "-z unavailable" branch is the
-        # safety net behind the "never a silent empty digest" claim. Force the
-        # `-z` status to fail and assert the legacy per-file digest still runs
-        # (a content edit to a normal untracked file still moves the fp).
+    def test_z_failure_makes_the_material_unavailable(self):
+        # R2 (1.5.39) made a `-z` failure fall back to the quote-blind legacy
+        # parse because an EMPTY fingerprint was fail-OPEN at the gate. Task 060
+        # (plan panel codex-high #3): the empty fingerprint now BLOCKS a
+        # high-consequence close as UNREADABLE, so unavailable material is the
+        # honest answer — a weaker parse would hide quoted names silently.
         import tasks.core as core
         from unittest import mock
         d = _repo()
@@ -294,20 +295,15 @@ class FingerprintCoverage(unittest.TestCase):
             return real_run(cmd, *a, **k)
 
         with mock.patch.object(core.subprocess, "run", side_effect=fake_run):
-            fp1 = tree_state_fingerprint(d)
-            (d / "new.py").write_text("V = 2\n", encoding="utf-8")
-            fp2 = tree_state_fingerprint(d)
+            fp = tree_state_fingerprint(d)
         self.assertTrue(seen["z"], "the -z status was never attempted")
-        self.assertNotEqual(fp1, fp2,
-                            "-z-failure fallback did not content-hash untracked "
-                            "files (silent empty digest)")
+        self.assertEqual(fp, "", "a failed -z read must yield NO fingerprint (UNREADABLE at "
+                                 "close), never a quote-blind digest")
 
-    def test_z_exception_falls_back_to_legacy_parse(self):
-        # R2 impl-panel round-4 (codex:sol + codex:terra, unanimous): a -z
-        # subprocess EXCEPTION (OSError), not just a nonzero return code, must
-        # fall back to the legacy parse — NOT be caught by the outer try and
-        # blank the whole fingerprint (an empty fp makes the freshness gate
-        # permit a high-consequence close).
+    def test_z_exception_makes_the_material_unavailable(self):
+        # Same contract for a `-z` subprocess EXCEPTION (R2 round-4 vector):
+        # caught, and the fingerprint is unavailable — never a crash, never a
+        # weaker parse.
         import tasks.core as core
         from unittest import mock
         d = _repo()
@@ -322,15 +318,49 @@ class FingerprintCoverage(unittest.TestCase):
             return real_run(cmd, *a, **k)
 
         with mock.patch.object(core.subprocess, "run", side_effect=fake_run):
+            fp = tree_state_fingerprint(d)
+        self.assertTrue(seen["z"], "the -z status was never attempted")
+        self.assertEqual(fp, "")
+
+    def test_toplevel_failure_makes_the_material_unavailable(self):
+        # Task 060 (plan panel codex-medium #5 / grok #4): a failed
+        # `--show-toplevel` must NOT fall back to `repo_path` (that recreates the
+        # subdir doubled-prefix false FRESH) — unavailable material instead.
+        import tasks.core as core
+        from unittest import mock
+        d = _repo()
+        real_run = subprocess.run
+
+        def fake_run(cmd, *a, **k):
+            if isinstance(cmd, (list, tuple)) and "--show-toplevel" in cmd:
+                return subprocess.CompletedProcess(cmd, 128, stdout=b"", stderr=b"fatal")
+            return real_run(cmd, *a, **k)
+
+        with mock.patch.object(core.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(tree_state_fingerprint(d), "")
+
+    def test_toplevel_crlf_output_is_handled(self):
+        # Git-for-Windows can print `C:/…\r\n`: drop one `\n` then one `\r`,
+        # never `.strip()` (a space-suffixed repo path must survive).
+        import tasks.core as core
+        from unittest import mock
+        d = _repo()
+        (d / "new.py").write_text("V = 1\n", encoding="utf-8")
+        real_run = subprocess.run
+
+        def fake_run(cmd, *a, **k):
+            r = real_run(cmd, *a, **k)
+            if isinstance(cmd, (list, tuple)) and "--show-toplevel" in cmd and r.returncode == 0:
+                out = r.stdout.rstrip(b"\n") + b"\r\n"
+                return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr=b"")
+            return r
+
+        with mock.patch.object(core.subprocess, "run", side_effect=fake_run):
             fp1 = tree_state_fingerprint(d)
             (d / "new.py").write_text("V = 2\n", encoding="utf-8")
             fp2 = tree_state_fingerprint(d)
-        self.assertTrue(seen["z"], "the -z status was never attempted")
-        self.assertTrue(fp1, "a -z exception blanked the fingerprint (empty fp "
-                             "→ freshness gate permits the close)")
-        self.assertNotEqual(fp1, fp2,
-                            "-z-exception fallback did not content-hash untracked "
-                            "files")
+        self.assertTrue(fp1 and fp2)
+        self.assertNotEqual(fp1, fp2, "CRLF toplevel broke untracked resolution")
 
 
 class NestedCodeRoots(unittest.TestCase):
@@ -568,6 +598,244 @@ class NestedCodeRoots(unittest.TestCase):
                          "fingerprint was steered to hash outside the tree")
 
 
+def _symlink_or_skip(tc, target, link):
+    """Windows: os.symlink exists but needs a privilege — probe, don't hasattr."""
+    if not hasattr(os, "symlink"):
+        tc.skipTest("requires os.symlink")
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError) as e:
+        tc.skipTest(f"symlinks unavailable here: {e}")
+
+
+class FingerprintRobustness060(unittest.TestCase):
+    """Task 060 (parked T019/T023/T036, owner batch 2026-09-20): the freshness
+    fingerprint must tell the truth in the bounded cases the panels found."""
+
+    def test_subdir_project_untracked_content_edit_moves_fingerprint(self):
+        # T023 #1: porcelain paths are repo-TOPLEVEL-relative (probed: from
+        # `<repo>/sub`, `git status --porcelain -- .` prints `?? sub/new.py`), but
+        # the untracked content was resolved against `repo_path` → doubled prefix
+        # → `unreadable` → the SAME digest for content A and B (false FRESH).
+        # Creation already moves the folded porcelain string, so the instrument
+        # must EDIT an existing untracked file (plan-panel opus #1).
+        d = _repo()
+        sub = d / "sub"
+        sub.mkdir()
+        (sub / "new.py").write_text("A = 1\n", encoding="utf-8")
+        fp_a = tree_state_fingerprint(sub)
+        (sub / "new.py").write_text("A = 2\n", encoding="utf-8")
+        fp_b = tree_state_fingerprint(sub)
+        self.assertTrue(fp_a and fp_b, "subdir project must still fingerprint")
+        self.assertNotEqual(fp_a, fp_b,
+                            "subdir project: untracked content edit is invisible (false FRESH)")
+
+    @unittest.skipIf(os.name == "nt", "non-UTF-8 bytes are illegal in Windows filenames")
+    def test_quotepath_false_non_utf8_name_does_not_crash(self):
+        # T023 #2: with `core.quotePath=false` git emits RAW non-UTF-8 path bytes
+        # on the readable porcelain; the strict `text=True` read raised an
+        # uncaught UnicodeDecodeError → the whole close/panel crashed.
+        d = _repo()
+        raw = os.path.join(os.fsencode(str(d)), b"a\xffb.py")
+        try:
+            with open(raw, "wb") as f:
+                f.write(b"V = 1\n")
+        except OSError:
+            self.skipTest("filesystem rejects non-UTF-8 filenames")
+        _git(d, "config", "core.quotePath", "false")
+        try:
+            fp = tree_state_fingerprint(d)
+        except UnicodeDecodeError as e:
+            self.fail(f"quotePath=false + non-UTF-8 name crashed the fingerprint: {e}")
+        self.assertRegex(fp, r"^[0-9a-f]{12}$")
+
+    @unittest.skipIf(os.name == "nt", "non-UTF-8 bytes are illegal in Windows filenames")
+    def test_two_non_utf8_tracked_names_do_not_collide(self):
+        # Plan-panel codex ×2: surrogate-decoded names must survive the FINAL
+        # material encode — with `errors="replace"` both `a\xff.py` and
+        # `a\xfe.py` serialize as `a?.py`, so the same edit under either name
+        # hashes identically (a false FRESH across a rename).
+        d = _repo()
+        base = os.fsencode(str(d))
+        try:
+            for name in (b"a\xff.py", b"a\xfe.py"):
+                with open(os.path.join(base, name), "wb") as f:
+                    f.write(b"V = 1\n")
+        except OSError:
+            self.skipTest("filesystem rejects non-UTF-8 filenames")
+        _git(d, "config", "core.quotePath", "false")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "two raw names")
+        with open(os.path.join(base, b"a\xff.py"), "wb") as f:
+            f.write(b"V = 2\n")
+        fp_ff = tree_state_fingerprint(d)
+        with open(os.path.join(base, b"a\xff.py"), "wb") as f:
+            f.write(b"V = 1\n")
+        with open(os.path.join(base, b"a\xfe.py"), "wb") as f:
+            f.write(b"V = 2\n")
+        fp_fe = tree_state_fingerprint(d)
+        self.assertNotEqual(fp_ff, fp_fe,
+                            "distinct non-UTF-8 names collapsed to the same fingerprint")
+
+    def test_truncated_index_yields_empty_fingerprint_not_a_clean_tree(self):
+        # T019 F4-outer: `git status`/`git diff` exit 128 on a truncated index
+        # with EMPTY output while `rev-parse HEAD` still succeeds → the outer
+        # material hashed HEAD + "" + "" — a clean-looking fingerprint equal to
+        # the stamp of a clean panel (false FRESH). rc must be read: → "".
+        d = _repo()
+        clean_fp = tree_state_fingerprint(d)
+        idx = d / ".git" / "index"
+        idx.write_bytes(idx.read_bytes()[:3])
+        fp = tree_state_fingerprint(d)
+        self.assertEqual(fp, "", f"broken index must yield NO fingerprint, got {fp!r} "
+                                 f"(clean was {clean_fp!r})")
+
+    def test_missing_head_yields_empty_fingerprint(self):
+        d = _repo()
+        (d / ".git" / "HEAD").unlink()
+        self.assertEqual(tree_state_fingerprint(d), "")
+
+    def test_untracked_symlink_retarget_moves_fingerprint(self):
+        # T036 r8 opus #2: an untracked symlink hashed as the constant
+        # `unreadable` (O_NOFOLLOW), so a RETARGET as the sole change kept the
+        # fingerprint equal (false FRESH). Token it by link text, like
+        # `_dirty_path_content_map` already does.
+        d = _repo()
+        (d / "a.py").write_text("same\n", encoding="utf-8")
+        (d / "b.py").write_text("same\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "two same files")
+        _symlink_or_skip(self, "a.py", d / "link.py")
+        fp1 = tree_state_fingerprint(d)
+        (d / "link.py").unlink()
+        os.symlink("b.py", d / "link.py")
+        fp2 = tree_state_fingerprint(d)
+        self.assertTrue(fp1 and fp2)
+        self.assertNotEqual(fp1, fp2, "untracked symlink retarget is invisible (false FRESH)")
+
+    def test_untracked_symlink_to_fifo_still_does_not_hang(self):
+        # W5 must not touch `_safe_hash_regular`: a symlink INTO a FIFO is
+        # tokened by link text and never opened.
+        if os.name == "nt":
+            self.skipTest("mkfifo is POSIX-only")
+        d = _repo()
+        os.mkfifo(d / "pipe")
+        _symlink_or_skip(self, "pipe", d / "link.py")
+        import threading
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("fp", tree_state_fingerprint(d)))
+        t.daemon = True
+        t.start()
+        t.join(20)
+        self.assertFalse(t.is_alive(), "fingerprint hung on an untracked symlink → FIFO")
+        self.assertRegex(out.get("fp", ""), r"^[0-9a-f]{12}$")
+
+    def test_code_root_symlink_repoint_to_same_head_clone_moves_fingerprint(self):
+        # T036 r8 codex:sol #2: a `code_root` scope is keyed by its config NAME, so
+        # repointing the symlink to a same-HEAD, clean clone leaves the material
+        # identical. The root and both clones are gitignored so the OUTER tree
+        # is blind to the repoint by construction — only the resolved identity
+        # can catch it.
+        d = _repo()
+        (d / ".gitignore").write_text("root\ncloneA/\ncloneB/\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "ignore roots")
+        a = d / "cloneA"
+        a.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=a, check=True)
+        (a / "app.py").write_text("y = 1\n", encoding="utf-8")
+        _git(a, "add", "-A")
+        _git(a, "commit", "-qm", "seed")
+        subprocess.run(["git", "clone", "-q", str(a), str(d / "cloneB")], check=True,
+                       capture_output=True)
+        (d / ".agent").mkdir()
+        (d / ".agent" / "config.json").write_text(json.dumps({"code_roots": ["root"]}),
+                                                  encoding="utf-8")
+        _symlink_or_skip(self, "cloneA", d / "root")
+        fp1 = tree_state_fingerprint(d)
+        (d / "root").unlink()
+        os.symlink("cloneB", d / "root")
+        fp2 = tree_state_fingerprint(d)
+        self.assertTrue(fp1 and fp2)
+        self.assertNotEqual(fp1, fp2, "code_root repoint to a same-HEAD clone is invisible")
+
+    def test_owner_exclude_covers_behavioral_classification(self):
+        # W6 helper: bookkeeping prose under an exclude is allowed (the documented
+        # `journal/` use); code / json / scripts / extension-less are source; a
+        # git error counts as covers (unknown = fail closed).
+        from tasks.core import owner_exclude_covers_behavioral
+        d = _repo()
+        for rel, body in {"journal/log.md": "x\n", "journal/notes.txt": "x\n",
+                          "gen/out.json": "{}\n", "gen/run.py": "x=1\n",
+                          "gen/Makefile": "all:\n", "gen/README.md": "x\n"}.items():
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text(body, encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "fixture")
+        self.assertEqual(owner_exclude_covers_behavioral(d, {}), (False, []))
+        self.assertEqual(owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["journal/"]}),
+                         (False, []))
+        covers, hits = owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["gen/"]})
+        self.assertTrue(covers)
+        self.assertEqual(hits, ["gen/Makefile", "gen/out.json", "gen/run.py"])
+        # untracked source under an exclude counts too (--others)
+        (d / "journal" / "helper.py").write_text("x\n", encoding="utf-8")
+        covers, hits = owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["journal/"]})
+        self.assertEqual((covers, hits), (True, ["journal/helper.py"]))
+        # git error → covers
+        (d / ".git" / "HEAD").unlink()
+        covers, hits = owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["journal/"]})
+        self.assertTrue(covers)
+        self.assertTrue(any("git error" in h for h in hits), hits)
+
+    def test_tail_cert_refuses_when_exclude_covers_source(self):
+        from tasks.core import build_panel_snapshot, tail_cert_delta
+        d = _repo()
+        (d / "src").mkdir()
+        (d / "src" / "x.py").write_text("v = 1\n", encoding="utf-8")
+        (d / "docs").mkdir()
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "src")
+        (d / ".agent").mkdir()
+        (d / ".agent" / "config.json").write_text(
+            json.dumps({"fingerprint_exclude": ["src/"]}), encoding="utf-8")
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        self.assertIsNotNone(snap)
+        (d / "docs" / "note.md").write_text("doc\n", encoding="utf-8")
+        can, beh, non = tail_cert_delta(d, snap, fp)
+        self.assertFalse(can, "tail-cert certified a docs delta while src/ was hidden by the exclude")
+
+    def test_snapshot_records_identity_and_tail_cert_refuses_a_repoint(self):
+        from tasks.core import build_panel_snapshot, tail_cert_delta
+        d = _repo()
+        (d / ".gitignore").write_text("root\ncloneA/\ncloneB/\n", encoding="utf-8")
+        (d / "docs").mkdir()
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "ignore roots")
+        a = d / "cloneA"
+        a.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=a, check=True)
+        (a / "app.py").write_text("y = 1\n", encoding="utf-8")
+        _git(a, "add", "-A")
+        _git(a, "commit", "-qm", "seed")
+        subprocess.run(["git", "clone", "-q", str(a), str(d / "cloneB")], check=True,
+                       capture_output=True)
+        (d / ".agent").mkdir()
+        (d / ".agent" / "config.json").write_text(json.dumps({"code_roots": ["root"]}),
+                                                  encoding="utf-8")
+        _symlink_or_skip(self, "cloneA", d / "root")
+        fp = tree_state_fingerprint(d)
+        snap = build_panel_snapshot(d, fp)
+        self.assertEqual(snap["scopes"]["root"]["identity"], "cloneA")
+        self.assertEqual(snap["scopes"][""]["identity"], ".")
+        (d / "root").unlink()
+        os.symlink("cloneB", d / "root")
+        (d / "docs" / "note.md").write_text("doc\n", encoding="utf-8")
+        can, beh, non = tail_cert_delta(d, snap, fp)
+        self.assertFalse(can, "tail-cert must refuse a repointed code_root")
+
+
 class GateDecision(unittest.TestCase):
     KW = dict(risk="irreversible", panel_required=True, evidence_carries=True,
               round_fp="a" * 12, now_fp="b" * 12, force=False,
@@ -596,12 +864,35 @@ class GateDecision(unittest.TestCase):
         # block on a stale carrying panel (see test_stale_assertive_blocks /
         # test_stale_unclassified_blocks); only `reversible` stays advisory.
         # Rewriting, not deleting, the old contract.
+        # Task 060: {"round_fp": ""} and {"now_fp": ""} MOVED OUT too — an
+        # absent fingerprint on a carrying high-consequence panel is NO-STAMP /
+        # UNREADABLE and blocks (see test_absent_fingerprint_blocks); the one
+        # remaining allow for an absent stamp is a project with no git at all.
         for tweak in ({"risk": "reversible"},
                       {"panel_required": False}, {"evidence_carries": False},
-                      {"round_fp": ""}, {"now_fp": ""},
+                      {"round_fp": "", "git_available": False},
                       {"now_fp": "a" * 12}, {"force": True}):
             allowed, _ = freshness_gate_decision(**{**self.KW, **tweak})
             self.assertTrue(allowed, f"gate overreached with {tweak}")
+
+    def test_absent_fingerprint_blocks(self):
+        # Task 060 (plan panel codex ×2, grok #2): NO-STAMP (git repo, no stamp)
+        # and UNREADABLE (stamp, no fingerprint now) block a carrying
+        # high-consequence close; the message names the cause, not "code changed";
+        # --stale-panel-ok needs a reason; --force still bypasses.
+        for tweak, word in (({"round_fp": ""}, "NO STAMP"), ({"now_fp": ""}, "UNREADABLE")):
+            allowed, why = freshness_gate_decision(**{**self.KW, **tweak})
+            self.assertFalse(allowed, f"absent fingerprint allowed with {tweak}")
+            self.assertIn(word, why)
+            self.assertNotIn("code state changed", why)
+            allowed, why = freshness_gate_decision(**{**self.KW, **tweak, "stale_ok": True})
+            self.assertFalse(allowed)
+            self.assertIn("--reason", why)
+            allowed, _ = freshness_gate_decision(
+                **{**self.KW, **tweak, "stale_ok": True, "stale_reason": "reviewed by hand"})
+            self.assertTrue(allowed)
+            allowed, _ = freshness_gate_decision(**{**self.KW, **tweak, "force": True})
+            self.assertTrue(allowed)
 
     def test_stale_assertive_blocks(self):
         # T1: an assertive close resting on a stale panel must block, because a
@@ -657,10 +948,19 @@ class ClosePathMatrix(unittest.TestCase):
     def _setup(self, *, risk: str, panel_cfg, round_head: str = "Impl",
                verdict: str = "PASS", stamp: bool = True,
                change_after: bool = True, extra_round: "str | None" = None,
-               code_roots=None, nested_change: bool = False):
+               code_roots=None, nested_change: bool = False,
+               extra_cfg: "dict | None" = None,
+               tracked_files: "dict | None" = None):
         d = _repo()
         (d / ".agent").mkdir(exist_ok=True)
         sub = None
+        if tracked_files:
+            for rel, content in tracked_files.items():
+                fpath = d / rel
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+                fpath.write_text(content, encoding="utf-8")
+            _git(d, "add", "-A")
+            _git(d, "commit", "-qm", "tracked fixture files")
         if code_roots is not None:
             # gitignored nested git repo(s) — the code_roots dogfood shape.
             (d / ".gitignore").write_text(
@@ -679,6 +979,8 @@ class ClosePathMatrix(unittest.TestCase):
             cfg["panel_required_for"] = panel_cfg
         if code_roots is not None:
             cfg["code_roots"] = code_roots
+        if extra_cfg:
+            cfg.update(extra_cfg)
         if cfg:
             (d / ".agent" / "config.json").write_text(
                 json.dumps(cfg), encoding="utf-8")
@@ -897,14 +1199,74 @@ class ClosePathMatrix(unittest.TestCase):
         self.assertIn("panel review required by policy", r.stderr)
         self.assertNotIn(BLOCK_MARKER, r.stderr)
 
-    def test_missing_stamp_recorded_not_silent(self):
-        # Judge F4: deleting/never-having the stamp must leave a record, not
-        # read as legacy silence.
+    def test_missing_stamp_blocks_high_consequence_and_is_recorded(self):
+        # Judge F4 (1.5.6): a missing stamp must leave a RECORD. Task 060 (plan
+        # panel codex ×2): it must also BLOCK a carrying high-consequence close —
+        # with an unreadable git AT CLOSE now blocking, a missing stamp (git
+        # broken at PANEL time, or a hand-edited round) would be the cheaper path
+        # through the strict gate. Same two exits as STALE.
         d, td, env = self._setup(risk="irreversible", panel_cfg="all",
                                  stamp=False)
         r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout, "NO-STAMP must not close irreversible")
+        self.assertIn("no stamp", (r.stdout + r.stderr).lower())
+        r = self._close(d, env, "--stale-panel-ok", "--reason", "stamp lost, delta reviewed by hand")
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         self.assertIn("no stamp recorded", self._receipt(td))
+
+    def test_missing_stamp_reversible_still_advisory(self):
+        d, td, env = self._setup(risk="reversible", panel_cfg="all", stamp=False)
+        r = self._close(d, env)
+        self.assertIn("Task 001 done.", r.stdout, r.stderr)
+        self.assertIn("no stamp recorded", self._receipt(td))
+
+    def test_owner_exclude_covering_source_blocks_the_close(self):
+        # T036 r6 codex:sol #1 + plan-panel (4 judges, Critical): an owner
+        # `fingerprint_exclude` that covers a SOURCE path filters it out of the
+        # material; the exclude-set hash is unchanged since F0, so an edit under
+        # it reads FRESH and the close never reaches tail_cert_delta. The gate
+        # itself must refuse: a high-consequence carrying close blocks with an
+        # EXCLUDE-COVERS-CODE verdict until the config is fixed.
+        d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],
+                                 change_after=False,
+                                 tracked_files={"src/x.py": "v = 1\n"},
+                                 extra_cfg={"fingerprint_exclude": ["src/"]})
+        (d / "src" / "x.py").write_text("v = 2\n", encoding="utf-8")   # hidden edit
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout,
+                         f"an exclude hiding source read FRESH and closed: {r.stdout} {r.stderr}")
+        self.assertIn("EXCLUDE", r.stdout + r.stderr)
+        self.assertIn("src/", r.stdout + r.stderr)
+        r = self._close(d, env, "--stale-panel-ok", "--reason", "src/ exclusion reviewed by hand")
+        self.assertIn("Task 001 done.", r.stdout, r.stderr)
+        self.assertIn("EXCLUDE", self._receipt(td))
+
+    def test_owner_exclude_covering_only_docs_does_not_block(self):
+        d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],
+                                 change_after=False,
+                                 tracked_files={"journal/log.md": "entry\n"},
+                                 extra_cfg={"fingerprint_exclude": ["journal/"]})
+        (d / "journal" / "log.md").write_text("entry 2\n", encoding="utf-8")
+        r = self._close(d, env)
+        self.assertIn("Task 001 done.", r.stdout, r.stderr)
+
+    def test_unreadable_git_at_close_blocks_instead_of_reading_fresh(self):
+        # T019 F4-outer end to end: a PASS panel stamped on a CLEAN tree, no code
+        # change, then the index is corrupted before the close. Today the outer
+        # material ignores rc, hashes HEAD + "" + "" → equal to the clean stamp →
+        # FRESH close. With rc read the fingerprint is "" and the gate must block
+        # with a verdict that names git, not "code changed".
+        d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],
+                                 change_after=False)
+        idx = d / ".git" / "index"
+        idx.write_bytes(idx.read_bytes()[:3])
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout,
+                         f"unreadable git at close must not read FRESH: {r.stdout} {r.stderr}")
+        self.assertIn("UNREADABLE", r.stdout + r.stderr)
+        r = self._close(d, env, "--stale-panel-ok", "--reason", "git index rebuilt by hand")
+        self.assertIn("Task 001 done.", r.stdout, r.stderr)
+        self.assertIn("UNREADABLE", self._receipt(td))
 
     def test_force_bypasses_and_attributes_reason_to_force(self):
         # Judge F5 / design A8: --force keeps whole-policy semantics; the

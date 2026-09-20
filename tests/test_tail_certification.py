@@ -833,7 +833,13 @@ class Round2Fixes(unittest.TestCase):
         cp.write_text("x = 2\n", encoding="utf-8")   # dirty
         os.chmod(cp, 0)                                # unreadable at F0
         try:
-            fp = tree_state_fingerprint(d)
+            # Task 060: an unreadable DIRTY file makes `git diff HEAD` exit
+            # non-zero, and the outer fingerprint now reads git's return code →
+            # no fingerprint (the close blocks UNREADABLE). This test is about
+            # the descriptor TOKEN, so stamp with a stand-in fingerprint.
+            self.assertEqual(tree_state_fingerprint(d), "",
+                             "an unreadable dirty file must not yield a partial fingerprint")
+            fp = "deadbeef0000"
             snap = build_panel_snapshot(d, fp)
             # token must be "unreadable", not "absent"
             self.assertEqual(snap["scopes"][""]["dirty"].get("code.py"), "unreadable")

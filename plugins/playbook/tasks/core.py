@@ -1409,21 +1409,42 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
     live in a SUBDIRECTORY of a larger repo, where the toplevel check would wrongly
     blank the fingerprint)."""
     import hashlib
+    # Task 060: every text read is `surrogateescape` (T023 #2 — with
+    # `core.quotePath=false` git emits RAW non-UTF-8 path bytes and the strict
+    # default raised an uncaught UnicodeDecodeError that crashed the close);
+    # byte-identical for ASCII/valid-UTF-8 output. Every git return code is read
+    # on the OUTER path too (T019 F4-outer — a truncated index makes status/diff
+    # exit 128 with EMPTY output while `rev-parse HEAD` succeeds, so the material
+    # hashed HEAD + "" + "" = the stamp of a clean panel → false FRESH); None is
+    # now the STALE-safe direction for the outer tree as well, because the close
+    # treats "stamp present, fingerprint unavailable" as UNREADABLE and blocks.
     try:
         head_r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_path,
-                                capture_output=True, text=True)
+                                capture_output=True, text=True,
+                                errors="surrogateescape")
         head = head_r.stdout.strip()
-        if not head:
+        if not head or head_r.returncode != 0:
             return None
+        # The repo TOPLEVEL, as BYTES: porcelain paths are toplevel-relative even
+        # when the project is a SUBDIRECTORY of a larger repo (T023 #1 — the
+        # untracked content used to be resolved against `repo_path`, doubling the
+        # prefix → `unreadable` → edits invisible → false FRESH). Drop exactly
+        # one trailing `\n` then one `\r` (Git-for-Windows), never `.strip()` (a
+        # space-suffixed path). A resolver failure is NOT a reason to fall back
+        # to `repo_path` (that recreates the bug) — it is unavailable material.
+        top_r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                               cwd=repo_path, capture_output=True)
+        top_b = top_r.stdout
+        if top_b.endswith(b"\n"):
+            top_b = top_b[:-1]
+        if top_b.endswith(b"\r"):
+            top_b = top_b[:-1]
+        if top_r.returncode != 0 or not top_b:
+            return None
+        toplevel = Path(os.fsdecode(top_b))
         if strict:
-            if head_r.returncode != 0:
-                return None
-            top_r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                                   cwd=repo_path, capture_output=True, text=True)
             try:
-                if (top_r.returncode != 0
-                        or Path(top_r.stdout.strip()).resolve()
-                        != Path(repo_path).resolve()):
+                if toplevel.resolve() != Path(repo_path).resolve():
                     return None
             except (OSError, RuntimeError, ValueError):
                 # RuntimeError: a symlink loop under .resolve() (impl-panel N5).
@@ -1432,29 +1453,30 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
         # hides everything inside the directory from the hash below).
         porcelain_r = subprocess.run(
             ["git", "status", "--porcelain", "-uall", "--", ".", *exclude],
-            cwd=repo_path, capture_output=True, text=True)
+            cwd=repo_path, capture_output=True, text=True,
+            errors="surrogateescape")
         # R2/1.5.39: a SECOND, NUL-delimited status supplies the raw (un-quoted)
         # untracked paths for the content digest below — kept ADJACENT to the
         # first porcelain call (before `diff`) to MINIMIZE the window between the
         # two snapshots (impl-panel sonnet #1). Captured as BYTES (NO text=True):
         # `-z` emits raw path bytes, and universal-newline translation would
         # mangle a CR byte in a filename to LF (impl-panel codex:sol #1).
-        # Isolated so a `-z` FAILURE — a nonzero return code OR an exception
-        # (impl-panel r4 codex:sol/terra) — degrades to the legacy parse below
-        # (z_out=None) rather than being caught by the outer handler and blanking
-        # the WHOLE fingerprint: an empty fp reads as "git absent" and the
-        # freshness gate would then permit a high-consequence close.
-        try:
-            z_r = subprocess.run(
-                ["git", "status", "--porcelain", "-uall", "-z", "--", ".", *exclude],
-                cwd=repo_path, capture_output=True)
-            z_out = z_r.stdout if z_r.returncode == 0 else None
-        except (OSError, subprocess.SubprocessError):
-            z_out = None
+        # A `-z` FAILURE (nonzero rc or exception) used to degrade to the legacy
+        # quote-blind parse because an empty fingerprint was fail-OPEN at the
+        # gate (impl-panel r4 of 023). Task 060 (plan panel codex-high #3): the
+        # empty fingerprint now BLOCKS a high-consequence close (UNREADABLE), so
+        # unavailable material is the honest answer, not a weaker parse.
+        z_r = subprocess.run(
+            ["git", "status", "--porcelain", "-uall", "-z", "--", ".", *exclude],
+            cwd=repo_path, capture_output=True)
+        if z_r.returncode != 0:
+            return None
+        z_out = z_r.stdout
         diff_r = subprocess.run(
             ["git", "diff", "HEAD", "--", ".", *exclude],
-            cwd=repo_path, capture_output=True, text=True)
-        if strict and (porcelain_r.returncode != 0 or diff_r.returncode != 0):
+            cwd=repo_path, capture_output=True, text=True,
+            errors="surrogateescape")
+        if porcelain_r.returncode != 0 or diff_r.returncode != 0:
             return None                  # a failed status/diff is NOT a clean tree
         porcelain = porcelain_r.stdout
         diff = diff_r.stdout
@@ -1486,14 +1508,8 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
     # PB-PANEL-FRESHNESS ledger). The calls are adjacent to keep the window
     # minimal — the same order of non-atomicity the porcelain/diff/per-file reads
     # already carry.
-    untracked_rels: "list[str] | None" = None
-    if z_out is not None:
-        untracked_rels = [os.fsdecode(e[3:]) for e in z_out.split(b"\0")
-                          if e.startswith(b"?? ")]
-    if untracked_rels is None:                         # -z unavailable → legacy
-        untracked_rels = [ln[3:].strip().strip('"')
-                          for ln in porcelain.splitlines()
-                          if ln.startswith("?? ")]
+    untracked_rels = [os.fsdecode(e[3:]) for e in z_out.split(b"\0")
+                      if e.startswith(b"?? ")]
     for rel in sorted(untracked_rels):
         # R1/1.5.39: hash via the safe primitive, never a bare read_bytes().
         # O_NOFOLLOW stops an untracked SYMLINK from being followed into a FIFO
@@ -1504,8 +1520,30 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
         # guarantee holds (test_unset_matches_legacy_oracle). Degraded leaves are
         # DETERMINISTIC: a size-bearing `toolarge:<size>` (a growth still moves
         # the fingerprint) or `unreadable` (FIFO/symlink/device/deleted/perms).
-        kind, detail, _n = _safe_hash_regular(Path(repo_path) / rel,
-                                              _FINGERPRINT_HASH_CAP)
+        # Resolved against the TOPLEVEL (task 060): porcelain names are
+        # toplevel-relative, so for a toplevel project this is `repo_path / rel`
+        # exactly as before (byte-identical), and for a subdir project it is the
+        # file that actually exists instead of a doubled-prefix miss.
+        _upath = toplevel / rel
+        # An untracked SYMLINK is tokened by its LINK TEXT (task 060, T036 r8
+        # opus #2) — the same `symlink:<readlink>` token `_dirty_path_content_map`
+        # writes — so a retarget as the sole change moves the fingerprint.
+        # `_safe_hash_regular` is NOT touched: it keeps refusing to follow, so a
+        # link into a FIFO is never opened. Byte-identical for repos without
+        # untracked symlinks (previously the constant `unreadable`).
+        try:
+            _is_link = _upath.is_symlink()
+        except OSError:
+            _is_link = False
+        if _is_link:
+            try:
+                fhash = "symlink:" + os.readlink(_upath)
+            except OSError:
+                fhash = "unreadable"
+            untracked_digest.update(
+                f"{rel}\0{fhash}\n".encode("utf-8", "surrogateescape"))
+            continue
+        kind, detail, _n = _safe_hash_regular(_upath, _FINGERPRINT_HASH_CAP)
         if kind == "hash":
             fhash = detail
         elif kind == "toolarge":
@@ -1552,6 +1590,78 @@ def _code_roots(cfg: dict) -> "list[str]":
             continue
         out.add(rel)
     return sorted(out)
+
+
+def _scope_identity(project_path: Path, cand: Path) -> str:
+    """The RESOLVED identity of a `code_roots` scope: the real path of the root
+    relative to the real path of the project (task 060, T036 r8 codex:sol #2 —
+    a scope keyed by its config NAME alone let a symlink repoint to a same-HEAD
+    clone read FRESH). Relative, so the token is the same in every checkout
+    location of the same layout; never raises — a cross-drive `relpath`
+    (Windows), a loop, or a vanished root yields the stable `<unresolvable>`."""
+    try:
+        return os.path.relpath(os.path.realpath(cand),
+                               os.path.realpath(project_path)).replace(os.sep, "/")
+    except (ValueError, OSError, RuntimeError):
+        return "<unresolvable>"
+
+
+# Prose-shaped files an owner `fingerprint_exclude` may legitimately cover
+# (task 060): the documented use is bookkeeping such as `journal/`. Anything
+# else under an exclude — code, scripts, json/config, lock files, no extension
+# — is source the fingerprint must not be blind to.
+_BOOKKEEPING_SUFFIXES = (".md", ".txt", ".rst", ".log")
+
+
+def owner_exclude_covers_behavioral(project_path: Path,
+                                    cfg: dict) -> "tuple[bool, list[str]]":
+    """Does the OWNER-declared `fingerprint_exclude` hide any BEHAVIORAL (source)
+    path from the fingerprint? (task 060; T036 r6 codex:sol #1 + the 060 plan
+    panel, four judges: an exclude that covers code filters it out of the
+    material while the exclude-set hash is unchanged since F0, so an edit under
+    it reads FRESH for the WHOLE gate — tail certification is never reached.)
+
+    Per scope (outer + each validated `code_root`, since the exclusion applies
+    uniformly), the owner's RAW pathspecs are passed as POSITIVE pathspecs to
+    `git ls-files -z --cached --others --exclude-standard`, and the listed paths
+    are classified with `classify_delta_paths`. "Source" = a BEHAVIORAL path
+    that is not bookkeeping-shaped: the documented use of `fingerprint_exclude`
+    is owner bookkeeping such as `journal/` (docs/configuration.md), whose
+    `.md`/`.txt`/`.rst`/`.log` files classify behavioral only because they sit
+    outside `docs/` — those stay allowed; code, scripts, `.json`/config, lock
+    files and extension-less files under an exclude are source and are flagged.
+    Returns `(covers, paths)`: any source path → `(True, [<scope>/<path>, …])`;
+    a git error → `(True, ["<scope>: git error"])` (unknown = covers, fail
+    closed); no owner excludes → `(False, [])`. Never raises."""
+    raw = cfg.get("fingerprint_exclude") if isinstance(cfg, dict) else None
+    if not isinstance(raw, list):
+        return (False, [])
+    specs = [p.strip() for p in raw if isinstance(p, str) and p.strip() and "\x00" not in p]
+    if not specs:
+        return (False, [])
+    hits: "list[str]" = []
+    try:
+        scopes = _tail_cert_scopes(Path(project_path), cfg)
+    except Exception:
+        return (True, ["<scopes>: could not enumerate fingerprint scopes"])
+    for name, repo in scopes.items():
+        prefix = (name + "/") if name else ""
+        try:
+            r = subprocess.run(
+                ["git", "ls-files", "-z", "--cached", "--others",
+                 "--exclude-standard", "--", *specs],
+                cwd=repo, capture_output=True)
+        except (OSError, subprocess.SubprocessError):
+            hits.append(f"{prefix or '.'}: git error")
+            continue
+        if r.returncode != 0:
+            hits.append(f"{prefix or '.'}: git error")
+            continue
+        paths = sorted({os.fsdecode(t) for t in r.stdout.split(b"\0") if t})
+        beh, _non = classify_delta_paths(paths, is_outer_scope=(name == ""))
+        hits.extend(prefix + b for b in beh
+                    if not b.lower().endswith(_BOOKKEEPING_SUFFIXES))
+    return (bool(hits), sorted(hits))
 
 
 def tree_state_fingerprint(project_path: Path) -> str:
@@ -1635,7 +1745,22 @@ def tree_state_fingerprint(project_path: Path) -> str:
             continue
         _sub = _repo_fingerprint_material(_cand, exclude, strict=True)
         material += f"\0code_root:{_rel}\0" + ("<absent>" if _sub is None else _sub)
-    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:12]
+        # Task 060: bind the scope's RESOLVED identity too, so a symlink repoint
+        # to a same-HEAD clone (same material) still moves the fingerprint.
+        # Only reached with `code_roots` set — unset stays byte-identical; a
+        # project WITH roots reads STALE once and self-heals (051 precedent).
+        material += f"\0code_root_identity:{_scope_identity(Path(project_path), _cand)}"
+    # `surrogateescape` (task 060, plan panel codex ×2): the material carries
+    # surrogate-decoded raw bytes from non-UTF-8 names; `"replace"` folded
+    # `a\xff.py` and `a\xfe.py` both to `a?.py`, so the same edit under either
+    # name hashed identically. Byte-identical for all-valid-text material. A
+    # surrogate outside the escape range cannot come from our decoders, but a
+    # fingerprint must never raise, so fall back to `replace` if it ever does.
+    try:
+        _blob = material.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        _blob = material.encode("utf-8", "replace")
+    return hashlib.sha256(_blob).hexdigest()[:12]
 
 
 # ── Tail certification (task 036, owner decision A ratified 2026-08-27) ───────
@@ -1892,7 +2017,10 @@ def build_panel_snapshot(project_path: Path, tree_fp: str) -> "dict | None":
         dm = _dirty_path_content_map(repo, exclude)
         if not commit or dm is None:
             return None                      # fail closed: no trustworthy F0 state
-        scopes_out[name] = {"commit": commit, "dirty": dm}
+        # Task 060: the scope's resolved identity rides in the descriptor so a
+        # repoint between F0 and the close is refused by tail_cert_delta.
+        scopes_out[name] = {"commit": commit, "dirty": dm,
+                            "identity": _scope_identity(Path(project_path), repo)}
     # Bind the effective exclusion set to F0 (impl-panel r4 codex:terra#1): adding
     # a path to `fingerprint_exclude` AFTER the panel makes the fingerprint stale
     # while hiding that path from the close-time enumeration — the close must
@@ -2031,11 +2159,23 @@ def tail_cert_delta(project_path: Path, snapshot: "dict | None",
     # post-panel `fingerprint_exclude` addition could hide a behavioral path.
     if sorted(exclude) != (snapshot.get("exclude") or []):
         return (False, [], [])
+    # Task 060: an owner exclude that covers a SOURCE path (unchanged since F0,
+    # so it passed the set check above) hides that source from the delta —
+    # refuse; the close gate blocks this case before tail-cert is reached, this
+    # is the second line.
+    _covers, _hits = owner_exclude_covers_behavioral(Path(project_path), cfg)
+    if _covers:
+        return (False, [], [])
     all_behavioral: "list[str]" = []
     all_non: "list[str]" = []
     for name, repo in live_scopes.items():
         rec = snap_scopes.get(name)
         if not isinstance(rec, dict):
+            return (False, [], [])
+        # Task 060: the scope must be the SAME resolved directory it was at F0
+        # (a repoint to a same-HEAD clone is not certifiable; an older descriptor
+        # without the key fails closed too).
+        if rec.get("identity") != _scope_identity(Path(project_path), repo):
             return (False, [], [])
         f0_commit = rec.get("commit") or ""
         f0_dirty = rec.get("dirty")
@@ -2511,7 +2651,10 @@ def close_decision(*, risk: str, verify_declared: bool, verify_failed: bool,
 def freshness_gate_decision(*, risk: str, panel_required: bool,
                             evidence_carries: bool, round_fp: str, now_fp: str,
                             force: bool, stale_ok: bool,
-                            stale_reason: "str | None") -> "tuple[bool, str]":
+                            stale_reason: "str | None",
+                            git_available: bool = True,
+                            exclude_covers: "list[str] | None" = None
+                            ) -> "tuple[bool, str]":
     """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built);
     extended by T1 (owner decision 2026-08-23) to every risk held to the
     high-consequence bar — ASSERTIVE, IRREVERSIBLE, and an unset/UNCLASSIFIED
@@ -2544,7 +2687,63 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
     # token blocks). assertive / irreversible / unclassified all gate — O1.
     if risk == "reversible" or not panel_required or not evidence_carries:
         return True, ""
-    if not round_fp or not now_fp or round_fp == now_fp:
+    # Task 060 (plan panel): an ABSENT fingerprint is no longer "nothing to
+    # compare" → allow. Two shapes, both fail CLOSED for a carrying
+    # high-consequence panel, with the same two exits as STALE:
+    #   NO-STAMP   — the round carries no `**Tree-state:**` although the project
+    #                is a git repo (git broken at PANEL time, or a hand-edited
+    #                round). A non-git project (`git_available=False`) could
+    #                never have been stamped: advisory, as before (judge F4).
+    #   UNREADABLE — the round is stamped but git cannot fingerprint the tree
+    #                NOW (corrupt index, missing HEAD, toplevel unresolvable):
+    #                the panel's tree cannot be compared to the closed one.
+    # Otherwise, with an empty fingerprint fail-OPEN, these would be the cheaper
+    # path through the strict gate (the 1.5.32 argument).
+    if exclude_covers:
+        # Task 060: an owner `fingerprint_exclude` hides SOURCE from the
+        # fingerprint — no stamp can vouch for that code, fresh or not.
+        if stale_ok:
+            if stale_reason and stale_reason.strip():
+                return True, ""
+            return False, ('--stale-panel-ok requires --reason "why the excluded '
+                           "source paths need no review\" — the acceptance must "
+                           "be on the record.")
+        return False, (
+            f"risk is {risk} and `fingerprint_exclude` in .agent/config.json "
+            "hides BEHAVIORAL (source) paths from the panel-freshness "
+            "fingerprint — EXCLUDE-COVERS-CODE: " + ", ".join(exclude_covers[:8])
+            + (" …" if len(exclude_covers) > 8 else "") + "\n"
+            "  `fingerprint_exclude` is for owner bookkeeping (journal/, "
+            "generated docs), never code. Remove the source path from the "
+            "exclude list and re-run:  tasks panel-review <N> --mode impl\n"
+            "  or record the acceptance:  tasks work done --stale-panel-ok "
+            '--reason "..."')
+    if not round_fp and not git_available:
+        return True, ""
+    if not round_fp or not now_fp:
+        if stale_ok:
+            if stale_reason and stale_reason.strip():
+                return True, ""
+            return False, ('--stale-panel-ok requires --reason "why this close '
+                           "may rest on a panel whose tree cannot be verified\" "
+                           "— the acceptance must be on the record.")
+        if not round_fp:
+            return False, (
+                f"risk is {risk} and the newest impl panel carries NO STAMP "
+                "(no `**Tree-state:**` on the round, in a git repo) — the tree the "
+                "panel reviewed is unknown, so freshness cannot be verified.\n"
+                "  Either re-run:  tasks panel-review <N> --mode impl\n"
+                "  or record why the missing stamp is acceptable:  tasks work done "
+                '--stale-panel-ok --reason "..."')
+        return False, (
+            f"risk is {risk} and the tree is UNREADABLE at close — git could not "
+            f"fingerprint the working tree (stamp {round_fp}; corrupt index, "
+            "missing HEAD, or an unresolvable toplevel?) — not a code change, but "
+            "the panel's tree cannot be compared to the one being closed.\n"
+            "  Repair the repository (`git status` shows the error), then retry;\n"
+            "  or record the acceptance:  tasks work done --stale-panel-ok "
+            '--reason "..."')
+    if round_fp == now_fp:
         return True, ""
     if stale_ok:
         if stale_reason and stale_reason.strip():
@@ -2592,8 +2791,34 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
     if freshness:
         v = freshness.get("verdict")
         if v == "NO-STAMP":
-            out.append("- **Panel tree-state:** no stamp recorded on the "
-                       "newest impl round — freshness unverifiable")
+            line = ("- **Panel tree-state:** no stamp recorded on the "
+                    "newest impl round — freshness unverifiable")
+            ar = freshness.get("accepted_reason")
+            if ar:
+                line += f', accepted: "{" ".join(ar.split())}"'
+            out.append(line)
+        elif v == "EXCLUDE-COVERS-CODE":
+            # Task 060: the owner exclude set hides source paths; only an
+            # override can reach the receipt, so name the paths and the reason.
+            line = ("- **Panel tree-state:** EXCLUDE-COVERS-CODE — "
+                    "`fingerprint_exclude` hides behavioral paths: "
+                    + ", ".join((freshness.get("paths") or [])[:8]))
+            ar = freshness.get("accepted_reason")
+            if ar:
+                line += f', accepted: "{" ".join(ar.split())}"'
+            out.append(line)
+        elif v == "UNREADABLE":
+            # Task 060: git could not fingerprint the tree at close (corrupt
+            # index / missing HEAD / unresolvable toplevel). A forced or
+            # stale-panel-ok close must carry this forensic line — a plain block
+            # exits before the receipt, so this arm exists for the override path.
+            line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} "
+                    "vs close (unavailable) — UNREADABLE (git could not "
+                    "fingerprint the working tree at close)")
+            ar = freshness.get("accepted_reason")
+            if ar:
+                line += f', accepted: "{" ".join(ar.split())}"'
+            out.append(line)
         elif v == "TAIL-CERT-PASS":
             # Finding G (task 036): a stale panel whose only post-panel delta was
             # non-behavioral, re-certified by a single judge on the exact delta.

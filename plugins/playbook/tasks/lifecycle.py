@@ -357,6 +357,21 @@ def cmd_work(cmd_args):
                                 and _rounds[0]["mode"] == "impl"
                                 and _rounds[0]["verdict"] == "PASS")
                 _now_fp = tree_state_fingerprint(project_path) if _impl else ""
+                # Task 060: is this a git repo at all? A non-git project can
+                # never have been stamped, so NO-STAMP stays advisory there;
+                # in a git repo an absent stamp / an unreadable tree BLOCKS a
+                # carrying high-consequence close (freshness_gate_decision).
+                # Ancestor walk like review.py's `_in_git_repo` (a Playbook
+                # root may sit inside a parent worktree); pure stats.
+                _git_here = False
+                _gp = Path(project_path)
+                while True:
+                    if (_gp / ".git").exists():
+                        _git_here = True
+                        break
+                    if _gp.parent == _gp:
+                        break
+                    _gp = _gp.parent
                 _freshness = None
                 if _impl is not None:
                     if not _impl["tree_state"]:
@@ -364,7 +379,26 @@ def cmd_work(cmd_args):
                         # when panel evidence carries the close — silence
                         # here would be the one zero-record bypass.
                         if _carries:
-                            _freshness = {"verdict": "NO-STAMP"}
+                            _freshness = {
+                                "verdict": "NO-STAMP",
+                                "accepted_reason": (
+                                    reason if (stale_panel_ok and not force
+                                               and _git_here) else None),
+                            }
+                    elif not _now_fp:
+                        # Task 060 (T019 F4-outer): stamped round, but git
+                        # cannot fingerprint the tree NOW. Not "STALE" (no code
+                        # is known to have changed) and never FRESH: UNREADABLE.
+                        # Tail certification is not attempted (it needs a STALE
+                        # verdict and a working git); the gate blocks below.
+                        _freshness = {
+                            "verdict": "UNREADABLE",
+                            "round_fp": _impl["tree_state"],
+                            "now_fp": "",
+                            "accepted_reason": (
+                                reason if (stale_panel_ok and not force)
+                                else None),
+                        }
                     elif _now_fp:
                         _stale = _now_fp != _impl["tree_state"]
                         _freshness = {
@@ -375,12 +409,37 @@ def cmd_work(cmd_args):
                                 reason if (_stale and stale_panel_ok
                                            and not force) else None),
                         }
+                # Task 060: an owner `fingerprint_exclude` that covers SOURCE
+                # makes every fingerprint blind to that code — no verdict above
+                # can be trusted, fresh or stale. Checked only when the panel
+                # evidence would carry; git error → covers (fail closed).
+                _excl_hits: "list[str]" = []
+                if _impl is not None and _carries:
+                    from tasks.core import load_config as _lc, owner_exclude_covers_behavioral
+                    try:
+                        _cfg060 = _lc(Path(project_path))
+                    except Exception:
+                        _cfg060 = {}
+                    _cov, _excl_hits = owner_exclude_covers_behavioral(
+                        Path(project_path), _cfg060)
+                    if _cov:
+                        _freshness = {
+                            "verdict": "EXCLUDE-COVERS-CODE",
+                            "paths": _excl_hits,
+                            "round_fp": _impl["tree_state"],
+                            "now_fp": _now_fp,
+                            "accepted_reason": (
+                                reason if (stale_panel_ok and not force)
+                                else None),
+                        }
                 _f_allowed, _f_reason = freshness_gate_decision(
                     risk=risk, panel_required=_panel_req,
                     evidence_carries=_carries,
                     round_fp=(_impl["tree_state"] if _impl else ""),
                     now_fp=_now_fp, force=force,
                     stale_ok=stale_panel_ok, stale_reason=reason,
+                    git_available=_git_here,
+                    exclude_covers=_excl_hits,
                 )
                 # TAIL CERTIFICATION (task 036, owner decision A). When the panel
                 # is STALE and would block, but the ONLY post-panel delta is in
