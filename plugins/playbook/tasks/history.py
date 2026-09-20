@@ -242,6 +242,7 @@ def cmd_timeline(cmd_args):
         r'(?:.*/)?(tasks (?:work|new) .+)$'
     )
     seen = set()
+    printed = 0
     for line in bash_history.read_text(encoding="utf-8", errors="replace").splitlines():
         m = pattern.match(line)
         if m:
@@ -250,8 +251,11 @@ def cmd_timeline(cmd_args):
             if cmd not in seen:
                 seen.add(cmd)
                 print(f"{m.group(1)}  {cmd}")
+                printed += 1
             else:
                 seen.discard(cmd)
+    if not printed:   # task 073 (C2): silence looked like a crash
+        print("(no `tasks work`/`tasks new` activations recorded in bash_history yet)", file=sys.stderr)
 
 def cmd_tagger(cmd_args):
     """The `tasks tagger` arm — body moved verbatim from cli.py (1.5.9 split)."""
@@ -364,6 +368,7 @@ def cmd_tag(cmd_args):
     work_re = re.compile(r'tasks work (\d+)')
     transitions = []  # [(timestamp, task_num_or_None)]
     seen = set()
+    from tasks.retro import bash_history_ts_to_utc
     for line in bash_history.read_text(encoding="utf-8", errors="replace").splitlines():
         m = task_pattern.match(line)
         if m:
@@ -373,7 +378,7 @@ def cmd_tag(cmd_args):
             else:
                 seen.discard(task_cmd)
                 continue
-            ts = m.group(1)
+            ts = bash_history_ts_to_utc(m.group(1))   # local → UTC (task 073, C12)
             if "work done" in task_cmd:
                 transitions.append((ts, None))
             else:

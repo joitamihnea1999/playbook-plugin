@@ -311,7 +311,14 @@ elif [ -n "$GATE_LINE" ]; then
                 echo ""
                 echo "**[G${PREV_TASK}:${PREV_LINE}]** [$(date -u '+%Y-%m-%d %H:%M:%S UTC')] \`HOST\` (${PREV_COUNT} tool calls)"
                 echo ""
-                echo "- [x] ${PREV_TEXT}"
+                if [ -n "$TASK" ] && [ "${PREV_KEY%%:*}" != "$TASK" ]; then
+                    # task 073 (C10): a gate-key change caused by a TASK SWITCH is not a
+                    # completion — never log an open gate as [x]; keep the entry (it anchors
+                    # the previous task's attribution window) but say what happened.
+                    echo "- [ ] ${PREV_TEXT} (left open — switched to task ${TASK})"
+                else
+                    echo "- [x] ${PREV_TEXT}"
+                fi
                 echo ""
             } >> "$GATE_LOG" 2>/dev/null || PLAYBOOK_WRITE_FAILED=true
         fi
@@ -352,7 +359,14 @@ else
             echo ""
             echo "**[G${PREV_TASK}:${PREV_LINE}]** [$(date -u '+%Y-%m-%d %H:%M:%S UTC')] \`HOST\` (${PREV_COUNT} tool calls)"
             echo ""
-            echo "- [x] ${PREV_TEXT}"
+            if [ -n "$TASK" ] && [ "${PREV_KEY%%:*}" != "$TASK" ]; then
+                # task 073 (C10): a gate-key change caused by a TASK SWITCH is not a
+                # completion — never log an open gate as [x]; keep the entry (it anchors
+                # the previous task's attribution window) but say what happened.
+                echo "- [ ] ${PREV_TEXT} (left open — switched to task ${TASK})"
+            else
+                echo "- [x] ${PREV_TEXT}"
+            fi
             echo ""
         } >> "$GATE_LOG" 2>/dev/null || PLAYBOOK_WRITE_FAILED=true
         # Clear gate_* fields (task complete), keep tools/writes

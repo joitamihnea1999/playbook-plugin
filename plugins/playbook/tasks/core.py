@@ -4219,8 +4219,9 @@ def list_tasks(project_path: Path, pending_only: bool = False) -> None:
     name_w = max((len(r[0]) for r in rows), default=4)
     name_w = max(name_w, 4)  # at least wide enough for "Name"
 
+    sep_w = max(6, min(intent_w, max((len(r[3]) for r in rows), default=6)))   # task 073 (A4)
     print(f"{'Name':<{name_w}} | {'Status':<{status_w}} | {'Progress':<{progress_w}} | Intent")
-    print(f"{'-'*name_w}-+-{'-'*status_w}-+-{'-'*progress_w}-+-{'-'*intent_w}")
+    print(f"{'-'*name_w}-+-{'-'*status_w}-+-{'-'*progress_w}-+-{'-'*sep_w}")
 
     for name, status, progress, intent in rows:
         print(f"{name:<{name_w}} | {status:<{status_w}} | {progress:<{progress_w}} | {intent}")
@@ -4234,7 +4235,7 @@ def list_tasks(project_path: Path, pending_only: bool = False) -> None:
     if counts["blocked"]:
         parts.append(f"{counts['blocked']} blocked")
     if counts["other"]:
-        parts.append(f"{counts['other']} other")
+        parts.append(f"{counts['other']} in progress")   # task 073 (B15): was "other"
     summary = f"Summary: {', '.join(parts)}"
     if pending_only:
         summary += f" (showing {len(rows)} open)"

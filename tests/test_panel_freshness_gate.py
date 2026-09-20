@@ -1444,6 +1444,23 @@ class ClosePathMatrix(unittest.TestCase):
         self.assertIn("EXCLUDE-COVERS-CODE", rec)
         self.assertIn("src/a", rec)
 
+    def test_failed_verify_does_not_spend_a_tail_cert_judge(self):
+        # Task 073 finding C13: the close printed "[FAIL exit 1]" for the declared
+        # verify, then STILL ran the paid single-judge tail certification, then
+        # blocked on the failed verify anyway. A close that will block regardless
+        # must not spend a judge.
+        d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],
+                                 change_after=False,
+                                 tracked_files={"docs/note.md": "a\n"},
+                                 extra_cfg={"verify": {"_always": ["false"]},
+                                            "default_judge": "nosuchprovider"})
+        (d / "docs" / "note.md").write_text("b\n", encoding="utf-8")
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        self.assertIn("verification failed", r.stdout + r.stderr)
+        self.assertNotIn("tail certification", r.stdout + r.stderr,
+                         "a tail-cert judge was attempted although verify had already failed")
+
     def test_owner_exclude_covering_only_docs_does_not_block(self):
         d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],
                                  change_after=False,

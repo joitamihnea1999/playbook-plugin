@@ -51,6 +51,15 @@ def main():
     if not args or args[0] in ("-h", "--help", "help"):
         print_usage()
         return
+    if args[0] in ("--version", "-V", "version"):   # task 073 (C6)
+        import json as _json
+        from pathlib import Path as _Path
+        _pj = _Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        try:
+            print(_json.loads(_pj.read_text(encoding="utf-8")).get("version", "unknown"))
+        except Exception:
+            print("unknown")
+        return
 
     # Inspection is globally side-effect free, regardless of where a command
     # arm would otherwise interpret the token.  Previously `work done --help`

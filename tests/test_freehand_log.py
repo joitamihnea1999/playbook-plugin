@@ -56,3 +56,31 @@ class FreehandLog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GauntletFreehandPlacement(unittest.TestCase):
+    """Task 073 finding B8: `tasks freehand` on a LIGHT task (which has `## Work`,
+    not `## Work Plan`) appended its `### Freehand` block at EOF — inside the
+    last H2, `## Parked` — so `tasks parked` and the close's parked-debt warning
+    listed the four Freehand gates as parked items (even when checked)."""
+
+    def test_freehand_block_never_lands_inside_parked(self):
+        import subprocess, sys, os
+        sys.path.insert(0, str(PLUGIN))
+        from tasks.core import open_parked_items
+        d = Path(tempfile.mkdtemp())
+        env = dict(os.environ, PYTHONPATH=str(PLUGIN), PLAYBOOK_SESSION_ID="pid-fh073")
+        def run(*a):
+            return subprocess.run([sys.executable, "-m", "tasks.cli", *a], cwd=d, env=env,
+                                  capture_output=True, text=True, timeout=60)
+        run("init")
+        self.assertEqual(run("new", "light", "lt", "light task").returncode, 0)
+        self.assertEqual(run("work", "1").returncode, 0)
+        self.assertEqual(run("freehand").returncode, 0)
+        tf = next((d / ".agent" / "tasks").glob("001-*/task.md"))
+        text = tf.read_text(encoding="utf-8")
+        self.assertIn("### Freehand", text)
+        self.assertLess(text.index("### Freehand"), text.index("## Parked"),
+                        "freehand block must sit before ## Parked, not inside it")
+        self.assertEqual(open_parked_items(text), [],
+                         "the Freehand gates must not read as parked debt")

@@ -83,8 +83,17 @@ def cmd_init(cmd_args):
         import json
         try:
             settings = json.loads(settings_file.read_text(encoding="utf-8"))
-            if "hooks" in settings:
-                hook_events = list(settings["hooks"].keys())
+            # The monitor-nudge PostToolUse registration is SANCTIONED — scripts/init
+            # writes it (task 073 finding C8: this warning told users to delete it).
+            def _foreign(entries):
+                for e in entries if isinstance(entries, list) else []:
+                    for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
+                        if "monitor-nudge.sh" not in str((h or {}).get("command", "")):
+                            return True
+                return False
+            hook_events = [ev for ev, entries in (settings.get("hooks") or {}).items()
+                           if _foreign(entries)]
+            if hook_events:
                 print(f"  ⚠ .claude/settings.json has local hook registrations: {', '.join(hook_events)}")
                 print(f"    These may duplicate plugin hooks (hooks/hooks.json) — causing double writes.")
                 print(f"    Fix: remove the 'hooks' key from .claude/settings.json")
@@ -94,7 +103,8 @@ def cmd_init(cmd_args):
     # Check for stale .claude/hooks/ directory
     local_hooks = target / ".claude" / "hooks"
     if local_hooks.is_dir():
-        hook_files = [f.name for f in local_hooks.iterdir() if f.is_file()]
+        hook_files = [f.name for f in local_hooks.iterdir()
+                      if f.is_file() and f.name != "monitor-nudge.sh"]   # sanctioned (C8)
         if hook_files:
             print(f"  ⚠ .claude/hooks/ contains {len(hook_files)} hook scripts: {', '.join(hook_files)}")
             print(f"    These are stale copies — canonical hooks live in scripts/ (resolved via plugin).")

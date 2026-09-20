@@ -1051,7 +1051,7 @@ def cmd_panel_review(cmd_args):
               file=sys.stderr)
         sys.exit(1)
 
-    display_target = task_path or "(promptless)"
+    display_target = task_path or "the --prompt consultation"   # task 073 (C14)
     timeout_label = format_soft_hard_timeout_label(soft_timeout_secs, timeout_secs)
     hard_timeout_label = format_timeout_label(timeout_secs)
     print(
@@ -1217,7 +1217,8 @@ def cmd_panel_review(cmd_args):
     # (No tamper branch here: a mutated tree already exited above with the banner,
     # so this assembly/write is only reached on a clean tree.)
     display_label = task_path or extra_prompt[:60]
-    lines = [f"# Panel {review_label.title()} — {display_label}\n", verdict_banner]
+    _title = f"Panel {review_label.title()}" if task_path else "Panel Consultation"   # task 073 (C14)
+    lines = [f"# {_title} — {display_label}\n", verdict_banner]
     lines.append(f"**Judges:** {succeeded}/{len(results)} succeeded | **Quorum:** {panel_quorum} | **Web search:** {'yes' if web_search else 'no'} | **Timeout:** {timeout_label}\n")
     # Context receipt (C3/P3), per transport (1.5.3): each seat saw what its
     # line says it saw — nothing was dropped without being named.

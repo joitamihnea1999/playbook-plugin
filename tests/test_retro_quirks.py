@@ -129,3 +129,14 @@ class TasksLogTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class GauntletRetroType(unittest.TestCase):
+    def test_light_task_is_not_typed_quick(self):
+        # Task 073 finding C16: the retro table typed a `light` task as `quick`
+        # (both lack `## Design Phase`; light has `## Risk Routing`).
+        from tasks.retro import _detect_type
+        light = "# 002 - Second\n\n## Status\npending\n\n## Risk\nunclassified\n\n## Risk Routing\n- [ ] risk\n\n## Work\n- [ ] Do the work\n"
+        quick = "# 001 - First\n\n## Status\npending\n\n## Work\n- [ ] Do the work\n"
+        self.assertEqual(_detect_type(light), "light")
+        self.assertEqual(_detect_type(quick), "quick")

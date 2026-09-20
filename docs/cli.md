@@ -71,7 +71,7 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 **`tasks merge-doctor`** — audit a multi-user repo before/after a merge for the three things plain `git merge` gets wrong in playbook repos: stranded conflict markers in prose files, per-user namespace cross-contamination, and legacy `.agent/` paths.
 
-**`tasks prepare-merge <source> [target]`** — merge preparation used by the merge skill: stages the cross-namespace merge so the verifier can prove it clean.
+**`tasks prepare-merge [--target <branch>] [--dry-run]`** — merge preparation used by the merge skill, run on the SOURCE branch: renumbers tasks, re-sequences the chat log and reports MIND_MAP collisions so the branch merges cleanly into the target (default `main`); `--dry-run` previews without writing.
 
 **`tasks mindmap-sync`** — mind-map merge support (conflict-marker-safe synchronization), also driven by the merge skill.
 

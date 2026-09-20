@@ -175,6 +175,8 @@ if [ -n "$TXN_MANIFEST" ]; then
 fi
 
 CREATED=()
+REGEN=()
+_nudge_pre=0; [ -f "$PROJECT_DIR/.claude/hooks/monitor-nudge.sh" ] && _nudge_pre=1
 SKIPPED=()
 FAILED=()
 
@@ -329,14 +331,16 @@ else
 fi
 
 # --- (d) .claude/bin/ wrappers ---
+_pre=0; [ -f "$PROJECT_DIR/.claude/bin/tasks" ] && _pre=1
 create_wrapper "$PROJECT_DIR" tasks
 if [ -f "$PROJECT_DIR/.claude/bin/tasks" ]; then
-    CREATED+=(".claude/bin/tasks")
+    if [ "$_pre" = 1 ]; then REGEN+=(".claude/bin/tasks"); else CREATED+=(".claude/bin/tasks"); fi
 fi
 
+_pre=0; [ -f "$PROJECT_DIR/.claude/bin/sandbox" ] && _pre=1
 create_wrapper "$PROJECT_DIR" sandbox
 if [ -f "$PROJECT_DIR/.claude/bin/sandbox" ]; then
-    CREATED+=(".claude/bin/sandbox")
+    if [ "$_pre" = 1 ]; then REGEN+=(".claude/bin/sandbox"); else CREATED+=(".claude/bin/sandbox"); fi
 fi
 
 # Provider launchers: thin find-and-exec wrappers so each provider's gate-hooked
@@ -344,9 +348,10 @@ fi
 # scripts/ dir is not on PATH). Generated uniformly; running one whose CLI isn't
 # installed just errors at exec time.
 for provider_wrapper in playbook-codex playbook-agy playbook-grok playbook-pi; do
+        _pre=0; [ -f "$PROJECT_DIR/.claude/bin/$provider_wrapper" ] && _pre=1
     create_wrapper "$PROJECT_DIR" "$provider_wrapper"
     if [ -f "$PROJECT_DIR/.claude/bin/$provider_wrapper" ]; then
-        CREATED+=(".claude/bin/$provider_wrapper")
+        if [ "$_pre" = 1 ]; then REGEN+=(".claude/bin/$provider_wrapper"); else CREATED+=(".claude/bin/$provider_wrapper"); fi
     fi
 done
 
@@ -508,15 +513,16 @@ if [ -n "$MONITOR_LIB_DIR" ] && [ -d "$MONITOR_LIB_DIR" ]; then
         mkdir -p "$PROJECT_DIR/.claude/hooks"
         cp "$MONITOR_HOOK_SRC" "$PROJECT_DIR/.claude/hooks/monitor-nudge.sh"
         chmod +x "$PROJECT_DIR/.claude/hooks/monitor-nudge.sh"
-        CREATED+=(".claude/hooks/monitor-nudge.sh")
+        if [ "$_nudge_pre" = 1 ]; then REGEN+=(".claude/hooks/monitor-nudge.sh"); else CREATED+=(".claude/hooks/monitor-nudge.sh"); fi
     else
         FAILED+=("monitor-nudge.sh source not found")
     fi
 
     # Create .claude/bin/monitor wrapper (same pattern as sandbox, tasks)
+        _pre=0; [ -f "$PROJECT_DIR/.claude/bin/monitor" ] && _pre=1
     create_wrapper "$PROJECT_DIR" monitor
     if [ -f "$PROJECT_DIR/.claude/bin/monitor" ]; then
-        CREATED+=(".claude/bin/monitor")
+        if [ "$_pre" = 1 ]; then REGEN+=(".claude/bin/monitor"); else CREATED+=(".claude/bin/monitor"); fi
     fi
 
     # Register PostToolUse hook for monitor-nudge in .claude/settings.json
@@ -601,6 +607,12 @@ if [ ${#CREATED[@]} -gt 0 ]; then
     echo "Created:"
     for item in "${CREATED[@]}"; do
         echo "  + $item"
+    done
+fi
+if [ ${#REGEN[@]} -gt 0 ]; then
+    echo "Regenerated (playbook-managed, refreshed on every init):"
+    for item in "${REGEN[@]}"; do
+        echo "  ~ $item"
     done
 fi
 if [ ${#SKIPPED[@]} -gt 0 ]; then

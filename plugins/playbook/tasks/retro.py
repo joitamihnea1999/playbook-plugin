@@ -174,6 +174,8 @@ def _detect_type(content: str) -> str:
     if "<!-- stub:" in content:
         m = re.search(r'<!-- stub:(\w+) -->', content)
         return f"stub:{m.group(1)}" if m else "stub"
+    if "## Risk Routing" in content and "## Design Phase" not in content:
+        return "light"                     # task 073 (C16): light is not quick
     if "## Design Phase" not in content and "## Work" in content:
         return "quick"
     if "### Round" in content:
@@ -253,6 +255,25 @@ def _attribute_to_task(timestamp: str, task_windows: dict[int, tuple[str, str]])
     return None
 
 
+def bash_history_ts_to_utc(ts: str) -> str:
+    """`.agent/bash_history` is stamped in LOCAL time by bash-log.sh
+    (`date '+%Y-%m-%d %H:%M:%S'`), while chat_log.md messages and G-entries are
+    stamped UTC. Every consumer that compares the two must convert first (task
+    073, live gauntlet finding C12: on a UTC+3 machine an activation read 3 h
+    AFTER the messages typed right after it, so they attributed to the PREVIOUS
+    task). Returns the chat_log form (`YYYY-MM-DD HH:MM:SS UTC`); an unparseable
+    stamp is returned unchanged."""
+    from datetime import datetime, timezone
+    try:
+        naive = datetime.strptime(ts.strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return ts
+    try:
+        return naive.astimezone().astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (OverflowError, OSError, ValueError):
+        return ts
+
+
 def build_task_windows(chatlog_path: Path, bash_history_path: Path | None = None) -> dict[int, tuple[str, str]]:
     """Build task number → (start_timestamp, end_timestamp) mapping.
 
@@ -280,7 +301,7 @@ def build_task_windows(chatlog_path: Path, bash_history_path: Path | None = None
             r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+\|\s+\w+\s+\|\s+.*tasks\s+work\s+(\d+)'
         )
         for m in work_pattern.finditer(content):
-            ts = m.group(1).strip()
+            ts = bash_history_ts_to_utc(m.group(1).strip())   # local → UTC (C12)
             task_num = int(m.group(2))
             if task_num not in windows or ts < windows[task_num]:
                 windows[task_num] = ts

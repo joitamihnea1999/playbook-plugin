@@ -321,6 +321,14 @@ def cmd_work(cmd_args):
                 else:
                     print(f"  (no verify contract declared — NOTHING verified at close; risk={risk})",
                           file=sys.stderr, flush=True)
+                if verify_failed and not force:
+                    # Task 073 (C13): a failed verify blocks the close regardless,
+                    # so say so NOW — before the freshness gate could spend a paid
+                    # tail-certification judge on a close that cannot succeed.
+                    print(f"\nBlocked: cannot close task {prev_task} — declared verification "
+                          "failed — fix it, or override with --force --reason.",
+                          file=sys.stderr, flush=True)
+                    sys.exit(1)
 
                 # Owner policy: panel_required_for makes the evidence bar
                 # PANEL-grade (all available judges, quorum PASS) — for the
@@ -1350,7 +1358,12 @@ def cmd_freehand(cmd_args):
 
         # Find Work Plan section and insert before first unchecked gate there
         import re
-        work_plan_match = re.search(r'^## Work Plan\b', task_text, re.MULTILINE)
+        # `## Work Plan` (full templates) OR `## Work` (quick/light — task 073
+        # finding B8: the light shape has no `## Work Plan`, so the block used to
+        # land at EOF, INSIDE the trailing `## Parked` section, and `tasks parked`
+        # listed the Freehand gates as parked debt). Never after `## Parked`.
+        work_plan_match = re.search(r'^## Work( Plan)?\b', task_text, re.MULTILINE)
+        parked_match = re.search(r'^## Parked\b', task_text, re.MULTILINE)
         if work_plan_match:
             after_wp = task_text[work_plan_match.start():]
             gate_match = re.search(r'^- \[ \]', after_wp, re.MULTILINE)
@@ -1360,8 +1373,12 @@ def cmd_freehand(cmd_args):
                 sep_match = re.search(r'\n---\n', after_wp)
                 if sep_match:
                     insert_pos = work_plan_match.start() + sep_match.start()
+                elif parked_match and parked_match.start() > work_plan_match.start():
+                    insert_pos = parked_match.start()
                 else:
                     insert_pos = len(task_text)
+        elif parked_match:
+            insert_pos = parked_match.start()
         else:
             insert_pos = len(task_text)
 

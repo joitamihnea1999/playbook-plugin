@@ -16,7 +16,8 @@ Design for "safe without new problems":
     targets flag; `--force-with-lease` is allowed, only `--force`/`-f` flags).
   * FAIL-OPEN on any internal error (a broken guard must never wedge a session);
     FAIL-CLOSED on a match (block until acknowledged).
-  * ACKNOWLEDGE path: `PLAYBOOK_ALLOW_DANGEROUS=1` lets a human-confirmed command
+  * ACKNOWLEDGE path: `PLAYBOOK_ALLOW_DANGEROUS=1` IN THE HOOK'S OWN ENVIRONMENT
+    (the operator's shell / harness env, not a command-line prefix) lets a human-confirmed command
     through; config `command_guard: false` disables the guard; config
     `dangerous_commands: [regex,...]` adds project-specific patterns.
 
@@ -123,6 +124,35 @@ def _unwrap_shell_c(seg: str) -> "str | None":
     return inner
 
 
+_HEREDOC_OPEN = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_DATA_CMD = re.compile(r"^\s*(?:echo|printf)\b")
+_DATA_ARGS = re.compile(r"(^|[;&|]\s*|\n\s*)(?:echo|printf)\b[^\n;&|]*")
+
+
+def _strip_data_regions(command):
+    """Drop heredoc BODIES and the arguments of echo/printf segments so the
+    whole-command patterns see only what could run (task 073, B0). A line that
+    opens a heredoc keeps its command part, so a piped installer written on the
+    same line as the opener is still seen."""
+    out_lines = []
+    lines = str(command).split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _HEREDOC_OPEN.search(line)
+        out_lines.append(line)
+        i += 1
+        if m:
+            tag = m.group(2)
+            while i < len(lines) and lines[i].strip() != tag:
+                i += 1
+            i += 1                                    # the closing tag line
+    text = "\n".join(out_lines)
+    # Mask the ARGUMENTS of an echo/printf segment (up to the next separator),
+    # keeping every separator so a real pipe elsewhere in the text is still seen.
+    return _DATA_ARGS.sub(r"\1echo", text)
+
+
 def classify_command(command, extra_patterns=None, _depth=0):
     """Return ("block", name, why) or ("allow", None, None). Pure + deterministic.
 
@@ -147,8 +177,13 @@ def classify_command(command, extra_patterns=None, _depth=0):
             v = classify_command(inner, extra_patterns, _depth + 1)
             if v[0] == "block":
                 return v
+    # Task 073 (B0): the whole-command patterns must not fire on DATA — a heredoc
+    # body or an echo/printf string being written to a file is text about a
+    # command, not the command (the documented bound: echoing dangerous text is
+    # fine). Segment checks above already ran on the full text.
+    whole_text = _strip_data_regions(command)
     for name, rx, why in _WHOLE:
-        if rx.search(command):
+        if rx.search(whole_text):
             return ("block", name, why)
     for pat in (extra_patterns or []):
         try:
@@ -273,13 +308,25 @@ def main() -> int:
     except Exception:
         pass
 
-    sys.stderr.write(
-        f"BLOCKED — destructive/irreversible command ({name}): {why}.\n"
-        f"  command: {shown.strip()[:200]}\n"
-        "  If this is intended: confirm with the user, and run it inside a task\n"
-        "  classified `## Risk: irreversible` with a rollback plan. To proceed on\n"
-        "  a one-off you've confirmed, re-run with PLAYBOOK_ALLOW_DANGEROUS=1.\n")
+    sys.stderr.write(block_message(shown, name, why))
     return 2
+
+
+def block_message(shown, name, why):
+    """The block text. Task 073 (B1): the old text said "re-run with
+    PLAYBOOK_ALLOW_DANGEROUS=1" — impossible from inside the agent session, the
+    hook reads ITS OWN environment (a prefix on the command line cannot set it).
+    Say where the acknowledgement actually has to happen."""
+    return (
+        f"BLOCKED — destructive/irreversible command ({name}): {why}.\n"
+        f"  command: {str(shown).strip()[:200]}\n"
+        "  If this is intended: confirm with the user and run it inside a task\n"
+        "  classified `## Risk: irreversible` with a rollback plan (the interlock\n"
+        "  stands down for that task). A one-off acknowledgement is the OPERATOR's:\n"
+        "  PLAYBOOK_ALLOW_DANGEROUS=1 must be present in the environment the hook\n"
+        "  runs in (the shell that started the agent, or the harness env settings) —\n"
+        "  the hook reads its own environment, so a prefix on this command cannot\n"
+        "  set it.\n")
 
 
 if __name__ == "__main__":

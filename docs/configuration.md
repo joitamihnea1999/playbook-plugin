@@ -219,12 +219,19 @@ irreversible shell commands — `rm -rf` on a dangerous path, `git push --force`
 `DROP`/`TRUNCATE` — before they run, because the sandbox contains filesystem
 blast radius but not outward/logical irreversibility, and judgment alone is not a
 guarantee. It is **conservative** (matches only at a command position, so an
-`echo`/`grep` of dangerous text is fine; a relative `rm -rf ./build` is fine;
+`echo`/`grep` of dangerous text is fine — including inside a heredoc body or an
+`echo`/`printf` string being written to a file (task 073: the two whole-command
+rules, pipe-to-shell and DB drop, now skip those data regions too); a relative `rm -rf ./build` is fine;
 `--force-with-lease` is allowed), and it **fails OPEN** on any internal error so
 it can never wedge a session.
 
-- **Acknowledge** a command you've confirmed: run it with `PLAYBOOK_ALLOW_DANGEROUS=1`,
-  or inside a task classified `## Risk: irreversible` with a rollback plan.
+- **Acknowledge** a command you've confirmed: run it inside a task classified
+  `## Risk: irreversible` with a rollback plan (the interlock stands down for that
+  task — this is the in-session path), or have the OPERATOR set
+  `PLAYBOOK_ALLOW_DANGEROUS=1` in the environment the hook runs in (the shell that
+  started the agent, or the harness's env settings). The hook reads its own
+  environment: a `PLAYBOOK_ALLOW_DANGEROUS=1 <cmd>` prefix typed by the agent
+  cannot set it (task 073).
 - **Extend** with project-specific patterns (e.g. a deploy/publish command):
   ```json
   {"dangerous_commands": ["^fly deploy\\b", "npm publish"]}
@@ -451,6 +458,6 @@ Pinned model ids rot as providers ship and retire models, so the pins have a mai
 | `PLAYBOOK_VERIFY_TIMEOUT_SECS` | Overrides `verify_timeout_secs` — the close-time verify ceiling (`0`/`unlimited` disables). |
 | `PLAYBOOK_REVIEW_CONTEXT_CHARS` | Overrides `review_context_chars` — the argv-transport judge context budget. |
 | `PLAYBOOK_REVIEW_CONTEXT_CHARS_STDIN` | Overrides `review_context_chars_stdin` — the stdin-transport judge context budget. |
-| `PLAYBOOK_ALLOW_DANGEROUS` | Set truthy to acknowledge one destructive command past the `command_guard` interlock (a human-confirmed one-off). |
+| `PLAYBOOK_ALLOW_DANGEROUS` | Set truthy IN THE HOOK'S ENVIRONMENT (operator shell / harness env, not a command prefix) to acknowledge a destructive command past the `command_guard` interlock (a human-confirmed one-off). |
 | `PLAYBOOK_BASH` | Absolute path to the `bash` the shell-dependent surfaces (audit sweeps, `merge-verify`, `scripts/verify`) should use. Needed only where a bare `bash` on `PATH` is not the right one — most often on Windows, where `bash.exe` in System32 is the WSL launcher rather than Git Bash. The chosen bash is probed with a sentinel; an unusable one fails closed. `$PLAYBOOK_VERIFY_BASH` (named for the dev verifier, exported by CI) is honoured as a fallback when `PLAYBOOK_BASH` is unset. |
 | `PLAYBOOK_PROJECT_ROOT`, `PLAYBOOK_SESSION_ID`, `PLAYBOOK_SANDBOXED`, `PLAYBOOK_MINDMAP_MAX`, `PLAYBOOK_EVAL_CONFIG` | Internal — set by the wrappers, hooks, and sandbox; not meant to be set by hand. |

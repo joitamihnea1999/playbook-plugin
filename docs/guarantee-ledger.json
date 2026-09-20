@@ -1918,7 +1918,7 @@
     {
       "id": "PB-COMMAND-DANGEROUS",
       "category": "command-safety",
-      "statement": "The command interlock blocks its enumerated high-blast command forms at command position, allows the documented benign look-alikes, and lets an explicitly acknowledged command through.",
+      "statement": "The command interlock blocks its enumerated high-blast command forms at command position — and, for the two whole-command rules (a downloader piped into a shell, a DB drop/truncate/delete issued to a client), anywhere in what could RUN, with heredoc bodies and echo/printf arguments masked first so a fixture or note ABOUT such a command is data, not a command (task 073) — allows the documented benign look-alikes, and lets an explicitly acknowledged command through, where acknowledgement means either an `irreversible`-classified active task or PLAYBOOK_ALLOW_DANGEROUS set in the HOOK'S OWN environment by the operator (a command-line prefix typed by the agent cannot set it — the block message says so).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/command_guard.py",
@@ -1931,6 +1931,14 @@
         {
           "path": "plugins/playbook/scripts/command-guard-hook",
           "reference": "whole-file"
+        },
+        {
+          "path": "plugins/playbook/scripts/command_guard.py",
+          "reference": "symbol:block_message"
+        },
+        {
+          "path": "plugins/playbook/scripts/command_guard.py",
+          "reference": "symbol:_strip_data_regions"
         }
       ],
       "failure_consequence": "Critical",
@@ -1975,6 +1983,32 @@
             "reference": "MustAllow.test_all_benign_forms_allow"
           },
           "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "GauntletDataIsNotACommand.test_heredoc_and_echo_data_is_allowed",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "GauntletDataIsNotACommand.test_real_pipe_to_shell_still_blocks"
+          },
+          "limitations": [
+            "Task 073 (live gauntlet): the whole-command rules blocked heredoc bodies and echo/printf strings that merely CONTAINED a piped installer or a DB drop — the agent could not write the plugin's own guard test fixtures or a findings note from inside a session (7 live blocks). Data regions are masked before the whole-command match; a real pipe on the heredoc's opener line, in a `bash -c` string, or after the closing tag still blocks. Quoted strings that are not echo/printf arguments (e.g. a python -c program) are NOT masked — conservative direction."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "GauntletDataIsNotACommand.test_block_message_does_not_promise_an_unreachable_env_ack",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "HookBehavior.test_blocks_dangerous_bash_payload"
+          },
+          "limitations": [
+            "Task 073 (B1): the block message and docs/configuration.md said 're-run with PLAYBOOK_ALLOW_DANGEROUS=1' — unreachable from inside the session (the hook reads its own environment; `export X=1; cmd` in the agent's command text was blocked identically, live). Message + docs now name the two real paths (irreversible task; operator env). No test can prove an operator's shell export from inside the suite — the env path is source-read + the pre-existing acknowledged-command proof."
+          ]
         }
       ],
       "applicable_platforms": [
