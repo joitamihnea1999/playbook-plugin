@@ -41,11 +41,14 @@ fi
 
 # Read stdin (Stop JSON) — extract stop_hook_active
 INPUT=$(cat)
-STOP_ACTIVE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stop_hook_active', False))" 2>/dev/null) || STOP_ACTIVE=""
-if [ -z "$STOP_ACTIVE" ] && python3 -c pass 2>/dev/null; then
-    # python3 RUNS but could not parse the payload (round-4 codex-medium): that
-    # is a malformed Stop JSON, not a missing interpreter — the flag is simply
-    # not set. The shell regex below is for a missing/broken python3 only.
+# `-I` (isolated): the hook's cwd is the project, whose own `json.py` would
+# otherwise shadow the stdlib for a `-c` run (round-5 codex ×2 — the parser
+# failed, a bare `python3 -c pass` probe passed, the flag read False forever).
+STOP_ACTIVE=$(echo "$INPUT" | python3 -I -c "import sys,json; d=json.load(sys.stdin); print(d.get('stop_hook_active', False))" 2>/dev/null) || STOP_ACTIVE=""
+if [ -z "$STOP_ACTIVE" ] && python3 -I -c "import json" 2>/dev/null; then
+    # python3 + json RUN but could not parse the payload (round-4 codex-medium):
+    # that is a malformed Stop JSON, not a missing interpreter — the flag is
+    # simply not set. The shell regex below is for a missing/broken python3 only.
     STOP_ACTIVE="False"
 fi
 if [ -z "$STOP_ACTIVE" ]; then

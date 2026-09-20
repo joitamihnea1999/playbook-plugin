@@ -786,6 +786,20 @@ class BlockedEndToEnd(unittest.TestCase):
             with self.subTest("python present, " + label):
                 r = self._run_stop_hook_with_shims({}, payload=payload)
                 self.assertEqual(r.returncode, 2, f"{label}: malformed payload released: {r.stderr}")
+        # Round-5 codex ×2: a project-root `json.py` shadows the stdlib for a
+        # `python3 -c` run from the project dir — the parser fails while a bare
+        # `python3 -c pass` probe succeeds, so the flag read False forever and
+        # the retry stayed blocked. The hook must run isolated (`-I`) so the
+        # project tree cannot shadow the stdlib, and the probe must import json.
+        (self.project / "json.py").write_text("raise ImportError('shadowed')\n", encoding="utf-8")
+        try:
+            r = self._run_stop_hook_with_shims({})
+            self.assertEqual(r.returncode, 2, f"first stop must block with json shadowed: {r.stderr}")
+            r = self._run_stop_hook_with_shims({}, stop_active=True)
+            self.assertEqual(r.returncode, 0,
+                             f"valve must survive a project-root json.py shadow: {r.stderr}")
+        finally:
+            (self.project / "json.py").unlink()
         # Round-2 codex-medium: the valve must be SHELL-NATIVE — with python3 AND
         # grep both broken the re-issued stop still has to end the turn.
         both = {"python3": "#!/bin/sh\nexit 1\n", "grep": "#!/bin/sh\nexit 2\n"}

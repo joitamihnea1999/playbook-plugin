@@ -124,7 +124,8 @@ seats. `scripts/verify` unittest count 1864 → 2337.
   `tasks status`'s head position takes its gate
   from the same scan and may only stop EARLIER, at an empty `- **Field**:` line. The grep
   survives only as the no-python fallback and is fail closed there (it can only over-count;
-  the Freehand release is disabled). Cost: one ~20-30 ms python spawn per gated code edit
+  the Freehand release is disabled) **[corrected in Unreleased — task 072: this was false; a grep
+  error released and BOM gates were missed]**. Cost: one ~20-30 ms python spawn per gated code edit
   (owner option (a) of 043's perf-vs-parity decision). Still fence-blind, disclosed in the
   ledger: state-echo-hook's advisory counts, gate-batch-check's batch-tick guard (over-blocks
   only), retro's analytics, the experimental codex `_scan_gates`; HTML-comment blocks remain

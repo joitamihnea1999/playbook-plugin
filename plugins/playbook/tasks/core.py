@@ -3667,8 +3667,8 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
 # A `- [ ]` in mid-line PROSE ("the convention is `- [ ]` until…") is NOT a gate
 # — the old substring count treated it as one, so a task could close at 71/74
 # while `status` said "(all gates checked)": the count that does not gate, and the
-# gate that does not count. Matches the Stop hook's `^[[:space:]]*- \[ \]` and
-# retro.py's gate scan. NOT fence-aware — a fenced ` - [ ]` template example is
+# gate that does not count. Matches the Stop hook's no-python fallback
+# `^(U+FEFF)*[[:space:]]*- \[ \]` (BOM-tolerant since task 072) and retro.py's gate scan. NOT fence-aware — a fenced ` - [ ]` template example is
 # still counted, consistently, by all three consumers; making the whole family
 # fence-aware (as `_node_starts` is on the mind-map side) needs the bash Stop hook
 # to agree too and is a separate design decision.
