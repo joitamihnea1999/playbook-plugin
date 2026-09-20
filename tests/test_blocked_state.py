@@ -730,6 +730,94 @@ class BlockedEndToEnd(unittest.TestCase):
                          f"unreadable status must fail CLOSED (gate count runs): {r.stderr}")
         self.assertIn("status", r.stderr.lower(), "the fallback must be loud")
 
+    def _run_stop_hook_with_shims(self, shims: dict, *, stop_active: bool = False,
+                                  ) -> "subprocess.CompletedProcess":
+        """Run the hook with PATH-prepended executables (name -> script body)."""
+        shim = Path(tempfile.mkdtemp())
+        for name, body in shims.items():
+            (shim / name).write_text(body, encoding="utf-8")
+            os.chmod(shim / name, 0o755)
+        env = self._env()
+        env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+        payload = '{"stop_hook_active": %s}' % ("true" if stop_active else "false")
+        return subprocess.run([bash_or_skip(), str(SCRIPTS / "stop-hook")],
+                              input=payload, cwd=self.project,
+                              env=env, capture_output=True, text=True)
+
+    def test_no_python_valve_still_ends_a_second_stop(self):
+        """Task 072 impl panel (grok): `stop_hook_active` was parsed with python3
+        too, so with python3 gone the valve read False forever and a blocked
+        session could never end its turn (the fallback's UNCHECKED>=1 is sticky —
+        nothing can check a gate without the CLI). The ledger's one-shot-valve
+        sentence must hold in the no-python arm: first stop BLOCKS, the re-issued
+        stop (stop_hook_active=true) ENDS the turn."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [ ] open gate\n",
+            encoding="utf-8")
+        self._set_counters()
+        shims = {"python3": "#!/bin/sh\nexit 1\n"}
+        first = self._run_stop_hook_with_shims(shims)
+        self.assertEqual(first.returncode, 2, f"first stop must block: {first.stderr}")
+        second = self._run_stop_hook_with_shims(shims, stop_active=True)
+        self.assertEqual(second.returncode, 0,
+                         f"the valve must end a re-issued stop without python3: {second.stderr}")
+        # And the valve must not be a substring guess: `false` stays blocked.
+        third = self._run_stop_hook_with_shims(shims)
+        self.assertEqual(third.returncode, 2)
+
+    def test_no_python_fallback_keeps_the_conversational_bypass(self):
+        """Task 072 impl panel (opus/codex-high): the counter-gated conversational
+        bypass (writes=0, tools<5) runs AFTER the no-python fallback and releases
+        a low-activity turn with gates open — on the python path and on this
+        one alike. It is a documented BOUND of PB-HOOK-STOP-CLOSE, not a
+        fail-closed property; pinned so the ledger wording and the code agree."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [ ] open gate\n",
+            encoding="utf-8")
+        sd = self.project / ".agent" / "sessions" / SID
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "counters").write_text("writes=0\ntools=1\n", encoding="utf-8")
+        r = self._run_stop_hook_with_shims({"python3": "#!/bin/sh\nexit 1\n"})
+        self.assertEqual(r.returncode, 0, f"conversational bypass is the documented bound: {r.stderr}")
+
+    def test_no_python_fallback_blocks_when_grep_itself_fails(self):
+        """Task 072 (070 release panel, codex-high #2): in the no-python arm a grep
+        FAILURE (exit >= 2: unreadable file, bad regex, broken binary) used to be
+        mapped to UNCHECKED=0 and the stop was PERMITTED. The ledger says the
+        fallback can only over-count; an error must therefore count as >= 1 open
+        gate and BLOCK, loudly — never release on a count it could not take."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_text(
+            "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [ ] open gate\n",
+            encoding="utf-8")
+        self._set_counters()
+        r = self._run_stop_hook_with_shims({
+            "python3": "#!/bin/sh\nexit 1\n",
+            "grep": "#!/bin/sh\necho 'grep: simulated failure' >&2\nexit 2\n",
+        })
+        self.assertEqual(r.returncode, 2,
+                         f"a failed grep must BLOCK (fail closed), not release: {r.stderr}")
+        self.assertIn("grep", r.stderr.lower(), "the grep failure must be disclosed on stderr")
+
+    def test_no_python_fallback_counts_a_bom_prefixed_gate(self):
+        """Task 072 (070 release panel, codex-medium #3): core._live_gate_scan strips
+        a leading U+FEFF per line, so a BOM-prefixed `- [ ]` is a live gate for the
+        CLI and the Python-backed hook. The grep fallback anchored at
+        ^[[:space:]]* missed it and RELEASED the stop with the gate open."""
+        self.assertEqual(self.run_tasks("work", "012").returncode, 0)
+        self.task_file.write_bytes(
+            "# 012 - Decide\n\n## Status\npending\n\n## Work Plan\n- [x] G1\n\ufeff- [ ] G2 pasted from a BOM editor\n"
+            .encode("utf-8"))
+        self._set_counters()
+        # Sanity: the Python-backed path sees the gate (so the two arms must agree).
+        self.assertEqual(self.run_stop_hook().returncode, 2, "python arm must count the BOM gate")
+        r = self._run_stop_hook_with_shims({"python3": "#!/bin/sh\nexit 1\n"})
+        self.assertEqual(r.returncode, 2,
+                         f"no-python fallback under-counted a BOM-prefixed gate (released): {r.stderr}")
+        self.assertIn("1 unchecked", r.stderr)
+
 
     def test_fenced_gate_decoys_do_not_fool_the_stop_gate(self):
         """Task 055 (043 round-5 vector): the stop-hook's gate discovery reads the

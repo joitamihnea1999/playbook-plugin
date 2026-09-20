@@ -2,6 +2,33 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [Unreleased]
+
+### Fixed
+
+- **The stop-hook's no-python fallback is now actually fail-closed** (task 072; the 1.5.43
+  entry below said "it can only over-count" and the 1.5.43 release panel disproved it on two
+  vectors). In the arm reached only when `scripts/task-status.py --fields` cannot run
+  (python3 missing or import-broken): (1) `|| UNCHECKED=0` mapped a grep FAILURE (exit >= 2:
+  unreadable file, unsupported regex, missing binary) to "0 open gates" and RELEASED the stop
+  — now grep's exit code is read, 0/1 is a count, anything else counts as >= 1 open gate with
+  a loud stderr line; (2) the `^[[:space:]]*- \[ \]` anchor missed a BOM-prefixed gate that
+  `core._live_gate_scan` (BOM-tolerant since task 055) counts, so the CLI saw a live gate the
+  hook released on — now the pattern is `^(U+FEFF)*[[:space:]]*- \[ \]`, the bytes built with
+  `printf` (bash 3.2 / BSD grep safe) and matched under `LC_ALL=C`. Proof: seven BOM vectors in
+  the gate-parser parity table (`grep_fallback >= python_count` watched red on four of them),
+  `test_fallback_pattern_is_the_hooks_own` pins the mirrored pattern to the hook's literal
+  lines, and two subprocess cases in `tests/test_blocked_state.py` (grep shim exiting 2 →
+  BLOCK; BOM gate with python3 shimmed out → BLOCK) watched red against the 1.5.43 hook.
+  Ledger PB-HOOK-STOP-CLOSE re-stated. Residual, disclosed: the fallback stays fence-blind
+  and HTML-comment-blind (over-counts only) — precision is the Python arm's job, blocking is
+  this arm's. Impl panel follow-ups: the `stop_hook_active` one-shot valve was ALSO parsed
+  with python3, so a no-python session blocked by this arm could never end its turn (no CLI
+  to check a gate, no valve to end the stop) — now read byte-wise with grep when python3
+  cannot run (watched red); and the ledger sentence is scoped honestly: the counter-gated
+  conversational bypass (writes=0, tools<5) releases a low-activity turn on both arms — a
+  documented bound, now pinned by a test. `scripts/verify` unittest count 2337 → 2342.
+
 ## [1.5.43] — 2026-09-09
 
 Everything landed on the `bench/judge-harness` branch since 1.5.42 (tasks 043–056),

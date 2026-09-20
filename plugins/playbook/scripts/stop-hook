@@ -41,7 +41,20 @@ fi
 
 # Read stdin (Stop JSON) — extract stop_hook_active
 INPUT=$(cat)
-STOP_ACTIVE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stop_hook_active', False))" 2>/dev/null || echo "False")
+STOP_ACTIVE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stop_hook_active', False))" 2>/dev/null) || STOP_ACTIVE=""
+if [ -z "$STOP_ACTIVE" ]; then
+    # python3 missing/broken (task 072 impl panel, grok): the no-python fallback
+    # below blocks on >= 1 open gate and nothing can check a gate without the
+    # CLI, so the one-shot valve is the ONLY way such a session ends its turn —
+    # it must not depend on the same python3. Read the flag byte-wise: a JSON
+    # `true` for exactly this key (a `false`, a missing key or a quoted "true"
+    # stay False, never a substring guess).
+    if printf '%s' "$INPUT" | LC_ALL=C grep -Eq '"stop_hook_active"[[:space:]]*:[[:space:]]*true([[:space:]]*[,}]|[[:space:]]*$)'; then
+        STOP_ACTIVE="True"
+    else
+        STOP_ACTIVE="False"
+    fi
+fi
 SESSION_ID="$(resolve_session_id)"
 
 # Enforcement-journal target (log-only, best-effort). The resolved lane, but
@@ -128,9 +141,10 @@ fi
 # hook cannot disagree about the same file (the #09 disease).
 # If the reader cannot run (no python3, import failure) the state is UNREADABLE:
 # say so and fall back to the fence-blind grep for the COUNT only — it can only
-# over-count (a fence hides lines, never adds them), so the stop still blocks
-# (fail CLOSED); the status is never guessed `blocked` and the Freehand release is
-# NOT applied to a grep-derived first gate (it could be the decoy).
+# over-count (a fence hides lines, never adds them; the grep is BOM-tolerant like
+# the Python reader, and a grep ERROR counts as >= 1 open gate — task 072), so the
+# stop still blocks (fail CLOSED); the status is never guessed `blocked` and the
+# Freehand release is NOT applied to a grep-derived first gate (it could be the decoy).
 PB_STATE_READ=true
 STATUS_LINE=""
 UNCHECKED=""
@@ -160,9 +174,34 @@ if [ "$PB_STATE_READ" != true ]; then
     echo "[stop-hook] WARNING: could not read the task state via python3 ($HOOK_DIR/task-status.py --fields) — treating the status as unreadable, counting gates fence-blind (over-counts, never releases) and disabling the Freehand release" >&2
     STATUS_LINE=""
     PB_RELEASE="hold"
-    # Count unchecked gates (only real gates at line start, not inside blockquotes)
-    UNCHECKED=$(grep -cE '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null) || UNCHECKED=0
-    FIRST_GATE=$(grep -m1 -E '^[[:space:]]*- \[ \]' "$TASK_FILE" 2>/dev/null | sed 's/^[[:space:]]*- \[ \] *//')
+    # Count unchecked gates fence-blind — a LINE count that may only OVER-count
+    # the Python reader (task 072, 070 release panel):
+    #  * BOM-tolerant like core._live_gate_scan (`line.lstrip("\ufeff")`): a gate
+    #    pasted from a BOM-writing editor is live for the CLI and the Python arm,
+    #    so it must be live here too. The U+FEFF bytes are built with printf
+    #    (bash 3.2 / BSD grep have no `\x` escapes) and matched byte-wise under
+    #    LC_ALL=C so the pattern means the same thing in every locale.
+    #  * grep's exit code is read: 0/1 = a count was taken (1 = zero matches);
+    #    anything else (unreadable file, unsupported regex, broken binary) is NOT
+    #    "0 gates" — the count could not be taken, so the arm assumes >= 1 open
+    #    gate and blocks, loudly. `|| UNCHECKED=0` used to release the stop here.
+    #  * `set -e` is on: the capture runs inside `if` so a non-zero grep can
+    #    neither abort the hook open (I1) nor be mistaken for a count.
+    PB_BOM=$(printf '\357\273\277')
+    PB_GATE_ERE="^(${PB_BOM})*[[:space:]]*- \[ \]"
+    PB_GREP_RC=0
+    if UNCHECKED=$(LC_ALL=C grep -cE "$PB_GATE_ERE" "$TASK_FILE" 2>/dev/null); then :; else PB_GREP_RC=$?; fi
+    case "$PB_GREP_RC:$UNCHECKED" in
+        0:[0-9]*|1:[0-9]*) ;;
+        *)
+            echo "[stop-hook] WARNING: grep could not count the gates in $TASK_FILE (exit $PB_GREP_RC) — assuming at least one open gate (fail closed)" >&2
+            UNCHECKED=1
+            FIRST_GATE="(unreadable — python3 and grep both unavailable; open task.md)"
+            ;;
+    esac
+    if [ "$PB_GREP_RC" -le 1 ]; then
+        FIRST_GATE=$(LC_ALL=C grep -m1 -E "$PB_GATE_ERE" "$TASK_FILE" 2>/dev/null | LC_ALL=C sed -E "s/^(${PB_BOM})*[[:space:]]*- \[ \] *//") || FIRST_GATE=""
+    fi
 fi
 case "$STATUS_LINE" in
     blocked) exit 0 ;;   # core._is_blocked: the EXACT token (the writer only ever writes the bare word)

@@ -24,6 +24,7 @@ so a fourth parser cannot silently diverge again.
 
 Pure stdlib unittest. Run: python3 tests/test_gate_parser_parity.py
 """
+import os
 import subprocess
 import sys
 import tempfile
@@ -39,7 +40,10 @@ from tasks.core import (  # noqa: E402
 )
 
 TASK_STATUS = PLUGIN / "scripts" / "task-status.py"
-STOP_HOOK_GREP = r'^[[:space:]]*- \[ \]'   # the hook's NO-PYTHON fallback, copied verbatim
+# The hook's NO-PYTHON fallback pattern, byte-for-byte what stop-hook builds:
+# `PB_BOM=$(printf '\357\273\277'); "^(${PB_BOM})*[[:space:]]*- \[ \]"` under LC_ALL=C
+# (task 072: BOM-tolerant like core._live_gate_scan's `lstrip("\ufeff")`).
+STOP_HOOK_GREP = "^(\ufeff)*[[:space:]]*- \\[ \\]"
 
 
 def hook_fields(path: Path) -> "tuple[str, int, str, str]":
@@ -65,10 +69,17 @@ def hook_unchecked(path: Path) -> int:
 
 def grep_fallback_unchecked(path: Path) -> int:
     """The Stop hook's no-python fallback: grep -cE '^[[:space:]]*- \\[ \\]'."""
-    r = subprocess.run(["grep", "-cE", STOP_HOOK_GREP, str(path)],
-                       capture_output=True, text=True)
-    # grep -c prints the count and exits 1 when zero matches.
-    return int((r.stdout or "0").strip() or "0")
+    # The pattern goes through `-f <file>` as exact UTF-8 bytes: a U+FEFF in an
+    # argv string is re-encoded by the platform (UTF-16 on Windows), a file is not.
+    pat = path.parent / "gate.ere"
+    pat.write_bytes(STOP_HOOK_GREP.encode("utf-8") + b"\n")
+    env = dict(os.environ, LC_ALL="C")
+    r = subprocess.run(["grep", "-cE", "-f", str(pat), str(path)],
+                       capture_output=True, env=env)
+    # grep -c prints the count and exits 1 when zero matches; anything else is a
+    # grep FAILURE, which the hook maps to ">= 1 open gate" (fail closed).
+    assert r.returncode in (0, 1), f"grep failed rc={r.returncode}: {r.stderr!r}"
+    return int((r.stdout or b"0").strip() or b"0")
 
 
 CHECKED_71 = "".join(f"- [x] G{i}: done\n" for i in range(71))
@@ -126,10 +137,33 @@ CASES = [
     # no GATE is open (all readers agree), the head reports the field (documented extra).
     ("all checked + empty required field: no open gate, head shows the field",
      "- **Owner**:\n- [x] a\n", False),
+    # Task 072 (070 release panel): every task.md reader strips a leading U+FEFF
+    # per line (core._live_gate_scan), so a BOM-prefixed gate is LIVE for the CLI
+    # and the Python-backed hook. The no-python grep fallback missed it (pattern
+    # anchored at ^[[:space:]]*) — an UNDER-count, i.e. a released stop with work
+    # open — contradicting the ledger's "can only over-count". Pinned here.
+    ("BOM-prefixed open gate (file BOM)", "\ufeff- [ ] first line of the file\n", True),
+    ("BOM-prefixed open gate mid-file", "- [x] a\n\ufeff- [ ] pasted from a BOM editor\n", True),
+    ("doubled BOM + indent still a gate", "- [x] a\n\ufeff\ufeff    - [ ] nested\n", True),
+    ("BOM-prefixed CHECKED gate is not open", "\ufeff- [x] done\n", False),
+    ("BOM-prefixed CRLF open gate", "\ufeff- [ ] b\r\n", True),
+    ("BOM gate inside a closed fence is an example (grep may over-count)",
+     "- [x] a\n```\n\ufeff- [ ] ex\n```\n", False),
+    ("whitespace BEFORE the BOM is not stripped by any reader — not a gate",
+     "- [x] a\n \ufeff- [ ] not a gate\n", False),
 ]
 
 
 class GateParserParity(unittest.TestCase):
+    def test_fallback_pattern_is_the_hooks_own(self):
+        """The mirrored pattern above must be what scripts/stop-hook actually builds,
+        or the >= property below proves nothing about the shipped fallback."""
+        hook = (PLUGIN / "scripts" / "stop-hook").read_text(encoding="utf-8")
+        self.assertIn("PB_BOM=$(printf '\\357\\273\\277')", hook)
+        self.assertIn('PB_GATE_ERE="^(${PB_BOM})*[[:space:]]*- \\[ \\]"', hook)
+        self.assertIn('LC_ALL=C grep -cE "$PB_GATE_ERE"', hook)
+        self.assertEqual(STOP_HOOK_GREP, "^(\ufeff)*[[:space:]]*- \\[ \\]")
+
     def test_all_three_agree_on_every_case(self):
         for label, content, expect_open in CASES:
             with self.subTest(label):
