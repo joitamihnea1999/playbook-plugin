@@ -129,8 +129,8 @@ printed warning, never silently. Exclude only true bookkeeping: anything
 excluded here can change after a panel without anyone being told, so a path
 that can carry claims or code does NOT belong in this list — and since task
 060 that is enforced for code: if an exclude covers a **source** path (anything
-behavioral by file class that is not bookkeeping-shaped `.md`/`.txt`/`.rst`/`.log`,
-e.g. a `.py`, a script, a `.json` or lock file, an extension-less file — in the
+behavioral by file class that is not bookkeeping-shaped `.md`/`.rst`/`.log`,
+e.g. a `.py`, a script, a `.json`, `.txt` or lock file, an extension-less file — in the
 outer tree or in any `code_roots` root), a high-consequence close blocks with
 `EXCLUDE-COVERS-CODE` naming the paths, the panel stamp warns and records no
 descriptor, and tail certification refuses. `journal/*.md` stays fine; a
@@ -155,9 +155,12 @@ guarantee. `code_roots` closes that blind spot:
 
 Each entry is a **project-relative path** to a nested git repository. When set,
 the fingerprint additionally folds in each root's `HEAD`, porcelain status, and
-working diff (including untracked-file content) — the exact same material the
-outer tree already hashes, no stronger and no weaker. A code-only edit inside a
-listed root now moves the fingerprint, so the freshness gate sees it.
+working diff (including untracked-file content) — the same material the outer
+tree already hashes — plus, since task 060, the root's **resolved identity**
+(its real path relative to the project), so repointing a symlinked root at a
+different checkout with the same `HEAD` also moves the fingerprint and is
+refused by tail certification. A code-only edit inside a listed root moves the
+fingerprint, so the freshness gate sees it.
 
 Rules, all loud: the key is **opt-in** — with `code_roots` absent (or `[]`) the
 fingerprint is **byte-identical** to before the key existed, so nothing changes

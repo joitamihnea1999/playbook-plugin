@@ -765,7 +765,7 @@ class FingerprintRobustness060(unittest.TestCase):
         # git error counts as covers (unknown = fail closed).
         from tasks.core import owner_exclude_covers_behavioral
         d = _repo()
-        for rel, body in {"journal/log.md": "x\n", "journal/notes.txt": "x\n",
+        for rel, body in {"journal/log.md": "x\n", "journal/notes.rst": "x\n",
                           "gen/out.json": "{}\n", "gen/run.py": "x=1\n",
                           "gen/Makefile": "all:\n", "gen/README.md": "x\n"}.items():
             (d / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -778,6 +778,19 @@ class FingerprintRobustness060(unittest.TestCase):
         covers, hits = owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["gen/"]})
         self.assertTrue(covers)
         self.assertEqual(hits, ["gen/Makefile", "gen/out.json", "gen/run.py"])
+        # impl-panel r1 (sonnet/codex-high): `.txt` is NOT bookkeeping-shaped —
+        # requirements.txt / CMakeLists.txt change behaviour.
+        (d / "gen" / "requirements.txt").write_text("requests==2.0\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "reqs")
+        covers, hits = owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["gen/"]})
+        self.assertIn("gen/requirements.txt", hits)
+        # impl-panel r1 (codex-high #1): a STAGED DELETION removes the path from
+        # `ls-files --cached`; the exclude still hides the `D` line, so the check
+        # must also see what HEAD has under the exclude.
+        _git(d, "rm", "-q", "gen/run.py")
+        covers, hits = owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["gen/"]})
+        self.assertIn("gen/run.py", hits, "staged deletion under an exclude escaped the check")
         # untracked source under an exclude counts too (--others)
         (d / "journal" / "helper.py").write_text("x\n", encoding="utf-8")
         covers, hits = owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["journal/"]})
@@ -787,6 +800,36 @@ class FingerprintRobustness060(unittest.TestCase):
         covers, hits = owner_exclude_covers_behavioral(d, {"fingerprint_exclude": ["journal/"]})
         self.assertTrue(covers)
         self.assertTrue(any("git error" in h for h in hits), hits)
+
+    def test_subdir_project_tail_cert_sees_a_dirty_code_edit(self):
+        # impl-panel r1 (opus): `_dirty_path_content_map` resolved porcelain paths
+        # against `repo_path` too, so in a SUBDIR project every dirty path tokened
+        # as the doubled-prefix `absent` at BOTH F0 and close — a content edit to
+        # an already-dirty code file was invisible to the tail-cert delta while a
+        # committed doc explained the STALE, and the behavioural edit certified as
+        # docs-only.
+        from tasks.core import build_panel_snapshot, tail_cert_delta
+        d = _repo()
+        sub = d / "sub"
+        (sub / "docs").mkdir(parents=True)
+        (sub / "app.py").write_text("v = 1\n", encoding="utf-8")
+        (sub / "docs" / "note.md").write_text("a\n", encoding="utf-8")
+        _git(d, "add", "-A")
+        _git(d, "commit", "-qm", "sub project")
+        (sub / "app.py").write_text("v = 2\n", encoding="utf-8")        # dirty at F0
+        fp0 = tree_state_fingerprint(sub)
+        snap = build_panel_snapshot(sub, fp0)
+        self.assertIsNotNone(snap)
+        self.assertNotEqual(snap["scopes"][""]["dirty"].get("sub/app.py",
+                            snap["scopes"][""]["dirty"].get("app.py")), "absent",
+                            "dirty code tokened as absent in a subdir project")
+        (sub / "app.py").write_text("v = 3\n", encoding="utf-8")        # code edit after F0
+        (sub / "docs" / "note.md").write_text("b\n", encoding="utf-8")
+        _git(d, "add", "sub/docs/note.md")
+        _git(d, "commit", "-qm", "doc after panel")
+        can, beh, non = tail_cert_delta(sub, snap, fp0)
+        self.assertTrue(any(p.endswith("app.py") for p in beh),
+                        f"subdir dirty code edit invisible to tail-cert: can={can} beh={beh} non={non}")
 
     def test_tail_cert_refuses_when_exclude_covers_source(self):
         from tasks.core import build_panel_snapshot, tail_cert_delta
@@ -1240,6 +1283,35 @@ class ClosePathMatrix(unittest.TestCase):
         r = self._close(d, env, "--stale-panel-ok", "--reason", "src/ exclusion reviewed by hand")
         self.assertIn("Task 001 done.", r.stdout, r.stderr)
         self.assertIn("EXCLUDE", self._receipt(td))
+
+    def test_owner_exclude_staged_deletion_of_source_blocks_the_close(self):
+        # impl-panel r1 (codex-high #1): `git rm src/x.py` after the panel removes
+        # the path from the index/worktree; the exclude hides the `D` line from
+        # the fingerprint, and a worktree-only check sees no hit → FRESH close.
+        d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],
+                                 change_after=False,
+                                 tracked_files={"src/x.py": "v = 1\n"},
+                                 extra_cfg={"fingerprint_exclude": ["src/"]})
+        _git(d, "rm", "-q", "src/x.py")
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout,
+                         f"staged deletion under an exclude closed FRESH: {r.stdout} {r.stderr}")
+        self.assertIn("EXCLUDE", r.stdout + r.stderr)
+
+    def test_missing_stamp_blocks_when_git_dir_is_external(self):
+        # impl-panel r1 (codex-medium #1): `git_available` was a `.git` ancestor
+        # probe; a worktree driven by GIT_DIR/GIT_WORK_TREE has no `.git` inside
+        # the project, so a missing stamp read as "not a git project" → advisory.
+        import shutil
+        d, td, env = self._setup(risk="irreversible", panel_cfg="all", stamp=False)
+        gitdir = Path(tempfile.mkdtemp()) / "external.git"
+        shutil.move(str(d / ".git"), str(gitdir))
+        env["GIT_DIR"] = str(gitdir)
+        env["GIT_WORK_TREE"] = str(d)
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout,
+                         f"NO-STAMP bypassed via an external GIT_DIR: {r.stdout} {r.stderr}")
+        self.assertIn("no stamp", (r.stdout + r.stderr).lower())
 
     def test_owner_exclude_covering_only_docs_does_not_block(self):
         d, td, env = self._setup(risk="assertive", panel_cfg=["assertive"],

@@ -1389,6 +1389,31 @@ def _safe_read_regular(path: "Path", cap: int) -> "bytes | None":
         os.close(fd)
 
 
+def _git_toplevel(repo_path: Path) -> "Path | None":
+    """`git rev-parse --show-toplevel` for `repo_path`, as a Path, or None when
+    git cannot answer (task 060). Read as BYTES: porcelain paths are toplevel-
+    relative even when the project is a SUBDIRECTORY of a larger repo, so every
+    reader that opens a porcelain-named file must join it to THIS, never to
+    `repo_path` (T023 #1 — the doubled prefix read `unreadable`/`absent`). Drop
+    exactly one trailing `\n` then one `\r` (Git-for-Windows), never `.strip()`
+    (a space-suffixed path). Shared by `_repo_fingerprint_material` and
+    `_dirty_path_content_map` (impl-panel r1 opus: the dirty-map had the same
+    bug, so a subdir project's tail-cert delta under-enumerated)."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                           cwd=repo_path, capture_output=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top_b = r.stdout
+    if top_b.endswith(b"\n"):
+        top_b = top_b[:-1]
+    if top_b.endswith(b"\r"):
+        top_b = top_b[:-1]
+    if r.returncode != 0 or not top_b:
+        return None
+    return Path(os.fsdecode(top_b))
+
+
 def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
                                strict: bool = False) -> "str | None":
     """The fingerprint MATERIAL for a single git repo: HEAD + porcelain + working
@@ -1432,16 +1457,9 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
         # one trailing `\n` then one `\r` (Git-for-Windows), never `.strip()` (a
         # space-suffixed path). A resolver failure is NOT a reason to fall back
         # to `repo_path` (that recreates the bug) — it is unavailable material.
-        top_r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                               cwd=repo_path, capture_output=True)
-        top_b = top_r.stdout
-        if top_b.endswith(b"\n"):
-            top_b = top_b[:-1]
-        if top_b.endswith(b"\r"):
-            top_b = top_b[:-1]
-        if top_r.returncode != 0 or not top_b:
+        toplevel = _git_toplevel(repo_path)
+        if toplevel is None:
             return None
-        toplevel = Path(os.fsdecode(top_b))
         if strict:
             try:
                 if toplevel.resolve() != Path(repo_path).resolve():
@@ -1499,7 +1517,8 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
     # repo that ACTUALLY contains a special-char untracked file — previously
     # mis-recorded `unreadable` — sees its digest change, to the correct value.
     # `os.fsdecode` round-trips raw path bytes (incl. non-UTF-8) losslessly. A
-    # `-z` failure falls back to the exact legacy parse (never a silent empty
+    # `-z` failure is UNAVAILABLE material (task 060 — the pre-060 legacy-parse
+    # fallback is gone; an empty fingerprint now blocks the close as UNREADABLE
     # digest). NOTE (impl-panel sonnet #1): the `-z` snapshot is separate from
     # the folded `porcelain` above, so a file created/removed in the tiny window
     # between them could make the two disagree — practically always in the
@@ -1610,7 +1629,7 @@ def _scope_identity(project_path: Path, cand: Path) -> str:
 # (task 060): the documented use is bookkeeping such as `journal/`. Anything
 # else under an exclude — code, scripts, json/config, lock files, no extension
 # — is source the fingerprint must not be blind to.
-_BOOKKEEPING_SUFFIXES = (".md", ".txt", ".rst", ".log")
+_BOOKKEEPING_SUFFIXES = (".md", ".rst", ".log")   # NOT .txt: requirements.txt / CMakeLists.txt are behaviour (impl-panel r1)
 
 
 def owner_exclude_covers_behavioral(project_path: Path,
@@ -1627,7 +1646,7 @@ def owner_exclude_covers_behavioral(project_path: Path,
     are classified with `classify_delta_paths`. "Source" = a BEHAVIORAL path
     that is not bookkeeping-shaped: the documented use of `fingerprint_exclude`
     is owner bookkeeping such as `journal/` (docs/configuration.md), whose
-    `.md`/`.txt`/`.rst`/`.log` files classify behavioral only because they sit
+    `.md`/`.rst`/`.log` files classify behavioral only because they sit
     outside `docs/` — those stay allowed; code, scripts, `.json`/config, lock
     files and extension-less files under an exclude are source and are flagged.
     Returns `(covers, paths)`: any source path → `(True, [<scope>/<path>, …])`;
@@ -1657,7 +1676,23 @@ def owner_exclude_covers_behavioral(project_path: Path,
         if r.returncode != 0:
             hits.append(f"{prefix or '.'}: git error")
             continue
-        paths = sorted({os.fsdecode(t) for t in r.stdout.split(b"\0") if t})
+        found = {os.fsdecode(t) for t in r.stdout.split(b"\0") if t}
+        # Union with what HEAD has under the exclude (impl-panel r1 codex-high
+        # #1): a STAGED DELETION (`git rm src/x.py`) leaves the index/worktree
+        # listing empty while the exclude hides the `D` line from the fingerprint
+        # — the deleted code must still count as covered.
+        try:
+            rt = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD", "--", *specs],
+                cwd=repo, capture_output=True)
+        except (OSError, subprocess.SubprocessError):
+            hits.append(f"{prefix or '.'}: git error")
+            continue
+        if rt.returncode != 0:
+            hits.append(f"{prefix or '.'}: git error")
+            continue
+        found |= {os.fsdecode(t) for t in rt.stdout.split(b"\0") if t}
+        paths = sorted(found)
         beh, _non = classify_delta_paths(paths, is_outer_scope=(name == ""))
         hits.extend(prefix + b for b in beh
                     if not b.lower().endswith(_BOOKKEEPING_SUFFIXES))
@@ -1933,9 +1968,17 @@ def _dirty_path_content_map(repo_path: Path,
             if i < len(entries) and entries[i]:
                 paths.append(os.fsdecode(entries[i]))
         i += 1
+    # Task 060 (impl-panel r1 opus): porcelain paths are TOPLEVEL-relative —
+    # resolve against the toplevel, exactly as the fingerprint does, or a subdir
+    # project tokens every dirty path as the doubled-prefix `absent` at F0 AND
+    # at close and a code edit certifies as docs-only. No toplevel → None (a git
+    # error; the callers fail closed).
+    _top = _git_toplevel(Path(repo_path))
+    if _top is None:
+        return None
     out: "dict[str, str]" = {}
     for rel in paths:
-        p = Path(repo_path) / rel
+        p = _top / rel
         # A SYMLINK is tokened by its LINK TEXT (impl-panel r5 codex:sol#2: a
         # retargeted untracked `code.py` symlink used to collapse to a constant
         # `absent` both times and slip the content-token comparison; the tamper

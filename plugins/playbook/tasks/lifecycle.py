@@ -372,6 +372,19 @@ def cmd_work(cmd_args):
                     if _gp.parent == _gp:
                         break
                     _gp = _gp.parent
+                if not _git_here:
+                    # impl-panel r1 (codex-medium): a worktree driven by
+                    # GIT_DIR / GIT_WORK_TREE has no `.git` inside the project
+                    # yet fingerprints fine — ask git itself too (either
+                    # signal → git is available here).
+                    try:
+                        import subprocess as _sp060
+                        _git_here = _sp060.run(
+                            ["git", "rev-parse", "--is-inside-work-tree"],
+                            cwd=project_path, capture_output=True,
+                            timeout=30).returncode == 0
+                    except (OSError, _sp060.SubprocessError):
+                        _git_here = False
                 _freshness = None
                 if _impl is not None:
                     if not _impl["tree_state"]:
