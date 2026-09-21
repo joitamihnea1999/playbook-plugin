@@ -425,5 +425,180 @@ class TailCertFailsClosed(unittest.TestCase):
         self.assertIsNotNone(v)
 
 
+class TaskDirExemption(unittest.TestCase):
+    """W4 (T045 + plan panel P5/codex-high #3): the untracked-task-dir exemption
+    fires only when task.md ITSELF is untracked; when task.md is tracked, only
+    the panel's own record files (by name) are exempt, and a rogue sibling
+    flags. A failed trackedness probe is a caution and narrows the exemption."""
+
+    def _proj(self, *, commit_task: bool):
+        d = _repo()
+        td = d / ".agent" / "tasks" / "001-x"
+        td.mkdir(parents=True)
+        tf = td / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        if commit_task:
+            _commit_all(d)
+        return d, td, tf
+
+    def test_snapshot_records_trackedness(self):
+        d, td, tf = self._proj(commit_task=True)
+        self.assertEqual(R._snapshot_repo_state(d, tf)["taskmd_tracked"], "tracked")
+        d2, td2, tf2 = self._proj(commit_task=False)
+        self.assertEqual(R._snapshot_repo_state(d2, tf2)["taskmd_tracked"], "untracked")
+
+    def test_tracked_taskmd_rogue_sibling_flags(self):
+        d, td, tf = self._proj(commit_task=True)
+        (td / "judge.md").write_text("old\n", encoding="utf-8")          # an untracked record child exists
+        before = R._snapshot_repo_state(d, tf)
+        (td / "evil.py").write_text("x\n", encoding="utf-8")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("evil.py" in m for m in full["mutations"]), full)
+
+    def test_tracked_taskmd_record_files_are_exempt(self):
+        d, td, tf = self._proj(commit_task=True)
+        before = R._snapshot_repo_state(d, tf)
+        (td / "judge.md").write_text("round\n", encoding="utf-8")
+        (td / "judge-impl-codex.log").write_text("log\n", encoding="utf-8")
+        (td / "judge-impl-claude.partial.log").write_text("p\n", encoding="utf-8")
+        (td / "judge-archive.md").write_text("a\n", encoding="utf-8")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+
+    def test_tracked_record_file_MODIFIED_still_flags(self):
+        # The pairing that keeps the exemption honest: a NEWLY CREATED record
+        # file is the panel's own churn (exempt), but a COMMITTED judge.md that
+        # a judge rewrites during the window is a rogue editing evidence.
+        d, td, tf = self._proj(commit_task=False)
+        (td / "judge.md").write_text("v1\n", encoding="utf-8")
+        _commit_all(d)                                   # task.md AND judge.md tracked
+        before = R._snapshot_repo_state(d, tf)
+        self.assertEqual(before["taskmd_tracked"], "tracked")
+        (td / "judge.md").write_text("v1\nrogue\n", encoding="utf-8")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("judge.md" in m for m in full["mutations"]), full)
+
+    def test_untracked_taskmd_keeps_the_broad_exemption(self):
+        d, td, tf = self._proj(commit_task=False)
+        before = R._snapshot_repo_state(d, tf)
+        (td / "anything.txt").write_text("record churn\n", encoding="utf-8")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+
+    def test_probe_failure_is_a_caution_and_narrows(self):
+        d, td, tf = self._proj(commit_task=True)
+        real_run = subprocess.run
+
+        def _no_lsfiles(cmd, *a, **k):
+            if cmd[:2] == ["git", "ls-files"] or (len(cmd) > 3 and cmd[3] == "ls-files"):
+                raise OSError("git ls-files unavailable")
+            return real_run(cmd, *a, **k)
+        with mock.patch("subprocess.run", side_effect=_no_lsfiles):
+            before = R._snapshot_repo_state(d, tf)
+        self.assertEqual(before["taskmd_tracked"], "unknown")
+        (td / "evil.py").write_text("x\n", encoding="utf-8")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("evil.py" in m for m in full["mutations"]), full)
+        self.assertTrue(any("tracked" in c for c in full["cautions"]), full)
+
+
+class GitDiscoveryBoundaries(unittest.TestCase):
+    """W5 (T009 #2): `_in_git_repo` honours GIT_CEILING_DIRECTORIES, GIT_DIR and
+    filesystem boundaries the way git's own discovery does."""
+
+    def test_ceiling_stops_the_walk(self):
+        repo = _repo()
+        app = repo / "app"
+        app.mkdir()
+        with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(repo)}):
+            self.assertFalse(R._in_git_repo(app))          # `.git` is AT the ceiling → not entered
+            self.assertTrue(R._in_git_repo(repo))           # the start dir itself is always probed
+        self.assertTrue(R._in_git_repo(app))                # no ceiling → found
+
+    def test_git_dir_env_means_repo(self):
+        d = Path(tempfile.mkdtemp())
+        with mock.patch.dict(os.environ, {"GIT_DIR": "/somewhere/.git"}):
+            self.assertTrue(R._in_git_repo(d))
+
+    def test_empty_ceiling_entries_are_ignored(self):
+        repo = _repo()
+        with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": os.pathsep}):
+            self.assertTrue(R._in_git_repo(repo / "app"))  # a bogus/empty list must not disable discovery
+
+
+class CodexTempLog(unittest.TestCase):
+    """W6 (T008 #5): the codex `-o` transcript is owned from allocation to every
+    exit — normal, exception and SystemExit — so no `*-judge-codex.log` is left
+    in the system temp dir by a timeout/budget/dead-pin/tamper exit."""
+
+    def test_manager_unlinks_on_every_exit(self):
+        for exc in (None, RuntimeError("boom"), SystemExit(1)):
+            with self.subTest(exc=type(exc).__name__ if exc else "normal"):
+                try:
+                    with R._TempPath(suffix="-judge-codex.log") as p:
+                        self.assertTrue(p.exists())
+                        p.write_text("transcript", encoding="utf-8")
+                        if exc is not None:
+                            raise exc
+                except (RuntimeError, SystemExit):
+                    pass
+                self.assertFalse(p.exists(), p)
+
+    def test_manager_tolerates_an_already_removed_file(self):
+        with R._TempPath(suffix="-judge-codex.log") as p:
+            p.unlink()
+        self.assertFalse(p.exists())
+
+    def test_registry_is_drained_on_a_sys_exit_through_the_command(self):
+        # The real shape: the codex branch allocates, then the body exits via
+        # sys.exit (budget / timeout / dead-pin / tamper). `atexit` would not
+        # fire in-process, so the registry drain in cmd_single_review's finally
+        # is what unlinks it.
+        held = R._TempPath(suffix="-judge-codex.log")
+        p = held.keep_until_exit()
+        self.assertTrue(p.exists())
+        with mock.patch.object(R, "_cmd_single_review", side_effect=SystemExit(1)):
+            with self.assertRaises(SystemExit):
+                R.cmd_single_review("plan-review", ["001"])
+        self.assertFalse(p.exists(), "the codex -o transcript leaked past a sys.exit")
+
+    def test_no_codex_transcript_survives_a_budget_exit(self):
+        # End to end through the real dispatch: a fake codex whose output is the
+        # budget-exhausted message drives cmd_single_review to its nonzero exit.
+        import glob, tempfile as _tf
+        d = _repo()
+        td = d / ".agent" / "tasks" / "001-x"
+        td.mkdir(parents=True)
+        (td / "task.md").write_text(
+            "# 001 - x\n\n## Status\npending\n\n## Intent\nx\n\n"
+            "## Plan Review\n(plan review triage appears here)\n\n"
+            "## Design Phase\n- [ ] a gate\n", encoding="utf-8")
+        (d / "MIND_MAP.md").write_text("# Mind Map\n[1] node\n", encoding="utf-8")
+        _commit_all(d)
+        pattern = os.path.join(_tf.gettempdir(), "*-judge-codex.log")
+        before_files = set(glob.glob(pattern))
+
+        def fake_run(agent, args, **kw):
+            return subprocess.CompletedProcess(
+                args=[], returncode=1,
+                stdout="Credit balance is too low to run this request.", stderr="")
+        cwd = os.getcwd()
+        import contextlib, io
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("shutil.which", return_value="/usr/bin/codex"))
+            stack.enter_context(mock.patch("provider.sandbox.run", side_effect=fake_run))
+            stack.enter_context(mock.patch("provider.sandbox.format_judge_output",
+                                           side_effect=lambda r: (r.stdout or "")))
+            os.chdir(d)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                    with contextlib.suppress(SystemExit):
+                        R.cmd_single_review("plan-review", ["001", "--backend", "codex"])
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(set(glob.glob(pattern)) - before_files, set(),
+                         "a codex -o transcript was left in the system temp dir")
+
+
 if __name__ == "__main__":
     unittest.main()

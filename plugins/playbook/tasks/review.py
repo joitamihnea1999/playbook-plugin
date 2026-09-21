@@ -533,6 +533,25 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int
             "own_repo": (toplevel is not None and prefix in ("", ".")) if porcelain is not None else False}
     if task_file is not None:
         snap["taskdir_identity"] = _taskdir_identity(Path(task_file))
+        # Task 059 (T045, plan panel codex-high #3): is task.md itself TRACKED?
+        # `tracked | untracked | unknown | n/a` — only a SUCCESSFUL "not tracked"
+        # widens the task-dir exemption; a failed probe is a caution and narrows.
+        tracked = "n/a"
+        if porcelain is not None:
+            try:
+                rel_tf = Path(task_file).relative_to(project_path).as_posix()
+                rl = subprocess.run(
+                    ["git", "-C", str(project_path), "ls-files", "--error-unmatch", "--", rel_tf],
+                    capture_output=True, timeout=30)
+                if rl.returncode == 0:
+                    tracked = "tracked"
+                elif rl.returncode == 1 and b"did not match" in (rl.stderr or b""):
+                    tracked = "untracked"
+                else:
+                    tracked = "unknown"
+            except (OSError, subprocess.SubprocessError, ValueError):
+                tracked = "unknown"
+        snap["taskmd_tracked"] = tracked
     # code_roots (depth 1 only — a root's own code_roots are not followed).
     roots: dict = {}
     if _depth == 0:
@@ -568,14 +587,104 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int
 
 
 def _in_git_repo(path: Path) -> bool:
-    """`.git` ancestor probe (see `_snapshot_repo_state`'s `is_git`)."""
-    p = path
+    """`.git` ancestor probe (see `_snapshot_repo_state`'s `is_git`), honouring
+    git's own discovery boundaries (task 059, T009 #2): `GIT_DIR` set → a repo;
+    the walk never ENTERS a directory listed in `GIT_CEILING_DIRECTORIES`
+    (`os.pathsep`-separated, empty entries ignored) and stops at a filesystem
+    boundary unless `GIT_DISCOVERY_ACROSS_FILESYSTEM` is truthy. Without this a
+    project below a ceiling/mount with a `.git` at an unreachable ancestor
+    probed True while `git status` correctly said "not a repository" — a false
+    fail-closed abort. Pure `os.stat`, never a subprocess."""
+    if os.environ.get("GIT_DIR"):
+        return True
+    ceilings: set = set()
+    for c in (os.environ.get("GIT_CEILING_DIRECTORIES") or "").split(os.pathsep):
+        if not c or c == ":":
+            continue
+        try:
+            ceilings.add(os.path.realpath(c))
+        except (OSError, ValueError):
+            continue
+    cross_fs = (os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+    p = Path(path)
+    try:
+        start_dev = os.stat(p).st_dev
+    except OSError:
+        start_dev = None
     while True:
-        if (p / ".git").exists():
-            return True
-        if p.parent == p:
+        try:
+            if (p / ".git").exists():
+                return True
+        except OSError:
             return False
-        p = p.parent
+        parent = p.parent
+        if parent == p:
+            return False
+        try:
+            if os.path.realpath(parent) in ceilings:
+                return False
+        except (OSError, ValueError):
+            return False
+        if not cross_fs and start_dev is not None:
+            try:
+                if os.stat(parent).st_dev != start_dev:
+                    return False
+            except OSError:
+                return False
+        p = parent
+
+
+class _TempPath:
+    """A temp file owned from allocation to exit (task 059 / T008 #5): codex's
+    `-o` transcript lives in the system temp dir (the read-only judge sandbox
+    forbids project writes) and used to be unlinked only on the success save,
+    so every timeout / budget / dead-pin / tamper `sys.exit(1)` — and any
+    exception between `mkstemp` and the spawn — leaked one file per review.
+    Usable as a context manager (unlink on normal exit, exception AND
+    SystemExit) or via `keep_until_exit()` (atexit-registered unlink for the
+    long single-review body whose exits are `sys.exit` calls). `cleanup()` is
+    idempotent — the success path may unlink first."""
+
+    def __init__(self, suffix: str = ""):
+        import tempfile as _tempfile
+        fd, p = _tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        self.path = Path(p)
+
+    def __enter__(self) -> Path:
+        return self.path
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.cleanup()
+        return False
+
+    def cleanup(self) -> None:
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+
+    def keep_until_exit(self) -> Path:
+        """Own the file for the rest of the command: the long single-review body
+        exits through ~14 `sys.exit` sites, so the unlink rides on BOTH an
+        `atexit` hook (the real CLI, which exits the process right after) and a
+        module-level registry drained by `cmd_single_review`'s own `finally`
+        (an in-process drive — tests, or an embedded caller — where `atexit`
+        would not fire until much later)."""
+        import atexit
+        atexit.register(self.cleanup)
+        _TEMP_REGISTRY.append(self)
+        return self.path
+
+
+# Drained in `cmd_single_review`'s finally (see `_TempPath.keep_until_exit`).
+_TEMP_REGISTRY: "list[_TempPath]" = []
+
+
+def _drain_temp_registry() -> None:
+    while _TEMP_REGISTRY:
+        _TEMP_REGISTRY.pop().cleanup()
 
 
 # Each mode accepts BOTH placeholder generations: pre-1.5.2 templates say
@@ -699,13 +808,14 @@ def _judge_log_name(backend: str) -> str:
     }.get(backend, "judge.log")
 
 
-def _prefixed(prefix: "str | None", body: str) -> "re.Pattern":
+def _prefixed(prefix: "str | None", body: str, status: str = "..") -> "re.Pattern":
     """A porcelain-LINE exemption regex that also matches the toplevel-relative
-    form git emits for a SUBDIRECTORY project (task 059, P3): `^..\s+"?` then an
-    optional `<prefix>/` then `body`. The readable line itself is never parsed
-    or rewritten — only matched."""
+    form git emits for a SUBDIRECTORY project (task 059, P3): the two status
+    characters (`status`, default any) then `\s+"?`, an optional `<prefix>/`,
+    then `body`. The readable line itself is never parsed or rewritten — only
+    matched, so C-quoting and ` -> ` renames cannot be mangled."""
     pre = "" if prefix in (None, "", ".") else "(?:" + re.escape(prefix) + "/)?"
-    return re.compile(r'^..\s+"?' + pre + body)
+    return re.compile(r"^" + status + r'\s+"?' + pre + body)
 
 
 def _scope_changes(before: dict, after: dict, *, label: str = "",
@@ -848,13 +958,45 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
             _td = task_file.parent.relative_to(project_path).as_posix()
         except (ValueError, AttributeError):
             _td = None
-        if _td and _td != "." and b_porc:
-            _untracked_td_re = _prefixed(prefix, re.escape(_td) + r"/").pattern.replace(r"^..\s+", r"^\?\?\s+", 1)
-            if any(re.match(_untracked_td_re, ln) for ln in b_porc.splitlines()):
+        # `b_porc is not None` (not truthiness): a CLEAN tree's porcelain is the
+        # empty string, and the trackedness-keyed exemption below must still be
+        # computed for it — the old `??`-presence rule needed a non-empty
+        # listing, the new rule does not (task 059).
+        if _td and _td != "." and b_porc is not None:
+            # Task 059 (T045 / P5 / codex-high #3): the exemption is keyed on
+            # task.md's OWN tracked-ness, probed at snapshot time.
+            #   untracked → the whole task dir is the panel's fresh record dir:
+            #               broad exemption (as before).
+            #   tracked   → the dir is a committed record dir; only the panel's
+            #               own record FILES (by name) are exempt — a rogue
+            #               sibling (`evil.py`) flags.
+            #   unknown   → the probe failed: CAUTION + the narrow exemption.
+            #   None/n-a  → pre-059 snapshot / non-git: the old `??`-presence rule.
+            tracked = before.get("taskmd_tracked")
+            record_names = (r"(?:judge\.md|judge-archive\.md|judge-[^/\"]*\.log|"
+                            r"task-archive\.md|vetting-ledger\.json)")
+            if tracked == "untracked":
                 line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))
                 path_exempt.append(re.compile(r"^" + re.escape(_td) + r"/"))
+            elif tracked in ("tracked", "unknown"):
+                # Only a NEWLY CREATED (`??`) record file is the panel's own
+                # churn. A TRACKED record file that was MODIFIED during the
+                # window is a rogue editing committed evidence and must still
+                # flag (regression `test_tracked_task_dir_edit_still_flags`), so
+                # the exemption is anchored on the untracked status and NO
+                # content-hash (path) exemption is added.
+                line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/" + record_names + r'"?$',
+                                             status=r"\?\?"))
+            else:
+                _untracked_td_re = _prefixed(prefix, re.escape(_td) + r"/").pattern.replace(r"^..\s+", r"^\?\?\s+", 1)
+                if b_porc and any(re.match(_untracked_td_re, ln) for ln in b_porc.splitlines()):
+                    line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))
+                    path_exempt.append(re.compile(r"^" + re.escape(_td) + r"/"))
     mutations, cautions = _scope_changes(before, after, line_exempt=line_exempt,
                                          path_exempt=path_exempt, task_rel=_task_rel)
+    if before.get("taskmd_tracked") == "unknown" or after.get("taskmd_tracked") == "unknown":
+        cautions.append("task.md tracked-ness unknown (`git ls-files` failed) — the task-dir "
+                        "exemption was narrowed to the panel's own record files")
     # task.md — its own hash (the primary tamper target).
     b_hash, a_hash = before.get("task_hash"), after.get("task_hash")
     if b_hash:
@@ -1919,6 +2061,16 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
 
 
 def cmd_single_review(cmd, cmd_args):
+    """Thin owner of the temp-file registry around the real body (task 059 /
+    T008 #5): whatever exit the body takes — return, `sys.exit`, or an
+    exception — the codex `-o` transcript is unlinked."""
+    try:
+        return _cmd_single_review(cmd, cmd_args)
+    finally:
+        _drain_temp_registry()
+
+
+def _cmd_single_review(cmd, cmd_args):
     # "judge" is a legacy alias — auto-detects mode from task status
     review_cmd = cmd
     if not cmd_args:
@@ -2273,10 +2425,10 @@ def cmd_single_review(cmd, cmd_args):
         # at a temp file — system temp (/tmp, /var/folders) stays writable
         # under both seatbelt and bwrap — and copy it into the task dir from
         # the parent, after the tamper check (see the save block below).
-        import tempfile as _tempfile
-        _codex_log_fd, codex_log = _tempfile.mkstemp(suffix="-judge-codex.log")
-        os.close(_codex_log_fd)
-        codex_log = Path(codex_log)
+        # Owned from allocation to process exit (task 059 / T008 #5): every
+        # `sys.exit` below (timeout / budget / dead-pin / tamper) and any
+        # exception before the spawn used to orphan this file.
+        codex_log = _TempPath(suffix="-judge-codex.log").keep_until_exit()
         # Bypass flag (--dangerously-bypass-approvals-and-sandbox) inserted
         # after `exec` by provider.sandbox._compose_agent_argv.
         codex_args = ["exec"]
