@@ -311,10 +311,12 @@ class _Project(unittest.TestCase):
         R._PB_JOURNAL_LOADED = False
 
     def _degraded(self, *a, **k):
-        return {"mutations": [], "cautions": ["content-hash guard degraded: could not enumerate dirty files at close (`git status -z` failed)"]}
+        return {"mutations": [],
+                "cautions": ["content-hash guard degraded: could not enumerate dirty files at close (`git status -z` failed)"],
+                "degraded": True}
 
     def _mutated(self, *a, **k):
-        return {"mutations": ["working tree: ?? rogue.md"], "cautions": []}
+        return {"mutations": ["working tree: ?? rogue.md"], "cautions": [], "degraded": False}
 
 
 class PanelDegradedKeepsVerdict(_Project):
@@ -479,8 +481,8 @@ class TaskDirExemption(unittest.TestCase):
         d, td, tf = self._proj(commit_task=True)
         before = R._snapshot_repo_state(d, tf)
         (td / "judge.md").write_text("round\n", encoding="utf-8")
-        (td / "judge-impl-codex.log").write_text("log\n", encoding="utf-8")
-        (td / "judge-impl-claude.partial.log").write_text("p\n", encoding="utf-8")
+        (td / "judge-codex.log").write_text("log\n", encoding="utf-8")      # REAL names only
+        (td / "judge.partial.log").write_text("p\n", encoding="utf-8")
         (td / "judge-archive.md").write_text("a\n", encoding="utf-8")
         full = R._detect_tamper_full(d, tf, before)
         self.assertEqual(full["mutations"], [], full)
@@ -811,6 +813,115 @@ class NestedRootExemptions(unittest.TestCase):
         (nested / "x.py").write_text("x = 99\n", encoding="utf-8")
         full = R._detect_tamper_full(proj, tf, before)
         self.assertTrue(any("x.py" in m for m in full["mutations"]), full)
+
+
+class Round2Fixes(unittest.TestCase):
+    """059 impl-panel round 2."""
+
+    def _proj(self):
+        d = _repo()
+        (d / "a.py").write_text("a = 1\n", encoding="utf-8")
+        tf = d / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        (d / ".gitignore").write_text("task.md\n", encoding="utf-8")
+        _commit_all(d)
+        return d, tf
+
+    def test_z_succeeding_while_readable_status_fails_is_a_caution_not_a_crash(self):
+        # grok #3: `hash_scope_ok` stayed True with `toplevel` None, so
+        # `Path(None) / rel` raised TypeError → the detector turned a degraded
+        # guard into a MUTATION ("review UNVERIFIED") and discarded a paid panel.
+        d, tf = self._proj()
+        (d / "a.py").write_text("a = 2\n", encoding="utf-8")
+        real_run = subprocess.run
+
+        def _readable_fails(cmd, *a, **k):
+            if "status" in cmd and "-z" not in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "", "fatal: timeout")
+            return real_run(cmd, *a, **k)
+        with mock.patch("subprocess.run", side_effect=_readable_fails):
+            snap = R._snapshot_repo_state(d, tf)          # must not raise (it did: Path(None) / rel)
+        # The toplevel is now resolved whenever hashing could run, so the `-z`
+        # side still produces real hashes instead of being skipped; the
+        # invariant that matters is that `hash_scope_ok` and `toplevel` agree.
+        self.assertEqual(snap["hash_scope_ok"], snap["prefix"] is not None)
+        if snap["hash_scope_ok"]:
+            self.assertIn("a.py", snap["dirty_hashes"])
+        else:
+            self.assertEqual(snap["dirty_hashes"], {})
+
+    def test_uncontained_host_treats_a_moved_head_as_a_mutation(self):
+        # grok #1: where the OS sandbox cannot deny writes, a judge can commit
+        # its own changes — the demotion would launder them.
+        d, tf = self._proj()
+        before = R._snapshot_repo_state(d, tf)
+        (d / "rogue.py").write_text("x\n", encoding="utf-8")
+        _commit_all(d, "a judge commits its own write")
+        with mock.patch("provider.sandbox.containment_available", return_value=False):
+            full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("HEAD" in m or "head" in m for m in full["mutations"]), full)
+
+    def test_contained_host_keeps_the_commit_caution(self):
+        d, tf = self._proj()
+        before = R._snapshot_repo_state(d, tf)
+        (d / "note.md").write_text("x\n", encoding="utf-8")
+        _commit_all(d, "concurrent commit")
+        with mock.patch("provider.sandbox.containment_available", return_value=True):
+            full = R._detect_tamper_full(d, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+        self.assertTrue(any("head moved" in c.lower() for c in full["cautions"]), full)
+
+    def test_a_removal_the_commit_does_not_explain_stays_a_mutation(self):
+        # opus F1: the demotion was unconditional — a rogue could move HEAD and
+        # launder unrelated deletions. Only paths the commit actually touched
+        # are demoted.
+        d, tf = self._proj()
+        (d / "a.py").write_text("a = 2\n", encoding="utf-8")          # dirty, will be committed
+        (d / "scratch.txt").write_text("s\n", encoding="utf-8")        # untracked, will be DELETED
+        before = R._snapshot_repo_state(d, tf)
+        subprocess.run(["git", "add", "a.py"], cwd=str(d), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "commit a.py only"], cwd=str(d), check=True, capture_output=True)
+        (d / "scratch.txt").unlink()                                   # not part of the commit
+        with mock.patch("provider.sandbox.containment_available", return_value=True):
+            full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("scratch.txt" in m for m in full["mutations"]), full)
+        self.assertFalse(any("scratch.txt" in c for c in full["cautions"]), full)
+
+    def test_head_movement_alone_does_not_mark_the_round_degraded(self):
+        # opus F2: a concurrent commit marked the round `degraded`, which at close
+        # replaced FRESH/STALE and made tail certification unreachable — a real
+        # regression for the background-panel workflow. The guard ran fine; only
+        # the tree moved, which freshness already covers.
+        d, tf = self._proj()
+        before = R._snapshot_repo_state(d, tf)
+        (d / "note.md").write_text("x\n", encoding="utf-8")
+        _commit_all(d, "concurrent commit")
+        with mock.patch("provider.sandbox.containment_available", return_value=True):
+            full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(full["cautions"])
+        self.assertFalse(full["degraded"], "head movement is not a degraded GUARD")
+
+    def test_a_real_guard_failure_does_mark_the_round_degraded(self):
+        d, tf = self._proj()
+        before = {"porcelain": "", "task_hash": None, "dirty_hashes": {},
+                  "z_read_ok": False, "is_git": True}
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(full["degraded"], full)
+
+    def test_record_exemption_uses_exact_known_names(self):
+        # opus F3 / sonnet #1: `judge-[^/"]*\.log` exempted ANY novel sibling.
+        d = _repo()
+        td = d / ".agent" / "tasks" / "001-x"
+        td.mkdir(parents=True)
+        tf = td / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        _commit_all(d)
+        before = R._snapshot_repo_state(d, tf)
+        (td / "judge.log").write_text("real claude log\n", encoding="utf-8")       # a REAL name
+        (td / "judge-evil.log").write_text("planted\n", encoding="utf-8")          # not a known name
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("judge-evil.log" in m for m in full["mutations"]), full)
+        self.assertFalse(any("judge.log" in m and "evil" not in m for m in full["mutations"]), full)
 
 
 if __name__ == "__main__":

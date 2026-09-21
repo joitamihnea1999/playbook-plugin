@@ -458,12 +458,18 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int
         z_out = None
     # Toplevel + prefix (task 059): only meaningful for a git repo. A resolvable
     # toplevel is REQUIRED to open porcelain-named files correctly.
+    # Resolve the toplevel whenever content hashing could run — NOT only when the
+    # readable porcelain succeeded. The readable call and the `-z` call are
+    # separate 30 s subprocesses, so on a large dirty tree the first can time out
+    # while the second succeeds; the earlier shape then left `hash_scope_ok` True
+    # with `toplevel` None and `Path(None) / rel` raised TypeError, which the
+    # detector turned into a MUTATION and a discarded paid panel (059 impl-panel
+    # r2, grok #3).
     toplevel = prefix = None
-    hash_scope_ok = True
-    if porcelain is not None:
+    if porcelain is not None or z_out is not None:
         toplevel = _git_toplevel(Path(project_path))
         prefix = _toplevel_prefix(Path(project_path), toplevel) if toplevel is not None else None
-        hash_scope_ok = toplevel is not None and prefix is not None
+    hash_scope_ok = toplevel is not None and prefix is not None
     dirty_hashes: dict[str, str] = {}
     untracked: "set[str]" = set()
     if z_out and hash_scope_ok:
@@ -597,53 +603,8 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int
     return snap
 
 
-def _in_git_repo(path: Path) -> bool:
-    """`.git` ancestor probe (see `_snapshot_repo_state`'s `is_git`), honouring
-    git's own discovery boundaries (task 059, T009 #2): `GIT_DIR` set → a repo;
-    the walk never ENTERS a directory listed in `GIT_CEILING_DIRECTORIES`
-    (`os.pathsep`-separated, empty entries ignored) and stops at a filesystem
-    boundary unless `GIT_DISCOVERY_ACROSS_FILESYSTEM` is truthy. Without this a
-    project below a ceiling/mount with a `.git` at an unreachable ancestor
-    probed True while `git status` correctly said "not a repository" — a false
-    fail-closed abort. Pure `os.stat`, never a subprocess."""
-    if os.environ.get("GIT_DIR"):
-        return True
-    ceilings: set = set()
-    for c in (os.environ.get("GIT_CEILING_DIRECTORIES") or "").split(os.pathsep):
-        if not c or c == ":":
-            continue
-        try:
-            ceilings.add(os.path.realpath(c))
-        except (OSError, ValueError):
-            continue
-    cross_fs = (os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM") or "").strip().lower() in (
-        "1", "true", "yes", "on")
-    p = Path(path)
-    try:
-        start_dev = os.stat(p).st_dev
-    except OSError:
-        start_dev = None
-    while True:
-        try:
-            if (p / ".git").exists():
-                return True
-        except OSError:
-            return False
-        parent = p.parent
-        if parent == p:
-            return False
-        try:
-            if os.path.realpath(parent) in ceilings:
-                return False
-        except (OSError, ValueError):
-            return False
-        if not cross_fs and start_dev is not None:
-            try:
-                if os.stat(parent).st_dev != start_dev:
-                    return False
-            except OSError:
-                return False
-        p = parent
+# One probe, shared with the close path (task 059, impl-panel r2 sonnet #2).
+from tasks.core import in_git_repo as _in_git_repo  # noqa: E402
 
 
 class _TempPath:
@@ -829,6 +790,48 @@ def _prefixed(prefix: "str | None", body: str, status: str = "..") -> "re.Patter
     return re.compile(r"^" + status + r'\s+"?' + pre + body)
 
 
+def _containment_available() -> bool:
+    """Is an OS sandbox actually denying judge writes here? False on Windows and
+    inside a nested sandbox — where the tamper guard is the ONLY defense and the
+    concurrent-commit demotions below must not apply (059 impl-panel r2, grok
+    #1). Never raises: an unanswerable probe is treated as UNCONTAINED."""
+    try:
+        from provider import sandbox as _sb
+        return bool(_sb.containment_available())
+    except Exception:      # noqa: BLE001 — fail toward caution
+        return False
+
+
+def _commit_paths(repo_path: Path, before_sha: "str | None", after_sha: "str | None") -> "set[str]":
+    """Paths the `before..after` commits touched, toplevel-relative, or an empty
+    set when git cannot say (which keeps every removal a MUTATION — the safe
+    direction)."""
+    if not before_sha or not after_sha:
+        return set()
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(repo_path), "diff", "--name-only",
+                            f"{before_sha}..{after_sha}"],
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if r.returncode != 0:
+        return set()
+    return {os.fsdecode(b) for b in r.stdout.split(b"\n") if b}
+
+
+def _line_path_in(line: str, paths: "set[str]") -> bool:
+    """Does a porcelain LINE name one of `paths`? The readable line is never
+    parsed (C-quoting, ` -> ` renames), so this is a containment test on the
+    line's text — deliberately conservative: an unmatched line stays a
+    mutation."""
+    if not paths:
+        return False
+    body = line[3:].strip().strip('"')
+    return any(body == p or body.endswith("/" + p) or p.endswith("/" + body) or p == body
+               for p in paths)
+
+
 def _standard_exempts(prefix: "str | None") -> "tuple[list[re.Pattern], list[re.Pattern]]":
     """The (line, path) exemptions every git scope carries — the OUTER tree and
     each `code_roots` root alike (059 impl-panel r1, sonnet #2: built for the
@@ -851,7 +854,9 @@ def _standard_exempts(prefix: "str | None") -> "tuple[list[re.Pattern], list[re.
 def _scope_changes(before: dict, after: dict, *, label: str = "",
                    line_exempt: "list[re.Pattern]" = (), path_exempt: "list[re.Pattern]" = (),
                    untracked_exempt: "list[re.Pattern]" = (),
-                   task_rel: "str | None" = None) -> "tuple[list[str], list[str]]":
+                   task_rel: "str | None" = None, contained: bool = True,
+                   committed_paths: "set[str] | None" = None
+                   ) -> "tuple[list[str], list[str], bool]":
     """Porcelain-line and content-hash comparison for ONE git scope (the outer
     tree or a `code_roots` root). Returns (mutations, cautions). `label` is a
     `code root <rel>: ` prefix for nested scopes so an inner `x.py` never reads
@@ -859,6 +864,12 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
     path is named by scope + line rather than rewritten)."""
     mutations: list[str] = []
     cautions: list[str] = []
+    # `degraded` marks the GUARD as having been unable to run — the state the
+    # round header records and the close gate keys on. A concurrent commit is a
+    # caution but NOT a degraded guard (059 impl-panel r2, opus F2: marking it
+    # degraded made tail certification unreachable after any background commit).
+    degraded = False
+    committed_paths = committed_paths or set()
     b_porc, a_porc = before.get("porcelain"), after.get("porcelain")
     # Named degradations (CAUTIONS since task 059 — the guard could not run, which
     # is not evidence that a judge wrote anything; printed + recorded, and
@@ -867,19 +878,24 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
     if a_porc is not None and not after.get("z_read_ok", False):
         cautions.append(f"{label}content-hash guard degraded: could not enumerate dirty "
                         "files at close (`git status -z` failed)")
+        degraded = True
     if b_porc is not None and not before.get("z_read_ok", False):
         cautions.append(f"{label}content-hash guard degraded: dirty files were not "
                         "enumerable at review start (`git status -z` failed)")
+        degraded = True
     if a_porc is not None and not after.get("hash_scope_ok", True):
         cautions.append(f"{label}content-hash guard degraded: hash scope unresolvable at close "
                         "(`git rev-parse --show-toplevel` failed) — no content hashes taken")
+        degraded = True
     if b_porc is not None and not before.get("hash_scope_ok", True):
         cautions.append(f"{label}content-hash guard degraded: hash scope unresolvable at review "
                         "start (`git rev-parse --show-toplevel` failed) — no content hashes taken")
+        degraded = True
     if a_porc is None and after.get("is_git"):
         cautions.append(f"{label}content-hash guard degraded: `git status` did not run at "
                         "close on a git repo (hostile/huge tree, corrupt index, or "
                         "repo broken?)")
+        degraded = True
     if b_porc is None and before.get("is_git"):
         cautions.append(f"{label}content-hash guard degraded: `git status` did not run at "
                         "review start on a git repo (hostile/huge tree, corrupt "
@@ -889,13 +905,26 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
     # 'a judge modified the repo'; a read ERROR on either side is a caution too
     # (two errors must not compare equal and hide a move).
     bh, ah = before.get("head") or {}, after.get("head") or {}   # also read by the line diff below
+    head_moved = (bh.get("state") == "ok" and ah.get("state") == "ok"
+                  and bh.get("value") != ah.get("value"))
     if bh.get("state") == "error" or ah.get("state") == "error":
         cautions.append(f"{label}HEAD could not be read on one side of the review — a "
                         "concurrent commit would go unnoticed")
-    elif bh.get("state") == "ok" and ah.get("state") == "ok" and bh.get("value") != ah.get("value"):
-        cautions.append(f"{label}head moved during review ({str(bh.get('value'))[:12]} → "
-                        f"{str(ah.get('value'))[:12]}) — a concurrent commit; the verdict "
-                        "may not describe the current HEAD")
+        degraded = True
+    elif head_moved:
+        if contained:
+            cautions.append(f"{label}head moved during review ({str(bh.get('value'))[:12]} → "
+                            f"{str(ah.get('value'))[:12]}) — a concurrent commit; the verdict "
+                            "may not describe the current HEAD")
+        else:
+            # No OS containment (Windows, or an already-nested sandbox): the guard
+            # is the ONLY defense, and a judge that can write can also `git
+            # commit` its writes — which would hide them from the porcelain diff
+            # and (below) launder its own removals. Fail closed there (059
+            # impl-panel r2, grok #1).
+            mutations.append(f"{label}HEAD moved during an UNCONTAINED review "
+                             f"({str(bh.get('value'))[:12]} → {str(ah.get('value'))[:12]}) — "
+                             "with no OS sandbox a judge can commit its own writes")
     if (b_porc is None) != (a_porc is None):
         # git↔non-git transition WHILE a review runs. A rogue DELETING `.git/` is
         # catastrophic, history-destroying tamper and must hard-stop (round-4
@@ -911,6 +940,7 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
         else:
             cautions.append(f"{label}`git status` succeeded on only one side of the review "
                             "— the working-tree comparison could not run")
+            degraded = True
     # A concurrent COMMIT (HEAD moved) removes the porcelain lines of everything
     # it committed. A read-only judge cannot commit, so on a moved HEAD those
     # REMOVALS are the concurrent actor's and must not void a paid review (059
@@ -919,8 +949,6 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
     # and content changes stay MUTATIONS either way. Bound, disclosed: while a
     # commit is landing, a judge deleting an untracked file in the same window
     # is reported as a caution rather than a banner.
-    head_moved = (bh.get("state") == "ok" and ah.get("state") == "ok"
-                  and bh.get("value") != ah.get("value"))
     if b_porc is not None and a_porc is not None and b_porc != a_porc:
         b_lines, a_lines = set(b_porc.splitlines()), set(a_porc.splitlines())
         # NEW porcelain lines: a rogue created/modified a tracked or untracked
@@ -934,7 +962,11 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
         for line in sorted(b_lines - a_lines):
             if any(rx.match(line) for rx in line_exempt):
                 continue
-            if head_moved:
+            # Demote ONLY when the concurrent commit actually explains this path
+            # (opus F1: an unconditional demotion let a rogue move HEAD and
+            # launder unrelated deletions). `committed_paths` is the commit's own
+            # name list; anything outside it stays a mutation.
+            if head_moved and contained and _line_path_in(line, committed_paths):
                 cautions.append(f"{label}no longer listed after the concurrent commit: "
                                 f"{line.strip()}")
             else:
@@ -958,7 +990,7 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
             continue
         if b_dirty[rel] != a_dirty[rel]:
             mutations.append(f"{label}working tree content changed: {rel}")
-    return mutations, cautions
+    return mutations, cautions, degraded
 
 
 def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, after: dict) -> dict:
@@ -1027,8 +1059,15 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
             #   unknown   → the probe failed: CAUTION + the narrow exemption.
             #   None/n-a  → pre-059 snapshot / non-git: the old `??`-presence rule.
             tracked = before.get("taskmd_tracked")
-            record_names = (r"(?:judge\.md|judge-archive\.md|judge-[^/\"]*\.log|"
-                            r"task-archive\.md|vetting-ledger\.json)")
+            # EXACT names the orchestrator itself writes — never a `judge-*.log`
+            # glob, which exempted any novel sibling a judge could plant (059
+            # impl-panel r2, opus F3 / sonnet #1) and still missed the supported
+            # claude backend's own `judge.log` (grok #4).
+            from tasks.core import judge_log_names as _jln
+            record_names = "(?:" + "|".join(
+                re.escape(n) for n in sorted(
+                    {"judge.md", "judge-archive.md", "task-archive.md",
+                     "vetting-ledger.json"} | _jln())) + ")"
             if tracked == "untracked":
                 line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))
                 path_exempt.append(re.compile(r"^" + re.escape(_td) + r"/"))
@@ -1051,13 +1090,17 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
                 if b_porc and any(re.match(_untracked_td_re, ln) for ln in b_porc.splitlines()):
                     line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))
                     path_exempt.append(re.compile(r"^" + re.escape(_td) + r"/"))
-    mutations, cautions = _scope_changes(before, after, line_exempt=line_exempt,
-                                         path_exempt=path_exempt,
-                                         untracked_exempt=untracked_exempt,
-                                         task_rel=_task_rel)
+    contained = _containment_available()
+    _bh, _ah = before.get("head") or {}, after.get("head") or {}
+    committed = _commit_paths(Path(project_path), _bh.get("value"), _ah.get("value"))
+    mutations, cautions, degraded = _scope_changes(
+        before, after, line_exempt=line_exempt, path_exempt=path_exempt,
+        untracked_exempt=untracked_exempt, task_rel=_task_rel,
+        contained=contained, committed_paths=committed)
     if before.get("taskmd_tracked") == "unknown" or after.get("taskmd_tracked") == "unknown":
         cautions.append("task.md tracked-ness unknown (`git ls-files` failed) — the task-dir "
                         "exemption was narrowed to the panel's own record files")
+        degraded = True
     # task.md — its own hash (the primary tamper target).
     b_hash, a_hash = before.get("task_hash"), after.get("task_hash")
     if b_hash:
@@ -1102,8 +1145,11 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
         if br is None or ar is None:
             cautions.append(f"code root {rel}: configured on only one side of the review "
                             "(config changed?)")
+            degraded = True
             continue
-        if br.get("identity") != ar.get("identity") or br.get("contained") != ar.get("contained"):
+        if br is not None and ar is not None and (
+                br.get("identity") != ar.get("identity")
+                or br.get("contained") != ar.get("contained")):
             mutations.append(f"code root {rel}: identity changed ({br.get('identity')} → "
                              f"{ar.get('identity')}) — repointed/relinked during review")
             continue
@@ -1117,16 +1163,22 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
         if not b_ok and not a_ok:
             cautions.append(f"code root {rel}: unavailable (not a readable git repo of its own) — "
                             "edits inside it are not guarded")
+            degraded = True
             continue
         if not b_ok and a_ok:
             cautions.append(f"code root {rel}: became readable during review (initialised?)")
             continue
         _rl, _rp = _standard_exempts(bs.get("prefix") if bs else None)
-        m, c = _scope_changes(bs, as_, label=f"code root {rel}: ",
-                              line_exempt=_rl, path_exempt=_rp)
+        _rcommitted = _commit_paths(Path(project_path) / rel,
+                                    (bs.get("head") or {}).get("value"),
+                                    (as_.get("head") or {}).get("value"))
+        m, c, dg = _scope_changes(bs, as_, label=f"code root {rel}: ",
+                                  line_exempt=_rl, path_exempt=_rp,
+                                  contained=contained, committed_paths=_rcommitted)
         mutations += m
         cautions += c
-    return {"mutations": mutations, "cautions": cautions}
+        degraded = degraded or dg
+    return {"mutations": mutations, "cautions": cautions, "degraded": degraded}
 
 
 def _detect_tamper_full(project_path: Path, task_file: Path | None, before: dict) -> dict:
@@ -1140,7 +1192,7 @@ def _detect_tamper_full(project_path: Path, task_file: Path | None, before: dict
         return _classify_tamper(project_path, task_file, before, after)
     except Exception as _e:   # noqa: BLE001 — last-resort guard, must not raise
         return {"mutations": [f"tamper check itself errored ({_e}) — review UNVERIFIED"],
-                "cautions": []}
+                "cautions": [], "degraded": True}
 
 
 def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> list[str]:
@@ -1648,9 +1700,13 @@ def cmd_panel_review(cmd_args):
         lines.append(f"**Commit:** {_judged_head}\n")
     # Tamper-guard receipt (task 059): what the guard could and could not verify
     # for THIS round, on one line the close-gate reader can key on.
+    # `degraded` marks the GUARD, not merely "something was noticed": a
+    # concurrent commit is a caution but leaves the guard fully working, and
+    # marking such a round degraded made tail certification unreachable after
+    # any background commit (059 impl-panel r2, opus F2).
     lines.append("**Tamper guard:** " + (
         "degraded — " + "; ".join(c.replace("\n", " ") for c in _tamper_cautions)
-        if _tamper_cautions else "clean") + "\n")
+        if _tamper_full.get("degraded") else "clean") + "\n")
     _fp = tree_state_fingerprint(project_path)
     if _fp:
         lines.append(f"**Tree-state:** {_fp}\n")
@@ -2317,8 +2373,9 @@ def _cmd_single_review(cmd, cmd_args):
 
     def _tamper_mark(full):
         # The durable one-line receipt for the judge log / findings (task 059).
+        # Keyed on the GUARD's own state, like the panel round header.
         return ("degraded — " + "; ".join(c.replace("\n", " ") for c in full["cautions"])
-                if full["cautions"] else "clean")
+                if full.get("degraded") else "clean")
 
     def _bail_review_timeout(expired=None):
         # Only reachable when a finite HARD timeout is in force.

@@ -173,6 +173,36 @@ class ClosePath(unittest.TestCase):
         self.assertNotIn("TAMPER-GUARD-DEGRADED", r.stdout + r.stderr)
 
 
+class CloseGitProbeHonoursCeilings(unittest.TestCase):
+    """059 impl-panel r2 (sonnet #2): the close re-implemented the `.git`
+    ancestor walk inline, without the ceiling/mount rules W5 added to
+    `review._in_git_repo` — the same T009#2 false positive at a second call
+    site. Both paths must now use the ONE shared helper."""
+
+    def test_core_exports_the_shared_probe(self):
+        from tasks.core import in_git_repo
+        from tasks.review import _in_git_repo
+        self.assertIs(_in_git_repo, in_git_repo)
+
+    def test_shared_probe_honours_the_ceiling(self):
+        from tasks.core import in_git_repo
+        from unittest import mock
+        d = _repo()
+        app = d / "app"
+        app.mkdir()
+        with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(d)}):
+            self.assertFalse(in_git_repo(app))
+        self.assertTrue(in_git_repo(app))
+
+    def test_lifecycle_uses_it(self):
+        import inspect
+        from tasks import lifecycle
+        src = inspect.getsource(lifecycle)
+        self.assertIn("in_git_repo(", src)
+        self.assertNotIn('if (_gp / ".git").exists():', src,
+                         "the close still carries its own naive ancestor walk")
+
+
 class SingleJudgeDegradedAtClose(unittest.TestCase):
     """059 impl-panel r1 (sonnet #1/#3): the close-time TAMPER-GUARD-DEGRADED
     protection read only PANEL rounds, so a single-judge review that ran with a
@@ -188,7 +218,7 @@ class SingleJudgeDegradedAtClose(unittest.TestCase):
         from tasks.core import single_review_tamper_degraded
         return single_review_tamper_degraded
 
-    def _task(self, log_body=None, name="judge-plan-claude.log"):
+    def _task(self, log_body=None, name="judge.log"):   # the REAL claude log name
         d = _repo()
         td = d / ".agent" / "tasks" / "001-t"
         td.mkdir(parents=True)
@@ -215,11 +245,31 @@ class SingleJudgeDegradedAtClose(unittest.TestCase):
 
     def test_reader_reads_the_newest_log(self):
         import time
-        d, td, tf = self._task(self.MARK, name="judge-plan-claude.log")
+        d, td, tf = self._task(self.MARK, name="judge.log")
         time.sleep(0.02)
-        (td / "judge-impl-claude.log").write_text(
+        (td / "judge-codex.log").write_text(
             "[context] x\n[tamper guard] clean\n\nfindings\n", encoding="utf-8")
         self.assertIsNone(self._reader()(tf), "the newest review's receipt is the one that counts")
+
+    def test_reader_covers_every_real_backend_log_name(self):
+        # 059 impl-panel r2 (grok #2): the reader globbed `judge-*.log`, which
+        # MISSES the supported Claude backend's own `judge.log` — and the first
+        # version of these tests planted a name production never writes.
+        from tasks.review import _judge_log_name
+        for backend in ("claude", "codex", "antigravity", "grok", "pi"):
+            with self.subTest(backend=backend):
+                d, td, tf = self._task(self.MARK, name=_judge_log_name(backend))
+                self.assertIsNotNone(self._reader()(tf), _judge_log_name(backend))
+
+    def test_name_list_matches_reviews_own_mapping(self):
+        from tasks.core import judge_log_names
+        from tasks.review import _judge_log_name
+        for backend in ("claude", "codex", "antigravity", "grok", "pi"):
+            self.assertIn(_judge_log_name(backend), judge_log_names(), backend)
+
+    def test_partial_log_receipt_is_read_too(self):
+        d, td, tf = self._task(self.MARK, name="judge.partial.log")
+        self.assertIsNotNone(self._reader()(tf))
 
     def test_close_records_the_single_judge_degradation(self):
         d, td, tf = self._task(self.MARK)

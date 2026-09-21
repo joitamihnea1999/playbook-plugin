@@ -1389,6 +1389,56 @@ def _safe_read_regular(path: "Path", cap: int) -> "bytes | None":
         os.close(fd)
 
 
+def in_git_repo(path: Path) -> bool:
+    """Is `path` inside a git repository? — the ONE probe (task 059, impl-panel
+    r2 sonnet #2: the close carried a naive duplicate that ignored ceilings, the
+    same T009#2 false positive at a second call site). Honours git's own
+    discovery boundaries as measured on git 2.54.0: `GIT_DIR` set → yes; the
+    start directory is always examined; the walk never ENTERS a directory listed
+    in `GIT_CEILING_DIRECTORIES` (`os.pathsep`-separated, empty entries and a
+    bare `:` ignored, realpath-normalised), and it stops at a filesystem
+    boundary unless `GIT_DISCOVERY_ACROSS_FILESYSTEM` is truthy. Pure `os.stat`,
+    never a subprocess that could itself hang."""
+    if os.environ.get("GIT_DIR"):
+        return True
+    ceilings: set = set()
+    for c in (os.environ.get("GIT_CEILING_DIRECTORIES") or "").split(os.pathsep):
+        if not c or c == ":":
+            continue
+        try:
+            ceilings.add(os.path.realpath(c))
+        except (OSError, ValueError):
+            continue
+    cross_fs = (os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+    p = Path(path)
+    try:
+        start_dev = os.stat(p).st_dev
+    except OSError:
+        start_dev = None
+    while True:
+        try:
+            if (p / ".git").exists():
+                return True
+        except OSError:
+            return False
+        parent = p.parent
+        if parent == p:
+            return False
+        try:
+            if os.path.realpath(parent) in ceilings:
+                return False
+        except (OSError, ValueError):
+            return False
+        if not cross_fs and start_dev is not None:
+            try:
+                if os.stat(parent).st_dev != start_dev:
+                    return False
+            except OSError:
+                return False
+        p = parent
+
+
 def _git_toplevel(repo_path: Path) -> "Path | None":
     """`git rev-parse --show-toplevel` for `repo_path`, as a Path, or None when
     git cannot answer (task 060). Read as BYTES: porcelain paths are toplevel-
@@ -2681,6 +2731,21 @@ def has_panel_impl_evidence(task_file) -> bool:
     return newest["mode"] == "impl" and newest["verdict"] == "PASS"
 
 
+# The review-log filenames a single judge can leave in a task directory, plus
+# the hard-timeout partial beside each. Task 059 (impl-panel r2, grok #2): the
+# first cut globbed `judge-*.log`, which MISSES the supported claude backend's
+# own `judge.log`, so a degraded claude review left no close-time signal — and
+# the tests planted a name production never writes.
+JUDGE_LOG_BASENAMES = ("judge.log", "judge-codex.log", "judge-agy.log",
+                       "judge-grok.log", "judge-pi.log")
+
+
+def judge_log_names() -> "set[str]":
+    """Every review-log basename, with its `.partial.log` sibling."""
+    return set(JUDGE_LOG_BASENAMES) | {
+        n.removesuffix(".log") + ".partial.log" for n in JUDGE_LOG_BASENAMES}
+
+
 _SINGLE_TAMPER_RE = re.compile(r"^\[tamper guard\]\s+(clean|degraded)(?:\s*[—-]+\s*(.*))?$",
                                re.MULTILINE)
 
@@ -2696,10 +2761,10 @@ def single_review_tamper_degraded(task_file) -> "str | None":
     — could have run with an unverified guard and leave no trace at the close.
     Advisory only: it adds a console note and a receipt clause, never a block
     (blocking on non-panel evidence would be new close policy). Never raises."""
+    p = Path(task_file)
     try:
-        p = Path(task_file)
-        logs = sorted((q for q in p.parent.glob("judge-*.log")
-                       if not q.name.endswith(".partial.log")),
+        names = judge_log_names()
+        logs = sorted((q for q in p.parent.iterdir() if q.name in names),
                       key=lambda q: q.stat().st_mtime, reverse=True)
     except OSError:
         return None

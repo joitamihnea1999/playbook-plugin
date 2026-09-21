@@ -4086,6 +4086,72 @@
           "limitations": [
             "A degraded SINGLE-judge review is advisory at the close (console note + receipt clause), never a block: blocking on non-panel evidence would be new close policy."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "Round2Fixes.test_uncontained_host_treats_a_moved_head_as_a_mutation",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "Round2Fixes.test_contained_host_keeps_the_commit_caution"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "Round2Fixes.test_a_removal_the_commit_does_not_explain_stays_a_mutation",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "ConcurrentCommitDuringReview.test_commit_of_dirty_files_is_a_caution_not_a_mutation"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "Round2Fixes.test_record_exemption_uses_exact_known_names",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "TaskDirExemption.test_tracked_taskmd_record_files_are_exempt"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "Round2Fixes.test_a_real_guard_failure_does_mark_the_round_degraded",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "Round2Fixes.test_head_movement_alone_does_not_mark_the_round_degraded"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_close_gate.py",
+          "reference": "SingleJudgeDegradedAtClose.test_reader_covers_every_real_backend_log_name",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_close_gate.py",
+            "reference": "SingleJudgeDegradedAtClose.test_reader_is_silent_without_a_log"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_close_gate.py",
+          "reference": "CloseGitProbeHonoursCeilings.test_shared_probe_honours_the_ceiling",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_close_gate.py",
+            "reference": "CloseGitProbeHonoursCeilings.test_core_exports_the_shared_probe"
+          },
+          "limitations": []
         }
       ],
       "applicable_platforms": [
@@ -4110,7 +4176,7 @@
         "The tamper guard EXEMPTS the active task's OWN record directory when it is UNTRACKED at snapshot time (a `?? …taskdir/` line in the `before` porcelain) — its record-file churn (the record files, plus the panel's own later judge.md / review-artifact writes) is sanctioned-writer noise, the same class as the existing `.agent/*/monitor/` exclusion — so the porcelain-line and dirty-hash compares skip it. task.md CONTENT stays guarded by task_hash regardless, and judges are write-denied under the OS sandbox where available. BEST-EFFORT BOUND (impl-panel task 045, codex-sol): the gate keys off ANY `?? <taskdir>/` porcelain line, so a TRACKED task dir that merely has a coexisting untracked child also trips the exemption, broadening it to a tracked sibling record (e.g. task-archive.md) for that window; narrowing the gate to the dir/task.md's actual tracked-ness (+ a mixed tracked-dir/untracked-child regression test) is PARKED (task 041, cca748f; red-first test_untracked_task_dir_record_churn_is_not_tamper, negative control test_tracked_task_dir_edit_still_flags). This scopes the statement's “newly written non-ignored files … are caught” for that sanctioned-writer case.",
         "v1.5.45 (task 059): a DEGRADED guard is advisory on the review paths — the verdict is kept and the degradation recorded — so the guarantee for those paths is 'a mutation the guard could see is loudly refused', not 'every review ran with a fully working guard'. The unverified case is carried forward to the close (TAMPER-GUARD-DEGRADED) and to tail certification (refuses), where it fails closed.",
         "v1.5.45: the moved-HEAD signal is a CAUTION by design (a read-only judge cannot commit, so a HEAD move during a review is a concurrent actor). It therefore does not stop a review, and the certified-tree question remains the freshness fingerprint's (PB-PANEL-FRESHNESS).",
-        "v1.5.45 (task 059, impl-panel round 1): a concurrent COMMIT during a review removes the porcelain lines it committed. A read-only judge cannot commit, so on a moved HEAD those REMOVALS are cautions rather than mutations — which means a judge deleting an untracked file while a commit lands in the same window is reported as a caution. New files and content changes hard-stop either way."
+        "v1.5.45 (task 059, impl-panel rounds 1-2): a concurrent COMMIT during a CONTAINED review removes the porcelain lines it committed; those removals are demoted to cautions only for the paths that commit actually touched (`git diff before..after`), and only while an OS sandbox is denying judge writes — with no containment a moved HEAD is itself a mutation. A judge deleting an untracked file that the same commit also removed is therefore reported as a caution; everything else still hard-stops."
       ],
       "follow_up_phases": [
         2,

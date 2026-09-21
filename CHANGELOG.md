@@ -64,8 +64,24 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     and receipt clause (it previously left no trace, and `reversible` work has no panel).
     One finding was rejected with evidence: `GIT_CEILING_DIRECTORIES` is exclusive in git
     2.54.0 (measured — a `.git` at the ceiling is NOT found from a child), so the walk is right.
-  Ledger `PB-JUDGE-TAMPER` restated with the new statement, owners, fifteen proof/negative-control
-  pairs and three honest bounds. `scripts/verify` unittest count 2389 → 2478.
+  - *Round 2 found seven more, including two that made earlier work partly fictional:* the
+    close-time reader globbed `judge-*.log`, which **misses the supported Claude backend's own
+    `judge.log`** — and the round-1 tests had planted a filename production never writes, so
+    they were green on a fiction; both now key on one shared list pinned against `review.py`'s
+    own mapping. The record-file exemption matched a `judge-*.log` **glob**, so a judge could
+    plant a novel sibling and have it ignored; it now matches only the exact names the
+    orchestrator writes. A concurrent commit marked the round `degraded`, which made **tail
+    certification unreachable** for the background-panel workflow — `degraded` now means the
+    guard itself could not run, while a moved HEAD stays an informational caution. The
+    commit-removal demotion was unconditional (a rogue could move HEAD to launder its own
+    deletions) and is now limited to the paths that commit touched **and** to hosts where an OS
+    sandbox is actually denying writes — with no containment a moved HEAD is itself a mutation.
+    A readable-`git status` timeout while the `-z` call succeeded raised `TypeError` inside the
+    guard, which surfaced as a bogus "review UNVERIFIED" mutation. And the close still carried
+    its own naive `.git` ancestor walk, re-opening the ceiling false positive at a second call
+    site — both paths now call one `core.in_git_repo`.
+  Ledger `PB-JUDGE-TAMPER` restated with the new statement, owners, twenty-one proof/negative-control
+  pairs and three honest bounds. `scripts/verify` unittest count 2389 → 2491.
 
 ## [1.5.44] — 2026-09-21
 

@@ -371,15 +371,12 @@ def cmd_work(cmd_args):
                 # carrying high-consequence close (freshness_gate_decision).
                 # Ancestor walk like review.py's `_in_git_repo` (a Playbook
                 # root may sit inside a parent worktree); pure stats.
-                _git_here = False
-                _gp = Path(project_path)
-                while True:
-                    if (_gp / ".git").exists():
-                        _git_here = True
-                        break
-                    if _gp.parent == _gp:
-                        break
-                    _gp = _gp.parent
+                # ONE shared probe (task 059, impl-panel r2 sonnet #2 — this used
+                # to be an inline ancestor walk that ignored GIT_CEILING_DIRECTORIES
+                # and mount boundaries, the same T009#2 false positive the review
+                # path had). `in_git_repo` honours git's measured discovery rules.
+                from tasks.core import in_git_repo
+                _git_here = in_git_repo(Path(project_path))
                 if not _git_here:
                     # impl-panel r1 (codex-medium): a worktree driven by
                     # GIT_DIR / GIT_WORK_TREE has no `.git` inside the project
