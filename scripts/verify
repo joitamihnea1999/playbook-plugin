@@ -135,6 +135,7 @@ def ut_fails(text: str, per_cap: int = 15, overall_cap: int = 80) -> list[str]:
 
     raw = text.splitlines()
     out: list[str] = []
+    block_total = 0                                    # exempt block lines kept so far (ceiling: BLOCK_TOTAL)
     i, n = 0, len(raw)
     while i < n:
         if not raw[i].startswith(("FAIL:", "ERROR:")):
@@ -163,7 +164,15 @@ def ut_fails(text: str, per_cap: int = 15, overall_cap: int = 80) -> list[str]:
         budgeted_seen = 0
         for ln in block:
             if ln.startswith(BLOCK_PREFIX):
-                kept.append(ln)
+                # Exempt from the per-failure budget, but never unbounded: the
+                # prefix is text a fixture printed, so a runaway 10,000-line
+                # assertion must still stop at the global ceiling (076 round 3).
+                if block_total < BLOCK_TOTAL:
+                    kept.append(ln)
+                    block_total += 1
+                elif block_total == BLOCK_TOTAL:
+                    kept.append(f"{BLOCK_PREFIX}... (diagnostic block ceiling of {BLOCK_TOTAL} lines reached; more omitted)")
+                    block_total += 1
                 continue
             budgeted_seen += 1
             if budgeted_seen <= per_cap:
@@ -208,38 +217,50 @@ def sh_fails(text: str) -> list[str]:
     left nothing to root-cause from because this kept only the FAIL line.
 
     Budgets are SEPARATE so neither starves the other (076 impl panel): every
-    FAIL line up to FAIL_CAP is kept regardless of how chatty a block was; each
-    block is cut at BLOCK_CAP lines and all blocks together at BLOCK_TOTAL, each
-    cut announced with a `... and N more` line. A FAIL line is one that STARTS
+    FAIL line up to FAIL_CAP is kept regardless of how chatty a block was; the
+    block budget BLOCK_TOTAL is shared EVENLY across blocks (each at most
+    BLOCK_CAP), each cut announced with a `... and N more` line. A FAIL line is one that STARTS
     with `FAIL` after stripping — a line merely containing the word is data.
     A FAIL with no block is reported exactly as before."""
-    out: list[str] = []
+    # Pass 1: collect FAIL lines and raw blocks in order.
+    items: list[tuple[str, object]] = []          # ("fail", line) | ("block", [lines])
     fails = 0
-    block_lines = 0
     lines = text.splitlines()
     i = 0
     while i < len(lines):
         ln = lines[i].strip()
         if ln.startswith("FAIL"):
             fails += 1
-            if fails <= FAIL_CAP:
-                out.append(ln)
-            elif fails == FAIL_CAP + 1:
-                out.append("... (further FAIL lines omitted — see the full transcript)")
+            items.append(("fail", ln))
         elif ln == BLOCK_START and fails:
             j = i + 1
             block: list[str] = []
             while j < len(lines) and lines[j].strip() != BLOCK_END:
                 block.append(BLOCK_PREFIX + lines[j].rstrip())
                 j += 1
-            total = len(block)
-            room = min(BLOCK_CAP, max(0, BLOCK_TOTAL - block_lines))
-            if total > room:
-                block = block[:room] + [f"{BLOCK_PREFIX}... and {total - room} more output line(s)"]
-            block_lines += len(block)
-            out.extend(block)
+            items.append(("block", block))
             i = j
         i += 1
+    # Pass 2: the block budget is shared EVENLY, not spent in encounter order
+    # (076 round 3): ten chatty earlier blocks can no longer reduce the one
+    # that matters to an omission marker — every block keeps at least its
+    # share of BLOCK_TOTAL (and never more than BLOCK_CAP).
+    nblocks = sum(1 for kind, _ in items if kind == "block")
+    share = min(BLOCK_CAP, max(1, BLOCK_TOTAL // nblocks)) if nblocks else BLOCK_CAP
+    out: list[str] = []
+    seen_fails = 0
+    for kind, payload in items:
+        if kind == "fail":
+            seen_fails += 1
+            if seen_fails <= FAIL_CAP:
+                out.append(payload)                  # type: ignore[arg-type]
+            elif seen_fails == FAIL_CAP + 1:
+                out.append("... (further FAIL lines omitted — see the full transcript)")
+        else:
+            block = list(payload)                    # type: ignore[arg-type]
+            if len(block) > share:
+                block = block[:share] + [f"{BLOCK_PREFIX}... and {len(block) - share} more output line(s)"]
+            out.extend(block)
     if fails > FAIL_CAP:
         out.append(f"... and {fails - FAIL_CAP} more FAIL line(s)")
     return out

@@ -255,7 +255,12 @@ $(awk -v n="$WRAPPER_FIXTURE_FORCE_S7_OUT_LINES" 'BEGIN{for(i=1;i<=n;i++) printf
     # `.agent` exists there (the walk `find_project_root` performs; a stray
     # `.agent/<lane>/tasks` without a marker is one way to get rc=1 with no
     # exec). Zero output on the green path.
-    if [ "$RC" != "0" ] || ! printf '%s' "$out" | grep -qF "launched root="; then
+    # No pipe in the gate: `printf | grep -q` under pipefail can SIGPIPE on a
+    # large $out and fire this block on a PASSING run (076 round 3). Inside,
+    # errexit/pipefail are suspended: a diagnostics path must not crash on the
+    # failure it exists to capture; they are restored right after the block.
+    if [ "$RC" != "0" ] || [[ "$out" != *"launched root="* ]]; then
+        set +e; set +o pipefail
         # Same markers assert_contains uses, so both reporters keep this block.
         # Decisive fields FIRST (the reporters bound a block at 40 lines): the
         # wrapper's rc + output, find_project_root's answer, each ancestor's
@@ -289,6 +294,7 @@ $(awk -v n="$WRAPPER_FIXTURE_FORCE_S7_OUT_LINES" 'BEGIN{for(i=1;i<=n;i++) printf
         echo "bash    -> $(command -v bash 2>&1 || echo '(none)') : $BASH_VERSION"
         echo "shim listing: $(ls -l "$SHIM_BIN" 2>&1 | awk 'NR>1{print $1, $5, $NF}' | tr '\n' ';')"
         echo "----- output end -----"
+        set -e; set -o pipefail
     fi
 }
 

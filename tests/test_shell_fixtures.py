@@ -132,6 +132,11 @@ class ShellFixtures(unittest.TestCase):
                 if r.returncode != 0:
                     lines = (r.stdout + r.stderr).splitlines()
                     self.fail(f"{name} failed (rc={r.returncode}):\n{_failure_detail(lines)}")
+                # Task 076 (round 3, opus): the S7 diagnostics block is
+                # failure-only — a green run must be byte-free of it, or the
+                # "green transcript unchanged" claim has silently broken.
+                self.assertNotIn("S7 diagnostics (task 076)", r.stdout + r.stderr,
+                                 f"{name}: S7 diagnostics printed on a PASSING run")
 
 
 if __name__ == "__main__":

@@ -252,56 +252,100 @@ class ShFailsPosition(unittest.TestCase):
         self.assertIn("S7 diagnostics (task 076)", got)
         self.assertIn("ancestor /tmp: no .agent", got)
 
+    def test_ten_earlier_full_blocks_still_leave_s7_its_head(self):
+        # 076 round 3 (codex ×2): spending BLOCK_TOTAL in encounter order let ten
+        # earlier blocks reduce S7 to an omission marker. Budget is now shared
+        # evenly across blocks, so the decisive first lines of S7 survive.
+        many = "".join(
+            f"  FAIL  S{i} earlier\n----- output start -----\n" + "\n".join(f"early {i} line {k}" for k in range(50))
+            + "\n----- output end -----\n" for i in range(1, 11)) + SH_EARLIER_BLOCKS.split("  FAIL  S7", 1)[1].join(["  FAIL  S7", ""])
+        got = _load_verify().sh_fails(many)
+        joined = "\n".join(got)
+        self.assertIn("S7 diagnostics (task 076)", joined)
+        self.assertIn("find_project_root from run dir: []", joined)
+        self.assertLessEqual(sum(1 for ln in got if ln.startswith("    | ")), 400 + 11)   # total block budget + one marker per block
+
+
+class UtFailsCeiling(unittest.TestCase):
+    def test_block_lines_have_a_global_ceiling(self):
+        # 076 round 3 (sonnet, codex-medium): every `    | ` line was exempt from
+        # BOTH caps with no total — a 10,000-line assertion came back whole.
+        verify = _load_verify()
+        huge = (
+            "======================================================================\n"
+            "FAIL: test_shell_fixtures_pass (test_shell_fixtures.ShellFixtures)\n"
+            "----------------------------------------------------------------------\n"
+            "AssertionError: x failed (rc=1):\n  FAIL  S1 a\n"
+            + "\n".join(f"    | line {i}" for i in range(10000)) + "\n"
+            "\n----------------------------------------------------------------------\nRan 1 test\n\nFAILED (failures=1)\n")
+        got = verify.ut_fails(huge)
+        self.assertLess(len(got), verify.BLOCK_TOTAL + 40)
+        self.assertTrue(any("more" in ln for ln in got), got[-3:])
+
 
 class ForcedS7EndToEnd(unittest.TestCase):
-    """Run the REAL fixture with its test-only knob that forces S7's exit
-    assertion to fail while the shim still prints `launched root=` (the
-    concrete mode codex-medium #1 named: rc != 0 but the content assertion
-    passes). Both reporters must then carry the diagnostics AND the wrapper's
-    output. Proves the fixture actually produces the block (grok #4)."""
+    """Run the REAL fixture ONCE (setUpClass) with its two test-only knobs:
+    S7's exit assertion forced red while the shim still prints `launched
+    root=` (the mode codex-medium named in round 1: rc != 0 but the content
+    assertion passes), and 3000 lines of wrapper output (past the pipe buffer,
+    exercising the bounded-output path under `set -o pipefail`). Both
+    reporters must carry the diagnostics AND the wrapper's output, and the
+    PRODUCTION 074 composition — real `_failure_detail` → a real unittest
+    `self.fail` rendered by a real `TextTestRunner` → `ut_fails` — must keep
+    the block. Round 3 (grok): kept in-process (no nested `unittest` of the
+    whole fixture suite) so the Windows lane's 900 s unittest budget is not
+    spent twice."""
 
-    def test_diagnostics_reach_both_reporters(self):
-        import os, shutil, subprocess, tempfile
+    transcript = ""
+    rc = 0
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil, subprocess, tempfile
         if shutil.which("bash") is None or shutil.which("git") is None:
-            self.skipTest("bash/git missing")
+            raise unittest.SkipTest("bash/git missing")
         env = test_shell_fixtures._clean_env()
         env["WRAPPER_FIXTURE_FORCE_S7_RC"] = "1"
+        env["WRAPPER_FIXTURE_FORCE_S7_OUT_LINES"] = "3000"
         with tempfile.TemporaryDirectory() as td:
             r = subprocess.run([test_shell_fixtures.bash_or_skip(), str(ROOT / "tests" / "wrapper-multiuser-fixture.sh")],
                                cwd=td, env=env, capture_output=True, text=True, timeout=600)
-        self.assertNotEqual(r.returncode, 0)
-        transcript = r.stdout + r.stderr
-        for reporter in (lambda t: "\n".join(_load_verify().sh_fails(t)),
-                         lambda t: test_shell_fixtures._failure_detail(t.splitlines()).split("--- last 25 lines ---")[0]):
-            got = reporter(transcript)
-            self.assertIn("S7 exits 0 outside a playbook project", got)
-            self.assertIn("S7 diagnostics (task 076)", got)
-            self.assertIn("find_project_root from run dir: []", got)
-            self.assertIn("ancestor", got)
-            self.assertIn("launched root=", got)          # the wrapper's own output is inside the block
+        cls.transcript = r.stdout + r.stderr
+        cls.rc = r.returncode
 
-    def test_the_074_composition_end_to_end(self):
-        """PRODUCTION shape of the 074 failure: fixture → test_shell_fixtures
-        (real `_failure_detail`, real `self.fail` envelope, run by unittest as a
-        subprocess) → scripts/verify's `ut_fails`. Nothing hand-written in
-        between (076 round 2, opus/grok)."""
-        import shutil, subprocess
-        if shutil.which("bash") is None or shutil.which("git") is None:
-            self.skipTest("bash/git missing")
-        env = test_shell_fixtures._clean_env()
-        env["WRAPPER_FIXTURE_FORCE_S7_RC"] = "1"
-        env["WRAPPER_FIXTURE_FORCE_S7_OUT_LINES"] = "3000"     # verbose wrapper: > pipe buffer, exercises the head/pipefail path
-        r = subprocess.run([sys.executable, "-m", "unittest", "tests.test_shell_fixtures"],
-                           cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=900)
-        self.assertNotEqual(r.returncode, 0)
-        got = "\n".join(_load_verify().ut_fails(r.stdout + r.stderr))
+    def _assert_fields(self, got: str):
         self.assertIn("S7 exits 0 outside a playbook project", got)
         self.assertIn("S7 diagnostics (task 076)", got)
         self.assertIn("find_project_root from run dir: []", got)
         self.assertIn("ancestor", got)
-        self.assertIn("launched root=", got)
-        self.assertIn("wrapper output truncated", got)       # the verbose output was bounded, not fatal
-        self.assertIn("shim listing", got)                    # the block ran to its end under pipefail
+        self.assertIn("launched root=", got)                 # the wrapper's own output is inside the block
+        self.assertIn("wrapper output truncated", got)       # verbose output was bounded, not fatal
+        self.assertIn("shim listing", got)                   # the block ran to its last field under pipefail
+        self.assertIn("----- output end -----", self.transcript)   # and closed its marker
+
+    def test_fixture_failed_and_closed_its_block(self):
+        self.assertNotEqual(self.rc, 0)
+        self.assertEqual(self.transcript.count("----- output start -----"), self.transcript.count("----- output end -----"))
+
+    def test_sh_fails_keeps_the_block(self):
+        self._assert_fields("\n".join(_load_verify().sh_fails(self.transcript)))
+
+    def test_failure_detail_keeps_the_block(self):
+        self._assert_fields(test_shell_fixtures._failure_detail(self.transcript.splitlines()).split("--- last 25 lines ---")[0])
+
+    def test_the_074_composition_end_to_end(self):
+        import io
+        detail = test_shell_fixtures._failure_detail(self.transcript.splitlines())
+        rc = self.rc
+
+        class Shape(unittest.TestCase):                      # the exact self.fail() test_shell_fixtures performs
+            def test_shell_fixtures_pass(self):
+                self.fail(f"wrapper-multiuser-fixture.sh failed (rc={rc}):\n{detail}")
+
+        stream = io.StringIO()
+        unittest.TextTestRunner(stream=stream, verbosity=0).run(unittest.defaultTestLoader.loadTestsFromTestCase(Shape))
+        got = "\n".join(_load_verify().ut_fails(stream.getvalue()))
+        self._assert_fields(got)
 
 
 if __name__ == "__main__":
