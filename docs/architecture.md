@@ -101,10 +101,14 @@ ingestion and exits non-zero. A **caution** is the guard telling you it could no
 fully run, or naming something a judge could not have done: `git status`/`-z`/
 `rev-parse` failed (on one side or both — the `.git`-removed banner needs the
 repo to have actually disappeared, probed independently of `git status`), or
-HEAD moved during the review. A read-only judge cannot commit, so a moved HEAD
-is a concurrent actor — and the porcelain lines that commit *removed* are
-cautions too, while anything it could not explain (a new file, a changed
-content hash) still hard-stops. A
+HEAD moved during the review. Where an OS sandbox is actually denying judge
+writes, a moved HEAD is a concurrent actor: it is a caution, and so are the
+porcelain lines that commit removed — but only for the paths the commit itself
+touched, and anything it cannot explain (a new file, a changed content hash)
+still hard-stops. Where there is **no containment** (Windows, or an already
+nested sandbox) a judge that can write can also commit, so a moved HEAD is a
+MUTATION there. A caution about a concurrent commit does not mark the round
+degraded: the guard worked, the tree moved, and freshness already covers that. A
 caution no longer discards the paid review — the verdict is kept, the notice is
 printed, and the round records `**Tamper guard:** degraded — <what>` (or
 `clean`). That receipt is load-bearing: a close held to the high-consequence bar

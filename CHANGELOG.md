@@ -51,9 +51,10 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     review in the system temp dir.
   - *Round 1 of the implementation panel found five more of the same class, each fixed
     red-first:* a concurrent legitimate **commit** during a (background) panel removes the
-    porcelain lines it committed, which still read as a mutation — on a moved HEAD those
-    removals are now cautions (a read-only judge cannot commit), while new files and content
-    changes still hard-stop; a **one-sided `git status` failure** was both the caution and the
+    porcelain lines it committed, which still read as a mutation — where an OS sandbox denies
+    judge writes those removals are now cautions, limited to the paths that commit touched,
+    while new files and content changes still hard-stop (with no containment a moved HEAD is
+    itself a mutation); a **one-sided `git status` failure** was both the caution and the
     `.git removed` banner, so the `.git`-disappeared mutation now needs the independent `.git`
     probe to flip; an already-untracked `judge.md` that a **second panel round** rewrites was
     exempt from the line diff but not the content compare, so every round-2 close would have
@@ -80,8 +81,16 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     guard, which surfaced as a bogus "review UNVERIFIED" mutation. And the close still carried
     its own naive `.git` ancestor walk, re-opening the ceiling false positive at a second call
     site — both paths now call one `core.in_git_repo`.
+  - *Round 3 found three more:* the review-START `git status`-failure branch omitted the
+    `degraded` flag its close-side twin sets (a latent asymmetry — measured, it is masked today
+    by the one-sided-transition caution, and fixed anyway); the single-review stamp could read
+    `clean` on a review that had raised cautions, so the console and the durable record
+    contradicted each other; and a receipt for a close gated by EXCLUDE-COVERS-CODE / NO-STAMP /
+    UNREADABLE silently dropped the degraded-guard condition the operator had actually accepted.
+    Round 3 also predicted, correctly, that two round-1 regressions would invert on the Windows
+    lane (which has no containment) — they now pin containment explicitly.
   Ledger `PB-JUDGE-TAMPER` restated with the new statement, owners, twenty-one proof/negative-control
-  pairs and three honest bounds. `scripts/verify` unittest count 2389 → 2491.
+  pairs and four honest bounds. `scripts/verify` unittest count 2389 → 2498 (measured).
 
 ## [1.5.44] — 2026-09-21
 

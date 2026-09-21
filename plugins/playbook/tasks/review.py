@@ -900,6 +900,7 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
         cautions.append(f"{label}content-hash guard degraded: `git status` did not run at "
                         "review start on a git repo (hostile/huge tree, corrupt "
                         "index, or repo broken?)")
+        degraded = True     # symmetric with the close-side twin above (059 r3)
     # HEAD (P1/P8): a moved HEAD is a concurrent COMMIT — a read-only judge cannot
     # commit — so it is a caution about what the verdict describes, never
     # 'a judge modified the repo'; a read ERROR on either side is a caution too
@@ -1201,6 +1202,22 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     the existing tests; the panel/single paths use `_detect_tamper_full`."""
     full = _detect_tamper_full(project_path, task_file, before)
     return list(full["mutations"]) + list(full["cautions"])
+
+
+def _tamper_mark_text(full: dict) -> str:
+    """The durable one-line tamper receipt for a judge log / findings block.
+
+    `degraded` means the GUARD could not run; a caution can also be something it
+    saw and attributed elsewhere (a concurrent commit). The stamp is emitted
+    precisely BECAUSE there were cautions, so it must never read `clean` while
+    any exist — the console and the durable record would contradict each other
+    (059 impl-panel r3, opus #2)."""
+    cautions = full.get("cautions") or []
+    if full.get("degraded"):
+        return "degraded — " + "; ".join(c.replace("\n", " ") for c in cautions)
+    if cautions:
+        return "clean, with notes — " + "; ".join(c.replace("\n", " ") for c in cautions)
+    return "clean"
 
 
 def _degraded_notice(cautions: list[str]) -> str:
@@ -1704,9 +1721,7 @@ def cmd_panel_review(cmd_args):
     # concurrent commit is a caution but leaves the guard fully working, and
     # marking such a round degraded made tail certification unreachable after
     # any background commit (059 impl-panel r2, opus F2).
-    lines.append("**Tamper guard:** " + (
-        "degraded — " + "; ".join(c.replace("\n", " ") for c in _tamper_cautions)
-        if _tamper_full.get("degraded") else "clean") + "\n")
+    lines.append("**Tamper guard:** " + _tamper_mark_text(_tamper_full) + "\n")
     _fp = tree_state_fingerprint(project_path)
     if _fp:
         lines.append(f"**Tree-state:** {_fp}\n")
@@ -2372,10 +2387,7 @@ def _cmd_single_review(cmd, cmd_args):
         return _detect_tamper_full(project_path, task_file, _tamper_before)
 
     def _tamper_mark(full):
-        # The durable one-line receipt for the judge log / findings (task 059).
-        # Keyed on the GUARD's own state, like the panel round header.
-        return ("degraded — " + "; ".join(c.replace("\n", " ") for c in full["cautions"])
-                if full.get("degraded") else "clean")
+        return _tamper_mark_text(full)
 
     def _bail_review_timeout(expired=None):
         # Only reachable when a finite HARD timeout is in force.

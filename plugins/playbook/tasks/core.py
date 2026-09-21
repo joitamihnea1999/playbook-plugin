@@ -3131,6 +3131,14 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
                 if ar:
                     line += f', accepted: "{" ".join(ar.split())}"'
             out.append(line)
+        # Task 059 (impl-panel r3, sonnet #2): the tamper degradation can coexist
+        # with another verdict (EXCLUDE-COVERS-CODE / NO-STAMP / UNREADABLE) and
+        # is what the gate actually blocked on first — name it either way, so the
+        # record never drops the condition the operator accepted.
+        _td = freshness.get("tamper_degraded_detail")
+        if _td and v != "TAMPER-GUARD-DEGRADED":
+            out.append("- **Panel tamper guard:** the carrying impl round's tamper guard was "
+                       f"DEGRADED ({' '.join(str(_td).split())})")
     if not entries:
         out.append("- **Verification:** NONE DECLARED — nothing was verified at close. "
                    "Declare `verify` in `.agent/config.json` to make close self-verifying.")

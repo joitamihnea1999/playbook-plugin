@@ -459,6 +459,12 @@ def cmd_work(cmd_args):
                 # receipt line and is treated as clean (additive).
                 _tamper_degraded = bool(
                     _impl is not None and _impl.get("tamper_guard") == "degraded")
+                if _tamper_degraded and _impl is not None and _freshness is not None:
+                    # Carried alongside whatever verdict already applies, so a
+                    # receipt for an EXCLUDE-COVERS-CODE / NO-STAMP / UNREADABLE
+                    # close still names the degraded guard (059 r3, sonnet #2).
+                    _freshness.setdefault("tamper_degraded_detail",
+                                          _impl.get("tamper_detail") or "guard could not fully run")
                 if (_tamper_degraded and _impl is not None
                         and (_freshness is None
                              or _freshness.get("verdict") in ("FRESH", "STALE"))):

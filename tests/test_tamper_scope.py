@@ -189,7 +189,8 @@ class CodeRoots(unittest.TestCase):
         self.assertEqual(before["head"]["state"], "ok")
         (proj / "note.md").write_text("n\n", encoding="utf-8")
         _commit_all(proj, "concurrent")
-        full = R._detect_tamper_full(proj, tf, before)
+        with mock.patch("provider.sandbox.containment_available", return_value=True):
+            full = R._detect_tamper_full(proj, tf, before)
         self.assertTrue(any("head moved" in c.lower() for c in full["cautions"]), full)
         # the new commit also cleaned the tree of an untracked file → porcelain differs; that part IS a mutation-class line
         self.assertFalse(any("head" in m.lower() for m in full["mutations"]), full)
@@ -651,7 +652,11 @@ class ConcurrentCommitDuringReview(unittest.TestCase):
         (d / "a.py").write_text("a = 2\n", encoding="utf-8")       # dirty BEFORE the panel
         before = R._snapshot_repo_state(d, tf)
         _commit_all(d, "the agent commits its own work mid-panel")
-        full = R._detect_tamper_full(d, tf, before)
+        # Containment pinned (059 impl-panel r3, grok #2): the demotion applies
+        # only where an OS sandbox denies judge writes, so without this mock the
+        # case inverts on the Windows lane — which HAS no containment.
+        with mock.patch("provider.sandbox.containment_available", return_value=True):
+            full = R._detect_tamper_full(d, tf, before)
         self.assertEqual(full["mutations"], [], full)
         self.assertTrue(any("head moved" in c.lower() for c in full["cautions"]), full)
         self.assertTrue(any("no longer listed" in c.lower() or "removed" in c.lower()
@@ -663,7 +668,8 @@ class ConcurrentCommitDuringReview(unittest.TestCase):
         before = R._snapshot_repo_state(d, tf)
         _commit_all(d, "concurrent commit")
         (d / "rogue.md").write_text("fabricated\n", encoding="utf-8")   # the judge's own write
-        full = R._detect_tamper_full(d, tf, before)
+        with mock.patch("provider.sandbox.containment_available", return_value=True):
+            full = R._detect_tamper_full(d, tf, before)
         self.assertTrue(any("rogue.md" in m for m in full["mutations"]), full)
 
     def test_content_change_during_that_window_still_flags(self):
@@ -674,7 +680,8 @@ class ConcurrentCommitDuringReview(unittest.TestCase):
         subprocess.run(["git", "add", "a.py"], cwd=str(d), check=True, capture_output=True)
         subprocess.run(["git", "commit", "-qm", "commit only a.py"], cwd=str(d), check=True, capture_output=True)
         (d / "b.py").write_text("b = 3\n", encoding="utf-8")            # judge edits the still-dirty file
-        full = R._detect_tamper_full(d, tf, before)
+        with mock.patch("provider.sandbox.containment_available", return_value=True):
+            full = R._detect_tamper_full(d, tf, before)
         self.assertTrue(any("b.py" in m for m in full["mutations"]), full)
 
     def test_removal_without_a_commit_is_still_a_mutation(self):
@@ -813,6 +820,83 @@ class NestedRootExemptions(unittest.TestCase):
         (nested / "x.py").write_text("x = 99\n", encoding="utf-8")
         full = R._detect_tamper_full(proj, tf, before)
         self.assertTrue(any("x.py" in m for m in full["mutations"]), full)
+
+
+class Round3Fixes(unittest.TestCase):
+    """059 impl-panel round 3 — opus and sonnet independently found the same
+    Critical: the review-START `git status` failure branch omitted
+    `degraded = True` (its close-side twin has it), so a round whose BEFORE
+    snapshot could not read the tree recorded `**Tamper guard:** clean` and the
+    whole close-gate protection never fired."""
+
+    def _repo_with_task(self):
+        d = _repo()
+        tf = d / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        _commit_all(d)
+        return d, tf
+
+    def test_status_failure_at_review_START_marks_the_round_degraded(self):
+        # ISOLATED on purpose. Both judges called this Critical by static
+        # reading; measured, the branch is masked today — a one-sided porcelain
+        # None also trips the transition caution, which does set the flag. The
+        # only input that reaches the start branch ALONE is: both porcelain
+        # None, `is_git` true at start and false at close. So the defect is a
+        # latent asymmetry, not a live bypass — and it is fixed anyway, because
+        # the pair must not drift.
+        before = {"porcelain": None, "task_hash": None, "dirty_hashes": {},
+                  "z_read_ok": True, "is_git": True, "hash_scope_ok": True}
+        after = {"porcelain": None, "task_hash": None, "dirty_hashes": {},
+                 "z_read_ok": True, "is_git": False, "hash_scope_ok": True}
+        muts, cautions, degraded = R._scope_changes(before, after)
+        self.assertEqual(muts, [])
+        self.assertTrue(any("review start" in c for c in cautions), cautions)
+        self.assertTrue(degraded,
+                        "a review-start git-status failure must mark the GUARD degraded")
+
+    def test_one_sided_status_failure_is_degraded_via_the_transition_caution(self):
+        # The masking path, pinned so the isolation above stays meaningful.
+        d, tf = self._repo_with_task()
+        before = {"porcelain": None, "task_hash": None, "dirty_hashes": {},
+                  "z_read_ok": True, "is_git": True, "hash_scope_ok": True}
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(full["degraded"], full)
+        self.assertEqual(full["mutations"], [], full)
+
+    def test_status_failure_at_CLOSE_marks_the_round_degraded(self):
+        # The symmetric twin, so the pair can never drift apart again.
+        d, tf = self._repo_with_task()
+        before = R._snapshot_repo_state(d, tf)
+        real_run = subprocess.run
+
+        def _close_status_fails(cmd, *a, **k):
+            if "status" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, b"" if "-z" in cmd else "", b"fatal")
+            return real_run(cmd, *a, **k)
+        with mock.patch("subprocess.run", side_effect=_close_status_fails):
+            full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(full["degraded"], full)
+
+    def test_every_degradation_caution_sets_the_flag(self):
+        # Structural: no caution whose text says the guard was degraded may leave
+        # `degraded` False (the drift this round caught).
+        import inspect
+        src = inspect.getsource(R._scope_changes)
+        blocks = [b for b in src.split("cautions.append(") if "guard degraded" in b[:200]]
+        self.assertTrue(blocks)
+        for b in blocks:
+            self.assertIn("degraded = True", b[:900], b[:300])
+
+    def test_single_review_mark_never_claims_clean_while_cautions_exist(self):
+        # opus #2: the findings/log stamp is emitted BECAUSE cautions exist, so it
+        # must never read "clean" — the two durable records would contradict.
+        from tasks.review import _tamper_mark_text
+        self.assertEqual(_tamper_mark_text({"cautions": [], "degraded": False}), "clean")
+        txt = _tamper_mark_text({"cautions": ["head moved during review (a→b)"], "degraded": False})
+        self.assertNotEqual(txt, "clean")
+        self.assertIn("head moved", txt)
+        self.assertIn("degraded", _tamper_mark_text(
+            {"cautions": ["content-hash guard degraded: x"], "degraded": True}))
 
 
 class Round2Fixes(unittest.TestCase):

@@ -110,6 +110,27 @@ class GateDecision(unittest.TestCase):
         self.assertTrue(allowed)
 
 
+class ReceiptNamesEveryGatingCondition(unittest.TestCase):
+    """059 impl-panel r3 (sonnet #2): when EXCLUDE-COVERS-CODE / NO-STAMP /
+    UNREADABLE was already the verdict, the tamper degradation the operator was
+    actually blocked on (and accepted) vanished from the receipt."""
+
+    def test_degraded_guard_is_recorded_beside_another_verdict(self):
+        txt = format_verify_receipt([], "abc", "assertive", freshness={
+            "verdict": "EXCLUDE-COVERS-CODE", "paths": ["src/app.py"],
+            "round_fp": "abc", "now_fp": "abc",
+            "tamper_degraded_detail": "content-hash guard degraded: `git status -z` failed",
+            "accepted_reason": "inspected by hand"})
+        self.assertIn("EXCLUDE-COVERS-CODE", txt)
+        self.assertIn("tamper guard was DEGRADED", txt)
+        self.assertIn("git status -z", txt)
+
+    def test_nothing_extra_when_the_guard_was_clean(self):
+        txt = format_verify_receipt([], "abc", "assertive", freshness={
+            "verdict": "STALE", "round_fp": "a", "now_fp": "b"})
+        self.assertNotIn("tamper guard was DEGRADED", txt)
+
+
 class Receipt(unittest.TestCase):
     def test_receipt_names_the_degraded_guard(self):
         txt = format_verify_receipt([], "abc", "assertive", freshness={
