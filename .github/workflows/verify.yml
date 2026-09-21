@@ -1,6 +1,6 @@
 name: verify
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]   # dispatch: task 076 flake-rate runs
 
 permissions:
   contents: read

@@ -58,6 +58,44 @@ def _clean_env() -> dict:
     return env
 
 
+_BLOCK_START = "----- output start -----"
+_BLOCK_END = "----- output end -----"
+_BLOCK_CAP = 40
+
+
+def _failure_detail(lines: list[str]) -> str:
+    """Failure detail for a fixture transcript.
+
+    Surface EVERY failing assertion, not just the tail: a fixture can print
+    250+ PASS lines and the two FAILs that matter scroll off a 25-line tail
+    (the wrapper-multiuser blind spot in CI run 32454916957). Task 076: also
+    keep the fixture's own diagnostic block that `assert_contains` prints right
+    after a FAIL (`----- output start/end -----`) — two Windows S7 failures
+    (runs 34381991629 / 35570688583, attempt 1) left zero bytes of the
+    wrapper's output because this kept only the FAIL line. Bounded per block.
+    A FAIL with no block is reported exactly as before."""
+    detail: list[str] = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if "FAIL" in ln:
+            detail.append(ln)
+        elif ln.strip() == _BLOCK_START and detail:
+            j = i + 1
+            block: list[str] = []
+            while j < len(lines) and lines[j].strip() != _BLOCK_END:
+                block.append("    | " + lines[j].rstrip())
+                j += 1
+            if len(block) > _BLOCK_CAP:
+                block = block[:_BLOCK_CAP] + [f"    | ... and {len(block) - _BLOCK_CAP} more output line(s)"]
+            detail.extend(block)
+            i = j
+        i += 1
+    text = "\n".join(detail) if detail else ""
+    text += "\n--- last 25 lines ---\n" + "\n".join(lines[-25:])
+    return text
+
+
 class ShellFixtures(unittest.TestCase):
     def test_shell_fixtures_pass(self):
         for name, needs in _FIXTURES.items():
@@ -90,14 +128,7 @@ class ShellFixtures(unittest.TestCase):
                     self.fail(f"{name}: timed out after {_PER_FIXTURE_TIMEOUT}s")
                 if r.returncode != 0:
                     lines = (r.stdout + r.stderr).splitlines()
-                    # Surface EVERY failing assertion, not just the tail: a
-                    # fixture can print 250+ PASS lines and the two FAILs that
-                    # matter scroll off a 25-line tail (the wrapper-multiuser
-                    # blind spot in CI run 32454916957).
-                    fails = [ln for ln in lines if "FAIL" in ln]
-                    detail = "\n".join(fails) if fails else ""
-                    detail += "\n--- last 25 lines ---\n" + "\n".join(lines[-25:])
-                    self.fail(f"{name} failed (rc={r.returncode}):\n{detail}")
+                    self.fail(f"{name} failed (rc={r.returncode}):\n{_failure_detail(lines)}")
 
 
 if __name__ == "__main__":

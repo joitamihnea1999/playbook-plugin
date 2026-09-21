@@ -157,9 +157,39 @@ def ut_fails(text: str, per_cap: int = 15, overall_cap: int = 80) -> list[str]:
     return cap(out, overall_cap)
 
 
+BLOCK_START = "----- output start -----"
+BLOCK_END = "----- output end -----"
+BLOCK_CAP = 40
+
+
 def sh_fails(text: str) -> list[str]:
-    """Failing assertion lines from a shell fixture (it prints `  FAIL  ...`)."""
-    return cap([ln.strip() for ln in text.splitlines() if ln.strip().startswith("FAIL")])
+    """Failing assertion lines from a shell fixture (it prints `  FAIL  ...`),
+    PLUS the fixture's own diagnostic block when it prints one right after a
+    FAIL (`assert_contains` in wrapper-multiuser-fixture.sh emits the captured
+    command output between `----- output start -----` / `----- output end -----`).
+    Task 076: two Windows S7 failures left nothing to root-cause from because
+    this kept only the FAIL line. The block is bounded (BLOCK_CAP lines per
+    block, then a count) so a chatty command cannot push later FAILs past `cap`.
+    Nothing else changes: a FAIL with no block is reported exactly as before."""
+    out: list[str] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        if ln.startswith("FAIL"):
+            out.append(ln)
+        elif ln == BLOCK_START and out:
+            j = i + 1
+            block: list[str] = []
+            while j < len(lines) and lines[j].strip() != BLOCK_END:
+                block.append("    | " + lines[j].rstrip())
+                j += 1
+            if len(block) > BLOCK_CAP:
+                block = block[:BLOCK_CAP] + [f"    | ... and {len(block) - BLOCK_CAP} more output line(s)"]
+            out.extend(block)
+            i = j
+        i += 1
+    return cap(out, n=max(20, BLOCK_CAP + 8))
 
 
 def record(name, status, detail="", started=None, lines=None):

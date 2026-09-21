@@ -237,6 +237,42 @@ echo "=== S7: non-playbook directory still launches the bare CLI ==="
     run_wrapper codex "$d"; out="$OUT"
     assert_eq "$RC" "0" "S7 exits 0 outside a playbook project"
     assert_contains "$out" "launched root=" "S7 launches with an empty project root"
+    # Task 076 (PLAN.md A1.1): S7 failed intermittently on the Windows lane at
+    # two consecutive release runs and both reporters dropped the wrapper's
+    # output, so nothing could be root-caused. On failure ONLY, print what the
+    # wrapper saw: its rc/output, the run dir, the temp roots, which binaries
+    # resolve, and — for every ancestor of the run dir up to `/` — whether an
+    # `.agent` exists there (the walk `find_project_root` performs; a stray
+    # `.agent/<lane>/tasks` without a marker is one way to get rc=1 with no
+    # exec). Zero output on the green path.
+    if [ "$RC" != "0" ] || ! printf '%s' "$out" | grep -qF "launched root="; then
+        # Same markers assert_contains uses, so both reporters keep this block.
+        echo "----- output start -----"
+        echo "S7 diagnostics (task 076)"
+        echo "rc=$RC"
+        echo "run dir: $d"
+        echo "WORK=$WORK  TMPDIR=${TMPDIR:-}  TMP=${TMP:-}  TEMP=${TEMP:-}"
+        echo "PWD inside run dir: $(cd "$d" && pwd -P)"
+        echo "codex   -> $(command -v codex 2>&1 || echo '(none)')"
+        echo "python3 -> $(command -v python3 2>&1 || echo '(none)') : $(python3 --version 2>&1 || echo '(python3 --version failed)')"
+        echo "bash    -> $(command -v bash 2>&1 || echo '(none)') : $BASH_VERSION"
+        echo "find_project_root from run dir: [$(cd "$d" && find_project_root)]"
+        anc="$(cd "$d" && pwd -P)"
+        while :; do
+            if [ -e "$anc/.agent" ]; then
+                echo "ancestor $anc: .agent EXISTS"
+                ls -la "$anc/.agent" 2>&1 | sed 's/^/    /'
+                [ -f "$anc/.agent/current_user" ] && echo "    current_user=[$(head -c 200 "$anc/.agent/current_user" 2>/dev/null)]"
+            else
+                echo "ancestor $anc: no .agent"
+            fi
+            par="$(dirname "$anc")"
+            [ "$par" = "$anc" ] && break
+            anc="$par"
+        done
+        echo "shim listing:"; ls -la "$SHIM_BIN" 2>&1 | sed 's/^/    /'
+        echo "----- output end -----"
+    fi
 }
 
 echo "=== S8: wrapper separated from gate-echo-lib.sh fails loud ==="
