@@ -3681,8 +3681,16 @@
     {
       "id": "PB-JUDGE-TAMPER",
       "category": "judges-and-reviews",
-      "statement": "Review paths compare Git porcelain state (new AND removed entries), per-dirty-file content hashes keyed off `--porcelain -z` byte paths (symlinks hashed by link text), and the task hash before/after — so newly written non-ignored files, reverted or deleted files (including task.md in the non-git fallback), a symlink retargeted to same-content, a git<->non-git transition (e.g. .git deleted), and content-only edits to an already-dirty regular file of any on-disk name are caught; detected tamper adds a loud banner, refuses ingestion, and exits nonzero.",
+      "statement": "Review paths snapshot the repo before spawning judges and compare after, splitting findings into MUTATIONS and CAUTIONS. Mutations — new/removed Git porcelain entries, a changed per-dirty-file content hash (dirty files opened at the git TOPLEVEL and keyed PROJECT-relative, so a project in a subdirectory of a larger repo is guarded; symlinks hashed by link text), a task.md rewrite/deletion/non-regular swap, a change to the task directory's git-independent identity (realpath + inode + symlink-ness), a `code_roots` root's identity change or readable->unreadable transition or an edit inside it, a git<->non-git transition (e.g. .git deleted), and an errored guard — add a loud banner, refuse ingestion and exit nonzero. Cautions — `git status`/`-z`/`rev-parse --show-toplevel` failing, an unreadable HEAD, a HEAD that MOVED during the review (a read-only judge cannot commit), an unavailable configured root, or an unknown task.md trackedness — keep the paid verdict, print a degraded notice, and record `**Tamper guard:** degraded — <what>` on the round (else `clean`); that receipt blocks a close held to the high-consequence bar (assertive/irreversible/unclassified) with TAMPER-GUARD-DEGRADED, with the stale-panel exits, and tail certification refuses outright.",
       "owner": [
+        {
+          "path": "plugins/playbook/tasks/review.py",
+          "reference": "symbol:_snapshot_repo_state"
+        },
+        {
+          "path": "plugins/playbook/tasks/review.py",
+          "reference": "symbol:_classify_tamper"
+        },
         {
           "path": "plugins/playbook/tasks/review.py",
           "reference": "symbol:cmd_panel_review"
@@ -3690,6 +3698,10 @@
         {
           "path": "plugins/playbook/tasks/review.py",
           "reference": "symbol:cmd_single_review"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:freshness_gate_decision"
         }
       ],
       "failure_consequence": "Critical",
@@ -3899,6 +3911,122 @@
             "reference": "TamperGuardTest.test_non_git_porcelain_none_is_not_flagged"
           },
           "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "SubdirProject.test_content_edit_to_already_dirty_file_is_caught_project_relative",
+          "boundary": "unit",
+          "limitations": [
+            "The readable porcelain stream is compared byte-opaquely and never rewritten, so a subdirectory project's exemption matching is prefix-aware rather than path-normalised."
+          ],
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "SubdirProject.test_monitor_churn_under_subdir_is_not_tamper"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "CodeRoots.test_edit_inside_nested_root_is_caught",
+          "boundary": "unit",
+          "limitations": [
+            "Nested roots are snapshotted at depth 1: a root's own `code_roots` are not followed."
+          ],
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "CodeRoots.test_head_moved_is_a_caution_not_a_mutation"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "CodeRoots.test_root_symlink_retargeted_to_same_head_clone_is_a_mutation",
+          "boundary": "unit",
+          "limitations": [],
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "CodeRoots.test_unchanged_root_is_not_flagged"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "TaskDirIdentity.test_task_dir_swapped_for_symlink_is_a_mutation",
+          "boundary": "unit",
+          "limitations": [],
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "TaskDirIdentityNegative.test_unchanged_task_dir_is_not_flagged"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "DetectorSplit.test_detector_exception_is_a_mutation_class_hard_stop",
+          "boundary": "unit",
+          "limitations": [],
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "DetectorSplit.test_z_failure_is_a_caution_and_kept_in_legacy_list"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "TaskDirExemption.test_tracked_record_file_MODIFIED_still_flags",
+          "boundary": "unit",
+          "limitations": [],
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "TaskDirExemption.test_tracked_taskmd_record_files_are_exempt"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "GitDiscoveryBoundaries.test_ceiling_stops_the_walk",
+          "boundary": "unit",
+          "limitations": [],
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "GitDiscoveryBoundaries.test_empty_ceiling_entries_are_ignored"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "CodexTempLog.test_no_codex_transcript_survives_a_budget_exit",
+          "boundary": "unit",
+          "limitations": [],
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "CodexTempLog.test_manager_unlinks_on_every_exit"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_close_gate.py",
+          "reference": "GateDecision.test_degraded_blocks_a_fresh_assertive_close",
+          "boundary": "unit",
+          "limitations": [],
+          "negative_control": {
+            "path": "tests/test_tamper_close_gate.py",
+            "reference": "GateDecision.test_reversible_is_advisory"
+          }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_close_gate.py",
+          "reference": "ClosePath.test_assertive_degraded_blocks_then_closes_with_recorded_reason",
+          "boundary": "unit",
+          "limitations": [
+            "A round written before v1.5.45 carries no `**Tamper guard:**` receipt and is treated as clean — the gate is additive and never retro-blocks an older round."
+          ],
+          "negative_control": {
+            "path": "tests/test_tamper_close_gate.py",
+            "reference": "ClosePath.test_pre_059_round_without_the_line_still_closes"
+          }
         }
       ],
       "applicable_platforms": [
@@ -3920,7 +4048,9 @@
         "The pre-exec / spawn-failure exits in cmd_single_review (a missing CLI binary; a grok/pi OSError from an argv-too-long dispatch) do not emit a tamper banner. They are reachable only BEFORE the judge subprocess executes, so no judge ran and no tamper is possible; the absence of a banner there is correct, not a gap (panel round-4 opus, self-down-ranked).",
         "Owner decision 2026-08-21: judge-seat is supported on claude, grok, and codex; antigravity and pi are experimental and removed from applicable_providers.",
         "Live evidence 2026-08-22 (owner Linux account): judge pins opus, sonnet, codex:gpt-5.6-terra:high, codex:gpt-5.6-sol:high, and grok:grok-4.6:high all responded on the `tasks init` live-check; the Phase 8 required_live_evidence (CI-observed judge behavior) remains pending.",
-        "The tamper guard EXEMPTS the active task's OWN record directory when it is UNTRACKED at snapshot time (a `?? …taskdir/` line in the `before` porcelain) — its record-file churn (the record files, plus the panel's own later judge.md / review-artifact writes) is sanctioned-writer noise, the same class as the existing `.agent/*/monitor/` exclusion — so the porcelain-line and dirty-hash compares skip it. task.md CONTENT stays guarded by task_hash regardless, and judges are write-denied under the OS sandbox where available. BEST-EFFORT BOUND (impl-panel task 045, codex-sol): the gate keys off ANY `?? <taskdir>/` porcelain line, so a TRACKED task dir that merely has a coexisting untracked child also trips the exemption, broadening it to a tracked sibling record (e.g. task-archive.md) for that window; narrowing the gate to the dir/task.md's actual tracked-ness (+ a mixed tracked-dir/untracked-child regression test) is PARKED (task 041, cca748f; red-first test_untracked_task_dir_record_churn_is_not_tamper, negative control test_tracked_task_dir_edit_still_flags). This scopes the statement's “newly written non-ignored files … are caught” for that sanctioned-writer case."
+        "The tamper guard EXEMPTS the active task's OWN record directory when it is UNTRACKED at snapshot time (a `?? …taskdir/` line in the `before` porcelain) — its record-file churn (the record files, plus the panel's own later judge.md / review-artifact writes) is sanctioned-writer noise, the same class as the existing `.agent/*/monitor/` exclusion — so the porcelain-line and dirty-hash compares skip it. task.md CONTENT stays guarded by task_hash regardless, and judges are write-denied under the OS sandbox where available. BEST-EFFORT BOUND (impl-panel task 045, codex-sol): the gate keys off ANY `?? <taskdir>/` porcelain line, so a TRACKED task dir that merely has a coexisting untracked child also trips the exemption, broadening it to a tracked sibling record (e.g. task-archive.md) for that window; narrowing the gate to the dir/task.md's actual tracked-ness (+ a mixed tracked-dir/untracked-child regression test) is PARKED (task 041, cca748f; red-first test_untracked_task_dir_record_churn_is_not_tamper, negative control test_tracked_task_dir_edit_still_flags). This scopes the statement's “newly written non-ignored files … are caught” for that sanctioned-writer case.",
+        "v1.5.45 (task 059): a DEGRADED guard is advisory on the review paths — the verdict is kept and the degradation recorded — so the guarantee for those paths is 'a mutation the guard could see is loudly refused', not 'every review ran with a fully working guard'. The unverified case is carried forward to the close (TAMPER-GUARD-DEGRADED) and to tail certification (refuses), where it fails closed.",
+        "v1.5.45: the moved-HEAD signal is a CAUTION by design (a read-only judge cannot commit, so a HEAD move during a review is a concurrent actor). It therefore does not stop a review, and the certified-tree question remains the freshness fingerprint's (PB-PANEL-FRESHNESS)."
       ],
       "follow_up_phases": [
         2,

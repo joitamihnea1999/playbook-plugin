@@ -81,7 +81,42 @@ Blind by construction: a judge gets the repo but not your conversation, so it ca
 
 **judge.md round format and retention.** Each `panel-review` run prepends one round to `judge.md`, newest first. A round starts at a `# Panel Plan Review` or `# Panel Impl Review` heading and runs to the next such heading (or end of file); the close gate reads only the newest round's `**PANEL VERDICT: …**`. `judge.md` retains the newest `JUDGE_MD_MAX_ROUNDS` (5) rounds — the review-read budget. Since v1.5.41 any older round that overflows that window is **archived** (its round content preserved as UTF-8 text) to a sibling `judge-archive.md` (newest first, never deleted — the same "moving history is not deleting it" contract as `task-archive.md`), and `judge.md` carries a one-line pointer to it. Earlier releases dropped the overflow with only a "…full history is in git" note, which was unreliable (judge.md is rewritten in place and committed at most once per task, so intra-session rounds were lost); the archive fixes that. **The true panel-round count for a task is the machine-written round headings in `judge.md` plus those in `judge-archive.md`.** Note two edges: (1) the 5-round cap on `judge.md` holds only when the archive write *succeeds* — if archiving fails, *this* call's overflow is kept untrimmed in `judge.md` (it may exceed 5) rather than dropped, while any rounds already moved out in earlier successful archives stay in `judge-archive.md`; no paid round is lost, and the true count is still the headings in **both** files (never `judge.md` alone); (2) the count assumes judges don't emit a `# Panel … Review` line at column 0 inside their findings (see the lens-v0.2 caveat below). (Caveat, tracked for a lens-v0.2 hardening: the heading is matched textually at column 0, so a judge that itself emits a `# Panel … Review` line at the start of a line inside its findings would be miscounted as an extra round; the round writer should grow an unambiguous machine-generated delimiter/ID that both retention and any counter key on.)
 
-Since v1.4.3 the judge runs write-denied: the project is mounted no-write, so a judge physically cannot edit the repo or task.md. It is not otherwise isolated — it can still read the filesystem and reach the network (which it needs, to call model APIs); "read-only" here means writes are denied, nothing more. Because that OS containment is unavailable on some platforms (**Windows has no seatbelt/bwrap backend at all**, and nested sandboxes forbid it), a working-tree tamper guard backs it up — the review paths snapshot git status + the task.md hash before and after, and if a judge changed anything the review is saved with a loud TAMPER banner, ingestion is refused, and the run exits non-zero. The guard exempts the task's own record directory when it is untracked at snapshot time (its record-file churn is sanctioned-writer noise, the same class as the `monitor/` lane); task.md content stays guarded by its hash regardless. (Best-effort bound: the exemption keys off a `?? taskdir/` porcelain line, so a tracked task dir with a coexisting untracked child also trips it — narrowing that is a parked follow-up.)
+Since v1.4.3 the judge runs write-denied: the project is mounted no-write, so a judge physically cannot edit the repo or task.md. It is not otherwise isolated — it can still read the filesystem and reach the network (which it needs, to call model APIs); "read-only" here means writes are denied, nothing more. Because that OS containment is unavailable on some platforms (**Windows has no seatbelt/bwrap backend at all**, and nested sandboxes forbid it), a working-tree tamper guard backs it up — the review paths snapshot git status + the task.md hash before and after, and if a judge changed anything the review is saved with a loud TAMPER banner, ingestion is refused, and the run exits non-zero.
+
+**What the guard sees, and what a degraded guard means (v1.5.45).** Its scope is
+the outer tree's porcelain state, the content hash of every dirty/untracked file,
+`task.md`'s own hash, the task directory's git-independent identity (realpath +
+inode + symlink-ness, so a judge cannot swap it for a symlink and redirect the
+trusted parent's later writes), and — when `code_roots` is set — each nested
+repo's state plus its resolved identity. Dirty files are opened at the **git
+toplevel** and named **project-relative**, so a project living in a subdirectory
+of a larger repo is guarded correctly (before v1.5.45 those paths were joined
+onto the project root, which made content-only edits invisible and `monitor/`
+churn a false alarm).
+
+Findings split in two. A **mutation** — a porcelain or content-hash change, a
+task.md rewrite/deletion, a task-dir or code-root identity change, a `.git` that
+disappeared, or an errored guard — still prints the loud TAMPER banner, refuses
+ingestion and exits non-zero. A **caution** is the guard telling you it could not
+fully run: `git status`/`-z`/`rev-parse` failed, or HEAD moved during the review
+(a read-only judge cannot commit, so that is a concurrent actor, not tamper). A
+caution no longer discards the paid review — the verdict is kept, the notice is
+printed, and the round records `**Tamper guard:** degraded — <what>` (or
+`clean`). That receipt is load-bearing: a close held to the high-consequence bar
+(assertive, irreversible, or an unclassified `## Risk`) **blocks** on such a
+round with `TAMPER-GUARD-DEGRADED`, with the same two exits as a stale panel
+(re-run the panel, or `--stale-panel-ok --reason "..."` recorded in the receipt);
+`reversible` closes proceed with an advisory. Tail certification refuses
+outright. The single-judge path carries the same receipt in its judge log and in
+the findings it writes into task.md.
+
+The task's own record directory stays exempt from the working-tree diff, scoped
+by whether `task.md` itself is tracked: an **untracked** task.md means the whole
+directory is the panel's fresh record dir (broad exemption), while a **tracked**
+one exempts only newly created (`??`) record files by name (`judge.md`,
+`judge-archive.md`, `judge-*.log`, `task-archive.md`, `vetting-ledger.json`) —
+a rogue rewriting a committed `judge.md`, or dropping an `evil.py` beside it,
+still flags. task.md content stays guarded by its hash regardless.
 
 **Session-pointer isolation (v1.5.41).** A review or probe spawn runs as a child process that would otherwise inherit the foreground session's identity — `CLAUDE_ENV_FILE` plus the `CLAUDE_CODE_*` / `CLAUDE_PID` vars — and could shadow which task is active, surfacing as a spurious `No active task` during a background panel. Every spawn on the review/probe paths (panel and single-judge reviews, `run_subagent`/`stream_subagent`, and the `claude -p` model-availability probe) now scrubs those parent-session vars through one shared scrubber; writable subagents additionally pin an isolated per-invocation `PLAYBOOK_SESSION_ID`, while read-only judges share a fixed non-foreground `judge` identity (harmless — they cannot write a pointer). Guarantee `PB-SESSION-POINTER-ISOLATION`.
 

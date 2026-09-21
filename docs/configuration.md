@@ -153,6 +153,11 @@ guarantee. `code_roots` closes that blind spot:
 }
 ```
 
+Each entry also widens the **judge tamper guard** (v1.5.45): the review paths
+snapshot each root's state and its resolved identity before spawning judges, so
+an edit inside a nested root — or a symlink repoint to a same-`HEAD` clone —
+during the review window is caught rather than silently baked into the stamp.
+
 Each entry is a **project-relative path** to a nested git repository. When set,
 the fingerprint additionally folds in each root's `HEAD`, porcelain status, and
 working diff (including untracked-file content) — the same material the outer
@@ -477,6 +482,7 @@ Pinned model ids rot as providers ship and retire models, so the pins have a mai
 | `PLAYBOOK_VERIFY_TIMEOUT_SECS` | Overrides `verify_timeout_secs` — the close-time verify ceiling (`0`/`unlimited` disables). |
 | `PLAYBOOK_REVIEW_CONTEXT_CHARS` | Overrides `review_context_chars` — the argv-transport judge context budget. |
 | `PLAYBOOK_REVIEW_CONTEXT_CHARS_STDIN` | Overrides `review_context_chars_stdin` — the stdin-transport judge context budget. |
+| `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, `GIT_DIR` | Not Playbook's own, but honoured: the tamper guard's "is this a git repo?" probe walks ancestors the way git's discovery does, so a project below a ceiling or across a mount is not mistaken for part of an unreachable parent repo (v1.5.45). |
 | `PLAYBOOK_ALLOW_DANGEROUS` | Set truthy IN THE HOOK'S ENVIRONMENT (operator shell / harness env, not a command prefix) to acknowledge a destructive command past the `command_guard` interlock (a human-confirmed one-off). |
 | `PLAYBOOK_BASH` | Absolute path to the `bash` the shell-dependent surfaces (audit sweeps, `merge-verify`, `scripts/verify`) should use. Needed only where a bare `bash` on `PATH` is not the right one — most often on Windows, where `bash.exe` in System32 is the WSL launcher rather than Git Bash. The chosen bash is probed with a sentinel; an unusable one fails closed. `$PLAYBOOK_VERIFY_BASH` (named for the dev verifier, exported by CI) is honoured as a fallback when `PLAYBOOK_BASH` is unset. |
 | `PLAYBOOK_PROJECT_ROOT`, `PLAYBOOK_SESSION_ID`, `PLAYBOOK_SANDBOXED`, `PLAYBOOK_MINDMAP_MAX`, `PLAYBOOK_EVAL_CONFIG` | Internal — set by the wrappers, hooks, and sandbox; not meant to be set by hand. |

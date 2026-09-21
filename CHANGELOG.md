@@ -2,6 +2,56 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [Unreleased]
+
+### Fixed
+
+- **The judge tamper guard sees what it could not, and no longer discards a paid review over a
+  guard that merely could not run** (task 059; parked T004/T008/T009/T019/T036/T040/T045 plus
+  the 074 impl-panel finding; plan panel PASS 5/5 with 24 findings, 14 accepted into the plan
+  before a line was written). The guard is the ONLY defense against a rogue or uncontained
+  judge on Windows, so both directions were wrong:
+  - *Scope.* Porcelain paths are **toplevel**-relative, but dirty files were opened at
+    `project_path / rel`, so a project living in a SUBDIRECTORY of a larger repo hashed every
+    dirty file as absent — a judge's content-only edit to an already-dirty file was invisible,
+    and `monitor/` churn under the subdirectory was a false TAMPER. Files are now opened at the
+    git toplevel and keyed project-relative, the exemption regexes are prefix-aware, and the
+    readable porcelain stream stays byte-opaque (it is never parsed or rewritten, so C-quoted
+    and renamed names cannot be mangled). When the toplevel cannot be resolved, no content
+    hashes are taken and the guard says so, rather than silently reading every file as absent.
+  - *Scope.* The snapshot now also covers each `code_roots` nested repo (its state, its resolved
+    identity and its containment — an edit inside a root, a root whose `.git` disappears, or a
+    symlink repointed to a same-`HEAD` clone are all caught), the task directory's
+    git-independent identity (realpath + inode + symlink-ness: a judge cannot swap the task dir
+    for a symlink and redirect the trusted parent's later writes), and `HEAD`.
+  - *Posture.* Findings split into MUTATIONS (hard stop, loud banner, nonzero exit — unchanged,
+    and an errored detector still counts as one) and CAUTIONS (`git status`/`-z`/`rev-parse`
+    failed, HEAD unreadable, a root unavailable, task.md trackedness unknown, or HEAD MOVED —
+    a read-only judge cannot commit, so that is a concurrent actor). A caution keeps the paid
+    verdict, prints a degraded notice, and records `**Tamper guard:** degraded — <what>` on the
+    round (else `clean`). The single-judge path carries the same receipt in its judge log and in
+    the findings written into task.md.
+  - *The receipt is load-bearing.* A close held to the high-consequence bar (assertive,
+    irreversible, or an unclassified `## Risk`) **blocks** on a degraded round with
+    `TAMPER-GUARD-DEGRADED` and the stale-panel exits (re-run the panel, or `--stale-panel-ok
+    --reason "..."` recorded in the receipt); `reversible` closes proceed with an advisory; tail
+    certification refuses outright, and now also refuses when its own snapshot cannot be taken
+    (it used to run unguarded). A round written before this release carries no receipt and is
+    treated as clean — the gate is additive and never retro-blocks.
+  - *Exemption narrowed.* The task-dir exemption is keyed on whether `task.md` itself is tracked:
+    untracked → the whole directory is the panel's fresh record dir (as before); tracked →
+    only NEWLY CREATED record files by name (`judge.md`, `judge-archive.md`, `judge-*.log`,
+    `task-archive.md`, `vetting-ledger.json`). A rogue rewriting a committed `judge.md` or
+    dropping an `evil.py` beside it flags. A failed trackedness probe is a caution and narrows.
+  - *Discovery boundaries.* The "is this a git repo?" probe honours `GIT_DIR`,
+    `GIT_CEILING_DIRECTORIES` and filesystem boundaries, so a project below a ceiling or across
+    a mount is no longer mistaken for part of an unreachable parent repo (a false abort).
+  - *No more leaked transcripts.* Codex's `-o` transcript is owned from `mkstemp` to exit by one
+    helper, so the timeout / budget / dead-pin / tamper exits no longer orphan one file per
+    review in the system temp dir.
+  Ledger `PB-JUDGE-TAMPER` restated with the new statement, owners, ten proof/negative-control
+  pairs and two honest bounds. `scripts/verify` unittest count 2389 → 2461.
+
 ## [1.5.44] — 2026-09-21
 
 Three batches from the 1.5.44 candidate branch (`fix/1.5.44-batch`, tasks 072/060/073): the
@@ -1387,8 +1437,6 @@ only) — so a dangerous command can't run by accident under Codex or Grok eithe
   configuration) updated to say the interlock is active on Claude, grok, codex.
   New tests: `test_codex_command_guard.py` + grok-parity + grok-normalize cases.
 
-
-
 Add the missing **deterministic** safety layer, so a dangerous command can't run
 by accident — not just by judgment. Analysis: the sandbox contains filesystem
 blast radius and the close contract catches under-leveling at close, but a
@@ -1419,8 +1467,6 @@ no pattern set is exhaustive — the real guarantee for filesystem blast radius 
 still running the agent in the **sandbox** (OS-level). Docs (architecture,
 configuration, CLAUDE.md ceremony backstop) updated to say so.
 
-
-
 Harden the ceremony-classification protocol so it doesn't under-level the
 highest-risk requests. Adversarial review of 1.5.28's protocol found it led with
 "is it code?" — so its "no code → just do it" bucket silently waved through two
@@ -1441,8 +1487,6 @@ one-word edit).
   change, but shell/git/docs have no such gate, so the risk triggers are their
   only guard. (A prose protocol applied by judgment can't be infallible; this
   makes it risk-first, safe-defaulted, and explicit about the cases that bite.)
-
-
 
 Match ceremony to risk — so quick work stays quick and the trust machinery aims
 where it matters, and the agent chooses the level (the user shouldn't have to).
@@ -1470,8 +1514,6 @@ where it matters, and the agent chooses the level (the user shouldn't have to).
   the user **only** when it genuinely can't gauge risk or scope, and even then
   leads with a recommendation biased to the safer option. Better safe than sorry.
 
-
-
 ### Added
 
 - **`testing` skill** — a method for the doctrine the plugin already preaches
@@ -1487,8 +1529,6 @@ where it matters, and the agent chooses the level (the user shouldn't have to).
   the discipline the playbook's own suite follows. This is the sixth
   harness-discoverable skill (docs/cli.md + architecture.md updated). Adapted from
   `horiacristescu/playbook-harness` (same lineage/author).
-
-
 
 Verification pass over the 1.5.21–1.5.25 context-economy arc: an independent
 3-way adversarial audit (recall/bootstrap, the map audit-checks, compact/
@@ -1522,8 +1562,6 @@ the surfaced edges red-first.
   A dangling link in the map preamble reads as "preamble", not "node [None]".
   The bootstrap index notice is grammatical for a single indexed node.
 
-
-
 Context-economy pass, part 5: the map's *structure* is now checked mechanically,
 not just its content — so "how the map is written" stops depending on the author
 remembering the checklist. Pure-benefit (advisory, fires only on real defects).
@@ -1547,8 +1585,6 @@ remembering the checklist. Pure-benefit (advisory, fires only on real defects).
   files it owns (those citations are its freshness *anchor*), add a keyword alias
   when its search terms differ from its title, and earn its place with at least
   one incoming link. The guidance now names the mechanical checks that enforce it.
-
-
 
 Context-economy pass, part 4: sharper retrieval — "better than grep" within the
 plugin's stdlib-only, offline, portable contract (no embeddings/vector index by
@@ -1577,8 +1613,6 @@ design; those would trade away portability).
   for the mind map, and `grep`/`rg` for plain text — the sharpest tool per job,
   not always grep.
 
-
-
 Context-economy pass, part 3: internal-consistency check for the map.
 
 ### Added
@@ -1592,8 +1626,6 @@ Context-economy pass, part 3: internal-consistency check for the map.
   (`[1.5.0]`), and range tokens (`[1-5]`) never register — and each finding names
   the SOURCE node so the drift is fixable. Advisory; `audit.dangling_links_severity`
   raises it. New `check_mindmap_dangling_links` in `tasks/audit.py`.
-
-
 
 Context-economy pass, part 2: complete the retrieval loop. 1.5.21 gave bootstrap
 a mind-map INDEX (routing nodes + titled TOC) but only for `MIND_MAP.md` — a
@@ -1620,8 +1652,6 @@ overflow boundary.
 - The task-template References gate, `CLAUDE.md` template, and CLI help/usage now
   drive first-contact context-gathering through `tasks recall` rather than a raw
   `grep MIND_MAP.md` that misses overflow.
-
-
 
 Context-economy pass: make the agent load the information it needs, retain what
 matters out of the way, and stop carrying what's of no use. Four levers around
@@ -1661,8 +1691,6 @@ matters out of the way, and stop carrying what's of no use. Four levers around
   *reason* (not the hash) into the owning subsystem node. Git holds the *when*.
 - `mind_map_header()` is now honest about index-vs-full output; the bootstrap docs,
   CLAUDE.md template CLI list, and task sticker document `tasks compact`.
-
-
 
 Hardening from an independent 3-way verification pass over 1.5.16–1.5.19 (every
 finding re-reproduced by hand). The audit confirmed the enforcement core (F2/F3),

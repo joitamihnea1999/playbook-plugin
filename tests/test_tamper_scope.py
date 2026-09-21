@@ -176,6 +176,13 @@ class CodeRoots(unittest.TestCase):
         full = R._detect_tamper_full(proj, tf, before)
         self.assertTrue(any("nested" in m and "identity" in m for m in full["mutations"]), full)
 
+    def test_unchanged_root_is_not_flagged(self):
+        # Negative control: a nested root nobody touched produces nothing.
+        proj, nested, tf = self._with_root()
+        before = R._snapshot_repo_state(proj, tf)
+        full = R._detect_tamper_full(proj, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+
     def test_head_moved_is_a_caution_not_a_mutation(self):
         proj, nested, tf = self._with_root()
         before = R._snapshot_repo_state(proj, tf)
@@ -225,6 +232,19 @@ class TaskDirIdentity(unittest.TestCase):
             self.skipTest("symlink not permitted")
         full = R._detect_tamper_full(d, tf, before)
         self.assertTrue(any("task directory identity" in m for m in full["mutations"]), full)
+
+
+class TaskDirIdentityNegative(unittest.TestCase):
+    def test_unchanged_task_dir_is_not_flagged(self):
+        # Negative control for the identity signal: an untouched task dir.
+        d = _repo()
+        td = d / ".agent" / "tasks" / "001-x"
+        td.mkdir(parents=True)
+        tf = td / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        _commit_all(d)
+        before = R._snapshot_repo_state(d, tf)
+        self.assertEqual(R._detect_tamper_full(d, tf, before)["mutations"], [])
 
 
 class DetectorSplit(unittest.TestCase):
