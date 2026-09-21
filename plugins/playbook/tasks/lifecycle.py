@@ -453,6 +453,27 @@ def cmd_work(cmd_args):
                                 reason if (stale_panel_ok and not force)
                                 else None),
                         }
+                # Task 059 (plan panel P2): a carrying round whose tamper guard
+                # was DEGRADED cannot certify a high-consequence close — the
+                # verdict was kept on the review path, but its tamper-freedom is
+                # unverified. Recorded as its own verdict (never FRESH), blocked
+                # by the gate for assertive/irreversible/unclassified with the
+                # STALE exits; advisory for reversible. A pre-059 round has no
+                # receipt line and is treated as clean (additive).
+                _tamper_degraded = bool(
+                    _impl is not None and _impl.get("tamper_guard") == "degraded")
+                if (_tamper_degraded and _impl is not None
+                        and (_freshness is None
+                             or _freshness.get("verdict") in ("FRESH", "STALE"))):
+                    _freshness = {
+                        "verdict": "TAMPER-GUARD-DEGRADED",
+                        "round_fp": _impl["tree_state"],
+                        "now_fp": _now_fp,
+                        "detail": _impl.get("tamper_detail") or "",
+                        "accepted_reason": (
+                            reason if (stale_panel_ok and not force and _carries)
+                            else None),
+                    }
                 _f_allowed, _f_reason = freshness_gate_decision(
                     risk=risk, panel_required=_panel_req,
                     evidence_carries=_carries,
@@ -461,6 +482,7 @@ def cmd_work(cmd_args):
                     stale_ok=stale_panel_ok, stale_reason=reason,
                     git_available=_git_here,
                     exclude_covers=_excl_hits,
+                    tamper_degraded=_tamper_degraded,
                 )
                 # TAIL CERTIFICATION (task 036, owner decision A). When the panel
                 # is STALE and would block, but the ONLY post-panel delta is in
@@ -680,6 +702,12 @@ def cmd_work(cmd_args):
                           "impl panel (tree-state mismatch) — if code was "
                           "edited post-review, consider re-running "
                           "`tasks panel-review <N> --mode impl`.",
+                          flush=True)
+                if _freshness and _freshness.get("verdict") == "TAMPER-GUARD-DEGRADED":
+                    print("note: the newest impl panel's tamper guard was degraded "
+                          "(its verdict is kept, its tamper-freedom unverified) — "
+                          "recorded in the receipt; consider re-running "
+                          "`tasks panel-review <N> --mode impl` on a healthy git.",
                           flush=True)
             # Remove session dirs that reference this task.
             # PLAYBOOK_SESSION_ID is not set when called from Bash tool, so scan all sessions.

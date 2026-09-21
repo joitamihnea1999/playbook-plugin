@@ -2407,6 +2407,12 @@ def parse_tail_cert_verdict(raw: "str | None",
 _ROUND_HEAD_RE = re.compile(r"^# Panel (Plan|Impl) Review\b", re.MULTILINE)
 _ROUND_VERDICT_RE = re.compile(r"\*\*PANEL VERDICT: (PASS|FAIL)\*\*")
 _ROUND_TREE_RE = re.compile(r"\*\*Tree-state:\*\* ([0-9a-f]{6,64})")
+# Task 059: the tamper-guard receipt review.py writes on every panel round —
+# `clean`, or `degraded — <what could not be verified>`. Parsed from the
+# orchestrator-authored HEADER region only (like the snapshot), so a judge's
+# output block can neither forge nor clear it.
+_ROUND_TAMPER_RE = re.compile(r"^\*\*Tamper guard:\*\* (clean|degraded)(?:\s*[—-]+\s*(.*))?$",
+                              re.MULTILINE)
 # The tail-cert F0 descriptor rides on one line inside the round (finding F).
 _ROUND_SNAPSHOT_RE = re.compile(r"\*\*Panel-snapshot:\*\* (\{.*\})[ \t]*$",
                                 re.MULTILINE)
@@ -2455,11 +2461,16 @@ def parse_judge_rounds(text: str) -> "list[dict]":
                 snapshot = json.loads(sm.group(1))
             except (ValueError, TypeError):
                 snapshot = None
+        gm = _ROUND_TAMPER_RE.search(_head)
         rounds.append({
             "mode": m.group(1).lower(),
             "verdict": vm.group(1) if vm else None,
             "tree_state": tm.group(1) if tm else "",
             "snapshot": snapshot,
+            # Task 059: None for a pre-059 round (no receipt → treated as clean,
+            # additive), "clean", or "degraded" + the detail text.
+            "tamper_guard": gm.group(1) if gm else None,
+            "tamper_detail": (gm.group(2) or "").strip() if gm else "",
             "body": body,
         })
     return rounds
@@ -2798,7 +2809,8 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
                             force: bool, stale_ok: bool,
                             stale_reason: "str | None",
                             git_available: bool = True,
-                            exclude_covers: "list[str] | None" = None
+                            exclude_covers: "list[str] | None" = None,
+                            tamper_degraded: bool = False
                             ) -> "tuple[bool, str]":
     """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built);
     extended by T1 (owner decision 2026-08-23) to every risk held to the
@@ -2832,6 +2844,27 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
     # token blocks). assertive / irreversible / unclassified all gate — O1.
     if risk == "reversible" or not panel_required or not evidence_carries:
         return True, ""
+    if tamper_degraded:
+        # Task 059 (plan panel P2): the carrying round's tamper guard could not
+        # fully run (its header says `**Tamper guard:** degraded`). The verdict
+        # was KEPT on the review path — a degraded guard is not evidence of a
+        # write — but a high-consequence close must not rest on a PASS whose
+        # tamper-freedom is unverified: on the uncontained platform the guard
+        # IS the defense. Same two exits as STALE, acceptance on the record.
+        if stale_ok:
+            if stale_reason and stale_reason.strip():
+                return True, ""
+            return False, ('--stale-panel-ok requires --reason "why this close may '
+                           "rest on a panel whose tamper guard was degraded\" — the "
+                           "acceptance must be on the record.")
+        return False, (
+            f"risk is {risk} and the newest impl panel's TAMPER GUARD was DEGRADED "
+            "— TAMPER-GUARD-DEGRADED: git could not fully verify that no judge wrote "
+            "the tree during that review (see `**Tamper guard:**` on the round), so "
+            "its PASS is unverified for tamper-freedom.\n"
+            "  Either re-run:  tasks panel-review <N> --mode impl\n"
+            "  or record the acceptance:  tasks work done --stale-panel-ok "
+            '--reason "..."')
     # Task 060 (plan panel): an ABSENT fingerprint is no longer "nothing to
     # compare" → allow. Two shapes, both fail CLOSED for a carrying
     # high-consequence panel, with the same two exits as STALE:
@@ -2960,6 +2993,16 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
             line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} "
                     "vs close (unavailable) — UNREADABLE (git could not "
                     "fingerprint the working tree at close)")
+            ar = freshness.get("accepted_reason")
+            if ar:
+                line += f', accepted: "{" ".join(ar.split())}"'
+            out.append(line)
+        elif v == "TAMPER-GUARD-DEGRADED":
+            # Task 059: the carrying round's tamper guard could not fully run;
+            # only an override (or a reversible close) reaches the receipt with it.
+            line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} vs close "
+                    f"{freshness.get('now_fp', '?')} — TAMPER-GUARD-DEGRADED on the newest "
+                    f"impl round ({freshness.get('detail') or 'guard could not fully run'})")
             ar = freshness.get("accepted_reason")
             if ar:
                 line += f', accepted: "{" ".join(ar.split())}"'
