@@ -152,34 +152,50 @@ def ut_fails(text: str, per_cap: int = 15, overall_cap: int = 80) -> list[str]:
         while block and not block[-1].strip():         # trim trailing blanks
             block.pop()
         # Task 076: a shell-fixture failure's own diagnostic block (lines the
-        # fixture reporter prefixes with `    | `) is exempt from the per-failure
-        # cap — the traceback + FAIL lines alone consume ~10 of the 15, so the
-        # block that names the cause was sliced away in CI run 35570688583.
-        # The block is already bounded by BLOCK_CAP per block; everything else
-        # in the failure (traceback, tail) keeps the old budget.
-        exempt = [ln for ln in block if ln.startswith(BLOCK_PREFIX)]
-        budgeted = [ln for ln in block if not ln.startswith(BLOCK_PREFIX)]
-        if len(budgeted) > per_cap:
-            budgeted = budgeted[:per_cap] + [f"    ... and {len(budgeted) - per_cap} more lines"]
-        # Re-interleave: budgeted lines in order, with the exempt block lines
-        # re-inserted where the first of them appeared (they are contiguous).
-        if exempt:
-            first = next(i for i, ln in enumerate(block) if ln.startswith(BLOCK_PREFIX))
-            before = [ln for ln in block[:first] if not ln.startswith(BLOCK_PREFIX)]
-            keep_before = budgeted[:len(before)] if len(before) <= per_cap else budgeted
-            keep_after = budgeted[len(before):] if len(before) <= per_cap else []
-            block = keep_before + exempt + keep_after
+        # fixture reporter prefixes with `    | `) is EXEMPT from both caps —
+        # the traceback + FAIL lines alone consume ~10 of the 15, so the block
+        # that names the cause was sliced away in CI run 35570688583. The block
+        # is already bounded by the fixture reporter (BLOCK_CAP per block,
+        # BLOCK_TOTAL per run). Everything else keeps the old per-failure
+        # budget, IN ORDER, with one marker at the point of the cut — nothing
+        # after the block is dropped silently (076 round 2).
+        kept: list[str] = []
+        budgeted_seen = 0
+        for ln in block:
+            if ln.startswith(BLOCK_PREFIX):
+                kept.append(ln)
+                continue
+            budgeted_seen += 1
+            if budgeted_seen <= per_cap:
+                kept.append(ln)
+            elif budgeted_seen == per_cap + 1:
+                kept.append("    ... (more lines of this failure omitted)")
+        if budgeted_seen > per_cap:
+            kept.append(f"    ... {budgeted_seen - per_cap} more lines")
+        out.extend(kept)
+    # Overall cap counts the budgeted lines only; block lines ride along so a
+    # dozen unrelated failures cannot evict the one block that matters.
+    plain = [ln for ln in out if not ln.startswith(BLOCK_PREFIX)]
+    if len(plain) <= overall_cap:
+        return out
+    result: list[str] = []
+    seen = 0
+    for ln in out:
+        if ln.startswith(BLOCK_PREFIX):
+            result.append(ln)
         else:
-            block = budgeted
-        out.extend(block)
-    return cap(out, overall_cap + BLOCK_TOTAL)
+            seen += 1
+            if seen <= overall_cap:
+                result.append(ln)
+    result.append(f"... and {len(plain) - overall_cap} more")
+    return result
 
 
 BLOCK_START = "----- output start -----"
 BLOCK_END = "----- output end -----"
 BLOCK_PREFIX = "    | "
 BLOCK_CAP = 40        # lines kept per diagnostic block
-BLOCK_TOTAL = 100     # lines kept across all blocks of one fixture run
+BLOCK_TOTAL = 400     # lines kept across all blocks of one fixture run (≈10 full blocks; S7 is the 7th of ~18 scenarios)
 FAIL_CAP = 40         # FAIL lines kept (was cap()'s 20; the fixture has ~274 assertions)
 
 

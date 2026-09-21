@@ -192,6 +192,67 @@ class ShellFixturesDetail(unittest.TestCase):
         self.assertTrue(detail.startswith("  FAIL  S2 exits 0"), detail)
 
 
+# ut_fails: a failure whose NON-block prefix already exceeds the per-failure cap
+# (cascading fixture failures before S7) must still show the block AND announce
+# what was cut after it — never drop the tail silently (076 round 2, sonnet).
+UT_LONG_PREFIX = (
+    "======================================================================\n"
+    "FAIL: test_shell_fixtures_pass (test_shell_fixtures.ShellFixtures) (fixture='wrapper-multiuser-fixture.sh')\n"
+    "----------------------------------------------------------------------\n"
+    "Traceback (most recent call last):\n"
+    "AssertionError: wrapper-multiuser-fixture.sh failed (rc=1):\n"
+    + "\n".join(f"  FAIL  S{i} cascading failure {i}" for i in range(1, 25)) + "\n"
+    "    | S7 diagnostics (task 076)\n    | rc=1\n    | find_project_root from run dir: []\n"
+    "--- last 25 lines ---\n" + "\n".join(f"  PASS  tail {i}" for i in range(25)) + "\n"
+    "\n----------------------------------------------------------------------\nRan 1 test\n\nFAILED (failures=1)\n")
+
+# ut_fails: twelve unrelated unittest failures BEFORE the S7 one must not push
+# S7's block past the overall cap (076 round 2, codex-high).
+UT_MANY_BEFORE = "".join(
+    "======================================================================\n"
+    f"FAIL: test_other_{i} (tests.test_x.T)\n"
+    "----------------------------------------------------------------------\n"
+    "Traceback (most recent call last):\n  File \"x.py\", line 1, in t\nAssertionError: nope\n\n" for i in range(12)) + (
+    "======================================================================\n"
+    "FAIL: test_shell_fixtures_pass (test_shell_fixtures.ShellFixtures) (fixture='wrapper-multiuser-fixture.sh')\n"
+    "----------------------------------------------------------------------\n"
+    "Traceback (most recent call last):\nAssertionError: wrapper-multiuser-fixture.sh failed (rc=1):\n"
+    "  FAIL  S7 exits 0 outside a playbook project — expected [0], got [1]\n"
+    "    | S7 diagnostics (task 076)\n    | rc=1\n    | find_project_root from run dir: []\n"
+    "\n----------------------------------------------------------------------\nRan 13 tests\n\nFAILED (failures=13)\n")
+
+# sh_fails: three earlier 50-line blocks must not exhaust the budget before
+# S7's own block (076 round 2, codex-high).
+SH_EARLIER_BLOCKS = "".join(
+    f"  FAIL  S{i} earlier\n----- output start -----\n" + "\n".join(f"early {i} line {k}" for k in range(50)) + "\n----- output end -----\n"
+    for i in range(1, 4)) + (
+    "  FAIL  S7 exits 0 outside a playbook project — expected [0], got [1]\n----- output start -----\n"
+    "S7 diagnostics (task 076)\nrc=1\nfind_project_root from run dir: []\nancestor /tmp: no .agent\n----- output end -----\n")
+
+
+class UtFailsBudgets(unittest.TestCase):
+    def setUp(self):
+        self.verify = _load_verify()
+
+    def test_long_prefix_keeps_block_and_announces_the_cut(self):
+        got = "\n".join(self.verify.ut_fails(UT_LONG_PREFIX))
+        self.assertIn("find_project_root from run dir", got)
+        self.assertIn("more lines", got)               # the cut is announced, not silent
+        self.assertNotIn("PASS  tail 24", got)         # the tail is what gets budgeted away
+
+    def test_many_earlier_failures_do_not_evict_the_block(self):
+        got = "\n".join(self.verify.ut_fails(UT_MANY_BEFORE))
+        self.assertIn("test_shell_fixtures_pass", got)
+        self.assertIn("find_project_root from run dir", got)
+
+
+class ShFailsPosition(unittest.TestCase):
+    def test_earlier_blocks_do_not_starve_s7(self):
+        got = "\n".join(_load_verify().sh_fails(SH_EARLIER_BLOCKS))
+        self.assertIn("S7 diagnostics (task 076)", got)
+        self.assertIn("ancestor /tmp: no .agent", got)
+
+
 class ForcedS7EndToEnd(unittest.TestCase):
     """Run the REAL fixture with its test-only knob that forces S7's exit
     assertion to fail while the shim still prints `launched root=` (the
@@ -218,6 +279,29 @@ class ForcedS7EndToEnd(unittest.TestCase):
             self.assertIn("find_project_root from run dir: []", got)
             self.assertIn("ancestor", got)
             self.assertIn("launched root=", got)          # the wrapper's own output is inside the block
+
+    def test_the_074_composition_end_to_end(self):
+        """PRODUCTION shape of the 074 failure: fixture → test_shell_fixtures
+        (real `_failure_detail`, real `self.fail` envelope, run by unittest as a
+        subprocess) → scripts/verify's `ut_fails`. Nothing hand-written in
+        between (076 round 2, opus/grok)."""
+        import shutil, subprocess
+        if shutil.which("bash") is None or shutil.which("git") is None:
+            self.skipTest("bash/git missing")
+        env = test_shell_fixtures._clean_env()
+        env["WRAPPER_FIXTURE_FORCE_S7_RC"] = "1"
+        env["WRAPPER_FIXTURE_FORCE_S7_OUT_LINES"] = "3000"     # verbose wrapper: > pipe buffer, exercises the head/pipefail path
+        r = subprocess.run([sys.executable, "-m", "unittest", "tests.test_shell_fixtures"],
+                           cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=900)
+        self.assertNotEqual(r.returncode, 0)
+        got = "\n".join(_load_verify().ut_fails(r.stdout + r.stderr))
+        self.assertIn("S7 exits 0 outside a playbook project", got)
+        self.assertIn("S7 diagnostics (task 076)", got)
+        self.assertIn("find_project_root from run dir: []", got)
+        self.assertIn("ancestor", got)
+        self.assertIn("launched root=", got)
+        self.assertIn("wrapper output truncated", got)       # the verbose output was bounded, not fatal
+        self.assertIn("shim listing", got)                    # the block ran to its end under pipefail
 
 
 if __name__ == "__main__":

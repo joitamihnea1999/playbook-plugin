@@ -239,6 +239,12 @@ echo "=== S7: non-playbook directory still launches the bare CLI ==="
     # red while the shim's output stays intact, to prove the diagnostics below
     # reach both reporters WITH the wrapper's output. Never set outside tests.
     [ -n "${WRAPPER_FIXTURE_FORCE_S7_RC:-}" ] && RC="$WRAPPER_FIXTURE_FORCE_S7_RC"
+    # Second test-only knob: make the wrapper output VERBOSE (N filler lines,
+    # past the pipe buffer) so the bounded-output path below is exercised.
+    if [ -n "${WRAPPER_FIXTURE_FORCE_S7_OUT_LINES:-}" ]; then
+        out="$out
+$(awk -v n="$WRAPPER_FIXTURE_FORCE_S7_OUT_LINES" 'BEGIN{for(i=1;i<=n;i++) printf "filler line %d for the verbose-wrapper regression\n", i}')"
+    fi
     assert_eq "$RC" "0" "S7 exits 0 outside a playbook project"
     assert_contains "$out" "launched root=" "S7 launches with an empty project root"
     # Task 076 (PLAN.md A1.1): S7 failed intermittently on the Windows lane at
@@ -259,8 +265,10 @@ echo "=== S7: non-playbook directory still launches the bare CLI ==="
         echo "rc=$RC"
         echo "find_project_root from run dir: [$(cd "$d" && find_project_root)]"
         echo "wrapper output (stdout+stderr) begins:"
-        printf '%s\n' "$out" | head -n 12 | sed 's/^/    > /'
-        [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" -gt 12 ] && echo "    > ... (wrapper output truncated at 12 lines)"
+        # awk reads the WHOLE stream (no early close → no SIGPIPE for printf
+        # under `set -o pipefail`; 076 round 2) and prints only the first 12.
+        printf '%s\n' "$out" | awk 'NR<=12{print "    > " $0} END{if(NR>12) print "    > ... (wrapper output truncated at 12 lines; " NR " total)"}'
+
         echo "wrapper output ends."
         anc="$(cd "$d" && pwd -P)"
         while :; do
