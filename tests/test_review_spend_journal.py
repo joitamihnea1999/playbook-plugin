@@ -460,8 +460,11 @@ class SingleSpendE2E(_E2EBase):
         patches = [
             mock.patch.object(sandbox, "run", _boom),
             mock.patch.object(shutil, "which", lambda name: "/usr/bin/" + name),
-            mock.patch.object(review, "_detect_tamper_safe",
-                              lambda pp, t, b: (["dirty"] if tampered else [])),
+            # Task 059: the callers read the mutations/cautions split; "dirty" is a
+            # MUTATION (a simulated judge write), so the hard stop must still fire.
+            mock.patch.object(review, "_detect_tamper_full",
+                              lambda pp, t, b: ({"mutations": ["dirty"], "cautions": []}
+                                                if tampered else {"mutations": [], "cautions": []})),
         ]
         for p in patches:
             p.start()
@@ -539,8 +542,11 @@ class TailCertSpendE2E(_E2EBase):
             mock.patch.object(review, "_run_tail_cert_judge_raw",
                               lambda pp, prompt, ts: raw),
             mock.patch.object(review, "_snapshot_repo_state", lambda pp, t: {}),
-            mock.patch.object(review, "_detect_tamper_safe",
-                              lambda pp, t, b: (["dirty"] if tampered else [])),
+            # Task 059: the callers read the mutations/cautions split; "dirty" is a
+            # MUTATION (a simulated judge write), so the hard stop must still fire.
+            mock.patch.object(review, "_detect_tamper_full",
+                              lambda pp, t, b: ({"mutations": ["dirty"], "cautions": []}
+                                                if tampered else {"mutations": [], "cautions": []})),
             mock.patch.object(review, "_tail_cert_seat", lambda pp: "claude:opus"),
         ]
         for p in patches:
@@ -577,7 +583,8 @@ class TamperRecordsNothing(_E2EBase):
         _oa, _or = ClaudeAdapter.is_available, ClaudeAdapter.run_headless_judge
         ClaudeAdapter.is_available = classmethod(lambda cls: True)
         ClaudeAdapter.run_headless_judge = lambda self, **kw: "1. **Note** — fine\n"
-        p = mock.patch.object(review, "_detect_tamper_safe", lambda pp, t, b: ["dirty"])
+        p = mock.patch.object(review, "_detect_tamper_full",
+                              lambda pp, t, b: {"mutations": ["dirty"], "cautions": []})
         p.start()
         try:
             with _chdir(self.project):
@@ -657,7 +664,8 @@ class StructuredUsageE2E(_E2EBase):
             mock.patch.object(review, "_tail_cert_review_diff", lambda pp, snap: "diff --git a b\n+x\n"),
             mock.patch.object(review, "_run_tail_cert_judge_raw", lambda pp, prompt, ts: outs.pop(0)),
             mock.patch.object(review, "_snapshot_repo_state", lambda pp, t: {}),
-            mock.patch.object(review, "_detect_tamper_safe", lambda pp, t, b: []),
+            mock.patch.object(review, "_detect_tamper_full",
+                              lambda pp, t, b: {"mutations": [], "cautions": []}),
             mock.patch.object(review, "_tail_cert_seat", lambda pp: "grok:grok-4.6:medium"),
         ]
         for p in patches:

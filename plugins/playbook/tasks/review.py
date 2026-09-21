@@ -336,7 +336,51 @@ def _porcelain_z_paths(z: bytes) -> "list[str]":
     return paths
 
 
-def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
+def _git_head_state(repo_path: Path) -> dict:
+    """`{"state": "ok"|"unborn"|"error", "value": sha|None}` for `repo_path`'s
+    HEAD (task 059, P8): a read FAILURE is recorded as such so two failed reads
+    can never compare equal and silently disable the moved-HEAD caution."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_path),
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return {"state": "error", "value": None}
+    if r.returncode == 0:
+        v = r.stdout.strip().decode("ascii", "replace") if isinstance(r.stdout, bytes) else str(r.stdout).strip()
+        return {"state": "ok", "value": v}
+    err = r.stderr if isinstance(r.stderr, bytes) else str(r.stderr).encode()
+    if b"unknown revision" in err or b"ambiguous argument" in err or b"Needed a single revision" in err:
+        return {"state": "unborn", "value": None}
+    return {"state": "error", "value": None}
+
+
+def _taskdir_identity(task_file: Path) -> dict:
+    """Git-INDEPENDENT identity of the task directory and task.md (task 059,
+    plan panel codex-high #1): realpath + (dev, ino) + is-symlink for both. A
+    judge that swaps the task dir for a symlink to a copy holding an identical
+    task.md while `git status` is degraded would otherwise redirect the trusted
+    parent's later `judge.md`/`task.md` writes outside the repo — `atomic_write`
+    follows the parent path. Never raises; unreadable → stable markers."""
+    out: dict = {}
+    for label, p in (("td", task_file.parent), ("tf", task_file)):
+        try:
+            out[label + "_link"] = os.path.islink(p)
+        except OSError:
+            out[label + "_link"] = None
+        try:
+            out[label + "_real"] = os.path.realpath(p)
+        except (OSError, RuntimeError, ValueError):
+            out[label + "_real"] = "<unresolvable>"
+        try:
+            st = os.stat(p)
+            out[label + "_ino"] = (st.st_dev, st.st_ino)
+        except OSError:
+            out[label + "_ino"] = None
+    return out
+
+
+def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int = 0) -> dict:
     """Capture the repo's mutable state before spawning judges, so a rogue judge
     that writes the working tree can be detected afterward (#1 tamper guard).
 
@@ -346,26 +390,34 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     (Windows) or when already nested — there this snapshot/compare is the ONLY
     tamper defense, so it is mandatory, not belt-and-braces.
 
-    Three best-effort signals:
-      - `git status --porcelain`: repo-wide; catches edits to tracked files and
-        new non-ignored files (e.g. a rogue's task_audit.md). Gitignored runtime
-        churn (.agent/**/sessions, chat_log, bash_history) is excluded by design,
-        so legitimate judge-session hook writes don't false-positive. None when
-        the project is not a git repo.
-      - `dirty_hashes`: sha256 of the CONTENT of each dirty / untracked file
-        (enumerated from `--porcelain -z` so quoted/special-char and ` -> ` names
-        parse correctly; capped at `_TAMPER_HASH_CAP`; oversize → an
-        `unhashed:too-large:<size>` marker, read error → `unhashed:error`). This
-        closes the dirty-tree gap: a file already dirty before the review keeps
-        an identical porcelain line when only its content changes, so the line
-        diff alone would miss a rogue's content-only edit to it. Empty when the
-        project isn't a git repo (no porcelain to enumerate from).
-      - sha256 of task.md: the primary tamper target (the rogue rewrote work-plan
-        gates); the only signal when the project isn't a git repo.
+    Signals (best-effort, each degradation recorded as a field the detector can
+    NAME rather than silently pass):
+      - `porcelain`: readable `git status --porcelain -uall`, kept byte-OPAQUE as
+        the before==after line signal (never parsed — C-quoting and ` -> ` make
+        the readable form unsafe to parse; see `_porcelain_z_paths`). None when
+        not a git repo (or git failed — `is_git` tells the two apart).
+      - `dirty_hashes`: sha256 of the CONTENT of each dirty / untracked file,
+        enumerated from `--porcelain -z` (raw paths). Task 059 (074 panel, T023):
+        porcelain paths are TOPLEVEL-relative even when the project is a
+        SUBDIRECTORY of its repo, so files are opened at `toplevel / rel` and
+        keyed PROJECT-relative (`_project_relative`). When the toplevel cannot
+        be resolved while porcelain exists, `hash_scope_ok` is False and NO
+        hashes are taken — never a `project_path / rel` join (the 074 bug read
+        every such file as absent).
+      - `prefix`: the toplevel→project prefix, so the detector's exemption
+        regexes (monitor / catalog / task dir) can match toplevel-relative lines.
+      - `head`: `_git_head_state` (moved HEAD is a CAUTION — a read-only judge
+        cannot commit, so a move is a concurrent actor, not tamper; P1).
+      - `roots`: one nested snapshot per `code_roots` entry (depth 1), with the
+        root's resolved identity + containment (T019 F3, T040 P-1, P7/P10).
+      - `taskdir_identity`: git-independent identity of the task dir (P6).
+      - `task_hash`: sha256 of task.md — the primary tamper target; the only
+        signal when the project isn't a git repo.
     """
     import hashlib
-    import os
     import subprocess
+    from tasks.core import (_git_toplevel, _toplevel_prefix, _project_relative,
+                            _code_roots, load_config, _scope_identity)
     porcelain = None
     try:
         r = subprocess.run(
@@ -397,17 +449,26 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
             z_out = rz.stdout            # bytes
     except (OSError, subprocess.SubprocessError):
         z_out = None
+    # Toplevel + prefix (task 059): only meaningful for a git repo. A resolvable
+    # toplevel is REQUIRED to open porcelain-named files correctly.
+    toplevel = prefix = None
+    hash_scope_ok = True
+    if porcelain is not None:
+        toplevel = _git_toplevel(Path(project_path))
+        prefix = _toplevel_prefix(Path(project_path), toplevel) if toplevel is not None else None
+        hash_scope_ok = toplevel is not None and prefix is not None
     dirty_hashes: dict[str, str] = {}
-    if z_out:
+    if z_out and hash_scope_ok:
         budget = _TAMPER_TOTAL_BUDGET       # cumulative-bytes ceiling across the run
         for rel in _porcelain_z_paths(z_out):
-            fp = project_path / rel
+            fp = Path(toplevel) / rel
+            key = _project_relative(rel, prefix)
             try:
                 if fp.is_symlink():
                     # Hash the LINK TEXT, not the referent: `read_bytes` follows a
                     # symlink, so a retarget to a same-content file would be
                     # invisible (round-4 grok). os.readlink captures the target.
-                    dirty_hashes[rel] = "symlink:" + hashlib.sha256(
+                    dirty_hashes[key] = "symlink:" + hashlib.sha256(
                         os.fsencode(os.readlink(fp))).hexdigest()
                     continue
                 import stat as _stat_mod
@@ -424,14 +485,14 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
                     # flagged (panel round-8 codex:terra). A path that is
                     # non-regular in BOTH snapshots (a real submodule) keeps the
                     # same marker → no false flag.
-                    dirty_hashes[rel] = f"nonregular:{_stat_mod.S_IFMT(_lst.st_mode)}"
+                    dirty_hashes[key] = f"nonregular:{_stat_mod.S_IFMT(_lst.st_mode)}"
                     continue
                 if budget <= 0:
                     # Total-bytes budget exhausted: a huge dirty/untracked tree
                     # (e.g. a fresh repo with no .gitignore for node_modules)
                     # must not make every review hash gigabytes twice. Honest
                     # marker, never a silent skip (round-4 opus).
-                    dirty_hashes[rel] = "unhashed:budget-exceeded"
+                    dirty_hashes[key] = "unhashed:budget-exceeded"
                     continue
                 # Route the read through the SAME safe primitive as task.md: a
                 # detached writer swapping a dirty file to a FIFO between the
@@ -441,22 +502,17 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
                 # Critical / opus). The primitive re-validates with fstat.
                 kind, detail, nbytes = _safe_hash_regular(fp, _TAMPER_HASH_CAP)
                 if kind == "hash":
-                    dirty_hashes[rel] = detail   # type: ignore[assignment]
+                    dirty_hashes[key] = detail   # type: ignore[assignment]
                     budget -= nbytes
                 elif kind == "toolarge":
-                    dirty_hashes[rel] = f"unhashed:too-large:{detail}"
+                    dirty_hashes[key] = f"unhashed:too-large:{detail}"
                 else:  # a TOCTOU swap after the lstat, or a read failure
-                    dirty_hashes[rel] = "unhashed:error"
+                    dirty_hashes[key] = "unhashed:error"
             except OSError:
-                dirty_hashes[rel] = "unhashed:error"
+                dirty_hashes[key] = "unhashed:error"
     # task.md fingerprint — a hostile swap must not crash OR HANG the guard
     # before the exit banner (panel rounds 2-4, codex×2). See _safe_task_fingerprint.
     task_hash = _safe_task_fingerprint(task_file) if task_file else None
-    # `z_read_ok` lets _detect_tamper fail CLOSED when the content-hash guard
-    # could not run: if the readable `git status` succeeded (a git repo) but the
-    # separate `-z` read failed, `dirty_hashes` is empty and the content-hash
-    # compare would silently pass — so surface a degraded-guard warning instead
-    # of a quiet miss (round-5 opus/grok).
     # `is_git` (A2): a cheap `.git` probe that lets _detect_tamper distinguish
     # "git repo whose readable `git status` FAILED" (fail CLOSED) from "genuinely
     # not a git repo" (documented uncontained fallback), symmetric with the
@@ -466,17 +522,60 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None) -> dict:
     # `git -C project_path status` reports on that ancestor repo. Matches a `.git`
     # dir OR file (worktrees/submodules). Pure filesystem stats — never a
     # subprocess that could itself hang.
-    def _in_git_repo(path: Path) -> bool:
-        p = path
-        while True:
-            if (p / ".git").exists():
-                return True
-            if p.parent == p:
-                return False
-            p = p.parent
-    return {"porcelain": porcelain, "task_hash": task_hash,
+    snap = {"porcelain": porcelain, "task_hash": task_hash,
             "dirty_hashes": dirty_hashes, "z_read_ok": z_out is not None,
-            "is_git": _in_git_repo(project_path)}
+            "is_git": _in_git_repo(Path(project_path)),
+            "hash_scope_ok": hash_scope_ok, "prefix": prefix,
+            "head": _git_head_state(Path(project_path)) if porcelain is not None else {"state": "n/a", "value": None},
+            # Strict own-repo check (like the fingerprint's strict mode): a root
+            # whose toplevel is NOT itself is not its own repo (its `.git` is gone
+            # or never existed — git would report the PARENT's status for it).
+            "own_repo": (toplevel is not None and prefix in ("", ".")) if porcelain is not None else False}
+    if task_file is not None:
+        snap["taskdir_identity"] = _taskdir_identity(Path(task_file))
+    # code_roots (depth 1 only — a root's own code_roots are not followed).
+    roots: dict = {}
+    if _depth == 0:
+        try:
+            cfg = load_config(Path(project_path))
+            rels = _code_roots(cfg)
+        except Exception:      # noqa: BLE001 — config is advisory, never a crash here
+            rels = []
+        proj_resolved = None
+        try:
+            proj_resolved = Path(project_path).resolve()
+        except (OSError, RuntimeError, ValueError):
+            proj_resolved = None
+        for rel in rels:
+            cand = Path(project_path) / rel
+            identity = _scope_identity(Path(project_path), cand)
+            try:
+                cand_resolved = cand.resolve()
+                contained = proj_resolved is not None and (
+                    cand_resolved == proj_resolved or proj_resolved in cand_resolved.parents)
+            except (OSError, RuntimeError, ValueError):
+                contained = False
+            entry: dict = {"identity": identity, "contained": contained, "snap": None}
+            if contained:
+                try:
+                    entry["snap"] = _snapshot_repo_state(cand, None, _depth=1)
+                except Exception as _e:   # noqa: BLE001
+                    entry["snap"] = None
+                    entry["error"] = str(_e)
+            roots[rel] = entry
+    snap["roots"] = roots
+    return snap
+
+
+def _in_git_repo(path: Path) -> bool:
+    """`.git` ancestor probe (see `_snapshot_repo_state`'s `is_git`)."""
+    p = path
+    while True:
+        if (p / ".git").exists():
+            return True
+        if p.parent == p:
+            return False
+        p = p.parent
 
 
 # Each mode accepts BOTH placeholder generations: pre-1.5.2 templates say
@@ -600,16 +699,105 @@ def _judge_log_name(backend: str) -> str:
     }.get(backend, "judge.log")
 
 
-def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> list[str]:
-    """Compare current repo state against a `_snapshot_repo_state` result.
-    Returns human-readable change descriptions (empty list = no tamper).
+def _prefixed(prefix: "str | None", body: str) -> "re.Pattern":
+    """A porcelain-LINE exemption regex that also matches the toplevel-relative
+    form git emits for a SUBDIRECTORY project (task 059, P3): `^..\s+"?` then an
+    optional `<prefix>/` then `body`. The readable line itself is never parsed
+    or rewritten — only matched."""
+    pre = "" if prefix in (None, "", ".") else "(?:" + re.escape(prefix) + "/)?"
+    return re.compile(r'^..\s+"?' + pre + body)
 
-    Closed gap (T3): a judge editing a file that was ALREADY dirty before the
-    run produces an identical porcelain line, but its content hash in
-    `dirty_hashes` changes, so a content-only edit to an already-modified
-    non-task.md file is now caught; a revert-to-clean or untracked deletion is
-    caught by the REMOVED-porcelain-line diff. task.md is covered by its own
-    hash (and excluded from the dirty-hash compare to avoid a duplicate report).
+
+def _scope_changes(before: dict, after: dict, *, label: str = "",
+                   line_exempt: "list[re.Pattern]" = (), path_exempt: "list[re.Pattern]" = (),
+                   task_rel: "str | None" = None) -> "tuple[list[str], list[str]]":
+    """Porcelain-line and content-hash comparison for ONE git scope (the outer
+    tree or a `code_roots` root). Returns (mutations, cautions). `label` is a
+    `code root <rel>: ` prefix for nested scopes so an inner `x.py` never reads
+    as the outer `x.py` (the readable porcelain line is never parsed, so the
+    path is named by scope + line rather than rewritten)."""
+    mutations: list[str] = []
+    cautions: list[str] = []
+    b_porc, a_porc = before.get("porcelain"), after.get("porcelain")
+    # Named degradations (CAUTIONS since task 059 — the guard could not run, which
+    # is not evidence that a judge wrote anything; printed + recorded, and
+    # non-certifying for a high-consequence close). Round-5's rationale still
+    # holds: never a SILENT pass.
+    if a_porc is not None and not after.get("z_read_ok", False):
+        cautions.append(f"{label}content-hash guard degraded: could not enumerate dirty "
+                        "files at close (`git status -z` failed)")
+    if b_porc is not None and not before.get("z_read_ok", False):
+        cautions.append(f"{label}content-hash guard degraded: dirty files were not "
+                        "enumerable at review start (`git status -z` failed)")
+    if a_porc is not None and not after.get("hash_scope_ok", True):
+        cautions.append(f"{label}content-hash guard degraded: hash scope unresolvable at close "
+                        "(`git rev-parse --show-toplevel` failed) — no content hashes taken")
+    if b_porc is not None and not before.get("hash_scope_ok", True):
+        cautions.append(f"{label}content-hash guard degraded: hash scope unresolvable at review "
+                        "start (`git rev-parse --show-toplevel` failed) — no content hashes taken")
+    if a_porc is None and after.get("is_git"):
+        cautions.append(f"{label}content-hash guard degraded: `git status` did not run at "
+                        "close on a git repo (hostile/huge tree, corrupt index, or "
+                        "repo broken?)")
+    if b_porc is None and before.get("is_git"):
+        cautions.append(f"{label}content-hash guard degraded: `git status` did not run at "
+                        "review start on a git repo (hostile/huge tree, corrupt "
+                        "index, or repo broken?)")
+    # HEAD (P1/P8): a moved HEAD is a concurrent COMMIT — a read-only judge cannot
+    # commit — so it is a caution about what the verdict describes, never
+    # 'a judge modified the repo'; a read ERROR on either side is a caution too
+    # (two errors must not compare equal and hide a move).
+    bh, ah = before.get("head") or {}, after.get("head") or {}
+    if bh.get("state") == "error" or ah.get("state") == "error":
+        cautions.append(f"{label}HEAD could not be read on one side of the review — a "
+                        "concurrent commit would go unnoticed")
+    elif bh.get("state") == "ok" and ah.get("state") == "ok" and bh.get("value") != ah.get("value"):
+        cautions.append(f"{label}head moved during review ({str(bh.get('value'))[:12]} → "
+                        f"{str(ah.get('value'))[:12]}) — a concurrent commit; the verdict "
+                        "may not describe the current HEAD")
+    if (b_porc is None) != (a_porc is None):
+        # git↔non-git transition WHILE a review runs: `git status` succeeded once
+        # and failed the other time — the most likely cause is a rogue deleting
+        # `.git/` (catastrophic, history-destroying tamper) or otherwise breaking
+        # the repo. Without this, both porcelain reads being unequal-but-one-None
+        # skips the line diff and `dirty_hashes` is empty, so total repo
+        # destruction produced ZERO signal (round-4 sonnet, Critical). MUTATION.
+        mutations.append(f"{label}git repository state became unreadable during review "
+                         "(.git removed or repo broken?)")
+    if b_porc is not None and a_porc is not None and b_porc != a_porc:
+        b_lines, a_lines = set(b_porc.splitlines()), set(a_porc.splitlines())
+        # NEW porcelain lines: a rogue created/modified a tracked or untracked
+        # file. REMOVED lines: a rogue reverted an already-dirty file to clean or
+        # deleted an untracked one — also a working-tree mutation, and one the
+        # content-hash diff below cannot see (the path is gone from `after`).
+        for line in sorted(a_lines - b_lines):
+            if any(rx.match(line) for rx in line_exempt):
+                continue
+            mutations.append(f"{label}working tree: {line.strip()}")
+        for line in sorted(b_lines - a_lines):
+            if any(rx.match(line) for rx in line_exempt):
+                continue
+            mutations.append(f"{label}working tree reverted/removed: {line.strip()}")
+    # Content edits to files that were ALREADY dirty at snapshot time — an
+    # identical porcelain line, so only the content hash reveals them. Compare
+    # paths present in BOTH snapshots (new / removed paths are named by the
+    # porcelain-line diff above). Keys are PROJECT-relative (task 059).
+    b_dirty = before.get("dirty_hashes") or {}
+    a_dirty = after.get("dirty_hashes") or {}
+    for rel in sorted(set(b_dirty) & set(a_dirty)):
+        if rel == task_rel or any(rx.match(rel) for rx in path_exempt):
+            continue
+        if b_dirty[rel] != a_dirty[rel]:
+            mutations.append(f"{label}working tree content changed: {rel}")
+    return mutations, cautions
+
+
+def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, after: dict) -> dict:
+    """The comparison behind `_detect_tamper_full` — split into MUTATIONS (a
+    judge, or something, wrote the tree: hard stop) and CAUTIONS (the guard
+    could not fully run, or a concurrent commit moved HEAD: printed, recorded,
+    review kept but non-certifying for a high-consequence close). Task 059.
+
     Residual limitations (accepted, not silent): (1) a file larger than
     `_TAMPER_HASH_CAP`, or files past the `_TAMPER_TOTAL_BUDGET` cumulative
     ceiling, record an honest `unhashed:*` marker, so an edit that keeps such a
@@ -622,25 +810,21 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     `git add` that flips ` M f`→`M  f`) as a working-tree change — a safe
     direction (never a missed edit), and one that does not arise while judges
     run read-only."""
-    after = _snapshot_repo_state(project_path, task_file)
-    changes: list[str] = []
+    prefix = before.get("prefix") if before.get("prefix") is not None else after.get("prefix")
     # F22: the conversation monitor writes trace.md/session.md under
     # `.agent/monitor/` (or `.agent/<user>/monitor/`) WHILE panels run — a
     # sanctioned concurrent writer whose own sandbox confines it to exactly that
     # directory, so churn there is expected, not a judge writing the repo.
     # Everything else under .agent still flags. Two matchers: one for porcelain
-    # LINES, one for the bare paths keyed in `dirty_hashes`.
-    _monitor_re = re.compile(r"^..\s+\"?\.agent(/[^/]+)?/monitor/")
-    _monitor_path_re = re.compile(r"^\.agent(/[^/]+)?/monitor/")
-    # task 054: `tasks dashboard` records the provider catalog baseline at
-    # `.agent/model-catalog.json` (create or update) and may legitimately run
-    # WHILE a panel runs (the 038 background-panel advisory suggests exactly
-    # that). On an install whose .gitignore predates the entry the file is
-    # untracked, so its `??` / ` M` line is sanctioned churn like the monitor
-    # dir — that ONE path only (a sibling file still flags).
-    _catalog_re = re.compile(r"^..\s+\"?\.agent/model-catalog\.json\"?$")
-    _catalog_path_re = re.compile(r"^\.agent/model-catalog\.json$")
-    b_porc, a_porc = before.get("porcelain"), after.get("porcelain")
+    # LINES (prefix-aware for a subdir project), one for the PROJECT-relative
+    # paths keyed in `dirty_hashes`.
+    line_exempt = [_prefixed(prefix, r"\.agent(/[^/]+)?/monitor/"),
+                   # task 054: `tasks dashboard` records the provider catalog baseline at
+                   # `.agent/model-catalog.json` (create or update) and may legitimately
+                   # run WHILE a panel runs — that ONE path only (a sibling file still flags).
+                   _prefixed(prefix, r"\.agent/model-catalog\.json\"?$")]
+    path_exempt = [re.compile(r"^\.agent(/[^/]+)?/monitor/"),
+                   re.compile(r"^\.agent/model-catalog\.json$")]
     # E1: the task's OWN record directory is sanctioned churn — a panel
     # legitimately writes judge.md / review artifacts / task.md updates there
     # WHILE it runs. When that directory is UNTRACKED at snapshot time, `-uall`
@@ -653,92 +837,25 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
     # fully armed — a rogue editing a tracked file there is still caught. Either
     # way task.md's own CONTENT stays guarded by `task_hash` (below), so a rogue
     # rewriting the work plan is caught regardless.
-    _taskdir_re = None
-    _taskdir_path_re = None
-    if task_file is not None and b_porc:
-        try:
-            _td = task_file.parent.relative_to(project_path).as_posix()
-        except (ValueError, AttributeError):
-            _td = None
-        if _td and _td != ".":
-            _untracked_td_re = re.compile(r'^\?\?\s+"?' + re.escape(_td) + r"/")
-            if any(_untracked_td_re.match(ln) for ln in b_porc.splitlines()):
-                _taskdir_re = re.compile(r'^..\s+"?' + re.escape(_td) + r"/")
-                _taskdir_path_re = re.compile(r"^" + re.escape(_td) + r"/")
-    # Fail CLOSED if the content-hash guard could not run: a git repo whose `-z`
-    # enumeration failed on either snapshot has an empty/partial `dirty_hashes`,
-    # so a content-only edit to an already-dirty file would slip the compare
-    # SILENTLY. Surface it loudly rather than pass a hollow check (round-5).
-    if a_porc is not None and not after.get("z_read_ok", False):
-        changes.append("content-hash guard degraded: could not enumerate dirty "
-                       "files at close (`git status -z` failed)")
-    if b_porc is not None and not before.get("z_read_ok", False):
-        changes.append("content-hash guard degraded: dirty files were not "
-                       "enumerable at review start (`git status -z` failed)")
-    # A2: the READABLE `git status --porcelain` failing is asymmetric with the
-    # `-z` guard above — a git repo whose readable status returned None looks
-    # identical to a genuine non-git repo, so when BOTH snapshots are porcelain
-    # None the git↔non-git transition below does not fire and detection silently
-    # downgrades to task-hash-only. `is_git` (a `.git` probe) tells "git repo
-    # whose `git status` failed" (fail CLOSED) from "not a git repo at all"
-    # (documented uncontained fallback — stays silent, is_git False).
-    if a_porc is None and after.get("is_git"):
-        changes.append("content-hash guard degraded: `git status` did not run at "
-                       "close on a git repo (hostile/huge tree, corrupt index, or "
-                       "repo broken?)")
-    if b_porc is None and before.get("is_git"):
-        changes.append("content-hash guard degraded: `git status` did not run at "
-                       "review start on a git repo (hostile/huge tree, corrupt "
-                       "index, or repo broken?)")
-    if (b_porc is None) != (a_porc is None):
-        # git↔non-git transition WHILE a review runs: `git status` succeeded once
-        # and failed the other time — the most likely cause is a rogue deleting
-        # `.git/` (catastrophic, history-destroying tamper) or otherwise breaking
-        # the repo. Without this, both porcelain reads being unequal-but-one-None
-        # skips the line diff and `dirty_hashes` is empty, so total repo
-        # destruction produced ZERO signal (round-4 sonnet, Critical).
-        changes.append("git repository state became unreadable during review "
-                       "(.git removed or repo broken?)")
-    if b_porc is not None and a_porc is not None and b_porc != a_porc:
-        b_lines, a_lines = set(b_porc.splitlines()), set(a_porc.splitlines())
-        # NEW porcelain lines: a rogue created/modified a tracked or untracked
-        # file. REMOVED lines: a rogue reverted an already-dirty file to clean or
-        # deleted an untracked one — also a working-tree mutation, and one the
-        # content-hash diff below cannot see (the path is gone from `after`).
-        for line in sorted(a_lines - b_lines):
-            if _monitor_re.match(line) or _catalog_re.match(line):
-                continue
-            if _taskdir_re and _taskdir_re.match(line):
-                continue
-            changes.append(f"working tree: {line.strip()}")
-        for line in sorted(b_lines - a_lines):
-            if _monitor_re.match(line) or _catalog_re.match(line):
-                continue
-            if _taskdir_re and _taskdir_re.match(line):
-                continue
-            changes.append(f"working tree reverted/removed: {line.strip()}")
-    # Content edits to files that were ALREADY dirty at snapshot time — an
-    # identical porcelain line, so only the content hash reveals them. Compare
-    # paths present in BOTH snapshots (new / removed paths are named by the
-    # porcelain-line diff above). Skip the monitor dir and task.md (task_hash
-    # covers it). `.as_posix()`: dirty_hashes keys come from git porcelain, which
-    # always uses '/', so the task.md path must be normalised to '/' or the
-    # de-dup never matches on windows-git-bash (task.md would report twice).
+    b_porc = before.get("porcelain")
     _task_rel = None
     if task_file is not None:
         try:
             _task_rel = task_file.relative_to(project_path).as_posix()
         except (ValueError, AttributeError):
             _task_rel = task_file.name
-    b_dirty = before.get("dirty_hashes") or {}
-    a_dirty = after.get("dirty_hashes") or {}
-    for rel in sorted(set(b_dirty) & set(a_dirty)):
-        if _monitor_path_re.match(rel) or _catalog_path_re.match(rel) or rel == _task_rel:
-            continue
-        if _taskdir_path_re and _taskdir_path_re.match(rel):
-            continue
-        if b_dirty[rel] != a_dirty[rel]:
-            changes.append(f"working tree content changed: {rel}")
+        try:
+            _td = task_file.parent.relative_to(project_path).as_posix()
+        except (ValueError, AttributeError):
+            _td = None
+        if _td and _td != "." and b_porc:
+            _untracked_td_re = _prefixed(prefix, re.escape(_td) + r"/").pattern.replace(r"^..\s+", r"^\?\?\s+", 1)
+            if any(re.match(_untracked_td_re, ln) for ln in b_porc.splitlines()):
+                line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))
+                path_exempt.append(re.compile(r"^" + re.escape(_td) + r"/"))
+    mutations, cautions = _scope_changes(before, after, line_exempt=line_exempt,
+                                         path_exempt=path_exempt, task_rel=_task_rel)
+    # task.md — its own hash (the primary tamper target).
     b_hash, a_hash = before.get("task_hash"), after.get("task_hash")
     if b_hash:
         rel: Path | str = task_file
@@ -752,7 +869,7 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
             # non-git fallback the task hash is the ONLY signal, and a bare
             # `b_hash and a_hash` compare would short-circuit on the deletion
             # (round-3 sonnet, Critical).
-            changes.append(f"task.md deleted ({rel})")
+            mutations.append(f"task.md deleted ({rel})")
         elif a_hash == "unreadable" and b_hash != "unreadable":
             # A readable regular file BECAME non-regular mid-review (dir / FIFO /
             # device, or perms stripped) — a tamper. Both-unreadable is a stable
@@ -761,13 +878,84 @@ def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> 
             # round-5 fail-closed form — panel round-6 opus/codex:sol). Oversize
             # is caught instead by the size-bearing `too-large:<size>` marker
             # flowing through the change compare below.
-            changes.append(f"task.md is no longer a readable regular file — "
-                           f"swapped for a directory/FIFO/device or perms stripped ({rel})")
+            mutations.append(f"task.md is no longer a readable regular file — "
+                             f"swapped for a directory/FIFO/device or perms stripped ({rel})")
         elif b_hash != a_hash:
             # Content changed, OR the size-bearing oversize marker changed (a
             # grow/shrink across or within the cap), OR a readable↔oversize flip.
-            changes.append(f"task.md content changed ({rel})")
-    return changes
+            mutations.append(f"task.md content changed ({rel})")
+    # Task-dir identity (P6): git-independent.
+    bti, ati = before.get("taskdir_identity"), after.get("taskdir_identity")
+    if bti is not None and ati is not None and bti != ati:
+        mutations.append("task directory identity changed — swapped/relinked during review "
+                         f"({bti.get('td_real')} → {ati.get('td_real')})")
+    # code_roots (T019 F3 / P7 / P10): identity + containment are MUTATIONS when
+    # they change; a root that stops being its own readable repo mid-review is a
+    # mutation (a judge deleted its .git); a root unavailable on BOTH sides is a
+    # caution (unavailable ≠ unwritten); inner changes are labelled `<root>/`.
+    b_roots, a_roots = before.get("roots") or {}, after.get("roots") or {}
+    for rel in sorted(set(b_roots) | set(a_roots)):
+        br, ar = b_roots.get(rel), a_roots.get(rel)
+        if br is None or ar is None:
+            cautions.append(f"code root {rel}: configured on only one side of the review "
+                            "(config changed?)")
+            continue
+        if br.get("identity") != ar.get("identity") or br.get("contained") != ar.get("contained"):
+            mutations.append(f"code root {rel}: identity changed ({br.get('identity')} → "
+                             f"{ar.get('identity')}) — repointed/relinked during review")
+            continue
+        bs, as_ = br.get("snap"), ar.get("snap")
+        b_ok = bool(bs and bs.get("porcelain") is not None and bs.get("own_repo"))
+        a_ok = bool(as_ and as_.get("porcelain") is not None and as_.get("own_repo"))
+        if b_ok and not a_ok:
+            mutations.append(f"code root {rel}: became unreadable / not its own git repo during "
+                             "review (.git removed or repo broken?)")
+            continue
+        if not b_ok and not a_ok:
+            cautions.append(f"code root {rel}: unavailable (not a readable git repo of its own) — "
+                            "edits inside it are not guarded")
+            continue
+        if not b_ok and a_ok:
+            cautions.append(f"code root {rel}: became readable during review (initialised?)")
+            continue
+        m, c = _scope_changes(bs, as_, label=f"code root {rel}: ")
+        mutations += m
+        cautions += c
+    return {"mutations": mutations, "cautions": cautions}
+
+
+def _detect_tamper_full(project_path: Path, task_file: Path | None, before: dict) -> dict:
+    """Compare current repo state against a `_snapshot_repo_state` result.
+    Returns `{"mutations": [...], "cautions": [...]}` (task 059). Wrapped so an
+    unexpected raise NEVER skips a guaranteed banner: an exception is a
+    MUTATION-class `review UNVERIFIED` entry (P4/grok — an errored detector is
+    not a named degradation, so it keeps the hard-stop posture)."""
+    try:
+        after = _snapshot_repo_state(project_path, task_file)
+        return _classify_tamper(project_path, task_file, before, after)
+    except Exception as _e:   # noqa: BLE001 — last-resort guard, must not raise
+        return {"mutations": [f"tamper check itself errored ({_e}) — review UNVERIFIED"],
+                "cautions": []}
+
+
+def _detect_tamper(project_path: Path, task_file: Path | None, before: dict) -> list[str]:
+    """Legacy union view: mutations + cautions as one list (empty = clean AND
+    fully verified). Kept for the tail-cert path (fail-closed on ANY entry) and
+    the existing tests; the panel/single paths use `_detect_tamper_full`."""
+    full = _detect_tamper_full(project_path, task_file, before)
+    return list(full["mutations"]) + list(full["cautions"])
+
+
+def _degraded_notice(cautions: list[str]) -> str:
+    """Advisory for a review whose tamper guard could not fully run (task 059,
+    T009 prioritized): the verdict is KEPT, its tamper-freedom is UNVERIFIED on
+    the named points, and — recorded in the round header — a high-consequence
+    close will not certify on it."""
+    lines = ["⚠ tamper guard degraded — review KEPT, tamper-freedom UNVERIFIED on:"]
+    lines += [f"    - {c}" for c in cautions]
+    lines.append("  (recorded in the round header; an assertive/irreversible close treats "
+                 "this round like a stale one)")
+    return "\n".join(lines)
 
 
 def _detect_tamper_safe(project_path: Path, task_file: Path | None, before: dict) -> list[str]:
@@ -1167,16 +1355,23 @@ def cmd_panel_review(cmd_args):
                                    _judge_status(output, timed_out=_timed_out),
                                    _parse_judge_usage(output)))
 
-    _tamper_changes = _detect_tamper_safe(project_path, task_file, _tamper_before)
-    # On tamper the panel, like the single-judge path, does NOTHING but emit the
-    # banner and exit — before the tree fingerprint and judge.md assembly/write
-    # below, any of which could hang (an unbounded/FIFO read) or write through an
-    # attacker-redirected task dir on a hostile tree (panel rounds 9-10 codex:sol).
-    # The panel verdicts are untrustworthy on a mutated tree, so not persisting
-    # them costs nothing; the operator inspects per the banner.
-    if _tamper_changes:
-        print("\n" + _tamper_banner(_tamper_changes), file=sys.stderr, flush=True)
+    _tamper_full = _detect_tamper_full(project_path, task_file, _tamper_before)
+    # On a MUTATION the panel, like the single-judge path, does NOTHING but emit
+    # the banner and exit — before the tree fingerprint and judge.md assembly/
+    # write below, any of which could hang (an unbounded/FIFO read) or write
+    # through an attacker-redirected task dir on a hostile tree (panel rounds
+    # 9-10 codex:sol). The panel verdicts are untrustworthy on a mutated tree, so
+    # not persisting them costs nothing; the operator inspects per the banner.
+    # A CAUTION (task 059, T009): the guard could not fully run — that is not
+    # evidence a judge wrote anything, so the paid verdict is KEPT; the notice is
+    # printed and the round header records `**Tamper guard:** degraded`, which a
+    # high-consequence close treats like a stale round (lifecycle, W3b).
+    if _tamper_full["mutations"]:
+        print("\n" + _tamper_banner(_tamper_full["mutations"]), file=sys.stderr, flush=True)
         sys.exit(1)
+    _tamper_cautions = list(_tamper_full["cautions"])
+    if _tamper_cautions:
+        print("\n" + _degraded_notice(_tamper_cautions), file=sys.stderr, flush=True)
 
     # Clean tree: NOW emit the per-seat spend records (best-effort — fully
     # swallowed inside the helper, so they never affect the review; and past the
@@ -1246,6 +1441,11 @@ def cmd_panel_review(cmd_args):
         _judged_head = ""
     if _judged_head:
         lines.append(f"**Commit:** {_judged_head}\n")
+    # Tamper-guard receipt (task 059): what the guard could and could not verify
+    # for THIS round, on one line the close-gate reader can key on.
+    lines.append("**Tamper guard:** " + (
+        "degraded — " + "; ".join(c.replace("\n", " ") for c in _tamper_cautions)
+        if _tamper_cautions else "clean") + "\n")
     _fp = tree_state_fingerprint(project_path)
     if _fp:
         lines.append(f"**Tree-state:** {_fp}\n")
@@ -1672,14 +1872,14 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
     # snapshot the repo before spawning and refuse the verdict if the read-only
     # judge mutated the tree. The close-time fingerprint CAS excludes `.agent/`,
     # so without this a rogue write to task.md/judge.md during certification is
-    # invisible. Best-effort snapshot: if it can't be taken we still run, matching
-    # the other paths' posture on uncontained platforms.
+    # invisible. Task 059 (T036): the snapshot is REQUIRED — if it cannot be
+    # taken there is no verdict (a single certifying judge stands in for a whole
+    # panel, so this path stays fail-closed where the panel/single paths advise).
     _tf = Path(task_file) if task_file else None
-    _tb = None
     try:
         _tb = _snapshot_repo_state(project_path, _tf)
     except Exception:
-        _tb = None
+        return None                    # no snapshot → no certification
     # Spend record (task 042): bracket the raw tail-cert call here in the caller
     # (it has task_file + timeout in scope, and leaving the raw runner's 3-arg
     # signature untouched keeps its many test doubles valid). The elapsed spans
@@ -1687,12 +1887,12 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
     # tests, so the emit runs in production, not in those doubles (by design).
     _tc_t0 = time.monotonic()
     raw = _run_tail_cert_judge_raw(project_path, prompt, timeout_secs)
-    if _tb is not None:
-        try:
-            if _detect_tamper_safe(project_path, _tf, _tb):
-                return None            # repo mutated during cert → no verdict
-        except Exception:
-            return None                # tamper check itself failed → fail closed
+    try:
+        _full = _detect_tamper_full(project_path, _tf, _tb)
+        if _full["mutations"] or _full["cautions"]:
+            return None                # repo mutated OR guard degraded → no verdict
+    except Exception:
+        return None                    # tamper check itself failed → fail closed
                                        # (r4 grok#3: never certify on an errored guard)
     # Emit the spend record only PAST the tamper check (clean tree) — consistent
     # with the panel/single paths, and so the journal write can never precede /
@@ -1884,17 +2084,26 @@ def cmd_single_review(cmd, cmd_args):
 
     review_label = "plan review" if review_mode == "plan" else "impl review"
 
-    def _emit_tamper(changes):
+    def _emit_tamper(full):
         # A1: the loud tamper banner, shared by every post-snapshot single-judge
         # exit (timeout / budget / dead-pin / the normal hard-stop). Print-only:
         # each call site owns its own exit code, so this never exits itself.
-        if changes:
-            print("\n" + _tamper_banner(changes), file=sys.stderr, flush=True)
+        # Task 059: `full` is the mutations/cautions split — a MUTATION prints the
+        # banner; a CAUTION alone prints the degraded notice (review kept).
+        if full["mutations"]:
+            print("\n" + _tamper_banner(full["mutations"]), file=sys.stderr, flush=True)
+        elif full["cautions"]:
+            print("\n" + _degraded_notice(full["cautions"]), file=sys.stderr, flush=True)
 
     def _safe_detect():
-        # The single-judge alias for the module-level `_detect_tamper_safe`
-        # (which the panel path also uses — parity, opus round-7).
-        return _detect_tamper_safe(project_path, task_file, _tamper_before)
+        # The single-judge alias for the module-level `_detect_tamper_full`
+        # (which the panel path also uses — parity, opus round-7); never raises.
+        return _detect_tamper_full(project_path, task_file, _tamper_before)
+
+    def _tamper_mark(full):
+        # The durable one-line receipt for the judge log / findings (task 059).
+        return ("degraded — " + "; ".join(c.replace("\n", " ") for c in full["cautions"])
+                if full["cautions"] else "clean")
 
     def _bail_review_timeout(expired=None):
         # Only reachable when a finite HARD timeout is in force.
@@ -1968,7 +2177,7 @@ def cmd_single_review(cmd, cmd_args):
         # tamper hard-stop records no spend" across every review path. The closure
         # resolves `_spend_t0`/`_spend_seat`/`_spend_round` at call time (all call
         # sites are after their assignment). Best-effort — swallowed.
-        if not _to_changes:
+        if not _to_changes["mutations"]:
             _journal_review_spend(
                 project_path, kind="single", seat=_spend_seat,
                 task=task_num, round_no=_spend_round,
@@ -2306,9 +2515,12 @@ def cmd_single_review(cmd, cmd_args):
     # the banner. `_safe_detect` itself never raises (last-resort guarded).
     _tamper_changes = _safe_detect()
     judge_log = task_file.parent / _judge_log_name(backend)
-    if _tamper_changes:
+    if _tamper_changes["mutations"]:
         _emit_tamper(_tamper_changes)
         sys.exit(1)
+    if _tamper_changes["cautions"]:
+        _emit_tamper(_tamper_changes)          # degraded notice; the review is KEPT (task 059)
+    _tamper_receipt = _tamper_mark(_tamper_changes)
 
     # Structured judge stdout (task 056): codex `--json` / grok `--output-format
     # json` carry the real token usage. Extract ONCE here — before the operator
@@ -2422,7 +2634,11 @@ def cmd_single_review(cmd, cmd_args):
         _ctx_header = ("[context] "
                        + (" | ".join(context_receipts) if context_receipts
                           else "full task.md + mind map delivered (no truncation)")
-                       + "\n\n")
+                       + "\n"
+                       # Task 059: the tamper-guard receipt rides with the log so a
+                       # kept-but-degraded review stays visibly unverified after
+                       # the terminal output is gone.
+                       + f"[tamper guard] {_tamper_receipt}\n\n")
         # Best-effort: a rogue that returns 0 but deleted/locked the task dir
         # must not crash this write BEFORE the tamper hard-stop below (codex:terra
         # round-5 Critical) — the judge output was already streamed to stdout, so
@@ -2494,7 +2710,12 @@ def cmd_single_review(cmd, cmd_args):
               f"Judge output was printed above.", file=sys.stderr, flush=True)
         sys.exit(1)
     if result.returncode == 0 and saved_review_text and saved_review_text.strip():
-        refusal = _write_review_findings(task_file, review_mode, saved_review_text)
+        # Task 059: a degraded guard is stamped on the findings themselves so the
+        # task record says what was and was not verified (clean adds nothing).
+        _findings_text = saved_review_text
+        if _tamper_changes["cautions"]:
+            _findings_text = f"**Tamper guard: {_tamper_receipt}**\n\n" + saved_review_text
+        refusal = _write_review_findings(task_file, review_mode, _findings_text)
         if refusal is None:
             print(f"Findings written to {task_file.relative_to(project_path)} "
                   f"(## {'Plan' if review_mode == 'plan' else 'Implementation'} Review)",
