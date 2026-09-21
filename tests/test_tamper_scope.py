@@ -44,6 +44,32 @@ def _repo() -> Path:
     return d
 
 
+def _rmtree_git(case: unittest.TestCase, target: Path, *, must_vanish: bool = True):
+    """Delete a tree that contains a git repo, Windows-safely.
+
+    Git marks pack/object files READ-ONLY, so a plain `shutil.rmtree` of `.git`
+    raises `WinError 5` on the windows/git-bash lane — four of these tests
+    errored there. Clear the read-only bit and retry; if the OS still refuses
+    (locked handles) SKIP rather than error: the logic under test is proven on
+    POSIX and unit-injectable elsewhere. Same pattern as
+    `test_judge_isolation.test_git_directory_deletion_is_caught`."""
+    import shutil
+    import stat as _stat
+
+    def _force(func, path, _exc):
+        try:
+            os.chmod(path, _stat.S_IWRITE)
+            func(path)
+        except OSError:
+            pass
+    try:
+        shutil.rmtree(target, onerror=_force)
+    except OSError:
+        case.skipTest(f"OS will not let the test delete {target.name}")
+    if must_vanish and target.exists():
+        case.skipTest(f"OS retained {target.name} despite rmtree (locked handles)")
+
+
 def _commit_all(d: Path, msg="c"):
     _git("add", "-A", cwd=d)
     _git("commit", "-qm", msg, cwd=d)
@@ -150,8 +176,7 @@ class CodeRoots(unittest.TestCase):
     def test_root_git_deleted_mid_review_is_a_mutation(self):
         proj, nested, tf = self._with_root()
         before = R._snapshot_repo_state(proj, tf)
-        import shutil
-        shutil.rmtree(nested / ".git")
+        _rmtree_git(self, nested / ".git")
         full = R._detect_tamper_full(proj, tf, before)
         self.assertTrue(any("nested" in m and "unreadable" in m for m in full["mutations"]), full)
 
@@ -164,8 +189,7 @@ class CodeRoots(unittest.TestCase):
         a, b = base / "a", base / "b"
         _git("clone", "-q", str(nested), str(a), cwd=base)
         _git("clone", "-q", str(nested), str(b), cwd=base)
-        import shutil
-        shutil.rmtree(nested)
+        _rmtree_git(self, nested)
         try:
             os.symlink(a, nested, target_is_directory=True)
         except (OSError, NotImplementedError):
@@ -225,8 +249,7 @@ class TaskDirIdentity(unittest.TestCase):
         elsewhere = Path(tempfile.mkdtemp()) / "001-x"
         elsewhere.mkdir()
         (elsewhere / "task.md").write_text("gate\n", encoding="utf-8")       # identical content
-        import shutil
-        shutil.rmtree(td)
+        _rmtree_git(self, td)
         try:
             os.symlink(elsewhere, td, target_is_directory=True)
         except (OSError, NotImplementedError):
@@ -267,8 +290,7 @@ class DetectorSplit(unittest.TestCase):
     def test_git_dir_deletion_is_a_mutation(self):
         d, tf = self._clean()
         before = R._snapshot_repo_state(d, tf)
-        import shutil
-        shutil.rmtree(d / ".git")
+        _rmtree_git(self, d / ".git")
         full = R._detect_tamper_full(d, tf, before)
         self.assertTrue(any("unreadable" in m for m in full["mutations"]), full)
 
@@ -725,8 +747,7 @@ class OneSidedStatusFailure(unittest.TestCase):
     def test_real_git_deletion_is_still_a_mutation(self):
         d, tf = self._proj()
         before = R._snapshot_repo_state(d, tf)
-        import shutil
-        shutil.rmtree(d / ".git")
+        _rmtree_git(self, d / ".git")
         full = R._detect_tamper_full(d, tf, before)
         self.assertTrue(any("unreadable" in m for m in full["mutations"]), full)
 
