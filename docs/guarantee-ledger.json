@@ -3681,7 +3681,7 @@
     {
       "id": "PB-JUDGE-TAMPER",
       "category": "judges-and-reviews",
-      "statement": "Review paths snapshot the repo before spawning judges and compare after, splitting findings into MUTATIONS and CAUTIONS. Mutations — new/removed Git porcelain entries, a changed per-dirty-file content hash (dirty files opened at the git TOPLEVEL and keyed PROJECT-relative, so a project in a subdirectory of a larger repo is guarded; symlinks hashed by link text), a task.md rewrite/deletion/non-regular swap, a change to the task directory's git-independent identity (realpath + inode + symlink-ness), a `code_roots` root's identity change or readable->unreadable transition or an edit inside it, a git<->non-git transition (e.g. .git deleted), and an errored guard — add a loud banner, refuse ingestion and exit nonzero. Cautions — `git status`/`-z`/`rev-parse --show-toplevel` failing, an unreadable HEAD, a HEAD that MOVED during the review (a read-only judge cannot commit), an unavailable configured root, or an unknown task.md trackedness — keep the paid verdict, print a degraded notice, and record `**Tamper guard:** degraded — <what>` on the round (else `clean`); that receipt blocks a close held to the high-consequence bar (assertive/irreversible/unclassified) with TAMPER-GUARD-DEGRADED, with the stale-panel exits, and tail certification refuses outright.",
+      "statement": "Review paths snapshot the repo before spawning judges and compare after, splitting findings into MUTATIONS and CAUTIONS. Mutations — new/removed Git porcelain entries, a changed per-dirty-file content hash (dirty files opened at the git TOPLEVEL and keyed PROJECT-relative, so a project in a subdirectory of a larger repo is guarded; symlinks hashed by link text), a task.md rewrite/deletion/non-regular swap, a change to the task directory's git-independent identity (realpath + inode + symlink-ness), a `code_roots` root's identity change or readable->unreadable transition or an edit inside it, a `.git` that actually disappeared (probed, so a one-sided `git status` failure is a caution, not a banner), and an errored guard — add a loud banner, refuse ingestion and exit nonzero. Cautions — `git status`/`-z`/`rev-parse --show-toplevel` failing, an unreadable HEAD, a HEAD that MOVED during the review (a read-only judge cannot commit), an unavailable configured root, or an unknown task.md trackedness — keep the paid verdict, print a degraded notice, and record `**Tamper guard:** degraded — <what>` on the round (else `clean`); that receipt blocks a close held to the high-consequence bar (assertive/irreversible/unclassified) with TAMPER-GUARD-DEGRADED, with the stale-panel exits, and tail certification refuses outright.",
       "owner": [
         {
           "path": "plugins/playbook/tasks/review.py",
@@ -4027,6 +4027,65 @@
             "path": "tests/test_tamper_close_gate.py",
             "reference": "ClosePath.test_pre_059_round_without_the_line_still_closes"
           }
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "OneSidedStatusFailure.test_status_failure_with_git_intact_is_caution_only",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "OneSidedStatusFailure.test_real_git_deletion_is_still_a_mutation"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "ConcurrentCommitDuringReview.test_commit_of_dirty_files_is_a_caution_not_a_mutation",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "ConcurrentCommitDuringReview.test_removal_without_a_commit_is_still_a_mutation"
+          },
+          "limitations": [
+            "While HEAD moves, a removed porcelain line is attributed to the commit, so a judge deleting an untracked file in that same window is reported as a caution rather than a banner; new files and content changes still hard-stop."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "RecordFileContentChurn.test_second_round_appending_to_an_untracked_judge_md_is_not_tamper",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "RecordFileContentChurn.test_committed_judge_md_edited_is_still_a_mutation"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "NestedRootExemptions.test_monitor_churn_inside_a_root_is_not_tamper",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "NestedRootExemptions.test_a_real_edit_inside_a_root_still_flags"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_close_gate.py",
+          "reference": "SingleJudgeDegradedAtClose.test_close_records_the_single_judge_degradation",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_close_gate.py",
+            "reference": "SingleJudgeDegradedAtClose.test_reader_is_silent_on_a_clean_log"
+          },
+          "limitations": [
+            "A degraded SINGLE-judge review is advisory at the close (console note + receipt clause), never a block: blocking on non-panel evidence would be new close policy."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -4050,7 +4109,8 @@
         "Live evidence 2026-08-22 (owner Linux account): judge pins opus, sonnet, codex:gpt-5.6-terra:high, codex:gpt-5.6-sol:high, and grok:grok-4.6:high all responded on the `tasks init` live-check; the Phase 8 required_live_evidence (CI-observed judge behavior) remains pending.",
         "The tamper guard EXEMPTS the active task's OWN record directory when it is UNTRACKED at snapshot time (a `?? …taskdir/` line in the `before` porcelain) — its record-file churn (the record files, plus the panel's own later judge.md / review-artifact writes) is sanctioned-writer noise, the same class as the existing `.agent/*/monitor/` exclusion — so the porcelain-line and dirty-hash compares skip it. task.md CONTENT stays guarded by task_hash regardless, and judges are write-denied under the OS sandbox where available. BEST-EFFORT BOUND (impl-panel task 045, codex-sol): the gate keys off ANY `?? <taskdir>/` porcelain line, so a TRACKED task dir that merely has a coexisting untracked child also trips the exemption, broadening it to a tracked sibling record (e.g. task-archive.md) for that window; narrowing the gate to the dir/task.md's actual tracked-ness (+ a mixed tracked-dir/untracked-child regression test) is PARKED (task 041, cca748f; red-first test_untracked_task_dir_record_churn_is_not_tamper, negative control test_tracked_task_dir_edit_still_flags). This scopes the statement's “newly written non-ignored files … are caught” for that sanctioned-writer case.",
         "v1.5.45 (task 059): a DEGRADED guard is advisory on the review paths — the verdict is kept and the degradation recorded — so the guarantee for those paths is 'a mutation the guard could see is loudly refused', not 'every review ran with a fully working guard'. The unverified case is carried forward to the close (TAMPER-GUARD-DEGRADED) and to tail certification (refuses), where it fails closed.",
-        "v1.5.45: the moved-HEAD signal is a CAUTION by design (a read-only judge cannot commit, so a HEAD move during a review is a concurrent actor). It therefore does not stop a review, and the certified-tree question remains the freshness fingerprint's (PB-PANEL-FRESHNESS)."
+        "v1.5.45: the moved-HEAD signal is a CAUTION by design (a read-only judge cannot commit, so a HEAD move during a review is a concurrent actor). It therefore does not stop a review, and the certified-tree question remains the freshness fingerprint's (PB-PANEL-FRESHNESS).",
+        "v1.5.45 (task 059, impl-panel round 1): a concurrent COMMIT during a review removes the porcelain lines it committed. A read-only judge cannot commit, so on a moved HEAD those REMOVALS are cautions rather than mutations — which means a judge deleting an untracked file while a commit lands in the same window is reported as a caution. New files and content changes hard-stop either way."
       ],
       "follow_up_phases": [
         2,

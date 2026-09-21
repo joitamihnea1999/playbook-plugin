@@ -527,6 +527,13 @@ class GitDiscoveryBoundaries(unittest.TestCase):
     filesystem boundaries the way git's own discovery does."""
 
     def test_ceiling_stops_the_walk(self):
+        # git's OWN semantics, measured on git 2.54.0 (059 impl-panel r1, opus F2
+        # suggested the ceiling dir should still be probed): with the ceiling set
+        # to the directory that HOLDS .git, `git rev-parse --is-inside-work-tree`
+        # run from a child says "not a git repository" — git does NOT examine the
+        # ceiling's own .git while walking up. Run from the ceiling itself it
+        # succeeds, because the start directory is always examined. This test
+        # pins that behaviour, not our implementation's convenience.
         repo = _repo()
         app = repo / "app"
         app.mkdir()
@@ -618,6 +625,192 @@ class CodexTempLog(unittest.TestCase):
                 os.chdir(cwd)
         self.assertEqual(set(glob.glob(pattern)) - before_files, set(),
                          "a codex -o transcript was left in the system temp dir")
+
+
+class ConcurrentCommitDuringReview(unittest.TestCase):
+    """059 impl-panel r1 (opus F1): committing already-dirty files during a
+    (background) panel REMOVES their porcelain lines. A read-only judge cannot
+    commit, so those removals are the concurrent actor's, not tamper — they must
+    not void the paid panel. New lines and content changes still flag."""
+
+    def _proj(self):
+        d = _repo()
+        (d / "a.py").write_text("a = 1\n", encoding="utf-8")
+        (d / "b.py").write_text("b = 1\n", encoding="utf-8")
+        _commit_all(d)
+        tf = d / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        (d / ".gitignore").write_text("task.md\n", encoding="utf-8")
+        _commit_all(d)
+        return d, tf
+
+    def test_commit_of_dirty_files_is_a_caution_not_a_mutation(self):
+        d, tf = self._proj()
+        (d / "a.py").write_text("a = 2\n", encoding="utf-8")       # dirty BEFORE the panel
+        before = R._snapshot_repo_state(d, tf)
+        _commit_all(d, "the agent commits its own work mid-panel")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+        self.assertTrue(any("head moved" in c.lower() for c in full["cautions"]), full)
+        self.assertTrue(any("no longer listed" in c.lower() or "removed" in c.lower()
+                            for c in full["cautions"]), full)
+
+    def test_a_new_file_during_that_commit_window_still_flags(self):
+        d, tf = self._proj()
+        (d / "a.py").write_text("a = 2\n", encoding="utf-8")
+        before = R._snapshot_repo_state(d, tf)
+        _commit_all(d, "concurrent commit")
+        (d / "rogue.md").write_text("fabricated\n", encoding="utf-8")   # the judge's own write
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("rogue.md" in m for m in full["mutations"]), full)
+
+    def test_content_change_during_that_window_still_flags(self):
+        d, tf = self._proj()
+        (d / "a.py").write_text("a = 2\n", encoding="utf-8")
+        (d / "b.py").write_text("b = 2\n", encoding="utf-8")
+        before = R._snapshot_repo_state(d, tf)
+        subprocess.run(["git", "add", "a.py"], cwd=str(d), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "commit only a.py"], cwd=str(d), check=True, capture_output=True)
+        (d / "b.py").write_text("b = 3\n", encoding="utf-8")            # judge edits the still-dirty file
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("b.py" in m for m in full["mutations"]), full)
+
+    def test_removal_without_a_commit_is_still_a_mutation(self):
+        # Negative control for the demotion: HEAD did NOT move, so a vanished
+        # untracked file is a judge deleting it.
+        d, tf = self._proj()
+        (d / "scratch.txt").write_text("x\n", encoding="utf-8")
+        before = R._snapshot_repo_state(d, tf)
+        (d / "scratch.txt").unlink()
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("scratch.txt" in m for m in full["mutations"]), full)
+
+
+class OneSidedStatusFailure(unittest.TestCase):
+    """059 impl-panel r1 (grok #2): a one-sided readable-`git status` failure
+    was BOTH the named caution and the `.git removed` MUTATION, so a degraded
+    guard still aborted — the T009 harm this task exists to remove. The
+    mutation now needs a real `.git` disappearance."""
+
+    def _proj(self):
+        d = _repo()
+        tf = d / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        _commit_all(d)
+        return d, tf
+
+    def test_status_failure_with_git_intact_is_caution_only(self):
+        d, tf = self._proj()
+        before = R._snapshot_repo_state(d, tf)
+        real_run = subprocess.run
+
+        def _fail_status(cmd, *a, **k):
+            if "status" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, b"" if "-z" in cmd else "", b"fatal" if "-z" in cmd else "fatal")
+            return real_run(cmd, *a, **k)
+        with mock.patch("subprocess.run", side_effect=_fail_status):
+            full = R._detect_tamper_full(d, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+        self.assertTrue(any("did not run" in c for c in full["cautions"]), full)
+
+    def test_real_git_deletion_is_still_a_mutation(self):
+        d, tf = self._proj()
+        before = R._snapshot_repo_state(d, tf)
+        import shutil
+        shutil.rmtree(d / ".git")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("unreadable" in m for m in full["mutations"]), full)
+
+
+class RecordFileContentChurn(unittest.TestCase):
+    """059 impl-panel r1 (grok #1): with task.md TRACKED, an already-untracked
+    `judge.md` that a SECOND panel round appends to changed only its content
+    hash — exempt from the line diff but not from the content compare — so
+    round 2 of every such task would have discarded its own paid verdict."""
+
+    def _proj(self):
+        d = _repo()
+        td = d / ".agent" / "tasks" / "001-x"
+        td.mkdir(parents=True)
+        tf = td / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        (d / ".gitignore").write_text("", encoding="utf-8")
+        _commit_all(d)                                   # task.md tracked
+        return d, td, tf
+
+    def test_second_round_appending_to_an_untracked_judge_md_is_not_tamper(self):
+        d, td, tf = self._proj()
+        (td / "judge.md").write_text("round 1\n", encoding="utf-8")     # untracked record from round 1
+        before = R._snapshot_repo_state(d, tf)
+        (td / "judge.md").write_text("round 2\nround 1\n", encoding="utf-8")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+
+    def test_committed_judge_md_edited_is_still_a_mutation(self):
+        d, td, tf = self._proj()
+        (td / "judge.md").write_text("round 1\n", encoding="utf-8")
+        _commit_all(d)                                   # judge.md now TRACKED
+        before = R._snapshot_repo_state(d, tf)
+        (td / "judge.md").write_text("rogue\n", encoding="utf-8")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("judge.md" in m for m in full["mutations"]), full)
+
+    def test_a_non_record_untracked_file_content_change_still_flags(self):
+        d, td, tf = self._proj()
+        (td / "notes.py").write_text("v1\n", encoding="utf-8")
+        before = R._snapshot_repo_state(d, tf)
+        (td / "notes.py").write_text("v2\n", encoding="utf-8")
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertTrue(any("notes.py" in m for m in full["mutations"]), full)
+
+
+class NestedRootExemptions(unittest.TestCase):
+    """059 impl-panel r1 (sonnet #2): the monitor / model-catalog exemptions were
+    built for the outer scope only, so sanctioned concurrent churn INSIDE a
+    `code_roots` root read as a MUTATION and would discard a paid panel."""
+
+    def _with_root(self):
+        proj = _repo()
+        (proj / ".agent" / "tasks" / "001-x").mkdir(parents=True)
+        tf = proj / ".agent" / "tasks" / "001-x" / "task.md"
+        tf.write_text("gate\n", encoding="utf-8")
+        (proj / ".gitignore").write_text("nested/\n", encoding="utf-8")
+        (proj / ".agent" / "config.json").write_text('{"code_roots": ["nested"]}', encoding="utf-8")
+        nested = proj / "nested"
+        nested.mkdir()
+        _git("init", "-q", cwd=nested)
+        _git("config", "user.email", "x@y.z", cwd=nested)
+        _git("config", "user.name", "x", cwd=nested)
+        (nested / "x.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(nested)
+        _commit_all(proj)
+        return proj, nested, tf
+
+    def test_monitor_churn_inside_a_root_is_not_tamper(self):
+        proj, nested, tf = self._with_root()
+        mon = nested / ".agent" / "monitor"
+        mon.mkdir(parents=True)
+        (mon / "trace.md").write_text("t0\n", encoding="utf-8")
+        before = R._snapshot_repo_state(proj, tf)
+        (mon / "trace.md").write_text("t0\nt1\n", encoding="utf-8")
+        (mon / "session.md").write_text("s\n", encoding="utf-8")
+        full = R._detect_tamper_full(proj, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+
+    def test_catalog_write_inside_a_root_is_not_tamper(self):
+        proj, nested, tf = self._with_root()
+        (nested / ".agent").mkdir(parents=True, exist_ok=True)
+        before = R._snapshot_repo_state(proj, tf)
+        (nested / ".agent" / "model-catalog.json").write_text("{}\n", encoding="utf-8")
+        full = R._detect_tamper_full(proj, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+
+    def test_a_real_edit_inside_a_root_still_flags(self):
+        proj, nested, tf = self._with_root()
+        before = R._snapshot_repo_state(proj, tf)
+        (nested / "x.py").write_text("x = 99\n", encoding="utf-8")
+        full = R._detect_tamper_full(proj, tf, before)
+        self.assertTrue(any("x.py" in m for m in full["mutations"]), full)
 
 
 if __name__ == "__main__":

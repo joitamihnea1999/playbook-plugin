@@ -49,8 +49,23 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   - *No more leaked transcripts.* Codex's `-o` transcript is owned from `mkstemp` to exit by one
     helper, so the timeout / budget / dead-pin / tamper exits no longer orphan one file per
     review in the system temp dir.
-  Ledger `PB-JUDGE-TAMPER` restated with the new statement, owners, ten proof/negative-control
-  pairs and two honest bounds. `scripts/verify` unittest count 2389 → 2461.
+  - *Round 1 of the implementation panel found five more of the same class, each fixed
+    red-first:* a concurrent legitimate **commit** during a (background) panel removes the
+    porcelain lines it committed, which still read as a mutation — on a moved HEAD those
+    removals are now cautions (a read-only judge cannot commit), while new files and content
+    changes still hard-stop; a **one-sided `git status` failure** was both the caution and the
+    `.git removed` banner, so the `.git`-disappeared mutation now needs the independent `.git`
+    probe to flip; an already-untracked `judge.md` that a **second panel round** rewrites was
+    exempt from the line diff but not the content compare, so every round-2 close would have
+    discarded its own verdict; the monitor / model-catalog exemptions were built for the outer
+    tree only, so sanctioned churn **inside a `code_roots` root** read as tamper; and the
+    hard-timeout exit still wrote its partial log **through** a task directory a rogue may have
+    swapped. A degraded **single-judge** review now also reaches the close as an advisory note
+    and receipt clause (it previously left no trace, and `reversible` work has no panel).
+    One finding was rejected with evidence: `GIT_CEILING_DIRECTORIES` is exclusive in git
+    2.54.0 (measured — a `.git` at the ceiling is NOT found from a child), so the walk is right.
+  Ledger `PB-JUDGE-TAMPER` restated with the new statement, owners, fifteen proof/negative-control
+  pairs and three honest bounds. `scripts/verify` unittest count 2389 → 2478.
 
 ## [1.5.44] — 2026-09-21
 

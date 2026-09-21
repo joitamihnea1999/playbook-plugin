@@ -2681,6 +2681,39 @@ def has_panel_impl_evidence(task_file) -> bool:
     return newest["mode"] == "impl" and newest["verdict"] == "PASS"
 
 
+_SINGLE_TAMPER_RE = re.compile(r"^\[tamper guard\]\s+(clean|degraded)(?:\s*[—-]+\s*(.*))?$",
+                               re.MULTILINE)
+
+
+def single_review_tamper_degraded(task_file) -> "str | None":
+    """The detail of a DEGRADED tamper guard on the NEWEST single-judge review
+    log in a task's directory, else None (task 059, impl-panel r1 sonnet #1).
+
+    `cmd_single_review` stamps `[tamper guard] clean|degraded — …` into the
+    judge log's header. The close-time TAMPER-GUARD-DEGRADED gate reads PANEL
+    rounds, so without this a single-judge review — the only evidence most
+    `reversible` closes have, since `panel_required_for` demands no panel there
+    — could have run with an unverified guard and leave no trace at the close.
+    Advisory only: it adds a console note and a receipt clause, never a block
+    (blocking on non-panel evidence would be new close policy). Never raises."""
+    try:
+        p = Path(task_file)
+        logs = sorted((q for q in p.parent.glob("judge-*.log")
+                       if not q.name.endswith(".partial.log")),
+                      key=lambda q: q.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for log in logs[:1]:                    # the NEWEST review's receipt is what counts
+        try:
+            head = log.read_text(encoding="utf-8", errors="replace")[:4000]
+        except OSError:
+            return None
+        m = _SINGLE_TAMPER_RE.search(head)
+        if m and m.group(1) == "degraded":
+            return (m.group(2) or "").strip() or "guard could not fully run"
+    return None
+
+
 def has_review_evidence(task_file, impl_only: bool = False) -> bool:
     """True when a task carries evidence that a review actually ran: a judge.md
     in its directory, or a checked plan/impl/panel-review gate in task.md. Used
@@ -2996,6 +3029,14 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
             ar = freshness.get("accepted_reason")
             if ar:
                 line += f', accepted: "{" ".join(ar.split())}"'
+            out.append(line)
+        elif v == "SINGLE-TAMPER-DEGRADED":
+            # Task 059: no panel round carried this close, but the newest
+            # single-judge review recorded a degraded guard. Advisory — the
+            # close proceeds, the record says what was not verified.
+            line = ("- **Panel tree-state:** n/a — the newest single-judge review ran with a "
+                    f"DEGRADED tamper guard ({freshness.get('detail') or 'guard could not fully run'}); "
+                    "its findings are unverified for tamper-freedom")
             out.append(line)
         elif v == "TAMPER-GUARD-DEGRADED":
             # Task 059: the carrying round's tamper guard could not fully run;

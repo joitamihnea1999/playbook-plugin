@@ -474,6 +474,17 @@ def cmd_work(cmd_args):
                             reason if (stale_panel_ok and not force and _carries)
                             else None),
                     }
+                # Task 059 (impl-panel r1, sonnet #1): the panel gate above sees
+                # only judge.md rounds. A SINGLE-judge review records its own
+                # `[tamper guard]` receipt in its log; surface it when no panel
+                # verdict is carrying this close, so a degraded single review is
+                # not silent. Advisory (note + receipt clause), never a block.
+                if _freshness is None:
+                    from tasks.core import single_review_tamper_degraded
+                    _sj_detail = single_review_tamper_degraded(task_file)
+                    if _sj_detail:
+                        _freshness = {"verdict": "SINGLE-TAMPER-DEGRADED",
+                                      "detail": _sj_detail}
                 _f_allowed, _f_reason = freshness_gate_decision(
                     risk=risk, panel_required=_panel_req,
                     evidence_carries=_carries,
@@ -703,6 +714,10 @@ def cmd_work(cmd_args):
                           "edited post-review, consider re-running "
                           "`tasks panel-review <N> --mode impl`.",
                           flush=True)
+                if _freshness and _freshness.get("verdict") == "SINGLE-TAMPER-DEGRADED":
+                    print("note: the newest single-judge review ran with a degraded tamper "
+                          "guard (its findings are kept, their tamper-freedom unverified) — "
+                          "recorded in the receipt.", flush=True)
                 if _freshness and _freshness.get("verdict") == "TAMPER-GUARD-DEGRADED":
                     print("note: the newest impl panel's tamper guard was degraded "
                           "(its verdict is kept, its tamper-freedom unverified) — "

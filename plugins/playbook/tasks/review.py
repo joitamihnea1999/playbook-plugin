@@ -320,8 +320,15 @@ def _porcelain_z_paths(z: bytes) -> "list[str]":
     Each record is `XY <path>`; bytes 0-1 are the status, index 2 a space, 3+ the
     path. For an `R`/`C` status the NEXT field is the source path — consume and
     skip it (we want the destination, the file that now exists)."""
+    return [p for _st, p in _porcelain_z_entries(z)]
+
+
+def _porcelain_z_entries(z: bytes) -> "list[tuple[str, str]]":
+    """`(status, path)` pairs from the same stream — the status letters let the
+    caller tell an UNTRACKED (`??`) path from a tracked-but-dirty one (task 059:
+    only an untracked record file is the panel's own churn)."""
     import os as _os
-    paths: list[str] = []
+    out: "list[tuple[str, str]]" = []
     fields = z.split(b"\0")
     i = 0
     while i < len(fields):
@@ -331,9 +338,9 @@ def _porcelain_z_paths(z: bytes) -> "list[str]":
             continue
         status, path = rec[:2], _os.fsdecode(rec[3:])
         if path:
-            paths.append(path)
+            out.append((status.decode("ascii", "replace"), path))
         i += 2 if status[:1] in (b"R", b"C") else 1
-    return paths
+    return out
 
 
 def _git_head_state(repo_path: Path) -> dict:
@@ -458,11 +465,14 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int
         prefix = _toplevel_prefix(Path(project_path), toplevel) if toplevel is not None else None
         hash_scope_ok = toplevel is not None and prefix is not None
     dirty_hashes: dict[str, str] = {}
+    untracked: "set[str]" = set()
     if z_out and hash_scope_ok:
         budget = _TAMPER_TOTAL_BUDGET       # cumulative-bytes ceiling across the run
-        for rel in _porcelain_z_paths(z_out):
+        for _status, rel in _porcelain_z_entries(z_out):
             fp = Path(toplevel) / rel
             key = _project_relative(rel, prefix)
+            if _status.strip() == "??":
+                untracked.add(key)
             try:
                 if fp.is_symlink():
                     # Hash the LINK TEXT, not the referent: `read_bytes` follows a
@@ -526,6 +536,7 @@ def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int
             "dirty_hashes": dirty_hashes, "z_read_ok": z_out is not None,
             "is_git": _in_git_repo(Path(project_path)),
             "hash_scope_ok": hash_scope_ok, "prefix": prefix,
+            "untracked": untracked,
             "head": _git_head_state(Path(project_path)) if porcelain is not None else {"state": "n/a", "value": None},
             # Strict own-repo check (like the fingerprint's strict mode): a root
             # whose toplevel is NOT itself is not its own repo (its `.git` is gone
@@ -818,8 +829,28 @@ def _prefixed(prefix: "str | None", body: str, status: str = "..") -> "re.Patter
     return re.compile(r"^" + status + r'\s+"?' + pre + body)
 
 
+def _standard_exempts(prefix: "str | None") -> "tuple[list[re.Pattern], list[re.Pattern]]":
+    """The (line, path) exemptions every git scope carries — the OUTER tree and
+    each `code_roots` root alike (059 impl-panel r1, sonnet #2: built for the
+    outer scope only, a sanctioned concurrent write inside a root read as a
+    MUTATION and would discard a paid panel):
+      - F22: the conversation monitor writes trace.md/session.md under
+        `.agent/monitor/` (or `.agent/<user>/monitor/`) WHILE panels run — a
+        sanctioned concurrent writer whose own sandbox confines it to exactly
+        that directory. Everything else under .agent still flags.
+      - task 054: `tasks dashboard` records the provider catalog baseline at
+        `.agent/model-catalog.json` and may legitimately run while a panel does;
+        that ONE path only (a sibling file still flags).
+    """
+    return ([_prefixed(prefix, r"\.agent(/[^/]+)?/monitor/"),
+             _prefixed(prefix, r"\.agent/model-catalog\.json\"?$")],
+            [re.compile(r"^\.agent(/[^/]+)?/monitor/"),
+             re.compile(r"^\.agent/model-catalog\.json$")])
+
+
 def _scope_changes(before: dict, after: dict, *, label: str = "",
                    line_exempt: "list[re.Pattern]" = (), path_exempt: "list[re.Pattern]" = (),
+                   untracked_exempt: "list[re.Pattern]" = (),
                    task_rel: "str | None" = None) -> "tuple[list[str], list[str]]":
     """Porcelain-line and content-hash comparison for ONE git scope (the outer
     tree or a `code_roots` root). Returns (mutations, cautions). `label` is a
@@ -857,7 +888,7 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
     # commit — so it is a caution about what the verdict describes, never
     # 'a judge modified the repo'; a read ERROR on either side is a caution too
     # (two errors must not compare equal and hide a move).
-    bh, ah = before.get("head") or {}, after.get("head") or {}
+    bh, ah = before.get("head") or {}, after.get("head") or {}   # also read by the line diff below
     if bh.get("state") == "error" or ah.get("state") == "error":
         cautions.append(f"{label}HEAD could not be read on one side of the review — a "
                         "concurrent commit would go unnoticed")
@@ -866,14 +897,30 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
                         f"{str(ah.get('value'))[:12]}) — a concurrent commit; the verdict "
                         "may not describe the current HEAD")
     if (b_porc is None) != (a_porc is None):
-        # git↔non-git transition WHILE a review runs: `git status` succeeded once
-        # and failed the other time — the most likely cause is a rogue deleting
-        # `.git/` (catastrophic, history-destroying tamper) or otherwise breaking
-        # the repo. Without this, both porcelain reads being unequal-but-one-None
-        # skips the line diff and `dirty_hashes` is empty, so total repo
-        # destruction produced ZERO signal (round-4 sonnet, Critical). MUTATION.
-        mutations.append(f"{label}git repository state became unreadable during review "
-                         "(.git removed or repo broken?)")
+        # git↔non-git transition WHILE a review runs. A rogue DELETING `.git/` is
+        # catastrophic, history-destroying tamper and must hard-stop (round-4
+        # sonnet, Critical) — but a readable `git status` that merely FAILED on
+        # one side (hostile/huge tree, corrupt index, a timeout) is the degraded
+        # guard, already named as a caution above, and turning it into a banner
+        # re-opened the exact T009 harm this task removes (059 impl-panel r1,
+        # grok #2). Distinguish them with the `.git` probe: a MUTATION needs the
+        # repo to have actually disappeared.
+        if before.get("is_git") and not after.get("is_git"):
+            mutations.append(f"{label}git repository state became unreadable during review "
+                             "(.git removed or repo broken?)")
+        else:
+            cautions.append(f"{label}`git status` succeeded on only one side of the review "
+                            "— the working-tree comparison could not run")
+    # A concurrent COMMIT (HEAD moved) removes the porcelain lines of everything
+    # it committed. A read-only judge cannot commit, so on a moved HEAD those
+    # REMOVALS are the concurrent actor's and must not void a paid review (059
+    # impl-panel r1, opus F1 — the T009 harm, still open for the commit's
+    # working-tree side effects after P1 demoted only the HEAD sha). NEW lines
+    # and content changes stay MUTATIONS either way. Bound, disclosed: while a
+    # commit is landing, a judge deleting an untracked file in the same window
+    # is reported as a caution rather than a banner.
+    head_moved = (bh.get("state") == "ok" and ah.get("state") == "ok"
+                  and bh.get("value") != ah.get("value"))
     if b_porc is not None and a_porc is not None and b_porc != a_porc:
         b_lines, a_lines = set(b_porc.splitlines()), set(a_porc.splitlines())
         # NEW porcelain lines: a rogue created/modified a tracked or untracked
@@ -887,15 +934,27 @@ def _scope_changes(before: dict, after: dict, *, label: str = "",
         for line in sorted(b_lines - a_lines):
             if any(rx.match(line) for rx in line_exempt):
                 continue
-            mutations.append(f"{label}working tree reverted/removed: {line.strip()}")
+            if head_moved:
+                cautions.append(f"{label}no longer listed after the concurrent commit: "
+                                f"{line.strip()}")
+            else:
+                mutations.append(f"{label}working tree reverted/removed: {line.strip()}")
     # Content edits to files that were ALREADY dirty at snapshot time — an
     # identical porcelain line, so only the content hash reveals them. Compare
     # paths present in BOTH snapshots (new / removed paths are named by the
     # porcelain-line diff above). Keys are PROJECT-relative (task 059).
     b_dirty = before.get("dirty_hashes") or {}
     a_dirty = after.get("dirty_hashes") or {}
+    b_untracked = before.get("untracked") or set()
+    a_untracked = after.get("untracked") or set()
     for rel in sorted(set(b_dirty) & set(a_dirty)):
         if rel == task_rel or any(rx.match(rel) for rx in path_exempt):
+            continue
+        # An UNTRACKED record file the panel itself appends to between rounds
+        # (round 2 rewrites judge.md) is sanctioned churn; a COMMITTED one that
+        # changes is a rogue editing evidence (059 impl-panel r1, grok #1).
+        if (rel in b_untracked and rel in a_untracked
+                and any(rx.match(rel) for rx in untracked_exempt)):
             continue
         if b_dirty[rel] != a_dirty[rel]:
             mutations.append(f"{label}working tree content changed: {rel}")
@@ -921,6 +980,8 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
     direction (never a missed edit), and one that does not arise while judges
     run read-only."""
     prefix = before.get("prefix") if before.get("prefix") is not None else after.get("prefix")
+    line_exempt, path_exempt = _standard_exempts(prefix)
+    untracked_exempt: "list[re.Pattern]" = []
     # F22: the conversation monitor writes trace.md/session.md under
     # `.agent/monitor/` (or `.agent/<user>/monitor/`) WHILE panels run — a
     # sanctioned concurrent writer whose own sandbox confines it to exactly that
@@ -928,13 +989,6 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
     # Everything else under .agent still flags. Two matchers: one for porcelain
     # LINES (prefix-aware for a subdir project), one for the PROJECT-relative
     # paths keyed in `dirty_hashes`.
-    line_exempt = [_prefixed(prefix, r"\.agent(/[^/]+)?/monitor/"),
-                   # task 054: `tasks dashboard` records the provider catalog baseline at
-                   # `.agent/model-catalog.json` (create or update) and may legitimately
-                   # run WHILE a panel runs — that ONE path only (a sibling file still flags).
-                   _prefixed(prefix, r"\.agent/model-catalog\.json\"?$")]
-    path_exempt = [re.compile(r"^\.agent(/[^/]+)?/monitor/"),
-                   re.compile(r"^\.agent/model-catalog\.json$")]
     # E1: the task's OWN record directory is sanctioned churn — a panel
     # legitimately writes judge.md / review artifacts / task.md updates there
     # WHILE it runs. When that directory is UNTRACKED at snapshot time, `-uall`
@@ -979,6 +1033,11 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
                 line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))
                 path_exempt.append(re.compile(r"^" + re.escape(_td) + r"/"))
             elif tracked in ("tracked", "unknown"):
+                # …and the same record files are exempt from the CONTENT compare
+                # while they stay UNTRACKED on both sides (a second panel round
+                # rewrites judge.md in place — 059 impl-panel r1, grok #1).
+                untracked_exempt.append(
+                    re.compile(r"^" + re.escape(_td) + r"/" + record_names + r"$"))
                 # Only a NEWLY CREATED (`??`) record file is the panel's own
                 # churn. A TRACKED record file that was MODIFIED during the
                 # window is a rogue editing committed evidence and must still
@@ -993,7 +1052,9 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
                     line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))
                     path_exempt.append(re.compile(r"^" + re.escape(_td) + r"/"))
     mutations, cautions = _scope_changes(before, after, line_exempt=line_exempt,
-                                         path_exempt=path_exempt, task_rel=_task_rel)
+                                         path_exempt=path_exempt,
+                                         untracked_exempt=untracked_exempt,
+                                         task_rel=_task_rel)
     if before.get("taskmd_tracked") == "unknown" or after.get("taskmd_tracked") == "unknown":
         cautions.append("task.md tracked-ness unknown (`git ls-files` failed) — the task-dir "
                         "exemption was narrowed to the panel's own record files")
@@ -1060,7 +1121,9 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
         if not b_ok and a_ok:
             cautions.append(f"code root {rel}: became readable during review (initialised?)")
             continue
-        m, c = _scope_changes(bs, as_, label=f"code root {rel}: ")
+        _rl, _rp = _standard_exempts(bs.get("prefix") if bs else None)
+        m, c = _scope_changes(bs, as_, label=f"code root {rel}: ",
+                              line_exempt=_rl, path_exempt=_rp)
         mutations += m
         cautions += c
     return {"mutations": mutations, "cautions": cautions}
@@ -2272,6 +2335,14 @@ def _cmd_single_review(cmd, cmd_args):
         # (every call site is after its assignment below).
         _to_changes = _safe_detect()
         _emit_tamper(_to_changes)
+        if _to_changes["mutations"]:
+            # 059 impl-panel r1 (grok #3): on a MUTATION this exit writes NOTHING
+            # under the task dir — the partial log below would otherwise be
+            # `atomic_write`n through a task directory a rogue may have swapped
+            # for a symlink (the P6 write-through the panel/success hard stops
+            # already refuse). The banner is already out; the partial output of a
+            # review taken on a mutated tree is worthless anyway.
+            sys.exit(1)
         #
         # Whatever the judge had already written is salvaged to a SEPARATE
         # `*.partial.log` rather than being dropped or overwriting the main

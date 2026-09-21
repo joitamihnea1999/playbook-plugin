@@ -98,8 +98,13 @@ Findings split in two. A **mutation** — a porcelain or content-hash change, a
 task.md rewrite/deletion, a task-dir or code-root identity change, a `.git` that
 disappeared, or an errored guard — still prints the loud TAMPER banner, refuses
 ingestion and exits non-zero. A **caution** is the guard telling you it could not
-fully run: `git status`/`-z`/`rev-parse` failed, or HEAD moved during the review
-(a read-only judge cannot commit, so that is a concurrent actor, not tamper). A
+fully run, or naming something a judge could not have done: `git status`/`-z`/
+`rev-parse` failed (on one side or both — the `.git`-removed banner needs the
+repo to have actually disappeared, probed independently of `git status`), or
+HEAD moved during the review. A read-only judge cannot commit, so a moved HEAD
+is a concurrent actor — and the porcelain lines that commit *removed* are
+cautions too, while anything it could not explain (a new file, a changed
+content hash) still hard-stops. A
 caution no longer discards the paid review — the verdict is kept, the notice is
 printed, and the round records `**Tamper guard:** degraded — <what>` (or
 `clean`). That receipt is load-bearing: a close held to the high-consequence bar
@@ -108,7 +113,8 @@ round with `TAMPER-GUARD-DEGRADED`, with the same two exits as a stale panel
 (re-run the panel, or `--stale-panel-ok --reason "..."` recorded in the receipt);
 `reversible` closes proceed with an advisory. Tail certification refuses
 outright. The single-judge path carries the same receipt in its judge log and in
-the findings it writes into task.md.
+the findings it writes into task.md; when no panel round carries a close, the
+close reads that log and records the degradation as an advisory receipt clause.
 
 The task's own record directory stays exempt from the working-tree diff, scoped
 by whether `task.md` itself is tracked: an **untracked** task.md means the whole

@@ -173,5 +173,67 @@ class ClosePath(unittest.TestCase):
         self.assertNotIn("TAMPER-GUARD-DEGRADED", r.stdout + r.stderr)
 
 
+class SingleJudgeDegradedAtClose(unittest.TestCase):
+    """059 impl-panel r1 (sonnet #1/#3): the close-time TAMPER-GUARD-DEGRADED
+    protection read only PANEL rounds, so a single-judge review that ran with a
+    degraded guard — the common case for `reversible` work, where
+    `panel_required_for` demands no panel — produced ZERO close-time signal.
+    It now surfaces as an advisory note and a receipt clause."""
+
+    MARK = ("[context] full task.md + mind map delivered (no truncation)\n"
+            "[tamper guard] degraded — content-hash guard degraded: `git status -z` failed\n\n"
+            "1. **Note** — fine.\n")
+
+    def _reader(self):
+        from tasks.core import single_review_tamper_degraded
+        return single_review_tamper_degraded
+
+    def _task(self, log_body=None, name="judge-plan-claude.log"):
+        d = _repo()
+        td = d / ".agent" / "tasks" / "001-t"
+        td.mkdir(parents=True)
+        tf = td / "task.md"
+        tf.write_text("# 001 - T\n\n## Status\npending\n\n## Risk\nreversible\n\n"
+                      "## Work Plan\n- [x] G1: do it\n", encoding="utf-8")
+        if log_body is not None:
+            (td / name).write_text(log_body, encoding="utf-8")
+        return d, td, tf
+
+    def test_reader_finds_the_marker(self):
+        d, td, tf = self._task(self.MARK)
+        detail = self._reader()(tf)
+        self.assertIsNotNone(detail)
+        self.assertIn("git status -z", detail)
+
+    def test_reader_is_silent_on_a_clean_log(self):
+        d, td, tf = self._task(self.MARK.replace("degraded — content-hash guard degraded: `git status -z` failed", "clean"))
+        self.assertIsNone(self._reader()(tf))
+
+    def test_reader_is_silent_without_a_log(self):
+        d, td, tf = self._task(None)
+        self.assertIsNone(self._reader()(tf))
+
+    def test_reader_reads_the_newest_log(self):
+        import time
+        d, td, tf = self._task(self.MARK, name="judge-plan-claude.log")
+        time.sleep(0.02)
+        (td / "judge-impl-claude.log").write_text(
+            "[context] x\n[tamper guard] clean\n\nfindings\n", encoding="utf-8")
+        self.assertIsNone(self._reader()(tf), "the newest review's receipt is the one that counts")
+
+    def test_close_records_the_single_judge_degradation(self):
+        d, td, tf = self._task(self.MARK)
+        env = dict(os.environ, PYTHONPATH=str(PLUGIN), PLAYBOOK_SESSION_ID="pid-059s")
+        r = subprocess.run([sys.executable, "-m", "tasks.cli", "work", "1"],
+                           cwd=d, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run([sys.executable, "-m", "tasks.cli", "work", "done"],
+                           cwd=d, env=env, capture_output=True, text=True, timeout=120)
+        self.assertIn("Task 001 done.", r.stdout, r.stdout + r.stderr)
+        self.assertIn("tamper guard", (r.stdout + r.stderr).lower())
+        receipt = tf.read_text(encoding="utf-8")
+        self.assertIn("single-judge review ran with a DEGRADED tamper guard", receipt)
+
+
 if __name__ == "__main__":
     unittest.main()
