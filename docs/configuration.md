@@ -303,9 +303,10 @@ require a panel.
 
 Two more blocks share this gate since task 060, both on a high-consequence
 close that policy holds to a panel: **UNREADABLE** — the stamped round's tree
-cannot be fingerprinted at close (a git `status`/`diff` returned non-zero, e.g. a
-truncated index), so freshness cannot be judged and the close blocks naming git
-rather than reading a corrupt tree as FRESH; and **NO-STAMP** — the panel round
+cannot be fingerprinted at close — git could not produce the material (a corrupt
+index, a missing `HEAD`, an unresolvable toplevel, a failed `status`/`diff`), so
+freshness cannot be judged and the close blocks naming git rather than reading
+a broken tree as FRESH; and **NO-STAMP** — the panel round
 carries no fingerprint stamp although the project is a git repo (a non-git
 project keeps the advisory record). The same manual exits apply.
 

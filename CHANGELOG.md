@@ -8,16 +8,20 @@ Three batches from the 1.5.44 candidate branch (`fix/1.5.44-batch`, tasks 072/06
 stop-hook's no-python fallback made fail-closed, the panel-freshness fingerprint made truthful
 in six bounded cases, and a live gauntlet of every command, hook and paid surface with its fix
 batch (attribution timezone, destructive-command interlock data masking and the in-session
-irreversible-task acknowledgement). No new commands, skills, hooks or providers; `tasks
---version` is the one new CLI flag. `scripts/verify` unittest count 2337 → 2389.
+irreversible-task acknowledgement). No new skills, hooks or providers; the one new CLI
+surface is the version query — `tasks --version`, with `-V` and the bare word `version` as
+aliases. `scripts/verify` unittest count 2337 → 2389.
 
 ### Fixed
 
 - **Live gauntlet of the 1.5.44 candidate (task 073)** — every CLI command, every hook and the
   paid surfaces (impl panel, tail certification, `--prompt` consultation, sandbox) exercised on a
   fresh scratch project with every output read in full and a file-system delta per step
-  (owner mandate 2026-09-20: "no bugs, no surprises, no errors"). Everything documented behaved
-  as documented; the seams hid these, each fixed red-first:
+  (owner mandate 2026-09-20: "no bugs, no surprises, no errors"; the surfaces NOT exercised are
+  listed at the end of this entry). The documented behaviour held on every surface exercised,
+  with one exception the gauntlet itself exposed — the irreversible-task acknowledgement below
+  was documented but had never been implemented; the other findings hid in the seams between
+  surfaces. Each fixed red-first:
   - *Attribution timezone* (Important): `.agent/bash_history` is stamped in LOCAL time by
     bash-log.sh, `chat_log.md` in UTC; `build_task_windows` and `tasks tag` compared them as
     strings, so on a UTC+3 machine a task's first hours of chat attributed to the PREVIOUS task
