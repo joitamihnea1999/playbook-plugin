@@ -151,45 +151,82 @@ def ut_fails(text: str, per_cap: int = 15, overall_cap: int = 80) -> list[str]:
             i += 1
         while block and not block[-1].strip():         # trim trailing blanks
             block.pop()
-        if len(block) > per_cap:
-            block = block[:per_cap] + [f"    ... and {len(block) - per_cap} more lines"]
+        # Task 076: a shell-fixture failure's own diagnostic block (lines the
+        # fixture reporter prefixes with `    | `) is exempt from the per-failure
+        # cap — the traceback + FAIL lines alone consume ~10 of the 15, so the
+        # block that names the cause was sliced away in CI run 35570688583.
+        # The block is already bounded by BLOCK_CAP per block; everything else
+        # in the failure (traceback, tail) keeps the old budget.
+        exempt = [ln for ln in block if ln.startswith(BLOCK_PREFIX)]
+        budgeted = [ln for ln in block if not ln.startswith(BLOCK_PREFIX)]
+        if len(budgeted) > per_cap:
+            budgeted = budgeted[:per_cap] + [f"    ... and {len(budgeted) - per_cap} more lines"]
+        # Re-interleave: budgeted lines in order, with the exempt block lines
+        # re-inserted where the first of them appeared (they are contiguous).
+        if exempt:
+            first = next(i for i, ln in enumerate(block) if ln.startswith(BLOCK_PREFIX))
+            before = [ln for ln in block[:first] if not ln.startswith(BLOCK_PREFIX)]
+            keep_before = budgeted[:len(before)] if len(before) <= per_cap else budgeted
+            keep_after = budgeted[len(before):] if len(before) <= per_cap else []
+            block = keep_before + exempt + keep_after
+        else:
+            block = budgeted
         out.extend(block)
-    return cap(out, overall_cap)
+    return cap(out, overall_cap + BLOCK_TOTAL)
 
 
 BLOCK_START = "----- output start -----"
 BLOCK_END = "----- output end -----"
-BLOCK_CAP = 40
+BLOCK_PREFIX = "    | "
+BLOCK_CAP = 40        # lines kept per diagnostic block
+BLOCK_TOTAL = 100     # lines kept across all blocks of one fixture run
+FAIL_CAP = 40         # FAIL lines kept (was cap()'s 20; the fixture has ~274 assertions)
 
 
 def sh_fails(text: str) -> list[str]:
     """Failing assertion lines from a shell fixture (it prints `  FAIL  ...`),
-    PLUS the fixture's own diagnostic block when it prints one right after a
-    FAIL (`assert_contains` in wrapper-multiuser-fixture.sh emits the captured
-    command output between `----- output start -----` / `----- output end -----`).
-    Task 076: two Windows S7 failures left nothing to root-cause from because
-    this kept only the FAIL line. The block is bounded (BLOCK_CAP lines per
-    block, then a count) so a chatty command cannot push later FAILs past `cap`.
-    Nothing else changes: a FAIL with no block is reported exactly as before."""
+    PLUS the fixture's own diagnostic block(s) printed right after a FAIL
+    (`assert_contains` in wrapper-multiuser-fixture.sh emits the captured
+    command output between `----- output start -----` / `----- output end -----`;
+    S7 adds a second block of diagnostics). Task 076: two Windows S7 failures
+    left nothing to root-cause from because this kept only the FAIL line.
+
+    Budgets are SEPARATE so neither starves the other (076 impl panel): every
+    FAIL line up to FAIL_CAP is kept regardless of how chatty a block was; each
+    block is cut at BLOCK_CAP lines and all blocks together at BLOCK_TOTAL, each
+    cut announced with a `... and N more` line. A FAIL line is one that STARTS
+    with `FAIL` after stripping — a line merely containing the word is data.
+    A FAIL with no block is reported exactly as before."""
     out: list[str] = []
+    fails = 0
+    block_lines = 0
     lines = text.splitlines()
     i = 0
     while i < len(lines):
         ln = lines[i].strip()
         if ln.startswith("FAIL"):
-            out.append(ln)
-        elif ln == BLOCK_START and out:
+            fails += 1
+            if fails <= FAIL_CAP:
+                out.append(ln)
+            elif fails == FAIL_CAP + 1:
+                out.append("... (further FAIL lines omitted — see the full transcript)")
+        elif ln == BLOCK_START and fails:
             j = i + 1
             block: list[str] = []
             while j < len(lines) and lines[j].strip() != BLOCK_END:
-                block.append("    | " + lines[j].rstrip())
+                block.append(BLOCK_PREFIX + lines[j].rstrip())
                 j += 1
-            if len(block) > BLOCK_CAP:
-                block = block[:BLOCK_CAP] + [f"    | ... and {len(block) - BLOCK_CAP} more output line(s)"]
+            total = len(block)
+            room = min(BLOCK_CAP, max(0, BLOCK_TOTAL - block_lines))
+            if total > room:
+                block = block[:room] + [f"{BLOCK_PREFIX}... and {total - room} more output line(s)"]
+            block_lines += len(block)
             out.extend(block)
             i = j
         i += 1
-    return cap(out, n=max(20, BLOCK_CAP + 8))
+    if fails > FAIL_CAP:
+        out.append(f"... and {fails - FAIL_CAP} more FAIL line(s)")
+    return out
 
 
 def record(name, status, detail="", started=None, lines=None):

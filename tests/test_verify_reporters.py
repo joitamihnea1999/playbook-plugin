@@ -86,6 +86,76 @@ class ShFails(unittest.TestCase):
         self.assertTrue(any("more" in ln for ln in got), got)
 
 
+# A transcript long enough that the last-25 tail does NOT already contain the
+# block (076 impl panel, grok #3: the short transcript above stayed green on the
+# pre-076 reporter because the tail happened to include the block).
+TRANSCRIPT_LONG = TRANSCRIPT_WITH_BLOCK + "\n".join(
+    f"  PASS  S{i} later scenario" for i in range(8, 60)) + "\nwrapper multi-user fixture: 52 passed, 2 failed\n"
+
+# One large block, then ten more failing assertions (076 impl panel, codex-medium
+# #2: the old overall cap kept only six of the ten).
+TRANSCRIPT_BIG_THEN_FAILS = (
+    "  FAIL  S1 first\n----- output start -----\n" + "\n".join(f"noise {i}" for i in range(60))
+    + "\n----- output end -----\n" + "\n".join(f"  FAIL  S{i} later failure {i}" for i in range(2, 12)) + "\n")
+
+# Two blocks after one failure group (assert_contains' block, then S7's own).
+TRANSCRIPT_TWO_BLOCKS = (
+    "  FAIL  S7 a\n  FAIL  S7 b\n----- output start -----\nwrapper said X\n----- output end -----\n"
+    "----- output start -----\nS7 diagnostics (task 076)\nrc=1\nfind_project_root from run dir: []\n----- output end -----\n")
+
+# A line that merely CONTAINS "FAIL" mid-string is not a failing assertion.
+TRANSCRIPT_MIDLINE_FAIL = "  PASS  S1 env var PLAYBOOK_FAILSAFE unset\n  FAIL  S2 real\n"
+
+# The unittest-wrapped path (the 074 shape): traceback + assertion message that
+# CARRIES the reporter's detail with a block. ut_fails must not slice the block
+# away at its per-failure cap (076 impl panel, grok #1 / codex-high #1).
+UT_TRANSCRIPT = (
+    "======================================================================\n"
+    "FAIL: test_shell_fixtures_pass (test_shell_fixtures.ShellFixtures) (fixture='wrapper-multiuser-fixture.sh')\n"
+    "----------------------------------------------------------------------\n"
+    "Traceback (most recent call last):\n"
+    "  File \"tests/test_shell_fixtures.py\", line 99, in test_shell_fixtures_pass\n"
+    "    self.fail(f\"{name} failed (rc={r.returncode}):\\n{_failure_detail(lines)}\")\n"
+    "AssertionError: wrapper-multiuser-fixture.sh failed (rc=1):\n"
+    "  FAIL  S7 exits 0 outside a playbook project — expected [0], got [1]\n"
+    "  FAIL  S7 launches with an empty project root — expected to find 'launched root='\n"
+    + "\n".join(f"    | diag line {i}" for i in range(30)) + "\n"
+    "    | ancestor /tmp: .agent EXISTS\n"
+    "--- last 25 lines ---\n" + "\n".join(f"  PASS  S{i} x" for i in range(25)) + "\n"
+    "\n----------------------------------------------------------------------\n"
+    "Ran 2394 tests in 400.0s\n\nFAILED (failures=1)\n")
+
+
+class ShFailsMore(unittest.TestCase):
+    def setUp(self):
+        self.verify = _load_verify()
+
+    def test_every_fail_line_survives_a_big_block(self):
+        got = self.verify.sh_fails(TRANSCRIPT_BIG_THEN_FAILS)
+        for i in range(2, 12):
+            self.assertTrue(any(f"S{i} later failure" in ln for ln in got), (i, got))
+
+    def test_two_blocks_both_kept(self):
+        got = "\n".join(self.verify.sh_fails(TRANSCRIPT_TWO_BLOCKS))
+        self.assertIn("wrapper said X", got)
+        self.assertIn("find_project_root from run dir", got)
+
+    def test_midline_fail_is_not_a_failure(self):
+        got = self.verify.sh_fails(TRANSCRIPT_MIDLINE_FAIL)
+        self.assertEqual(got, ["FAIL  S2 real"])
+
+
+class UtFailsKeepsBlock(unittest.TestCase):
+    def test_block_lines_survive_the_per_failure_cap(self):
+        verify = _load_verify()
+        got = "\n".join(verify.ut_fails(UT_TRANSCRIPT))
+        self.assertIn("FAIL  S7 exits 0", got)
+        self.assertIn("diag line 29", got)
+        self.assertIn("ancestor /tmp: .agent EXISTS", got)
+        # The 25-line PASS tail is still budgeted away — only the block is exempt.
+        self.assertNotIn("PASS  S24 x", got)
+
+
 class ShellFixturesDetail(unittest.TestCase):
     def test_block_after_fail_is_kept(self):
         detail = test_shell_fixtures._failure_detail(TRANSCRIPT_WITH_BLOCK.splitlines())
@@ -93,9 +163,61 @@ class ShellFixturesDetail(unittest.TestCase):
         self.assertIn("found per-user playbook lanes but no .agent/current_user", detail)
         self.assertIn("--- last 25 lines ---", detail)
 
+    def test_block_precedes_the_tail_on_a_long_transcript(self):
+        detail = test_shell_fixtures._failure_detail(TRANSCRIPT_LONG.splitlines())
+        head = detail.split("--- last 25 lines ---")[0]
+        self.assertIn("found per-user playbook lanes but no .agent/current_user", head)
+
+    def test_block_is_bounded(self):
+        big = ["  FAIL  X", "----- output start -----"] + [f"line {i}" for i in range(200)] + ["----- output end -----"]
+        detail = test_shell_fixtures._failure_detail(big)
+        head = detail.split("--- last 25 lines ---")[0]
+        self.assertLess(len(head.splitlines()), 60)
+        self.assertIn("more output line", head)
+
+    def test_every_fail_line_survives_a_big_block(self):
+        detail = test_shell_fixtures._failure_detail(TRANSCRIPT_BIG_THEN_FAILS.splitlines())
+        head = detail.split("--- last 25 lines ---")[0]
+        for i in range(2, 12):
+            self.assertIn(f"S{i} later failure", head)
+
+    def test_midline_fail_is_not_a_failure(self):
+        detail = test_shell_fixtures._failure_detail(TRANSCRIPT_MIDLINE_FAIL.splitlines())
+        head = detail.split("--- last 25 lines ---")[0]
+        self.assertNotIn("PLAYBOOK_FAILSAFE", head)
+        self.assertIn("FAIL  S2 real", head)
+
     def test_fail_without_block_unchanged(self):
         detail = test_shell_fixtures._failure_detail(TRANSCRIPT_NO_BLOCK.splitlines())
         self.assertTrue(detail.startswith("  FAIL  S2 exits 0"), detail)
+
+
+class ForcedS7EndToEnd(unittest.TestCase):
+    """Run the REAL fixture with its test-only knob that forces S7's exit
+    assertion to fail while the shim still prints `launched root=` (the
+    concrete mode codex-medium #1 named: rc != 0 but the content assertion
+    passes). Both reporters must then carry the diagnostics AND the wrapper's
+    output. Proves the fixture actually produces the block (grok #4)."""
+
+    def test_diagnostics_reach_both_reporters(self):
+        import os, shutil, subprocess, tempfile
+        if shutil.which("bash") is None or shutil.which("git") is None:
+            self.skipTest("bash/git missing")
+        env = test_shell_fixtures._clean_env()
+        env["WRAPPER_FIXTURE_FORCE_S7_RC"] = "1"
+        with tempfile.TemporaryDirectory() as td:
+            r = subprocess.run([test_shell_fixtures.bash_or_skip(), str(ROOT / "tests" / "wrapper-multiuser-fixture.sh")],
+                               cwd=td, env=env, capture_output=True, text=True, timeout=600)
+        self.assertNotEqual(r.returncode, 0)
+        transcript = r.stdout + r.stderr
+        for reporter in (lambda t: "\n".join(_load_verify().sh_fails(t)),
+                         lambda t: test_shell_fixtures._failure_detail(t.splitlines()).split("--- last 25 lines ---")[0]):
+            got = reporter(transcript)
+            self.assertIn("S7 exits 0 outside a playbook project", got)
+            self.assertIn("S7 diagnostics (task 076)", got)
+            self.assertIn("find_project_root from run dir: []", got)
+            self.assertIn("ancestor", got)
+            self.assertIn("launched root=", got)          # the wrapper's own output is inside the block
 
 
 if __name__ == "__main__":

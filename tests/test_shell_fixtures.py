@@ -78,7 +78,10 @@ def _failure_detail(lines: list[str]) -> str:
     i = 0
     while i < len(lines):
         ln = lines[i]
-        if "FAIL" in ln:
+        # Same predicate as scripts/verify's sh_fails (076 impl panel: the two
+        # reporters must agree on what a failing assertion IS — a line that
+        # STARTS with FAIL after stripping; a line merely containing it is data).
+        if ln.strip().startswith("FAIL"):
             detail.append(ln)
         elif ln.strip() == _BLOCK_START and detail:
             j = i + 1

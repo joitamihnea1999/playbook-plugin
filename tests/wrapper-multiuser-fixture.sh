@@ -235,6 +235,10 @@ echo "=== S7: non-playbook directory still launches the bare CLI ==="
 {
     d="$WORK/s7"; build_project "$d" non-playbook
     run_wrapper codex "$d"; out="$OUT"
+    # Test-only knob (tests/test_verify_reporters.py): force the exit assertion
+    # red while the shim's output stays intact, to prove the diagnostics below
+    # reach both reporters WITH the wrapper's output. Never set outside tests.
+    [ -n "${WRAPPER_FIXTURE_FORCE_S7_RC:-}" ] && RC="$WRAPPER_FIXTURE_FORCE_S7_RC"
     assert_eq "$RC" "0" "S7 exits 0 outside a playbook project"
     assert_contains "$out" "launched root=" "S7 launches with an empty project root"
     # Task 076 (PLAN.md A1.1): S7 failed intermittently on the Windows lane at
@@ -247,22 +251,23 @@ echo "=== S7: non-playbook directory still launches the bare CLI ==="
     # exec). Zero output on the green path.
     if [ "$RC" != "0" ] || ! printf '%s' "$out" | grep -qF "launched root="; then
         # Same markers assert_contains uses, so both reporters keep this block.
+        # Decisive fields FIRST (the reporters bound a block at 40 lines): the
+        # wrapper's rc + output, find_project_root's answer, each ancestor's
+        # .agent state; listings last.
         echo "----- output start -----"
         echo "S7 diagnostics (task 076)"
         echo "rc=$RC"
-        echo "run dir: $d"
-        echo "WORK=$WORK  TMPDIR=${TMPDIR:-}  TMP=${TMP:-}  TEMP=${TEMP:-}"
-        echo "PWD inside run dir: $(cd "$d" && pwd -P)"
-        echo "codex   -> $(command -v codex 2>&1 || echo '(none)')"
-        echo "python3 -> $(command -v python3 2>&1 || echo '(none)') : $(python3 --version 2>&1 || echo '(python3 --version failed)')"
-        echo "bash    -> $(command -v bash 2>&1 || echo '(none)') : $BASH_VERSION"
         echo "find_project_root from run dir: [$(cd "$d" && find_project_root)]"
+        echo "wrapper output (stdout+stderr) begins:"
+        printf '%s\n' "$out" | head -n 12 | sed 's/^/    > /'
+        [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" -gt 12 ] && echo "    > ... (wrapper output truncated at 12 lines)"
+        echo "wrapper output ends."
         anc="$(cd "$d" && pwd -P)"
         while :; do
             if [ -e "$anc/.agent" ]; then
-                echo "ancestor $anc: .agent EXISTS"
-                ls -la "$anc/.agent" 2>&1 | sed 's/^/    /'
-                [ -f "$anc/.agent/current_user" ] && echo "    current_user=[$(head -c 200 "$anc/.agent/current_user" 2>/dev/null)]"
+                cu="(no current_user)"
+                [ -f "$anc/.agent/current_user" ] && cu="current_user=[$(head -c 120 "$anc/.agent/current_user" 2>/dev/null | tr -d '\r\n')]"
+                echo "ancestor $anc: .agent EXISTS  $cu  entries: $(ls -A "$anc/.agent" 2>/dev/null | tr '\n' ' ')"
             else
                 echo "ancestor $anc: no .agent"
             fi
@@ -270,7 +275,11 @@ echo "=== S7: non-playbook directory still launches the bare CLI ==="
             [ "$par" = "$anc" ] && break
             anc="$par"
         done
-        echo "shim listing:"; ls -la "$SHIM_BIN" 2>&1 | sed 's/^/    /'
+        echo "run dir: $d   WORK=$WORK   TMPDIR=${TMPDIR:-}  TMP=${TMP:-}  TEMP=${TEMP:-}"
+        echo "codex   -> $(command -v codex 2>&1 || echo '(none)')"
+        echo "python3 -> $(command -v python3 2>&1 || echo '(none)') : $(python3 --version 2>&1 || echo '(python3 --version failed)')"
+        echo "bash    -> $(command -v bash 2>&1 || echo '(none)') : $BASH_VERSION"
+        echo "shim listing: $(ls -l "$SHIM_BIN" 2>&1 | awk 'NR>1{print $1, $5, $NF}' | tr '\n' ';')"
         echo "----- output end -----"
     fi
 }
