@@ -301,6 +301,14 @@ blunt whole-policy hatch. A `reversible` risk always stays advisory (console
 note + receipt clause, no block), as does any close for which policy does not
 require a panel.
 
+Two more blocks share this gate since task 060, both on a high-consequence
+close that policy holds to a panel: **UNREADABLE** — the stamped round's tree
+cannot be fingerprinted at close (a git `status`/`diff` returned non-zero, e.g. a
+truncated index), so freshness cannot be judged and the close blocks naming git
+rather than reading a corrupt tree as FRESH; and **NO-STAMP** — the panel round
+carries no fingerprint stamp although the project is a git repo (a non-git
+project keeps the advisory record). The same manual exits apply.
+
 The stamp compares a tree-state fingerprint of the **outer** git repository. If
 your project keeps code in a gitignored **nested checkout** (this workspace's
 `playbook-plugin/`), a code-only edit there is invisible to the outer fingerprint

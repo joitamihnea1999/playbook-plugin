@@ -2,7 +2,14 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [Unreleased]
+## [1.5.44] — 2026-09-21
+
+Three batches from the 1.5.44 candidate branch (`fix/1.5.44-batch`, tasks 072/060/073): the
+stop-hook's no-python fallback made fail-closed, the panel-freshness fingerprint made truthful
+in six bounded cases, and a live gauntlet of every command, hook and paid surface with its fix
+batch (attribution timezone, destructive-command interlock data masking and the in-session
+irreversible-task acknowledgement). No new commands, skills, hooks or providers; `tasks
+--version` is the one new CLI flag. `scripts/verify` unittest count 2337 → 2389.
 
 ### Fixed
 
@@ -83,7 +90,7 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
   subdir layout / non-UTF-8 name / untracked symlink / `code_roots` (oracle test green);
   affected repos read STALE once and self-heal — this workspace (code_roots) included.
   Ledger PB-PANEL-FRESHNESS re-stated with each exception. `scripts/verify` unittest count
-  2342 → 2360.
+  2342 → 2368 (the three impl-panel rounds added eight more cases after the first count).
 
 - **The stop-hook's no-python fallback is now actually fail-closed** (task 072; the 1.5.43
   entry below said "it can only over-count" and the 1.5.43 release panel disproved it on two

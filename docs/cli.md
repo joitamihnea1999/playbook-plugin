@@ -85,6 +85,8 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 **`tasks list [--pending]`** (alias `ls`) — task overview table; `--pending` hides finished work.
 
+**`tasks --version`** (alias `-V`, `version`) — prints the installed plugin version read from the plugin manifest (task 073); `unknown` if the manifest cannot be read.
+
 **`tasks status`** — the active task's current gate position: the fastest way to see where a long run actually is.
 
 **`tasks compact <N> [--dry-run]`** — the mechanical half of the sanctioned task.md compaction. An open task.md grows monotonically (every review round, every outcome note) until a judge reads it through a trimmed keyhole (`audit`'s `task-bloat` check flags it). Wrap each cold block — old review-round narrative, never gates or Intent/Design/Parked — in `<!-- archive:start -->` … `<!-- archive:end -->`, then run this: it appends every marked block **verbatim** to `task-archive.md` (same dir) and leaves a one-line pointer. The agent decides what's cold; the command guarantees the move is safe — an unmatched marker, or a block containing a gate checkbox, a `<!-- pin -->`, or a protected section heading, aborts the whole run and writes nothing. `--dry-run` previews. "Moving history is not deleting it."
