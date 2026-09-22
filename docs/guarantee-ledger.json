@@ -2404,7 +2404,8 @@
             "reference": "MorePrivilegeWrappersAndArity.test_git_short_option_clusters"
           },
           "limitations": [
-            "A recursive-force `rm` whose target is COMPUTED (`$(pwd)`, `$DEST`, a backtick) is treated as dangerous; round 2 special-cased `$HOME` and missed every other expansion."
+            "A recursive-force `rm` whose target is COMPUTED (`$(pwd)`, `$DEST`, a backtick) is treated as dangerous; round 2 special-cased `$HOME` and missed every other expansion.",
+            "Task 077 impl panel round 5, opus #2, NARROWED with a measurement: round 4 treated every `$` target as computed, which blocked `rm -rf \"$WORK\"` — the standard temp-dir cleanup idiom, ~28 occurrences in this repository alone, ALLOWED before this task. Dangerous now means a target that RUNS something (`$(…)`, a backtick) or a known-dangerous variable NAME (HOME/ROOT/PREFIX/…), which blocks however it is quoted. Still strictly stronger than the pre-task guard, which allowed `rm -rf \"$HOME\"` and `rm -rf $(pwd)` alike."
           ]
         },
         {
@@ -2417,7 +2418,8 @@
             "reference": "OverBlocksTheRoundClosed.test_echoing_dangerous_text_really_is_fine_now"
           },
           "limitations": [
-            "The docstring has promised since task 073 that echoing dangerous text is fine, but a quote-blind matcher could only honour it for a REDIRECTED echo. With quoting metadata the promise is general: a pipe INSIDE the string is data, an unquoted pipe still feeds a shell. One task-073 fixture moved from STILL_BLOCK to ALLOW as a result, deliberately and recorded."
+            "The docstring has promised since task 073 that echoing dangerous text is fine, but a quote-blind matcher could only honour it for a REDIRECTED echo. With quoting metadata the promise is general: a pipe INSIDE the string is data, an unquoted pipe still feeds a shell. One task-073 fixture moved from STILL_BLOCK to ALLOW as a result, deliberately and recorded.",
+            "Task 077 impl panel round 5, opus #1: a separator GLUED to a quoted token (`\"x\";psql`) stays inside one lexer token, so a per-token guard never fired and the echo mask ran into the NEXT command's arguments, hiding a DB client. Masking is now per SEGMENT via the quote-aware splitter, and an echo whose own output is piped is never masked."
           ]
         },
         {
@@ -2535,32 +2537,6 @@
           },
           "limitations": [
             "`trap '<cmd>' SIGNAL` stores a command the shell runs later; `watch` and `parallel` delegate like the other wrappers; a `f() { … }` definition header is not a command name. Found by my own sweep after the round-4 panel."
-          ]
-        },
-        {
-          "type": "executable unit",
-          "path": "tests/test_command_guard.py",
-          "reference": "OverBlocksTheRoundClosed.test_but_an_echo_that_FEEDS_a_shell_still_blocks",
-          "boundary": "unit",
-          "negative_control": {
-            "path": "tests/test_command_guard.py",
-            "reference": "OverBlocksTheRoundClosed.test_echoing_dangerous_text_really_is_fine_now"
-          },
-          "limitations": [
-            "Task 077 impl panel round 5, opus #1: a separator GLUED to a quoted token (`\"x\";psql`) stays inside one lexer token, so a per-token guard never fired and the echo mask ran into the NEXT command's arguments, hiding a DB client. Masking is now per SEGMENT via the quote-aware splitter, and an echo whose own output is piped is never masked."
-          ]
-        },
-        {
-          "type": "executable unit",
-          "path": "tests/test_command_guard.py",
-          "reference": "MorePrivilegeWrappersAndArity.test_a_computed_rm_target_is_dangerous",
-          "boundary": "unit",
-          "negative_control": {
-            "path": "tests/test_command_guard.py",
-            "reference": "QuotingDecidesWhatExpands.test_literal_names_in_single_quotes_are_literal"
-          },
-          "limitations": [
-            "Task 077 impl panel round 5, opus #2, NARROWED with a measurement: round 4 treated every `$` target as computed, which blocked `rm -rf \"$WORK\"` — the standard temp-dir cleanup idiom, ~28 occurrences in this repository alone, ALLOWED before this task. Dangerous now means a target that RUNS something (`$(…)`, a backtick) or a known-dangerous variable NAME (HOME/ROOT/PREFIX/…), which blocks however it is quoted. Still strictly stronger than the pre-task guard, which allowed `rm -rf \"$HOME\"` and `rm -rf $(pwd)` alike."
           ]
         }
       ],
