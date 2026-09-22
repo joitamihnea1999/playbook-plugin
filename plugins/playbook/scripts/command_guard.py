@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 
 # Statement separators: each becomes its own command position. Single `|` too,
@@ -102,18 +103,23 @@ def _wspec(val_short="", val_long=(), terminal=(), operands=0,
 _WRAPPERS = {
     # privilege
     "sudo": _wspec(
-        val_short="ugUCprtTR",
+        val_short="ugUCprtTRDh",
         val_long=("--user", "--group", "--other-user", "--close-from", "--prompt",
                   "--role", "--type", "--chroot", "--chdir", "--host",
                   "--command-timeout"),
-        terminal=("-V", "--version", "-h", "--help", "-l", "--list",
+        # `-h` is NOT terminal: sudo takes `-h host`, and treating it as a
+        # query mode made `sudo -h localhost rm -rf /` read as non-executing
+        # (impl panel round 1, grok #1). `--help` alone is the query form.
+        terminal=("-V", "--version", "--help", "-l", "--list",
                   "-v", "--validate", "-K", "--remove-timestamp")),
     "doas": _wspec(val_short="uC", val_long=(),
                    terminal=("-L", "-V", "-h", "--help", "--version")),
     # environment / scheduling / buffering
+    # `--block-signal`/`--default-signal`/`--ignore-signal` take an OPTIONAL
+    # value that is only ever attached with `=`, so modelling them as
+    # value-taking swallowed the command (impl panel round 1, sol:high #3).
     "env": _wspec(val_short="uC",
-                  val_long=("--unset", "--chdir", "--block-signal",
-                            "--default-signal", "--ignore-signal"),
+                  val_long=("--unset", "--chdir"),
                   terminal=("--help", "--version"),
                   split_short="S", split_long=("--split-string",)),
     "nice": _wspec(val_short="n", val_long=("--adjustment",),
@@ -139,6 +145,8 @@ _WRAPPERS = {
     # shell builtins that delegate
     "command": _wspec(terminal=("-v", "-V")),
     "builtin": _wspec(),
+    # `eval` delegates to a STRING, so its remainder is classified, not walked.
+    "eval": _wspec(),
     "exec": _wspec(val_short="a", val_long=()),
     # control-flow keywords that can precede a command in a split segment
     "then": _wspec(),
@@ -146,6 +154,73 @@ _WRAPPERS = {
     "else": _wspec(),
     "elif": _wspec(),
 }
+
+# ── lexing and naming (impl panel round 1) ────────────────────────────────────
+# Round 1 shipped a whitespace tokenizer and ONE normalisation site. The panel
+# produced 31 vectors that walked through, and every one of them was really two
+# defects: quoting is invisible to a whitespace split (`sudo -p 'Password: ' rm
+# -rf /` puts `rm` where an option value was expected), and a command can be
+# NAMED many ways (`'rm'`, `"/bin/rm"`, `r\m`, `~/rm`, `$HOME/bin/rm`) while the
+# rules all anchor on the bare word. So: one lexer, one naming function, used
+# everywhere a command position is decided.
+
+def _lex(s):
+    """(raw, start, value) per token. Quote- and escape-aware, and FORGIVING —
+    an unbalanced quote simply runs to the end rather than raising, because a
+    classifier that throws on hostile input fails OPEN."""
+    toks = []
+    i, n = 0, len(s)
+    while i < n:
+        while i < n and s[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        start = i
+        buf = []
+        while i < n:
+            c = s[i]
+            if c.isspace():
+                break
+            if c == "\\" and i + 1 < n:
+                buf.append(s[i + 1])
+                i += 2
+                continue
+            if c in "\"'":
+                q = c
+                i += 1
+                while i < n and s[i] != q:
+                    if q == '"' and s[i] == "\\" and i + 1 < n:
+                        buf.append(s[i + 1])
+                        i += 2
+                        continue
+                    buf.append(s[i])
+                    i += 1
+                i += 1                                 # closing quote, or end
+                continue
+            buf.append(c)
+            i += 1
+        toks.append((s[start:i], start, "".join(buf)))
+    return toks
+
+
+# A command NAME never contains whitespace. That single rule is what keeps this
+# from turning data into commands: `'rm'` is an obfuscated name, `"rm -rf /"` is
+# a string, and only the first one is renamed.
+_PATH_PREFIX = re.compile(r"^(?:[A-Za-z0-9_.+~$@{}-]*/)+")
+_LEAD_GROUP = "({!"
+_TRAIL_GROUP = ")};"
+
+
+def _command_name(value):
+    """The bare command a token names, or None when the token is not a name."""
+    if not value:
+        return None
+    v = value.lstrip(_LEAD_GROUP).rstrip(_TRAIL_GROUP)
+    if not v or any(ch.isspace() for ch in v):
+        return None
+    v = _PATH_PREFIX.sub("", v)
+    return v or None
+
 
 # A leading token that groups or negates, rather than naming a command.
 _GROUPERS = ("(", "{", "!", "&&", "||")
@@ -177,12 +252,16 @@ def _walk_prefix(seg):
         for the caller to classify recursively.
     """
     s = seg.strip()
-    toks = [(m.group(0), m.start()) for m in _TOKEN.finditer(s)]
+    lexed = _lex(s)
+    toks = [(value, start) for _raw, start, value in lexed]
     i = 0
     payloads = []
-    steps = 0
-    while i < len(toks) and steps < _WALK_CEILING:
-        steps += 1
+    # Termination needs no ceiling: every path below consumes at least one token,
+    # and the token list is finite. A ceiling WOULD be the bypass — nest one more
+    # wrapper than the cap and the walk stops short (impl panel round 1, three
+    # seats; the round-1 code had one and its test used 500 against a cap of
+    # 10 000, so it proved nothing).
+    while i < len(toks):
         tok = toks[i][0]
         if tok in _GROUPERS or _ASSIGN.match(tok):
             i += 1                                     # consumes a token → terminates
@@ -192,9 +271,20 @@ def _walk_prefix(seg):
                     depth += toks[i][0].count("(") - toks[i][0].count(")")
                     i += 1
             continue
-        spec = _WRAPPERS.get(tok.rsplit("/", 1)[-1])
+        name = _command_name(tok)
+        spec = _WRAPPERS.get(name) if name else None
         if spec is None:
             break                                      # this token is the command
+        if name == "eval":                             # delegates to a STRING
+            i += 1
+            if i < len(toks):
+                rest_toks = lexed[i:]
+                # one quoted operand → its VALUE is the command line; several
+                # tokens → the remainder as written.
+                payloads.append(rest_toks[0][2] if len(rest_toks) == 1
+                                else s[rest_toks[0][1]:])
+            i = len(toks)
+            break
         i += 1                                         # the wrapper itself
         end_of_opts = False
         operands = spec["operands"]
@@ -253,24 +343,57 @@ def _walk_prefix(seg):
     return (rest, True, payloads)
 
 
-# Finding a command position also means recognising the command when it is named
-# by PATH or escaped past an alias: `/bin/rm -rf /` and `\\rm -rf /` are the same
-# command as `rm -rf /`, but every rule here anchors on the bare name. The
-# normalised form is checked IN ADDITION to the original, never instead of it.
-# The first version of this accepted ANY non-slash run before the slashes, so a
-# quoted path at the start of a line — `"/sbin/mkfs.ext4 /dev/sdb1"` in a test
-# fixture — normalised into a command and blocked. The guard caught that on my
-# own file write. The path part is therefore restricted to path-shaped
-# characters, and nothing is normalised unless a directory or an alias-escaping
-# backslash was actually hiding the name.
-_CMD_HEAD = re.compile(r"^(\\)?((?:[A-Za-z0-9_.+-]*/)+)?([A-Za-z0-9_.+-]+)(?=\s|$)")
-
-
 def _normalize_command_head(seg):
-    m = _CMD_HEAD.match(seg)
-    if not m or not (m.group(1) or m.group(2)):
-        return seg                                     # nothing was hiding the name
-    return m.group(3) + seg[m.end():]
+    """`seg` with its command written plainly: quotes, escapes, a leading `(`,
+    and a directory prefix removed from the HEAD token only. Everything after it
+    is left byte-for-byte, so the rules still see the real arguments."""
+    toks = _lex(seg)
+    if not toks:
+        return seg
+    raw, start, value = toks[0]
+    name = _command_name(value)
+    if name is None or name == raw:
+        return seg
+    return seg[:start] + name + seg[start + len(raw):]
+
+
+# `git` is not a wrapper — the VERB carries the meaning — but it has the same
+# "options before the verb" shape, and `git -C <dir> push --force` is ordinary
+# agent usage (impl panel round 1, opus #2). These are git's global options.
+_GIT_VALUE_SHORT = set("Cc")
+_GIT_VALUE_LONG = {"--git-dir", "--work-tree", "--namespace", "--exec-path",
+                   "--super-prefix", "--config-env"}
+
+
+def _strip_git_globals(seg):
+    toks = _lex(seg)
+    if not toks or _command_name(toks[0][2]) != "git":
+        return seg
+    i = 1
+    while i < len(toks):
+        t = toks[i][2]
+        if t.startswith("--"):
+            base = t.split("=", 1)[0]
+            if base in _GIT_VALUE_LONG and "=" not in t:
+                i += 2
+                continue
+            if base in _GIT_VALUE_LONG or base in ("--paginate", "--no-pager",
+                                                   "--bare", "--literal-pathspecs",
+                                                   "--no-replace-objects"):
+                i += 1
+                continue
+            break
+        if t.startswith("-") and len(t) > 1:
+            letters = t[1:]
+            if letters[0] in _GIT_VALUE_SHORT:
+                i += 1 if letters[1:] else 2
+                continue
+            i += 1
+            continue
+        break
+    if i == 1 or i >= len(toks):
+        return seg
+    return "git " + seg[toks[i][1]:]
 
 
 def _strip_prefixes(seg):
@@ -408,7 +531,7 @@ def _strip_data_regions(command):
 # `_WRAPPERS` table as the segment rules. The original regex is KEPT: it still
 # catches shapes this split does not see (a pipe inside `bash -c '…'`), and two
 # independent rules that both block is the right redundancy for this layer.
-_DOWNLOADER = re.compile(r"^(?:curl|wget|fetch|aria2c)\b")
+_DOWNLOADER = re.compile(r"^(?:curl|wget|fetch|aria2c)$")
 _INTERPRETERS = {"sh", "bash", "zsh", "ksh", "dash", "ash",
                  "python", "python3", "perl", "ruby", "node"}
 _SINGLE_PIPE = re.compile(r"(?<!\|)\|(?!\|)")
@@ -426,14 +549,22 @@ def _pipes_downloader_into_shell(text):
         # `|&` pipes stdout AND stderr, and a grouped `(bash)` / `{ bash; }` runs
         # the same interpreter — both walked past the first version of this rule.
         part = part.lstrip("&")
-        rest, executes, _payloads = _walk_prefix(part)
+        rest, executes, payloads = _walk_prefix(part)
         if not executes:
             continue
-        head = rest.split()[0] if rest.split() else ""
-        head = head.strip("\"'`;(){}").lstrip("\\").rsplit("/", 1)[-1]
-        if seen_downloader and head in _INTERPRETERS:
-            return True
-        if _DOWNLOADER.match(rest):
+        rest = _normalize_command_head(rest)
+        lexed = _lex(rest)
+        head = _command_name(lexed[0][2]) if lexed else None
+        if seen_downloader:
+            # `curl … | env -S 'bash'` puts the interpreter inside an option
+            # VALUE (impl panel round 1, grok #3).
+            for payload in payloads:
+                p = _lex(payload)
+                if p and _command_name(p[0][2]) in _INTERPRETERS:
+                    return True
+            if head in _INTERPRETERS:
+                return True
+        if head and _DOWNLOADER.match(head):
             seen_downloader = True
     return False
 
@@ -446,11 +577,22 @@ def _command_substitutions(text):
     i, n = 0, len(text)
     while i < n:
         if text.startswith("$(", i):
-            depth, j = 1, i + 2
+            # Balance parentheses OUTSIDE quotes: `$(rm -rf /var/lib/app '(')`
+            # closed early for a quote-blind counter (impl panel round 1,
+            # sol:high #5), which left the real body unclassified.
+            depth, j, quote = 1, i + 2, ""
             while j < n and depth:
-                if text[j] == "(":
+                c = text[j]
+                if quote:
+                    if c == "\\" and quote == '"' and j + 1 < n:
+                        j += 1
+                    elif c == quote:
+                        quote = ""
+                elif c in "\"'":
+                    quote = c
+                elif c == "(":
                     depth += 1
-                elif text[j] == ")":
+                elif c == ")":
                     depth -= 1
                 j += 1
             if depth == 0:
@@ -467,13 +609,55 @@ def _command_substitutions(text):
     return out
 
 
+# A QUOTED heredoc tag means the shell performs NO expansion in the body — no
+# `$( )`, no backticks — whatever the sink is. The segment rules still read those
+# lines (so an interpreter heredoc carrying `rm -rf /` as a COMMAND still blocks,
+# because the interpreter runs it), but the SUBSTITUTION scan must not, or every
+# `python3 - <<'PY'` whose script mentions a dangerous command inside a Markdown
+# code span gets refused. Measured on this repo's own 73 859 source/doc lines:
+# that single distinction accounts for 19 of 27 newly-blocked lines, and it is
+# not a heuristic — a quoted tag genuinely suppresses expansion in every shell.
+_QUOTED_HEREDOC = re.compile(r"""<<-?\s*(['"])(?P<tag>[A-Za-z_][A-Za-z0-9_]*)\1""")
+# ... unless the SINK is itself a shell: `bash <<'EOF'` does not expand the body
+# when the outer shell reads it, but bash then runs it and expands it there.
+_SHELLS = {"sh", "bash", "zsh", "ksh", "dash", "ash"}
+
+
+def _strip_quoted_heredoc_bodies(text):
+    lines = str(text).split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        m = _QUOTED_HEREDOC.search(line)
+        if not m:
+            continue
+        lexed = _lex(line)
+        sink = _command_name(lexed[0][2]) if lexed else None
+        if sink in _SHELLS:
+            continue                                   # the body IS a shell script
+        tag = m.group("tag")
+        j = i
+        while j < len(lines) and lines[j].strip() != tag:
+            j += 1
+        if j >= len(lines):
+            continue                                   # unterminated → keep it all
+        i = j + 1                                      # drop the inert body
+    return "\n".join(out)
+
+
 def classify_command(command, extra_patterns=None, _depth=0):
     """Return ("block", name, why) or ("allow", None, None). Pure + deterministic.
 
     `command` may be a str, or a list of argv tokens (Codex `exec_command`), in
     which case the joined form AND each element are checked."""
     if isinstance(command, (list, tuple)):
-        for part in list(command) + [" ".join(str(p) for p in command)]:
+        try:
+            quoted = " ".join(shlex.quote(str(p)) for p in command)
+        except Exception:
+            quoted = " ".join(str(p) for p in command)
+        for part in list(command) + [" ".join(str(p) for p in command), quoted]:
             v = classify_command(part, extra_patterns, _depth)
             if v[0] == "block":
                 return v
@@ -490,11 +674,13 @@ def classify_command(command, extra_patterns=None, _depth=0):
                     return v
         if not executes:                               # `sudo --version …` prints, runs nothing
             continue
+        normalized = _normalize_command_head(stripped)
         hit = (_segment_checks(stripped)
-               or _segment_checks(_normalize_command_head(stripped)))
+               or _segment_checks(normalized)
+               or _segment_checks(_strip_git_globals(normalized)))
         if hit:
             return ("block", hit[0], hit[1])
-        inner = _unwrap_shell_c(stripped)
+        inner = _unwrap_shell_c(stripped) or _unwrap_shell_c(normalized)
         if inner and _depth < 3:                       # unwrap `bash -lc "<script>"`
             v = classify_command(inner, extra_patterns, _depth + 1)
             if v[0] == "block":
@@ -507,7 +693,7 @@ def classify_command(command, extra_patterns=None, _depth=0):
     if _depth < 3:
         # On the MASKED text: a quoted heredoc written to a plain file does not
         # expand, so a fixture ABOUT `$(rm -rf /)` stays data (task 073's promise).
-        for sub in _command_substitutions(whole_text):
+        for sub in _command_substitutions(_strip_quoted_heredoc_bodies(whole_text)):
             if sub.strip():
                 v = classify_command(sub, extra_patterns, _depth + 1)
                 if v[0] == "block":
@@ -518,8 +704,11 @@ def classify_command(command, extra_patterns=None, _depth=0):
         if rx.search(whole_text):
             return ("block", name, why)
     for pat in (extra_patterns or []):
+        # On the MASKED text, like every built-in whole-command rule: a project
+        # pattern must not fire on a heredoc fixture either (impl panel round 1,
+        # sonnet #2 — the shipped example dodged it only by its `$` anchor).
         try:
-            if re.search(pat, command, re.I):
+            if re.search(pat, whole_text, re.I):
                 return ("block", "project-dangerous", f"matches project pattern {pat!r}")
         except re.error:
             continue

