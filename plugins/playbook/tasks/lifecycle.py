@@ -260,16 +260,23 @@ def cmd_work(cmd_args):
             from tasks.core import _extract_status as _es058
             from tasks.core import _gate_counts as _gc058
             from tasks.core import blocked_digest as _bd058
+            from tasks.core import judge_digest as _jd058
             try:
                 _entry_text = task_file.read_text(encoding="utf-8", errors="replace")
                 _status_at_entry = _es058(task_file)
                 _blocked_at_entry = _bd058(_entry_text)
                 _chk, _tot = _gc058(_entry_text)
                 _open_gates_at_entry = _tot - _chk
-            except Exception:      # noqa: BLE001 — advisory; the transform re-checks anyway
+                _judge_at_entry = _jd058(task_file)
+            except Exception:      # noqa: BLE001 — a snapshot we could not take must SKIP
+                # its comparisons, never assert a baseline: `None` for
+                # `expect_blocked` MEANS "there was no block", which would falsely
+                # refuse a legitimately resumed task (impl panel r2, opus F2).
+                from tasks.core import _UNSET as _UNSET058
                 _status_at_entry = None
-                _blocked_at_entry = None
+                _blocked_at_entry = _UNSET058
                 _open_gates_at_entry = None
+                _judge_at_entry = _UNSET058
             if _live_status_index(_st_lines) is None:
                 print(f"Error: {task_file} has no live `## Status` heading with a "
                       "value line (missing, hidden inside a code fence, or directly "
@@ -696,7 +703,8 @@ def cmd_work(cmd_args):
                         receipt=receipt, expect_status=_status_at_entry,
                         expect_blocked=_blocked_at_entry,
                         expect_risk=risk if risk else None,
-                        expect_open_gates=_open_gates_at_entry))
+                        expect_open_gates=_open_gates_at_entry,
+                        expect_judge=_judge_at_entry, task_file=task_file))
                 except CloseRaceRefused as _race:
                     print(f"Blocked: cannot close task {prev_task} — {_race} "
                           "Nothing was written; the session pointer is kept.",

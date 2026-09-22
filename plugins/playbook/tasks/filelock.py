@@ -47,6 +47,20 @@ from contextlib import contextmanager
 from pathlib import Path
 
 LOCK_SUFFIX = ".lock"
+
+
+def _default_timeout() -> float:
+    """Seconds to wait for a contended task lock. `PLAYBOOK_LOCK_TIMEOUT_SECS`
+    overrides it (a test needs a short one; an operator on a slow filesystem may
+    want a long one)."""
+    raw = (os.environ.get("PLAYBOOK_LOCK_TIMEOUT_SECS") or "").strip()
+    try:
+        v = float(raw)
+        return v if v > 0 else 30.0
+    except ValueError:
+        return 30.0
+
+
 DEFAULT_TIMEOUT = 30.0
 _POLL_SECS = 0.05
 
@@ -161,17 +175,17 @@ def _holder_pid(lock_file: Path) -> str:
 
 
 @contextmanager
-def named_lock(lock_file, *, timeout: float = DEFAULT_TIMEOUT):
+def named_lock(lock_file, *, timeout: "float | None" = None):
     """`task_lock` on an EXPLICIT lock file — for a resource that already has a
     lock protocol of its own. The only caller today is `tasks tag`, which must
     rendezvous on the lock file the shell `chat-log-hook` uses for its counter
     (`<agent>/chat_log_counter.lock`) rather than on a task directory's lock."""
-    with _lock_on(Path(lock_file), timeout=timeout):
+    with _lock_on(Path(lock_file), timeout=_default_timeout() if timeout is None else timeout):
         yield
 
 
 @contextmanager
-def task_lock(path, *, timeout: float = DEFAULT_TIMEOUT):
+def task_lock(path, *, timeout: "float | None" = None):
     """Serialize the read-transform-write transactions on `path`'s records.
 
     Re-entrant within one process, so a caller may hold this across several
@@ -180,7 +194,8 @@ def task_lock(path, *, timeout: float = DEFAULT_TIMEOUT):
     platform with no backend it yields after one loud advisory — the write still
     happens, unserialized, and the operator is told.
     """
-    with _lock_on(lock_path_for(path), timeout=timeout):
+    with _lock_on(lock_path_for(path),
+                  timeout=_default_timeout() if timeout is None else timeout):
         yield
 
 

@@ -1096,7 +1096,10 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
             record_names = "(?:" + "|".join(
                 re.escape(n) for n in sorted(
                     {"judge.md", "judge-archive.md", "task-archive.md",
-                     "vetting-ledger.json", "task.md.lock", "judge.md.lock"}
+                     # ONE lock per task directory, always named `task.md.lock`
+                     # (058 impl panel r2, sonnet #3: a `judge.md.lock` literal
+                     # was exempted but nothing ever creates it).
+                     "vetting-ledger.json", "task.md.lock"}
                     | _jln())) + ")"
             if tracked == "untracked":
                 line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))

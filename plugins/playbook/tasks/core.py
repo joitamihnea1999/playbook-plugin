@@ -3810,11 +3810,34 @@ def blocked_digest(text: str) -> "str | None":
     return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
 
 
+def judge_digest(task_file) -> "str | None":
+    """A digest of judge.md's NEWEST round, or None when there is no judge.md
+    (task 058, impl panel r2, codex ×2 Critical).
+
+    The close reads the newest verdict to decide whether panel evidence carries
+    it — minutes before it commits. A panel finishing in that window can install
+    a newer FAIL, and the close would still commit on the stale PASS. This is
+    what the commit compares."""
+    import hashlib
+    jm = Path(task_file).parent / "judge.md"
+    try:
+        rounds = parse_judge_rounds(jm.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    if not rounds:
+        return None
+    newest = rounds[0]
+    material = f"{newest.get('mode')}|{newest.get('verdict')}|{newest.get('tree_state')}"
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
+
+
 def compose_close(text: str, *, receipt_heading: str, receipt: str,
                   expect_status: "str | None" = "in_progress",
                   expect_blocked: "str | None" = _UNSET,
                   expect_risk: "str | None" = None,
-                  expect_open_gates: "int | None" = None) -> str:
+                  expect_open_gates: "int | None" = None,
+                  expect_judge: "str | None" = _UNSET,
+                  task_file=None) -> str:
     """The close's ONE transform: insert the receipt AND set `done`, on the bytes
     just read, after re-checking what earned the close (task 058, plan panel
     P1/P10 and impl panel r1). Raises `CloseRaceRefused` — leaving the file
@@ -3830,6 +3853,13 @@ def compose_close(text: str, *, receipt_heading: str, receipt: str,
     """
     lines = _physical_lines(text)
     live = _status_from_lines(lines)      # the same reader `_extract_status` uses
+    if live == "done":
+        # Two concurrent closes: the loser used to capture `done` as its own
+        # expected status and append a SECOND receipt (impl panel r2,
+        # codex-high #2). A close of an already-closed task is not a close.
+        raise CloseRaceRefused(
+            "the task is already `done` — another close committed first; this one "
+            "would add a second receipt. Nothing was written.")
     if expect_status is not None and live != expect_status:
         raise CloseRaceRefused(
             f"task status changed to `{live}` while this close was running "
@@ -3857,6 +3887,13 @@ def compose_close(text: str, *, receipt_heading: str, receipt: str,
                 f"the open-gate count changed ({expect_open_gates} → {_open}) while "
                 "this close was running — a gate was unchecked or added, so the "
                 "work is no longer the work that earned this close.")
+    if expect_judge is not _UNSET and task_file is not None:
+        now_judge = judge_digest(task_file)
+        if now_judge != expect_judge:
+            raise CloseRaceRefused(
+                "judge.md's newest panel round changed while this close was running "
+                "(a panel finished in the window) — the evidence this close rests on "
+                "is superseded; re-read judge.md and re-run `tasks work done`.")
     with_receipt = _compose_upsert(text, f"## {receipt_heading}", receipt)
     out = _physical_lines(with_receipt, keepends=True)
     pair = _live_status_pair(out)

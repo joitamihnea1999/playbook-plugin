@@ -830,6 +830,199 @@ class JudgeRoundsSurviveConcurrentPanels(unittest.TestCase):
         self.assertEqual(missing, [], f"{len(missing)}/12 paid rounds lost")
 
 
+class Round2Fixes(unittest.TestCase):
+    """058 impl panel round 2."""
+
+    BASE = ("# 001 - T\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n"
+            "## Work Plan\n- [x] G1\n")
+
+    def test_a_failed_entry_snapshot_skips_the_checks_rather_than_asserting_none(self):
+        # opus F2: the `except` branch set `_blocked_at_entry = None`, which
+        # ENFORCES "there was no block" — so a transient read failure on a
+        # RESUMED task (which legitimately keeps its `## Blocked` history) would
+        # falsely refuse, re-breaking exactly what round 1 fixed.
+        import inspect
+        from tasks import lifecycle
+        src = inspect.getsource(lifecycle)
+        i = src.index("_status_at_entry = _es058")
+        window = src[i:i + 900]
+        self.assertIn("_UNSET", window,
+                      "a failed entry snapshot must SKIP the comparisons, not assert a baseline")
+
+    def test_compose_close_skips_a_check_it_was_given_no_baseline_for(self):
+        from tasks.core import compose_close, set_task_blocked, resume_blocked_task
+        d = _tmp()
+        tf = d / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        set_task_blocked(tf, "paused")
+        resume_blocked_task(tf)
+        # No `expect_blocked` at all → the resumed task still closes.
+        out = compose_close(tf.read_text(encoding="utf-8"),
+                            receipt_heading="Verification Receipt",
+                            receipt="### closed\n", expect_status="in_progress")
+        self.assertRegex(out, r"## Status\ndone")
+
+    def test_lock_timeout_prints_its_message_instead_of_a_traceback(self):
+        # opus F1: the crafted LockTimeout message was never caught at the CLI
+        # boundary, so a contended lock surfaced as a Python traceback.
+        d = _tmp()
+        subprocess.run(["git", "init", "-q", str(d)], check=True, capture_output=True)
+        (d / ".agent").mkdir()
+        td = d / ".agent" / "tasks" / "001-t"
+        td.mkdir(parents=True)
+        tf = td / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        if filelock.selected_backend() == "none":
+            self.skipTest("no locking backend on this platform")
+        env = dict(os.environ, PYTHONPATH=str(PLUGIN), PLAYBOOK_SESSION_ID="pid-to",
+                   PLAYBOOK_LOCK_TIMEOUT_SECS="1")
+        # Activate BEFORE the holder takes the lock (activation writes too).
+        r = subprocess.run([sys.executable, "-m", "tasks.cli", "work", "1"],
+                           cwd=d, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        holder = subprocess.Popen(
+            [sys.executable, "-c", textwrap.dedent(f"""
+                import sys, time
+                sys.path.insert(0, {str(PLUGIN)!r})
+                from tasks import filelock
+                with filelock.task_lock({str(tf)!r}):
+                    print("HELD", flush=True)
+                    time.sleep(20)
+            """)], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "HELD")
+            r = subprocess.run([sys.executable, "-m", "tasks.cli", "blocked", "waiting"],
+                               cwd=d, env=env, capture_output=True, text=True, timeout=120)
+            out = r.stdout + r.stderr
+            self.assertNotIn("Traceback", out, out[-400:])
+            self.assertIn("has held", out)
+            self.assertNotEqual(r.returncode, 0)
+        finally:
+            holder.kill()
+            holder.wait()
+
+    def test_a_superseded_panel_verdict_refuses_the_close(self):
+        # codex-high #1 / codex-medium #1 (Critical): the close reads judge.md's
+        # newest verdict BEFORE verify; a panel installing a newer FAIL in that
+        # window was never re-checked at the commit.
+        from tasks.core import CloseRaceRefused, compose_close, judge_digest
+        d = _tmp()
+        tf = d / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        jm = d / "judge.md"
+        jm.write_text("# Panel Impl Review — t\n\n**PANEL VERDICT: PASS** — 5/5\n", encoding="utf-8")
+        entry = judge_digest(tf)
+        jm.write_text("# Panel Impl Review — t\n\n**PANEL VERDICT: FAIL** — 2/5\n"
+                      "\n# Panel Impl Review — t\n\n**PANEL VERDICT: PASS** — 5/5\n",
+                      encoding="utf-8")
+        with self.assertRaises(CloseRaceRefused) as cm:
+            compose_close(tf.read_text(encoding="utf-8"),
+                          receipt_heading="Verification Receipt", receipt="### c\n",
+                          expect_status="in_progress", expect_judge=entry,
+                          task_file=tf)
+        self.assertIn("panel", str(cm.exception).lower())
+
+    def test_an_unchanged_panel_verdict_commits(self):
+        from tasks.core import compose_close, judge_digest
+        d = _tmp()
+        tf = d / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        (d / "judge.md").write_text("# Panel Impl Review — t\n\n**PANEL VERDICT: PASS** — 5/5\n",
+                                    encoding="utf-8")
+        out = compose_close(tf.read_text(encoding="utf-8"),
+                            receipt_heading="Verification Receipt", receipt="### c\n",
+                            expect_status="in_progress", expect_judge=judge_digest(tf),
+                            task_file=tf)
+        self.assertRegex(out, r"## Status\ndone")
+
+    def test_a_second_close_of_an_already_done_task_refuses(self):
+        # codex-high #2: the loser of two concurrent closes captured `done` as
+        # its own expected status and appended a second receipt.
+        from tasks.core import CloseRaceRefused, compose_close
+        done = self.BASE.replace("in_progress", "done")
+        with self.assertRaises(CloseRaceRefused) as cm:
+            compose_close(done, receipt_heading="Verification Receipt",
+                          receipt="### c\n", expect_status="done")
+        self.assertIn("already", str(cm.exception).lower())
+
+    def test_the_state_echo_hook_appends_under_the_shared_lock(self):
+        # codex-high #3: the gate logger appends to chat_log.md too, so a
+        # `tasks tag` rewrite could lose a gate entry.
+        hook = (PLUGIN / "scripts" / "state-echo-hook").read_text(encoding="utf-8")
+        self.assertIn("chat_log_counter.lock", hook)
+        self.assertIn("flock -x", hook)
+
+    def test_compact_refuses_a_stale_compose(self):
+        # sonnet #2 + codex ×2: compact composed its new text BEFORE taking the
+        # lock, so a writer landing in between was overwritten — the same shape
+        # this task measured 5/5. Driven through the real command.
+        import contextlib
+        import io
+        from tasks import compact as C
+        d = _tmp()
+        agent = d / ".agent" / "tasks" / "001-t"
+        agent.mkdir(parents=True)
+        tf = agent / "task.md"
+        tf.write_text("# 001\n\n## Status\nin_progress\n\n## Notes\n"
+                      "<!-- archive:start -->\ncold narrative\n<!-- archive:end -->\n",
+                      encoding="utf-8")
+        real_lock = C.__dict__.get("task_lock")
+
+        @contextlib.contextmanager
+        def _lock_and_write(path, *a, **k):
+            tf.write_text(tf.read_text(encoding="utf-8") +
+                          "\n## Blocked\n> another session paused this\n", encoding="utf-8")
+            yield
+
+        cwd = os.getcwd()
+        code = None
+        err = io.StringIO()
+        with mock.patch("tasks.filelock.task_lock", _lock_and_write):
+            os.chdir(d)
+            try:
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    C.cmd_compact(["001"])
+            except SystemExit as e:
+                code = e.code
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(code, 1, "a stale compaction was written")
+        self.assertIn("changed while the compaction was being composed", err.getvalue())
+        text = tf.read_text(encoding="utf-8")
+        self.assertIn("## Blocked", text, "the concurrent write was overwritten")
+        self.assertIn("cold narrative", text, "blocks were moved despite the refusal")
+
+    def test_compact_still_works_undisturbed(self):
+        import contextlib
+        import io
+        from tasks import compact as C
+        d = _tmp()
+        agent = d / ".agent" / "tasks" / "001-t"
+        agent.mkdir(parents=True)
+        tf = agent / "task.md"
+        tf.write_text("# 001\n\n## Status\nin_progress\n\n## Notes\n"
+                      "<!-- archive:start -->\ncold narrative\n<!-- archive:end -->\n",
+                      encoding="utf-8")
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.suppress(SystemExit):
+                    C.cmd_compact(["001"])
+        finally:
+            os.chdir(cwd)
+        self.assertIn("compacted", tf.read_text(encoding="utf-8").lower())
+        self.assertIn("cold narrative",
+                      (agent / "task-archive.md").read_text(encoding="utf-8"))
+
+    def test_the_tamper_exemption_has_no_dead_entry(self):
+        # sonnet #3: `judge.md.lock` was exempted but nothing ever creates it —
+        # the lock is one per DIRECTORY, always `task.md.lock`.
+        review_src = (PLUGIN / "tasks" / "review.py").read_text(encoding="utf-8")
+        self.assertNotIn('"judge.md.lock"', review_src)
+        self.assertIn('"task.md.lock"', review_src)
+
+
 class LockFileIsNotTamper(unittest.TestCase):
     """058 plan panel P3: my Design gate ASSUMED the lock file was tamper-exempt
     because it lives under `.agent/`. It was not — task 059's guard exempts only

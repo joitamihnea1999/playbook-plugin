@@ -40,6 +40,20 @@ def print_usage():
 
 
 def main():
+    """CLI entry point. Task 058: a contended task lock raises `LockTimeout` with
+    a message written for the operator ("another playbook holder (pid …) has held
+    …"); catching it here is what turns that into the message rather than a
+    traceback (impl panel r2, opus F1). The raise happens BEFORE any read or
+    write, so nothing was changed when it fires."""
+    from tasks.filelock import LockTimeout
+    try:
+        return _main()
+    except LockTimeout as exc:
+        print(f"Blocked: {exc}", file=sys.stderr, flush=True)
+        sys.exit(1)
+
+
+def _main():
     # Force utf-8 on Windows where the default console encoding (cp1252) chokes on → and emoji.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")

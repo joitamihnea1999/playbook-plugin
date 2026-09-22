@@ -152,10 +152,12 @@ def rewrite(
     receipt and a status change land together or not at all. A missing file is
     read as empty text, so a transform can create it.
     """
-    from tasks.filelock import DEFAULT_TIMEOUT, task_lock
+    from tasks.filelock import task_lock
 
     p = Path(path)
-    with task_lock(p, timeout=DEFAULT_TIMEOUT if timeout is None else timeout):
+    # `timeout=None` lets filelock apply its own default (and the
+    # PLAYBOOK_LOCK_TIMEOUT_SECS override); passing the constant here bypassed it.
+    with task_lock(p, timeout=timeout):
         try:
             text = p.read_text(encoding=encoding, errors="replace")
         except FileNotFoundError:

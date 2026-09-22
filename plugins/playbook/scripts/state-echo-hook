@@ -310,6 +310,11 @@ elif [ -n "$GATE_LINE" ]; then
             TRANSITION_MSG="# ✓ previous gate done (${PREV_COUNT} tool calls)"
         fi
         if [ "$AGENT_WRITABLE" = true ]; then
+            # Task 058 (impl panel r2, codex-high #3): this appends to the SAME
+            # chat_log.md that `tasks tag` rewrites, so it takes the same lock the
+            # chat-log hook and the Python rewriter use. Without flock the append
+            # is unchanged and `tasks tag` still refuses a stale rewrite.
+            _gate_append() {
             {
                 echo "---"
                 echo ""
@@ -325,6 +330,12 @@ elif [ -n "$GATE_LINE" ]; then
                 fi
                 echo ""
             } >> "$GATE_LOG" 2>/dev/null || PLAYBOOK_WRITE_FAILED=true
+            }
+            if command -v flock &>/dev/null; then
+                ( flock -x 202; _gate_append ) 202>"$AGENT_DIR/chat_log_counter.lock"
+            else
+                _gate_append
+            fi
         fi
         # Gate-skip detection: new first-unchecked is above the just-completed gate
         if [ "$PREV_TASK" = "$TASK" ] && [ "$GATE_LINE" -lt "$PREV_LINE" ] 2>/dev/null; then

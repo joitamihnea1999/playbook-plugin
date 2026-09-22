@@ -266,12 +266,34 @@ def cmd_compact(cmd_args) -> None:
     from tasks.filelock import task_lock
     with task_lock(task_md):
         _do_move(task_md, archive_path, new_task_text, header_for_archive=archive_add,
-                 task_num=task_num, nl=nl, moved=len(moved_blocks), total_lines=total_lines)
+                 task_num=task_num, nl=nl, moved=len(moved_blocks),
+                 total_lines=total_lines, source_text=text)
 
 
 def _do_move(task_md, archive_path, new_task_text, *, header_for_archive,
-             task_num, nl, moved, total_lines) -> None:
-    """The archive-then-replace move, run with the task lock held (task 058)."""
+             task_num, nl, moved, total_lines, source_text=None) -> None:
+    """The archive-then-replace move, run with the task lock held (task 058).
+
+    `source_text` is the task.md this move was COMPOSED from. The compose above
+    (read → validate → splice, ~60 lines) runs unlocked, so a writer landing
+    between it and this call would be overwritten by a stale buffer — the exact
+    lost-update shape this task measured 5/5 for the close (058 impl panel r2:
+    sonnet #2 and both codex seats). Compare-and-swap instead: if task.md moved,
+    write NOTHING and tell the operator to re-run, so no block is ever lost.
+    """
+    if source_text is not None:
+        try:
+            with task_md.open(encoding="utf-8", errors="replace", newline="") as _fh:
+                current = _fh.read()
+        except OSError as e:
+            print(f"Error: could not re-read task.md before the move ({e}). "
+                  "Nothing moved.", file=sys.stderr)
+            sys.exit(1)
+        if current != source_text:
+            print("Error: task.md changed while the compaction was being composed "
+                  "(another session wrote to it) — nothing moved, so no block was "
+                  "lost. Re-run `tasks compact`.", file=sys.stderr)
+            sys.exit(1)
     archive_add = header_for_archive
     existed = archive_path.exists()
     pre_size = archive_path.stat().st_size if existed else 0
