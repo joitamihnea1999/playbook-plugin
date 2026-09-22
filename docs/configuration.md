@@ -257,6 +257,7 @@ it can never wedge a session.
   `timeout --help …`. An option the table does not know that takes a value hides
   what follows it — the guard under-blocks there rather than risk blocking a safe
   command, and that bound is deliberate.
+- **A command substitution is a command** (task 077). The body of `$( ... )` and of a backtick form is classified in its own right, because it runs whatever surrounds it. A single `&` separates commands like `;` does, and `|&` or a grouped `(bash)` reach the same interpreter as `| bash`. Inert DATA is still inert: a quoted `cat`/`tee` heredoc written to a plain file is not scanned, which is how you write a fixture ABOUT a dangerous command. The one accepted cost is that a single-quoted substitution, which the shell would not expand, still blocks — the matcher cannot see quoting, and allowing it would mean allowing the double-quoted form that really runs.
 - **A generic pipe into a shell is NOT blocked** — `cat evil.sh | sh` is allowed;
   only a *downloader* piped into an interpreter (`curl`/`wget`/`fetch`/`aria2c`)
   blocks. Remote code is unreviewed and unambiguous; a local file is not, and the

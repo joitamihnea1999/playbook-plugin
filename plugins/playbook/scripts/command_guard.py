@@ -60,7 +60,7 @@ import sys
 
 # Statement separators: each becomes its own command position. Single `|` too,
 # so `foo | rm -rf /` still sees `rm` at a command position.
-_SEP = re.compile(r"&&|\|\||[;\n|]")
+_SEP = re.compile(r"&&|\|\||[;\n|&]")   # a single `&` backgrounds and separates
 # ── the wrapper grammar (task 077) ────────────────────────────────────────────
 # A WRAPPER delegates to the command that follows it. Stripping only the bare
 # wrapper token left every optioned form unguarded — `sudo rm -rf /` blocked while
@@ -186,6 +186,11 @@ def _walk_prefix(seg):
         tok = toks[i][0]
         if tok in _GROUPERS or _ASSIGN.match(tok):
             i += 1                                     # consumes a token → terminates
+            if _ASSIGN.match(tok):                     # `x=$(echo hi) rm -rf /`
+                depth = tok.count("(") - tok.count(")")
+                while depth > 0 and i < len(toks):
+                    depth += toks[i][0].count("(") - toks[i][0].count(")")
+                    i += 1
             continue
         spec = _WRAPPERS.get(tok.rsplit("/", 1)[-1])
         if spec is None:
@@ -418,16 +423,48 @@ def _pipes_downloader_into_shell(text):
         return False
     seen_downloader = False
     for part in parts:
+        # `|&` pipes stdout AND stderr, and a grouped `(bash)` / `{ bash; }` runs
+        # the same interpreter — both walked past the first version of this rule.
+        part = part.lstrip("&")
         rest, executes, _payloads = _walk_prefix(part)
         if not executes:
             continue
         head = rest.split()[0] if rest.split() else ""
-        head = head.strip("\"'`;)").lstrip("\\").rsplit("/", 1)[-1]
+        head = head.strip("\"'`;(){}").lstrip("\\").rsplit("/", 1)[-1]
         if seen_downloader and head in _INTERPRETERS:
             return True
         if _DOWNLOADER.match(rest):
             seen_downloader = True
     return False
+
+
+def _command_substitutions(text):
+    """The contents of every `$( … )` and backtick substitution. Their bodies RUN,
+    whatever surrounds them — `echo "$(rm -rf /)"` deletes the disk — so each is
+    classified as a command in its own right."""
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        if text.startswith("$(", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth == 0:
+                out.append(text[i + 2:j - 1])
+            i = j
+        elif text[i] == "`":
+            j = text.find("`", i + 1)
+            if j == -1:
+                break
+            out.append(text[i + 1:j])
+            i = j + 1
+        else:
+            i += 1
+    return out
 
 
 def classify_command(command, extra_patterns=None, _depth=0):
@@ -467,6 +504,14 @@ def classify_command(command, extra_patterns=None, _depth=0):
     # command, not the command (the documented bound: echoing dangerous text is
     # fine). Segment checks above already ran on the full text.
     whole_text = _strip_data_regions(command)
+    if _depth < 3:
+        # On the MASKED text: a quoted heredoc written to a plain file does not
+        # expand, so a fixture ABOUT `$(rm -rf /)` stays data (task 073's promise).
+        for sub in _command_substitutions(whole_text):
+            if sub.strip():
+                v = classify_command(sub, extra_patterns, _depth + 1)
+                if v[0] == "block":
+                    return v
     if _pipes_downloader_into_shell(whole_text):
         return ("block", "pipe-to-shell", _PIPE_WHY)
     for name, rx, why in _WHOLE:

