@@ -223,6 +223,13 @@ _WRAPPERS = {
     # shell builtins that delegate
     "command": _wspec(terminal=("-v", "-V")),
     "builtin": _wspec(),
+    "watch": _wspec(val_short="nd", val_long=("--interval",),
+                    terminal=("--help", "--version")),
+    "parallel": _wspec(val_short="jP", val_long=("--jobs",),
+                       terminal=("--help", "--version")),
+    "timeoutcmd": _wspec(),
+    # `trap '<command>' SIGNAL` stores a command string that runs on the signal.
+    "trap": _wspec(split_short="", split_long=(), operands=0),
     # `eval` delegates to a STRING, so its remainder is classified, not walked.
     "eval": _wspec(),
     "exec": _wspec(val_short="a", val_long=()),
@@ -421,9 +428,18 @@ def _walk_prefix(seg):
                     i += 1
             continue
         name = _command_name(tok)
+        if tok.endswith("()"):                         # `f() { <body>; }`
+            i += 1
+            continue
         spec = _WRAPPERS.get(name) if name else None
         if spec is None:
             break                                      # this token is the command
+        if name == "trap":                             # `trap '<cmd>' SIGNAL`
+            i += 1
+            if i < len(toks):
+                payloads.append(toks[i][0])
+            i = len(toks)
+            break
         if name == "eval":                             # delegates to a STRING
             i += 1
             if i < len(toks):

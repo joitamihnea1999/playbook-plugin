@@ -2523,6 +2523,19 @@
           "limitations": [
             "`git push --force --force-with-lease` still force-pushes; and a downloader can sit inside an option payload on the left of a pipe."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "MoreDelegatingForms.test_trap_watch_parallel_and_function_bodies",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "MoreDelegatingForms.test_their_benign_twins"
+          },
+          "limitations": [
+            "`trap '<cmd>' SIGNAL` stores a command the shell runs later; `watch` and `parallel` delegate like the other wrappers; a `f() { … }` definition header is not a command name. Found by my own sweep after the round-4 panel."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2547,7 +2560,9 @@
         "Task 077 impl panel round 1 produced 31 further vectors on the round-1 implementation, ALL confirmed by execution and all fixed. The lesson recorded rather than the symptom: this guard is a quote-blind pattern matcher over shell text, and 'find the command position' has a long tail (quoting, naming, separators, substitutions, verb-level options). The tail is now covered by one lexer and one naming function rather than by N normalisation sites, but the module remains pattern-based and the OS sandbox is still the only deterministic layer.",
         "Task 077 impl panel round 2 found 28 further defects on the round-1 implementation (23 under-blocks and 5 over-blocks), all confirmed by execution and all fixed. The generalisable lesson: lexing the command POSITION is not the same as lexing the DECISION — the rules that judge flags and targets have to read the same dequoted tokens, or a quoted argument hides the payload from a guard that correctly identified the command.",
         "Task 077 impl panel round 3 produced 31 more defects on the round-2 implementation (25 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. Two of the five seats reported they could not construct any under-block while three others found twelve between them — that disagreement is the honest description of this layer: the shell surface is large, and 'no judge found one' is not evidence that none exists. The interlock is a heuristic that fails toward caution, not a shell parser; the OS sandbox remains the only deterministic layer.",
-        "Task 077 impl panel round 4 produced 22 more defects (16 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. STOPPING RULE, stated rather than assumed: rounds 1-3 each invalidated an ARCHITECTURAL assumption (the command position was unlexed; the rules were unlexed; the separators were unlexed). Round 4 found one architectural regression of mine (the argv early-return) and otherwise INSTANCES - one more wrapper's arity, one more escape form. The task stops when a round returns only instances, with the residual surface disclosed here rather than implied to be empty: this is a heuristic interlock over shell text, not a shell parser, and the OS sandbox remains the only deterministic layer."
+        "Task 077 impl panel round 4 produced 22 more defects (16 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. STOPPING RULE, stated rather than assumed: rounds 1-3 each invalidated an ARCHITECTURAL assumption (the command position was unlexed; the rules were unlexed; the separators were unlexed). Round 4 found one architectural regression of mine (the argv early-return) and otherwise INSTANCES - one more wrapper's arity, one more escape form. The task stops when a round returns only instances, with the residual surface disclosed here rather than implied to be empty: this is a heuristic interlock over shell text, not a shell parser, and the OS sandbox remains the only deterministic layer.",
+        "Task 077 ARCHITECTURAL BOUND, pinned by `TheArchitecturalBound.test_a_computed_command_name_is_not_resolvable`: a command NAME that only exists after the shell evaluates something is out of reach for a static classifier — `alias x='<cmd>'; x`, `${X:-rm} …`, `$(echo rm) …`. These need the alias table, the variable environment, or the result of running an inner command. No amount of further parsing closes them; the OS sandbox is the layer that does.",
+        "Task 077 SCOPE BOUND, pinned by `TheArchitecturalBound.test_a_different_RULE_FAMILY_is_out_of_scope_not_covered`: the interlock answers 'where is the command and is it one of the enumerated dangerous forms', not 'is this act destructive'. Measured as ALLOWED and disclosed rather than implied: an interpreter running a destructive command inside its own language (`perl -e 'system(…)'`, `python3 -c 'os.system(…)'`), a remote command (`ssh host …`), a container bind mount, and other deletion tools (`find -delete`, `rsync --delete`, `shred`). Each would be a NEW rule family with its own false-positive profile, and adding one is a scope decision for the owner, not a bug fix."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
