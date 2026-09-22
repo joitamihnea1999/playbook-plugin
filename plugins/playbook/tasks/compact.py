@@ -260,6 +260,19 @@ def cmd_compact(cmd_args) -> None:
     # prior size; then write task.md ATOMICALLY. If that write fails, roll the
     # archive back to its prior size so the block is neither lost nor
     # double-archived on a retry — and report cleanly instead of a traceback.
+    # Task 058: hold the task lock across the WHOLE two-file move — the protocol
+    # (and its rollback) stays exactly as it was, but a concurrent writer can no
+    # longer land between the archive append and the task.md replace.
+    from tasks.filelock import task_lock
+    with task_lock(task_md):
+        _do_move(task_md, archive_path, new_task_text, header_for_archive=archive_add,
+                 task_num=task_num, nl=nl, moved=len(moved_blocks), total_lines=total_lines)
+
+
+def _do_move(task_md, archive_path, new_task_text, *, header_for_archive,
+             task_num, nl, moved, total_lines) -> None:
+    """The archive-then-replace move, run with the task lock held (task 058)."""
+    archive_add = header_for_archive
     existed = archive_path.exists()
     pre_size = archive_path.stat().st_size if existed else 0
     header = ("" if (existed and pre_size) else
@@ -283,6 +296,6 @@ def cmd_compact(cmd_args) -> None:
               "nothing moved.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Compacted {len(moved_blocks)} block(s), {total_lines} line(s) → "
+    print(f"Compacted {moved} block(s), {total_lines} line(s) → "
           f"{archive_path.parent.name}/task-archive.md. "
           f"task.md is now {len(new_task_text.encode('utf-8')):,} bytes.")

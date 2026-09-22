@@ -75,6 +75,13 @@ GITIGNORE_ENTRIES = (
     ".agent/current_user",
     ".agent/models.json",
     ".agent/model-catalog.json",
+    # Task 058: the per-task transaction lock files are machine-local runtime
+    # state, never part of the record (and a stray `?? …/task.md.lock` in a
+    # TRACKED task dir would otherwise read as working-tree tamper).
+    ".agent/tasks/*/*.lock",
+    ".agent/*/tasks/*/*.lock",
+    ".agent/chat_log_counter.lock",
+    ".agent/*/chat_log_counter.lock",
 )
 
 

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from tasks.atomic import atomic_write
 from tasks.core import (
-    PLAYBOOKS, _atomic_write, _find_playbook_skill, create_task,
+    PLAYBOOKS, _atomic_write, _find_playbook_skill, _rewrite, create_task,
     resolve_agent_dir, resolve_session_id,
 )
 from tasks.shared import _merge_verify_module, find_project_root
@@ -118,15 +118,15 @@ def _inject_chat_into_task(task_file: Path, messages: list[str]) -> None:
         """Replace non-UTF-8-survivable code points like lone surrogates."""
         return text.encode("utf-8", errors="replace").decode("utf-8")
 
-    content = task_file.read_text(encoding="utf-8", errors="replace")
-
     chat_block = "\n### Recent Chat (auto-captured at activation — review and remove unrelated)\n"
     for msg in messages:
         chat_block += f"\n{_utf8_safe(msg)}\n"
 
-    # Insert after the first --- (end of References section, before Design Phase)
-    first_sep = content.find("\n---\n")
-    if first_sep >= 0:
+    def _t(content: str) -> "str | None":
+        # Insert after the first --- (end of References section, before Design Phase)
+        first_sep = content.find("\n---\n")
+        if first_sep < 0:
+            return None                            # no anchor → nothing to write
         references = content[:first_sep]
         references = re.sub(
             r'\n### Recent Chat \(auto-captured at activation — review and remove unrelated\)\n.*\Z',
@@ -134,8 +134,9 @@ def _inject_chat_into_task(task_file: Path, messages: list[str]) -> None:
             references,
             flags=re.DOTALL,
         )
-        content = references.rstrip() + "\n" + chat_block + content[first_sep:]
-        _atomic_write(task_file, _utf8_safe(content))  # I9: atomic like every task.md writer
+        return _utf8_safe(references.rstrip() + "\n" + chat_block + content[first_sep:])
+
+    _rewrite(task_file, _t)   # task 058: one locked transaction
 
 
 def _gate_bounce(task_id: str, task_file, action: str) -> bool:
@@ -254,6 +255,13 @@ def cmd_work(cmd_args):
                 _st_lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 _st_lines = []
+            # Task 058: remember the status this close was AUTHORISED on, so the
+            # final transaction can refuse if it changed while verify/judges ran.
+            from tasks.core import _extract_status as _es058
+            try:
+                _status_at_entry = _es058(task_file)
+            except Exception:      # noqa: BLE001 — advisory; the transform re-checks anyway
+                _status_at_entry = None
             if _live_status_index(_st_lines) is None:
                 print(f"Error: {task_file} has no live `## Status` heading with a "
                       "value line (missing, hidden inside a code fence, or directly "
@@ -646,15 +654,37 @@ def cmd_work(cmd_args):
                 receipt = format_verify_receipt(
                     entries, _head, risk, reason=(reason if force else None),
                     dirty_files=_dirty, freshness=_freshness)
-                upsert_task_section(task_file, "Verification Receipt", receipt)
-                if not _set_status(task_file, "done"):
-                    # Preflighted above; only a concurrent rewrite between the
-                    # preflight and here can land us in this branch. Refuse loudly
-                    # — the receipt is written, the pointer is kept, re-run closes.
-                    print(f"Error: `## Status` disappeared between preflight and "
-                          f"write ({task_file}) — status NOT set to done; the "
-                          "session pointer is kept. Fix the file and re-run "
-                          "`tasks work done`.", file=sys.stderr, flush=True)
+                # Task 058 (plan panel P1/P10): receipt + status are ONE locked
+                # transaction, composed on the bytes just read and re-checked
+                # against what earned this close. Everything expensive (verify,
+                # judges) already happened OUTSIDE the lock; what is serialized
+                # here is only the commit. A task that moved underneath — a
+                # `tasks blocked` from another session, a status someone else
+                # changed — REFUSES rather than overwriting the other record.
+                # W4b (plan panel P9/P10): the freshness decision was made from
+                # `_now_fp` BEFORE verify and the judges ran. Re-compute it here,
+                # at the commit, and refuse if the tree moved — narrow and honest:
+                # it does not make the whole-tree TOCTOU preventable, it makes THIS
+                # close's own decision non-stale.
+                if _now_fp:
+                    _commit_fp = tree_state_fingerprint(project_path)
+                    if _commit_fp and _commit_fp != _now_fp:
+                        print(f"Blocked: cannot close task {prev_task} — the tree "
+                              f"changed while this close was running (tree-state "
+                              f"{_now_fp} → {_commit_fp}); the freshness decision "
+                              "above was made on the earlier state. Nothing was "
+                              "written; re-run `tasks work done`.",
+                              file=sys.stderr, flush=True)
+                        sys.exit(1)
+                from tasks.core import CloseRaceRefused, compose_close
+                try:
+                    _rewrite(task_file, lambda _txt: compose_close(
+                        _txt, receipt_heading="Verification Receipt",
+                        receipt=receipt, expect_status=_status_at_entry))
+                except CloseRaceRefused as _race:
+                    print(f"Blocked: cannot close task {prev_task} — {_race} "
+                          "Nothing was written; the session pointer is kept.",
+                          file=sys.stderr, flush=True)
                     sys.exit(1)
                 # T5: record the verify contract this close ran in the
                 # enforcement journal too. `.agent/config.json` (which declares
@@ -993,7 +1023,7 @@ def cmd_work(cmd_args):
         for _msg in _sg_issues:
             print(f"[playbook] standing_gates: {_msg}", file=sys.stderr)
 
-        _atomic_write(task_file, full_content)  # I9: atomic stub expansion
+        _rewrite(task_file, lambda _t: full_content)   # task 058: locked transaction
         # Re-read for chat injection and display
         task_content = full_content
         print(f"Expanded stub to full {stub_type} template.")
@@ -1200,14 +1230,14 @@ def cmd_handoff(cmd_args):
               file=sys.stderr)
         sys.exit(1)
     section = build_handoff_section(project_path, task_file)
-    write_handoff(task_file, section)
-    # Honest blocked state (reason "handoff") — bootstrap keys on this to surface
-    # the handoff, resume_blocked_task (via `tasks work`) clears it → consumed.
+    # Task 058: the section AND the honest blocked state (reason "handoff" —
+    # bootstrap keys on it to surface the handoff, and `tasks work` clears it)
+    # land in ONE locked transaction; a refusal writes nothing at all.
+    from tasks.core import write_handoff_and_block
     try:
-        set_task_blocked(task_file, "handoff")
+        write_handoff_and_block(task_file, section, "handoff")
     except ValueError as exc:
-        print(f"Error: handoff section written but the task could not be marked "
-              f"blocked — {exc}", file=sys.stderr)
+        print(f"Error: the handoff was NOT written — {exc}", file=sys.stderr)
         sys.exit(1)
     print(f"Handoff written to task {active} — mechanical state captured in the "
           "## Handoff section, task marked BLOCKED (reason: handoff).")
@@ -1329,10 +1359,15 @@ def cmd_freehand(cmd_args):
             print("Error: no '- [ ] Freehand log' gate found in task.md", file=sys.stderr)
             sys.exit(1)
 
-        insert_pos = log_gate_match.end()
         log_content = "\n\n" + "\n\n---\n\n".join(extracted) + "\n"
-        new_text = task_text[:insert_pos] + log_content + task_text[insert_pos:]
-        _atomic_write(task_file, new_text)  # I9: atomic task.md write
+
+        def _t_log(text: str) -> "str | None":
+            m = log_gate_pattern.search(text)
+            if m is None:
+                return None                        # the gate vanished under us
+            return text[:m.end()] + log_content + text[m.end():]
+
+        _rewrite(task_file, _t_log)   # task 058: locked transaction
         print(f"Inserted {len(extracted)} chat_log messages into task.md")
         return
 
@@ -1444,7 +1479,19 @@ def cmd_freehand(cmd_args):
         else:
             insert_pos = len(task_text)
 
-        new_text = task_text[:insert_pos] + freehand_block + "\n" + task_text[insert_pos:]
-        _atomic_write(task_file, new_text)  # I9: atomic task.md write
+        # Task 058: the offsets above were computed from `task_text`, so the
+        # write must apply to THOSE bytes — the transform refuses (returns None,
+        # leaving the file untouched) if the file changed under us, and the
+        # caller is told rather than silently clobbering the other writer.
+        def _t_block(current: str) -> "str | None":
+            if current != task_text:
+                return None
+            return task_text[:insert_pos] + freehand_block + "\n" + task_text[insert_pos:]
+
+        if _rewrite(task_file, _t_block) is None:
+            print("Error: task.md changed while the freehand block was being "
+                  "composed — nothing was written; re-run `tasks freehand`.",
+                  file=sys.stderr)
+            sys.exit(1)
         print(f"Freehand block inserted in task {task_num}")
     print(f"Freehand mode active. Agent: wait for user instructions. Close only when user says done.")

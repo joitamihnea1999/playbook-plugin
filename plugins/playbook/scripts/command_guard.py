@@ -299,7 +299,8 @@ def _active_task_is_irreversible(root):
         j = _load_journal()
         lane = j.resolve_lane_dir(root) if j is not None else None
         lane = str(lane) if lane else os.path.join(root, ".agent")
-        with open(os.path.join(lane, "sessions", sid, "current_state"), encoding="utf-8") as fh:
+        pointer = os.path.join(lane, "sessions", sid, "current_state")
+        with open(pointer, encoding="utf-8") as fh:
             num = fh.read().strip()
         if not num.isdigit():
             return False
@@ -311,12 +312,26 @@ def _active_task_is_irreversible(root):
         plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if plugin_dir not in sys.path:
             sys.path.insert(0, plugin_dir)
-        from tasks.core import extract_risk, _status_from_lines, _physical_lines   # fence-aware readers
+        from tasks.core import (extract_risk_from_text, _status_from_lines,   # fence-aware readers
+                                _physical_lines)
         from pathlib import Path as _P
+        # ONE read, both answers (task 058, plan panel P2): this used to read
+        # task.md for the status and AGAIN inside `extract_risk`, so a write
+        # landing between them could pair one task's status with another's risk.
         _text = _P(task_md).read_text(encoding="utf-8", errors="replace")
         if str(_status_from_lines(_physical_lines(_text))).strip().lower() != "in_progress":
             return False        # a done/blocked/pending task in a stale pointer never acknowledges (round 2)
-        return str(extract_risk(_P(task_md))).strip().lower() == "irreversible"
+        if str(extract_risk_from_text(_text)).strip().lower() != "irreversible":
+            return False
+        # RE-READ the pointer: a task switch between the first read and here would
+        # otherwise let a stale irreversible task acknowledge for a new one. No
+        # lock is taken — a PreToolUse hook must never wait on a writer — and any
+        # mismatch or error keeps the dangerous command BLOCKED, which is this
+        # function's standing contract ("any failure → False").
+        with open(pointer, encoding="utf-8") as fh:
+            if fh.read().strip() != num:
+                return False
+        return True
     except Exception:
         return False
 

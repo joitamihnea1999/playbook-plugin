@@ -408,7 +408,8 @@ def cmd_tag(cmd_args):
     # Also detect existing tags to avoid double-tagging
     existing_tag = re.compile(r'^<!--\s*/?T\d+\s*-->$')
 
-    lines = chat_log.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    _tag_source = chat_log.read_text(encoding="utf-8", errors="replace")
+    lines = _tag_source.splitlines(keepends=True)
     output = []
     current_tag = None  # currently open tag (task number)
     tags_inserted = 0
@@ -456,7 +457,26 @@ def cmd_tag(cmd_args):
     else:
         # Full rewrite of chat_log.md (tag insertion), NOT an append — atomic so
         # an interrupt can't truncate the whole conversation log to a fragment.
-        atomic_write(chat_log, "".join(output))
+        #
+        # Task 058 (plan panel P11): the chat-log HOOK appends to this file while
+        # a session runs, so a rewrite composed from an earlier read would drop
+        # every prompt that landed in between. Two defenses, because the hook's
+        # own `flock` covers only its counter and not the append:
+        #   1. rendezvous on the SAME lock file the hook uses
+        #      (`<agent>/chat_log_counter.lock`), so the two protocols agree
+        #      rather than ignore each other;
+        #   2. a compare-and-swap on the CONTENT — if the log changed since the
+        #      buffer these tags were computed from, write NOTHING and say so.
+        from tasks.filelock import task_lock
+        counter = resolve_agent_dir(project_path) / "chat_log_counter"
+        with task_lock(counter):
+            if chat_log.read_text(encoding="utf-8", errors="replace") != _tag_source:
+                print("chat_log.md changed while tags were being computed (the "
+                      "chat-log hook appended a message) — nothing was written, "
+                      "so no prompt was lost. Re-run `tasks tag`.",
+                      file=sys.stderr)
+                sys.exit(1)
+            atomic_write(chat_log, "".join(output))
         print(f"Inserted {tags_inserted} tags into chat_log.md")
 
 def cmd_retro(cmd_args):

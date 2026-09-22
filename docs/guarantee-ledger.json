@@ -1,7 +1,7 @@
 {
   "$schema": "guarantee-ledger.schema.json",
   "schema_version": 1,
-  "ledger_version": "2026-09-21",
+  "ledger_version": "2026-09-22",
   "guarantees": [
     {
       "id": "PB-TASK-ACTIVATE",
@@ -11016,6 +11016,162 @@
       "required_live_evidence": [],
       "semantic_protocol": null,
       "violation_reproduction": null
+    },
+    {
+      "id": "PB-TASK-TXN",
+      "category": "task-lifecycle",
+      "statement": "Every read-modify-write of a task's records (task.md, judge.md) is one TRANSACTION, not just an atomic write: `atomic.rewrite` holds a per-task advisory lock (fcntl → msvcrt → a loud unlocked degrade) across read → transform → write, a transform may decline (write nothing) or raise (file byte-identical), and the lock is re-entrant so a caller composes several writes as one. Multi-part VERBS land together or not at all — the close writes receipt AND status in one transform that REFUSES when a `## Blocked` appeared or the status moved while it ran, handoff writes section AND blocked, resume writes status AND its stamp — and the close also compare-and-swaps the tree fingerprint its freshness decision was made on. Two-file protocols (judge archive, compact) keep their own rollback under the same held lock. Readers (status, the gate and state-echo hooks, the destructive-command guard) take NO lock, so a minutes-long close never stalls a session.",
+      "owner": [
+        {
+          "path": "plugins/playbook/tasks/filelock.py",
+          "reference": "symbol:task_lock"
+        },
+        {
+          "path": "plugins/playbook/tasks/atomic.py",
+          "reference": "symbol:rewrite"
+        },
+        {
+          "path": "plugins/playbook/tasks/core.py",
+          "reference": "symbol:compose_close"
+        }
+      ],
+      "failure_consequence": "High",
+      "claim_kind": "mechanical",
+      "status": "verified_by_current_executable_evidence",
+      "applicable_platforms": [
+        "linux",
+        "macos",
+        "windows-git-bash"
+      ],
+      "applicable_providers": [
+        "claude"
+      ],
+      "proofs": [
+        {
+          "type": "executable integration",
+          "path": "tests/test_task_lock.py",
+          "reference": "CloseRefusesARaceItWouldOverwrite.test_end_to_end_the_cli_refuses_and_keeps_the_pause",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "LostUpdateRegression.test_two_writers_keep_every_entry"
+          },
+          "limitations": [
+            "The measured baseline (5/5 lost pauses) predates the fix and lives in task 058's record; this proof pins the refusal, which is what closes the window."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_task_lock.py",
+          "reference": "LostUpdateRegression.test_two_writers_keep_every_entry",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "LostUpdateRegression.test_a_crash_between_transform_and_write_leaves_the_file_intact"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "LockBasics.test_nesting_in_one_process_does_not_deadlock",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "LockBasics.test_released_on_systemexit"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "LockBasics.test_timeout_names_the_holder",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "LockBasics.test_os_releases_the_lock_when_the_holder_dies"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "LockBasics.test_degrades_loudly_when_no_backend_exists",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "Backend.test_this_platform_uses_the_expected_backend"
+          },
+          "limitations": [
+            "With no backend the write still happens UNSERIALIZED after one loud advisory — a tool that cannot run is worse than a race."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "RewritePrimitive.test_raising_transform_leaves_the_file_byte_identical",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "RewritePrimitive.test_applies_the_transform"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "NoUnapprovedDirectWriters.test_every_direct_task_writer_is_approved",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "NoUnapprovedDirectWriters.test_the_approved_set_has_no_dead_entries"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "GuardReadsOnceAndRechecksThePointer.test_a_task_switch_mid_check_refuses",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "GuardReadsOnceAndRechecksThePointer.test_an_irreversible_active_task_acknowledges"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "TagDoesNotLoseAnAppendedPrompt.test_tag_refuses_when_the_log_changed_under_it",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "TagDoesNotLoseAnAppendedPrompt.test_an_undisturbed_tag_run_writes_its_tags"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "LockFileIsNotTamper.test_a_lock_file_created_during_a_panel_is_not_a_mutation",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "LockFileIsNotTamper.test_the_seeded_gitignore_covers_it"
+          },
+          "limitations": []
+        }
+      ],
+      "missing_evidence_or_limitation": [
+        "The lock is ADVISORY: a process that writes task.md without the primitive is not stopped. The structural test `NoUnapprovedDirectWriters` fails the build when a new unapproved writer appears in the package, but nothing constrains a third-party editor or a hand-run script.",
+        "Scope is one task DIRECTORY on one machine's filesystem. Behaviour on a network filesystem (NFS/SMB) is whatever that filesystem's flock semantics are, and nothing coordinates two machines.",
+        "The whole-tree freshness TOCTOU stays detection-only: a task-directory lock cannot serialize edits to arbitrary source files during a multi-minute judge call. What v1.5.45 adds is a compare-and-swap of the close's OWN freshness decision at the commit.",
+        "The session pointer (`sessions/<sid>/current_state`) is a different resource and is still written unlocked; the destructive-command guard handles that by re-reading the pointer rather than locking."
+      ],
+      "semantic_protocol": null,
+      "violation_reproduction": null,
+      "follow_up_phases": [],
+      "required_live_evidence": []
     }
   ]
 }

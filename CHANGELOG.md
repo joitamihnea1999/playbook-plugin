@@ -6,6 +6,45 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- **Task records are written in transactions, not just atomic writes** (task 058; parked
+  T006/T008/T020/T024/T030/T032/T033/T035/T036/T040/T043; plan panel PASS 5/5 whose 24 findings
+  corrected the DESIGN before a line was written). Measured first: the real close shape — read
+  task.md, run the verify contract for minutes, then write the receipt — lost a concurrent
+  `tasks blocked` in **5 of 5** trials, leaving the task `in_progress` with no `## Blocked`
+  section at all. A fast transform never collided by luck (0/12); the long ones were the whole
+  exposure.
+  - *One portable lock.* New `tasks/filelock.py`: a per-task advisory lock on a PERSISTENT
+    sibling `<name>.lock` (never unlinked — an unlinked inode plus a fresh one is two owners),
+    backend chosen by capability probe (`fcntl` → `msvcrt` → a loud unlocked degrade, never a
+    hang), one fd per path refcounted so nesting cannot deadlock, a bounded wait that names the
+    holder pid, and release on every exit including `SystemExit`. No stale-lock stealing: the OS
+    releases on death, and a pid-based steal would let two writers proceed — the very bug.
+  - *One transaction primitive.* `atomic.rewrite(path, transform)` wraps read → transform →
+    write; a transform may DECLINE (write nothing) or raise (file byte-identical), and it is
+    re-entrant so a caller composes several writes as one.
+  - *One transform per VERB.* The close writes receipt AND status together, handoff writes its
+    section AND the blocked state, resume writes status AND its stamp — each composed on the
+    bytes just read. Routing the helpers alone would NOT have been enough, and a mutation check
+    proved it: with the lock neutered the first regression still passed, because every writer
+    now reads late. What closes the window is that the close **refuses** — `CloseRaceRefused`,
+    nothing written — when a `## Blocked` appeared or the status moved while it ran, and it
+    compare-and-swaps the tree fingerprint its freshness decision was made on.
+  - *Everything else routed or reasoned about.* Gate completion, activation's chat injection,
+    stub expansion, both freehand inserts and the review findings write became transactions; the
+    two-FILE protocols (judge archive, `tasks compact`) keep their own rollback and hold the lock
+    across the whole sequence. A structural test greps the package and fails the build when a new
+    unapproved direct writer appears, with a companion test that fails on a stale exemption.
+  - *`tasks tag` stopped dropping prompts.* It rewrites `chat_log.md` while the chat-log hook
+    appends, so it now rendezvous on the hook's own lock file AND compare-and-swaps the content:
+    if a message landed, it writes nothing and says so rather than losing it.
+  - *The destructive-command guard takes no lock* (a hook must never wait on a writer): it reads
+    the task once for status AND risk (it used to read the file twice) and re-reads the session
+    pointer, so a task switch mid-check cannot let a stale irreversible task acknowledge — and
+    every error path still keeps the command BLOCKED.
+  New ledger guarantee `PB-TASK-TXN` with ten proof/negative-control pairs and four honest bounds
+  (advisory only; one directory on one filesystem; the whole-tree freshness TOCTOU stays
+  detection-only; the session pointer is a separate resource).
+
 - **The judge tamper guard sees what it could not, and no longer discards a paid review over a
   guard that merely could not run** (task 059; parked T004/T008/T009/T019/T036/T040/T045 plus
   the 074 impl-panel finding; plan panel PASS 5/5 with 24 findings, 14 accepted into the plan

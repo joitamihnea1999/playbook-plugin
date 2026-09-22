@@ -1198,6 +1198,15 @@ def _live_section_span(lines: "list[str]", title: str) -> "tuple[int, int] | Non
     return (start, end)
 
 
+def extract_risk_from_text(text: str) -> str:
+    """`extract_risk` for a buffer already in hand (task 058, plan panel P2).
+
+    The destructive-command guard read the task file TWICE — once for the
+    status, once through `extract_risk` — so a write landing between them could
+    pair one task's status with another's risk. One read, both answers."""
+    return _risk_from_lines(text.splitlines())
+
+
 def extract_risk(task_file) -> str:
     """Read the `## Risk` classification from a task.md — the token on the line
     after the heading. Returns one of RISK_CLASSES, or 'unclassified' if the
@@ -1206,6 +1215,11 @@ def extract_risk(task_file) -> str:
         lines = Path(task_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return DEFAULT_RISK
+    return _risk_from_lines(lines)
+
+
+def _risk_from_lines(lines: "list[str]") -> str:
+    """The `## Risk` parse, as a pure function of the lines (task 058)."""
     # V9 (round-2 codex-terra CRITICAL) + V10 (round-3 opus F1): an unclosed fence
     # that HIDES a `## Risk`-shaped heading makes the parse untrustworthy — a higher
     # class hidden after the opener could be shadowed by a lower one read clean
@@ -2608,74 +2622,83 @@ def stack_judge_round(judge_md: Path, round_text: str,
     SAME task concurrently can still last-writer-win a round — best-effort under
     concurrency, tracked as a follow-up that should serialize all of core.py's
     stackers at once (round-2 panel F4)."""
-    old_bodies: "list[str]" = []
-    if judge_md.exists():
-        try:
-            old_text = judge_md.read_text(encoding="utf-8", errors="replace")
-            old_rounds = parse_judge_rounds(old_text)
-            if old_rounds:
-                # Strip the previous end-of-file overflow pointer off whichever
-                # round body it rode on (it is metadata, not review content), so
-                # the archive stays a clean sequence of rounds.
-                old_bodies = [_TRIM_POINTER_RE.sub("", r["body"]).rstrip()
-                              for r in old_rounds]
-            elif old_text.strip():
-                # Legacy / taskless content that predates round headings: keep it
-                # as one opaque block — stacking must never silently destroy a
-                # prior record it merely cannot parse.
-                old_bodies = [old_text.strip()]
-        except OSError:
-            old_bodies = []
-    kept_all = [round_text.rstrip()] + old_bodies
-    overflow = kept_all[max_rounds:]        # oldest rounds pushed out THIS call
-    kept = kept_all[:max_rounds]
-    archive_path = judge_md.parent / JUDGE_ARCHIVE_NAME
-    archived_total = 0
-    archived_ok = False
-    archive_existed = False
-    archive_backup: "bytes | None" = None
-    if overflow:
-        archive_existed = archive_path.exists()
-        try:
-            if archive_existed:
-                # Snapshot for rollback BEFORE we touch it (also fails closed on
-                # an unreadable existing archive → we keep rounds in judge.md).
-                archive_backup = archive_path.read_bytes()
-            archived_total = _archive_judge_overflow(archive_path, overflow)
-            archived_ok = True
-        except OSError:
-            archived_ok = False
-    if overflow and not archived_ok:
-        # F1: archiving failed — DO NOT drop the paid round. Keep everything in
-        # judge.md untrimmed and say so honestly (no false git-recovery claim).
-        out = "\n\n".join(kept_all) + "\n"
-        out += (f"\n[... {len(overflow)} older round(s) could NOT be archived to "
-                f"{JUDGE_ARCHIVE_NAME}; retained here in judge.md so nothing is "
-                "lost — fix the archive path ...]\n")
-    else:
-        out = "\n\n".join(kept) + "\n"
-        if overflow:
-            out += (f"\n[... {len(overflow)} older round(s) archived to "
-                    f"{JUDGE_ARCHIVE_NAME} — kept verbatim, {archived_total} "
-                    "round(s) preserved there in total ...]\n")
-    try:
-        _atomic_write(judge_md, out)
-    except OSError:
-        # F3: the primary write failed after the archive was already committed —
-        # roll the archive back so a retry does not stack the same overflow twice.
-        if archived_ok:
+    # Task 058 (plan panel P8): this is a TWO-FILE protocol (archive then
+    # judge.md, with a rollback) and must NOT be squashed into one
+    # single-file transaction — its own compensation logic is the
+    # crash contract. What it lacked was mutual exclusion: two panels
+    # finishing together could both read the same rounds and one could
+    # archive what the other had just trimmed. Hold the task lock
+    # across the WHOLE protocol instead.
+    from tasks.filelock import task_lock
+    with task_lock(judge_md):
+        old_bodies: "list[str]" = []
+        if judge_md.exists():
             try:
-                if archive_existed and archive_backup is not None:
-                    # Restore the prior bytes through the atomic (temp+rename+
-                    # fsync) primitive, NOT a raw truncating write_bytes: a crash
-                    # mid-restore must not leave a truncated archive that loses a
-                    # paid round (round-3 panel, sonnet+grok).
-                    atomic_write(archive_path, archive_backup)
-                elif not archive_existed:
-                    archive_path.unlink()
+                old_text = judge_md.read_text(encoding="utf-8", errors="replace")
+                old_rounds = parse_judge_rounds(old_text)
+                if old_rounds:
+                    # Strip the previous end-of-file overflow pointer off whichever
+                    # round body it rode on (it is metadata, not review content), so
+                    # the archive stays a clean sequence of rounds.
+                    old_bodies = [_TRIM_POINTER_RE.sub("", r["body"]).rstrip()
+                                  for r in old_rounds]
+                elif old_text.strip():
+                    # Legacy / taskless content that predates round headings: keep it
+                    # as one opaque block — stacking must never silently destroy a
+                    # prior record it merely cannot parse.
+                    old_bodies = [old_text.strip()]
             except OSError:
-                pass
-        raise
+                old_bodies = []
+        kept_all = [round_text.rstrip()] + old_bodies
+        overflow = kept_all[max_rounds:]        # oldest rounds pushed out THIS call
+        kept = kept_all[:max_rounds]
+        archive_path = judge_md.parent / JUDGE_ARCHIVE_NAME
+        archived_total = 0
+        archived_ok = False
+        archive_existed = False
+        archive_backup: "bytes | None" = None
+        if overflow:
+            archive_existed = archive_path.exists()
+            try:
+                if archive_existed:
+                    # Snapshot for rollback BEFORE we touch it (also fails closed on
+                    # an unreadable existing archive → we keep rounds in judge.md).
+                    archive_backup = archive_path.read_bytes()
+                archived_total = _archive_judge_overflow(archive_path, overflow)
+                archived_ok = True
+            except OSError:
+                archived_ok = False
+        if overflow and not archived_ok:
+            # F1: archiving failed — DO NOT drop the paid round. Keep everything in
+            # judge.md untrimmed and say so honestly (no false git-recovery claim).
+            out = "\n\n".join(kept_all) + "\n"
+            out += (f"\n[... {len(overflow)} older round(s) could NOT be archived to "
+                    f"{JUDGE_ARCHIVE_NAME}; retained here in judge.md so nothing is "
+                    "lost — fix the archive path ...]\n")
+        else:
+            out = "\n\n".join(kept) + "\n"
+            if overflow:
+                out += (f"\n[... {len(overflow)} older round(s) archived to "
+                        f"{JUDGE_ARCHIVE_NAME} — kept verbatim, {archived_total} "
+                        "round(s) preserved there in total ...]\n")
+        try:
+            _atomic_write(judge_md, out)
+        except OSError:
+            # F3: the primary write failed after the archive was already committed —
+            # roll the archive back so a retry does not stack the same overflow twice.
+            if archived_ok:
+                try:
+                    if archive_existed and archive_backup is not None:
+                        # Restore the prior bytes through the atomic (temp+rename+
+                        # fsync) primitive, NOT a raw truncating write_bytes: a crash
+                        # mid-restore must not leave a truncated archive that loses a
+                        # paid round (round-3 panel, sonnet+grok).
+                        atomic_write(archive_path, archive_backup)
+                    elif not archive_existed:
+                        archive_path.unlink()
+                except OSError:
+                    pass
+            raise
 
 
 def resolve_panel_required(project_path: Path, risk: str) -> bool:
@@ -3681,6 +3704,15 @@ def _is_blocked(task_file: Path) -> bool:
     return _extract_status(task_file) == "blocked"
 
 
+def _rewrite(path: Path, transform):
+    """The read-transform-write TRANSACTION (task 058) — `atomic.rewrite` under
+    the per-task lock. Every task.md read-modify-write in this module goes
+    through it, so a concurrent writer cannot land between the read and the
+    write (measured: 5/5 lost updates before this)."""
+    from tasks.atomic import rewrite as _rw
+    return _rw(path, transform)
+
+
 def _atomic_write(path: Path, text: str) -> None:
     """All task.md writers route here: same-directory temp + os.replace, so a
     concurrent reader never sees a sheared file and interleaved writers lose
@@ -3702,13 +3734,14 @@ def _set_status(task_file: Path, value: str) -> bool:
     written) — callers that must not silently lose a state change check it.
     A fenced `## Status` example is never the target, so a decoy can neither be
     clobbered nor stand in for the real field."""
-    lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"), keepends=True)
-    pair = _live_status_pair(lines)
-    if pair is None:
-        return False
-    _splice_status_value(lines, pair, value)      # canonical layout (see helper)
-    _atomic_write(task_file, "".join(lines))
-    return True
+    def _t(text: str) -> "str | None":
+        lines = _physical_lines(text, keepends=True)
+        pair = _live_status_pair(lines)
+        if pair is None:
+            return None                            # decline: nothing to write (task 058)
+        _splice_status_value(lines, pair, value)   # canonical layout (see helper)
+        return "".join(lines)
+    return _rewrite(task_file, _t) is not None
 
 
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -3735,41 +3768,104 @@ def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
     newest-first `###` entries keeps the full history AND makes the first thing
     under the heading the truth."""
     p = Path(task_file)
-    text = p.read_text(encoding="utf-8", errors="replace")
     marker = f"## {heading}"
+
+    def _t(text: str) -> str:
+        return _compose_upsert(text, marker, entry)
+
+    _rewrite(p, _t)
+
+
+class CloseRaceRefused(RuntimeError):
+    """The close's final transaction found the task changed under it (task 058).
+
+    The close validates status / gates / risk / evidence, then runs the verify
+    contract and the judges — minutes — and only then commits the receipt and
+    `done`. What it validated can be stale by the time it writes: a `tasks
+    blocked` landing in that window used to be silently overwritten (measured in
+    this task's baseline, 5 of 5 trials, with the `## Blocked` record gone). The
+    commit now re-checks on the bytes it is about to write and refuses instead.
+    """
+
+
+def compose_close(text: str, *, receipt_heading: str, receipt: str,
+                  expect_status: "str | None" = "in_progress") -> str:
+    """The close's ONE transform: insert the receipt AND set `done`, on the bytes
+    just read, after re-checking what earned the close (task 058, plan panel
+    P1/P10). Raises `CloseRaceRefused` — leaving the file byte-identical — when
+    the task moved underneath: a different live status (someone paused or closed
+    it) or a live `## Blocked` section that was not there when the close began.
+    """
+    lines = _physical_lines(text)
+    if _live_section_span(lines, "## Blocked") is not None:
+        raise CloseRaceRefused(
+            "a `## Blocked` section appeared while this close was running (another "
+            "session paused the task) — refusing to overwrite the pause. Re-read "
+            "task.md, then re-run `tasks work done` if the close is still right.")
+    live = _status_from_lines(lines)      # the same reader `_extract_status` uses
+    if expect_status is not None and live != expect_status:
+        raise CloseRaceRefused(
+            f"task status changed to `{live}` while this close was running "
+            f"(expected `{expect_status}`) — refusing to overwrite it.")
+    with_receipt = _compose_upsert(text, f"## {receipt_heading}", receipt)
+    out = _physical_lines(with_receipt, keepends=True)
+    pair = _live_status_pair(out)
+    if pair is None:
+        raise CloseRaceRefused(
+            "`## Status` disappeared while this close was running — status NOT set "
+            "to done; fix task.md and re-run `tasks work done`.")
+    _splice_status_value(out, pair, "done")
+    return "".join(out)
+
+
+def _compose_upsert(text: str, marker: str, entry: str) -> str:
+    """The `upsert_task_section` splice as a pure function (shared with
+    `compose_close`, so the close and a plain receipt write can never disagree
+    about where a section goes).
+
+    Skips a heading that sits inside a properly CLOSED ``` / ~~~ fence — a task
+    may quote the ritual (or a receipt example) in a fenced block, and writing
+    the real section INTO that fence would strand it where a fence-aware reader
+    (e.g. the verify-contract drift sweep, T5) never looks: writer and reader
+    must agree on what counts as a real heading (panel round-9 grok/codex). The
+    heading is matched through the strict shared ATX matcher (V10), exactly like
+    the readers, so a valid `## X ##` / `##\tX` is found by the WRITER too and
+    not appended as a duplicate the reader then reads stale.
+    """
     lines = text.splitlines()
-    # Skip a heading that sits inside a properly CLOSED ``` / ~~~ fence — a task
-    # may quote the ritual (or a receipt example) in a fenced block, and writing
-    # the real section INTO that fence would strand it where a fence-aware reader
-    # (e.g. the verify-contract drift sweep, T5) never looks: writer and reader
-    # must agree on what counts as a real heading (panel round-9 grok/codex).
     fenced = _closed_fence_line_indices(lines)
     for i, ln in enumerate(lines):
-        # Match the heading through the strict shared ATX matcher (V10, round-3
-        # opus F2 + codex-terra), exactly like the readers (_latest_receipt_line,
-        # the audit drift sweep): so a valid `## {heading} ##` / `##\t{heading}` is
-        # found by the WRITER too and not appended as a duplicate the reader then
-        # reads stale \u2014 writer and reader must agree on what a real heading is.
         if i not in fenced and _atx_h2_text(ln) == marker:
             new = lines[:i + 1] + ["", *entry.rstrip("\n").splitlines()] + lines[i + 1:]
-            _atomic_write(p, "\n".join(new) + "\n")
-            return
-    _atomic_write(p, text.rstrip("\n") + f"\n\n{marker}\n\n{entry.rstrip()}\n")
+            return "\n".join(new) + "\n"
+    return text.rstrip("\n") + f"\n\n{marker}\n\n{entry.rstrip()}\n"
 
 
-def set_task_blocked(task_file: Path, reason: str) -> None:
-    """Mark a task BLOCKED with a self-documenting reason (#08). Sets status to
-    `blocked` and writes a `## Blocked` section. Does NOT touch a single gate.
+def write_handoff_and_block(task_file: Path, section: str, reason: str = "handoff") -> None:
+    """Handoff = the section AND the blocked state, in ONE locked transaction
+    (task 058, plan panel P1/P13).
 
-    The reason is collapsed to one line and rendered as a blockquote, so a reason
-    containing `- [ ]`, backticks, or a `## ` heading can never become a phantom
-    gate or section for the line-anchored parsers (the #09 hazard)."""
-    clean = " ".join(reason.split()) or "(no reason given)"
+    These were two writes — `write_handoff` then `set_task_blocked` — and the
+    caller's own error message admitted the split ("handoff section written but
+    the task could not be marked blocked"). A crash or a concurrent writer
+    between them left a handoff nobody would surface (bootstrap keys on the
+    blocked state) or a block with no handoff. Now they land together or not at
+    all: any refusal leaves task.md byte-identical.
+    """
+    clean = " ".join(reason.split()) or "handoff"
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
-    # V7 (task 043, opus #2): status and reason must land TOGETHER or not at all.
-    # Build the whole new file in memory, check the invariants on the candidate,
-    # then write once — a refused block leaves task.md byte-identical.
-    lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
+
+    def _t(text: str) -> str:
+        composed = _compose_handoff(text.splitlines(), section)
+        return _compose_blocked(composed, clean, ts)
+
+    _rewrite(task_file, _t)
+
+
+def _compose_blocked(text: str, clean_reason: str, ts: str) -> str:
+    """The `set_task_blocked` splice as a pure function of the text (task 058),
+    so the handoff verb can compose it with its own section in one write."""
+    lines = _physical_lines(text)
     pair = _live_status_pair(lines)
     if pair is None:
         raise ValueError(
@@ -3778,60 +3874,70 @@ def set_task_blocked(task_file: Path, reason: str) -> None:
             "— refusing to record a blocked state whose status could not be "
             "written; fix the heading/fence first, nothing was changed")
     out = list(lines)
-    _splice_status_value(out, pair, "blocked")     # the same splice _set_status uses
-    # Drop any prior LIVE ## Blocked section (idempotent re-block), then append
-    # fresh. Fence-aware (P1): a `## Blocked` quoted inside a fenced example is not
-    # the section, so the delete can never strand an unclosed fence or swallow the
-    # real record. Loop because a re-block may find more than one live section.
+    _splice_status_value(out, pair, "blocked")
     while True:
-        span = _live_section_span(out, "## Blocked")
-        if span is None:
+        sp = _live_section_span(out, "## Blocked")
+        if sp is None:
             break
-        out = out[:span[0]] + out[span[1]:]
+        out = out[:sp[0]] + out[sp[1]:]
     while out and out[-1].strip() == "":
         out.pop()
-    out += ["", "## Blocked", f"> {clean}  (since {ts})", ""]
-    # What guarantees "the status lands or nothing is written" is the PREFLIGHT
-    # above (`_live_status_pair` is None → ValueError before any write) plus the
-    # direct splice of the value: a post-splice re-read would be tautological, so
-    # there is none (round-1 and round-7 panels both flagged such checks as dead).
-    # The appended `## Blocked` sits at EOF, so no CLOSED fence can enclose it; the
-    # documented corner where an UNCLOSED fence above hosts a decoy `## Blocked`
-    # is unchanged and disclosed in the ledger: the real record is appended and
-    # readable fail-open, the decoy is never deleted.
-    _atomic_write(task_file, "\n".join(out) + "\n")
+    out += ["", "## Blocked", f"> {clean_reason}  (since {ts})", ""]
+    return "\n".join(out) + "\n"
 
+
+def set_task_blocked(task_file: Path, reason: str) -> None:
+    """Mark a task BLOCKED with a self-documenting reason (#08). Sets status to
+    `blocked` and writes a `## Blocked` section. Does NOT touch a single gate.
+
+    The reason is collapsed to one line and rendered as a blockquote, so a reason
+    containing `- [ ]`, backticks, or a `## ` heading can never become a phantom
+    gate or section for the line-anchored parsers (the #09 hazard).
+
+    V7 (task 043): status and reason land TOGETHER or not at all — the whole new
+    file is built in memory and written once, so a refused block leaves task.md
+    byte-identical. Task 058 puts that build+write inside ONE locked transaction,
+    so a concurrent writer cannot land between the read and the write either.
+    """
+    clean = " ".join(reason.split()) or "(no reason given)"
+    ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
+    _rewrite(task_file, lambda text: _compose_blocked(text, clean, ts))
 
 def resume_blocked_task(task_file: Path) -> None:
     """Clear a block: status → in_progress, and stamp the ## Blocked section with a
     resume line so the history stays true and current rather than stale (#08).
     Raises ValueError (nothing written) when the status flip cannot land — the
     same land-together rule as set_task_blocked (round-2 panel): a `Resumed` stamp
-    on a task whose status is not in_progress would be a lie."""
-    if not _set_status(task_file, "in_progress"):
-        raise ValueError(
-            "task.md has no live `## Status` heading with a value line — refusing "
-            "to resume a blocked task whose status could not be written; fix the "
-            "heading/fence first, nothing was changed")
+    on a task whose status is not in_progress would be a lie.
+
+    Task 058 (plan panel P1/P13): this used to be TWO writes — `_set_status` then
+    a second read + write for the stamp — so a crash or a concurrent writer
+    between them left `in_progress` with no stamp, or a stamp the status did not
+    match. Both now land in ONE locked transform.
+    """
     ts = datetime.datetime.now().astimezone().isoformat(timespec="minutes")
-    lines = _physical_lines(task_file.read_text(encoding="utf-8", errors="replace"))
-    # Fence-aware (P1): stamp only the LIVE ## Blocked section, never a fenced
-    # `## Blocked` example. The stamp lands at the end of the section's body (right
-    # before the next live H2 / EOF), byte-identical to the pre-fix placement.
-    span = _live_section_span(lines, "## Blocked")
-    if span is None:
-        return
-    out = lines[:span[1]] + [f"> Resumed {ts}"] + lines[span[1]:]
-    _atomic_write(task_file, "\n".join(out) + "\n")
 
+    def _t(text: str) -> str:
+        lines = _physical_lines(text, keepends=True)
+        pair = _live_status_pair(lines)
+        if pair is None:
+            raise ValueError(
+                "task.md has no live `## Status` heading with a value line — refusing "
+                "to resume a blocked task whose status could not be written; fix the "
+                "heading/fence first, nothing was changed")
+        _splice_status_value(lines, pair, "in_progress")
+        out = _physical_lines("".join(lines))
+        # Fence-aware (P1): stamp only the LIVE ## Blocked section, never a fenced
+        # `## Blocked` example. The stamp lands at the end of the section's body
+        # (right before the next live H2 / EOF), byte-identical to the pre-fix
+        # placement. No live section → the status flip alone is the whole change.
+        sp = _live_section_span(out, "## Blocked")
+        if sp is not None:
+            out = out[:sp[1]] + [f"> Resumed {ts}"] + out[sp[1]:]
+        return "\n".join(out) + "\n"
 
-# ── Session handoff (C1) ─────────────────────────────────────────────────────
-# `tasks handoff` codifies the manual session-handoff pattern (proven 3x in this
-# project's own history): it writes the mechanical ~80% playbook already knows
-# into a `## Handoff` section, the agent appends the judgment ~20%, and the task
-# enters the honest blocked state (reason "handoff"). A fresh `tasks bootstrap`
-# surfaces the newest unconsumed handoff; resuming via `tasks work <N>` flips the
-# status back to in_progress (resume_blocked_task) — which is what consumes it.
+    _rewrite(task_file, _t)
+
 
 def _git_repo_summary(repo_path: Path, *,
                       require_own_toplevel: bool = False
@@ -3968,7 +4074,15 @@ def write_handoff(task_file: Path, section: str) -> None:
     That H2 is a distinct top-level section, so the next append's boundary never
     reaches into it — every handoff's judgment "stays behind as history" (the
     docs/CHANGELOG claim), not just the newest."""
-    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    def _t(text: str) -> str:
+        lines = text.splitlines()
+        return _compose_handoff(lines, section)
+
+    _rewrite(task_file, _t)
+
+
+def _compose_handoff(lines: "list[str]", section: str) -> str:
+    """The handoff splice, as a pure function of the lines just read (task 058)."""
 
     def _section_span(title: str) -> "tuple[int, int] | None":
         # [start, end) of a non-fenced level-2 section, or None. `end` is the
@@ -4014,7 +4128,7 @@ def write_handoff(task_file: Path, section: str) -> None:
     while lines and lines[-1].strip() == "":
         lines.pop()
     lines += ["", section.rstrip(), ""]
-    _atomic_write(task_file, "\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
 
 
 def _extract_block_reason(task_file: Path) -> "str | None":
@@ -4147,26 +4261,33 @@ def task_done(project_path: Path, name_filter: str = "") -> dict:
         return {"error": "No active task with open gates"}
 
     task_name = task_file.parent.name
-    lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    # Task 058: the read, the flip and the write-back are ONE locked transaction
+    # — this used to read, transform and write with a window in between, so a
+    # receipt or a block landing there erased the gate tick (or was erased by it).
+    state: dict = {}
 
-    # Find and check off the first unchecked gate
-    checked_text = None
-    checked_idx = None
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("- [ ]"):
-            checked_text = stripped[6:].strip()
-            # Preserve original indentation, just flip the checkbox
-            lines[i] = line.replace("- [ ]", "- [x]", 1)
-            checked_idx = i
-            break
+    def _t(text: str) -> "str | None":
+        lines = text.splitlines()
+        # Find and check off the first unchecked gate
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("- [ ]"):
+                state["text"] = stripped[6:].strip()
+                # Preserve original indentation, just flip the checkbox
+                lines[i] = line.replace("- [ ]", "- [x]", 1)
+                state["idx"] = i
+                state["lines"] = lines
+                return "\n".join(lines) + "\n"
+        state["lines"] = lines
+        return None                     # nothing to check off → decline the write
+
+    _rewrite(task_file, _t)
+    lines = state.get("lines") or []
+    checked_text = state.get("text")
+    checked_idx = state.get("idx")
 
     if checked_text is None:
         return {"error": f"No unchecked gate in {task_name}"}
-
-    # Write back (atomic: this rewrites an existing task.md a reader may be
-    # holding open — a plain write_text would expose a truncate→write torn read).
-    _atomic_write(task_file, "\n".join(lines) + "\n")
 
     # Collect next gates (up to 3) after the one we just checked
     upcoming = []

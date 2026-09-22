@@ -130,6 +130,49 @@ still flags. task.md content stays guarded by its hash regardless.
 
 **Session-pointer isolation (v1.5.41).** A review or probe spawn runs as a child process that would otherwise inherit the foreground session's identity — `CLAUDE_ENV_FILE` plus the `CLAUDE_CODE_*` / `CLAUDE_PID` vars — and could shadow which task is active, surfacing as a spurious `No active task` during a background panel. Every spawn on the review/probe paths (panel and single-judge reviews, `run_subagent`/`stream_subagent`, and the `claude -p` model-availability probe) now scrubs those parent-session vars through one shared scrubber; writable subagents additionally pin an isolated per-invocation `PLAYBOOK_SESSION_ID`, while read-only judges share a fixed non-foreground `judge` identity (harmless — they cannot write a pointer). Guarantee `PB-SESSION-POINTER-ISOLATION`.
 
+**Task records are written in transactions (v1.5.45).** `tasks/atomic.py` makes
+each write all-or-nothing; `tasks/filelock.py` makes the whole
+read → transform → write indivisible. The gap was measured, not assumed: the
+real close shape — read task.md, run the verify contract for minutes, then write
+the receipt — lost a concurrent `tasks blocked` in **5 of 5** trials, leaving the
+task `in_progress` with no `## Blocked` section at all.
+
+Three rules define the boundary:
+
+* **Writers serialize, readers never do.** Every read-modify-write of task.md /
+  judge.md goes through `atomic.rewrite(path, transform)`, which holds a
+  per-task advisory lock (`fcntl` → `msvcrt` → a loud unlocked degrade) on a
+  persistent sibling `<name>.lock`. `tasks status`, the gate hook and the
+  state-echo hook read on every tool call and take no lock — waiting on a
+  minutes-long close would stall the session, and `atomic_write` already
+  guarantees they never see a torn file.
+* **One transform per VERB, not per helper.** A close is receipt *and* status; a
+  handoff is section *and* blocked; a resume is status *and* its stamp. Each is
+  composed on the bytes just read and written once, so the pair can never
+  half-land. The expensive work (verify, judges) happens outside the lock.
+* **A commit re-checks what earned it.** `core.compose_close` refuses — leaving
+  task.md byte-identical — when a `## Blocked` appeared or the status moved
+  while the close was running, and the close also compare-and-swaps the tree
+  fingerprint its freshness decision was made on. Routing alone would not have
+  been enough: with the lock neutered the first regression still passed, because
+  each writer now reads late; what closes the window is the refusal.
+
+Two-file protocols (`stack_judge_round`'s archive-then-judge.md, `tasks compact`'s
+archive-then-task.md) keep their own rollback and hold the lock across the whole
+sequence. `tasks tag` rewrites `chat_log.md` while the chat-log hook appends to
+it, so it rendezvous on the hook's own lock file **and** compare-and-swaps the
+content — it refuses rather than drop a prompt. The destructive-command guard
+deliberately takes no lock (a hook must never wait on a writer): it reads the
+task once for status and risk, then re-reads the session pointer, and every
+error keeps the command blocked.
+
+Honest bounds: the lock is ADVISORY, so a process that writes task.md without
+the primitive is not stopped (a structural test fails the build when a new
+unapproved writer appears in the package); it is per-task-directory, so it says
+nothing about a network filesystem or another machine; and the whole-tree
+freshness TOCTOU remains detection-only — a task-directory lock cannot serialize
+edits to arbitrary source files during a judge call.
+
 ## Tests
 
 `tests/` — stdlib-unittest suites (no external deps), one file per subsystem: invocation contracts for agy/grok, model-availability machinery, config resolution, mind-map sorting, merge ref-integrity, README-drift detection. Run any file directly: `python3 tests/test_<name>.py`.

@@ -1,0 +1,621 @@
+#!/usr/bin/env python3
+"""The per-task transaction lock and the read-transform-write primitive (task 058).
+
+Every task.md writer is atomic per WRITE (`tasks.atomic`) but not per
+TRANSACTION. Measured baseline for this task: the real close shape — read
+task.md, run the verify contract for minutes, write the receipt — lost a
+concurrent `tasks blocked` in **5 of 5** trials, and the `## Blocked` record
+vanished entirely while the task stayed `in_progress`. These tests pin the lock,
+the primitive, and that regression.
+
+Pure stdlib unittest; the multi-process cases use real subprocesses.
+Run: python3 -m unittest tests.test_task_lock
+"""
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+_HERE = Path(__file__).resolve().parent
+PLUGIN = _HERE.parent / "plugins/playbook"
+sys.path.insert(0, str(PLUGIN))
+
+from tasks import filelock  # noqa: E402
+from tasks.atomic import rewrite  # noqa: E402
+
+
+def _tmp() -> Path:
+    import shutil
+    d = Path(tempfile.mkdtemp())
+    unittest.TestCase.addTypeEqualityFunc  # noqa: B018 (keep the import honest)
+    return d
+
+
+class Backend(unittest.TestCase):
+    def test_a_backend_is_selected_and_named(self):
+        b = filelock.selected_backend()
+        self.assertIn(b, ("fcntl", "msvcrt", "none"), b)
+
+    def test_this_platform_uses_the_expected_backend(self):
+        # 058 plan panel (opus #3): "the Windows lane is the msvcrt path" was an
+        # ASSUMPTION. Assert it, so a lane that silently took another branch
+        # fails loudly instead of reporting a green proof of an untested one.
+        b = filelock.selected_backend()
+        if sys.platform.startswith("win"):
+            self.assertEqual(b, "msvcrt", "the windows lane did not exercise msvcrt")
+        else:
+            self.assertEqual(b, "fcntl", f"{sys.platform} did not exercise fcntl")
+
+
+class LockBasics(unittest.TestCase):
+    def setUp(self):
+        self.d = _tmp()
+        self.f = self.d / "task.md"
+        self.f.write_text("x\n", encoding="utf-8")
+
+    def test_acquire_and_release(self):
+        with filelock.task_lock(self.f):
+            pass
+        with filelock.task_lock(self.f):
+            pass                                   # a second acquire must succeed
+
+    def test_lock_file_is_persistent(self):
+        # 058 plan panel (codex ×2, Critical): unlinking on release lets a waiter
+        # keep the old inode while a third process locks a new one — two owners.
+        with filelock.task_lock(self.f):
+            lock_path = filelock.lock_path_for(self.f)
+            self.assertTrue(lock_path.exists())
+        self.assertTrue(lock_path.exists(), "the lock file must survive release")
+
+    def test_nesting_in_one_process_does_not_deadlock(self):
+        # 058 plan panel (grok F5): a second flock on a NEW fd deadlocks on
+        # BSD/macOS and a second msvcrt.locking on the same range fails, so the
+        # holder is refcounted and locks only on the 0→1 transition.
+        with filelock.task_lock(self.f):
+            with filelock.task_lock(self.f):
+                with filelock.task_lock(self.f):
+                    pass
+        self.assertEqual(filelock._depth_for(self.f), 0)
+
+    def test_released_on_systemexit(self):
+        with self.assertRaises(SystemExit):
+            with filelock.task_lock(self.f):
+                raise SystemExit(1)
+        self.assertEqual(filelock._depth_for(self.f), 0)
+        with filelock.task_lock(self.f):
+            pass
+
+    def test_timeout_names_the_holder(self):
+        holder = subprocess.Popen(
+            [sys.executable, "-c", textwrap.dedent(f"""
+                import sys, time
+                sys.path.insert(0, {str(PLUGIN)!r})
+                from tasks import filelock
+                with filelock.task_lock({str(self.f)!r}):
+                    print("HELD", flush=True)
+                    time.sleep(8)
+            """)], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "HELD")
+            if filelock.selected_backend() == "none":
+                self.skipTest("no locking backend on this platform")
+            t0 = time.monotonic()
+            with self.assertRaises(filelock.LockTimeout) as cm:
+                with filelock.task_lock(self.f, timeout=1.0):
+                    pass
+            self.assertLess(time.monotonic() - t0, 6.0, "the wait was not bounded")
+            self.assertIn(str(holder.pid), str(cm.exception),
+                          "the timeout must name the holder pid")
+        finally:
+            holder.kill()
+            holder.wait()
+
+    def test_degrades_loudly_when_no_backend_exists(self):
+        import io
+        import contextlib
+        err = io.StringIO()
+        with mock.patch.object(filelock, "_BACKEND", "none"), \
+             mock.patch.object(filelock, "_ADVISED", False):
+            with contextlib.redirect_stderr(err):
+                with filelock.task_lock(self.f):
+                    self.f.write_text("written anyway\n", encoding="utf-8")
+        self.assertEqual(self.f.read_text(encoding="utf-8"), "written anyway\n")
+        self.assertIn("without locking", err.getvalue().lower())
+
+    def test_os_releases_the_lock_when_the_holder_dies(self):
+        # 058 plan panel (opus #4, sonnet #4): this is WHY there is no stale-lock
+        # stealing — the OS does it, and a pid-based steal would let two writers
+        # proceed, reintroducing the lost update.
+        if filelock.selected_backend() == "none":
+            self.skipTest("no locking backend on this platform")
+        holder = subprocess.Popen(
+            [sys.executable, "-c", textwrap.dedent(f"""
+                import sys, time
+                sys.path.insert(0, {str(PLUGIN)!r})
+                from tasks import filelock
+                with filelock.task_lock({str(self.f)!r}):
+                    print("HELD", flush=True)
+                    time.sleep(30)
+            """)], stdout=subprocess.PIPE, text=True)
+        self.assertEqual(holder.stdout.readline().strip(), "HELD")
+        holder.kill()
+        holder.wait()
+        with filelock.task_lock(self.f, timeout=5.0):
+            pass                                   # must not raise
+
+
+class RewritePrimitive(unittest.TestCase):
+    def setUp(self):
+        self.d = _tmp()
+        self.f = self.d / "task.md"
+        self.f.write_text("one\n", encoding="utf-8")
+
+    def test_applies_the_transform(self):
+        out = rewrite(self.f, lambda t: t + "two\n")
+        self.assertEqual(out, "one\ntwo\n")
+        self.assertEqual(self.f.read_text(encoding="utf-8"), "one\ntwo\n")
+
+    def test_transform_returning_none_declines_the_write(self):
+        # The `_set_status`-returns-False shape: "nothing to write" is not an error.
+        out = rewrite(self.f, lambda t: None)
+        self.assertIsNone(out)
+        self.assertEqual(self.f.read_text(encoding="utf-8"), "one\n")
+
+    def test_raising_transform_leaves_the_file_byte_identical(self):
+        before = self.f.read_bytes()
+        with self.assertRaises(ValueError):
+            rewrite(self.f, lambda t: (_ for _ in ()).throw(ValueError("no")))
+        self.assertEqual(self.f.read_bytes(), before)
+        self.assertEqual(filelock._depth_for(self.f), 0, "the lock leaked")
+
+    def test_composes_under_an_outer_lock(self):
+        with filelock.task_lock(self.f):
+            rewrite(self.f, lambda t: t + "a\n")
+            rewrite(self.f, lambda t: t + "b\n")
+        self.assertEqual(self.f.read_text(encoding="utf-8"), "one\na\nb\n")
+
+
+class NoUnapprovedDirectWriters(unittest.TestCase):
+    """058 plan panel (codex ×2, Critical): the routing inventory must not rot.
+    A NEW direct writer of task.md / judge.md that skips the transaction is the
+    exact way this guarantee decays, so the package is grepped and any call site
+    outside the approved set fails this test."""
+
+    # (filename, substring of the call line) -> why a direct write is correct there.
+    # Everything else must route through `atomic.rewrite` (or hold `task_lock`
+    # across its own multi-file protocol).
+    APPROVED = {
+        ("core.py", "_atomic_write(task_file, content)"):
+            "task CREATION writes a brand-new file in a directory just made — "
+            "there is no prior content to lose and no concurrent writer",
+        ("core.py", "_atomic_write(archive_path, header"):
+            "inside stack_judge_round's two-file protocol, which holds the task "
+            "lock across the whole sequence (its rollback is the crash contract)",
+        ("core.py", "_atomic_write(judge_md, out)"):
+            "same two-file protocol, under the same held lock",
+        ("core.py", "atomic_write(archive_path, archive_backup)"):
+            "the rollback arm of that protocol, under the same held lock",
+        ("history.py", "atomic_write(task_file, retro_content)"):
+            "retro CREATES a new task file in a directory it just made",
+        ("lifecycle.py", "_atomic_write("):
+            "the freehand task CREATION writes a brand-new file (checked by eye: "
+            "the only remaining _atomic_write in lifecycle is that creation)",
+        ("review.py", "atomic_write(task_file, new_text)"):
+            "inside _write_review_findings_locked, whose caller holds the task "
+            "lock for the whole read-splice-write (it keeps a soft error-string "
+            "contract, so it is not expressed as a rewrite transform)",
+        ("compact.py", "_atomic_write(task_md, new_task_text)"):
+            "inside tasks compact's two-file move, which holds the task lock "
+            "across the archive append and the task.md replace (its truncate-back "
+            "rollback is the crash contract)",
+        ("merge_prep.py", "atomic_write(task_md"):
+            "offline merge preparation — single-process by construction, and it "
+            "renumbers whole task trees rather than editing a live record",
+    }
+
+    def test_every_direct_task_writer_is_approved(self):
+        import re
+        pkg = PLUGIN / "tasks"
+        pattern = re.compile(r"(?:_)?atomic_write\(\s*(task_file|task_md|judge_md|archive_path|tf)\b")
+        unapproved = []
+        for pyfile in sorted(pkg.glob("*.py")):
+            if pyfile.name in ("atomic.py", "filelock.py"):
+                continue
+            for i, line in enumerate(pyfile.read_text(encoding="utf-8").splitlines(), 1):
+                if not pattern.search(line):
+                    continue
+                snippet = line.strip()
+                if any(fname == pyfile.name and sub in snippet
+                       for (fname, sub) in self.APPROVED):
+                    continue
+                unapproved.append(f"{pyfile.name}:{i}: {snippet[:100]}")
+        self.assertEqual(unapproved, [], "\n".join(
+            ["direct task/judge writers outside the approved set — route them through "
+             "`atomic.rewrite`, or add them to APPROVED with the reason:", *unapproved]))
+
+    def test_the_approved_set_has_no_dead_entries(self):
+        # An approval that no longer matches anything is a stale exemption that
+        # would silently cover a FUTURE writer with the same name.
+        pkg = PLUGIN / "tasks"
+        blobs = {f.name: f.read_text(encoding="utf-8") for f in pkg.glob("*.py")}
+        dead = [f"{fname}: {sub}" for (fname, sub) in self.APPROVED
+                if sub not in blobs.get(fname, "")]
+        self.assertEqual(dead, [], f"stale approvals: {dead}")
+
+
+class CloseRefusesARaceItWouldOverwrite(unittest.TestCase):
+    """THE regression of task 058, with teeth.
+
+    The measured baseline: the close validates, runs verify/judges for minutes,
+    then commits — and a `tasks blocked` landing in that window was silently
+    overwritten (5 of 5 trials; the task ended `in_progress` with no `## Blocked`
+    section). Routing the writers alone does NOT fix this (a mutation check with
+    the lock neutered still passed, because each writer now reads late); what
+    fixes it is the commit RE-CHECKING what earned the close. These cases fail
+    if `compose_close` stops refusing."""
+
+    BASE = ("# 001 - T\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n"
+            "## Work Plan\n- [x] G1\n")
+
+    def setUp(self):
+        from tasks.core import CloseRaceRefused, compose_close, set_task_blocked
+        self.compose_close = compose_close
+        self.CloseRaceRefused = CloseRaceRefused
+        self.set_task_blocked = set_task_blocked
+        self.d = _tmp()
+        self.tf = self.d / "task.md"
+        self.tf.write_text(self.BASE, encoding="utf-8")
+
+    def test_a_pause_that_landed_during_the_close_refuses_the_commit(self):
+        self.set_task_blocked(self.tf, "waiting on the owner")     # the other session
+        text = self.tf.read_text(encoding="utf-8")
+        with self.assertRaises(self.CloseRaceRefused) as cm:
+            self.compose_close(text, receipt_heading="Verification Receipt",
+                               receipt="### closed\n", expect_status="in_progress")
+        self.assertIn("Blocked", str(cm.exception))
+
+    def test_a_status_someone_else_changed_refuses_the_commit(self):
+        text = self.BASE.replace("in_progress", "done")
+        with self.assertRaises(self.CloseRaceRefused):
+            self.compose_close(text, receipt_heading="Verification Receipt",
+                               receipt="### closed\n", expect_status="in_progress")
+
+    def test_an_undisturbed_close_commits_receipt_and_status_together(self):
+        out = self.compose_close(self.BASE, receipt_heading="Verification Receipt",
+                                 receipt="### closed\n", expect_status="in_progress")
+        self.assertIn("## Verification Receipt", out)
+        self.assertIn("### closed", out)
+        self.assertRegex(out, r"## Status\ndone")
+
+    def test_the_refusal_leaves_the_file_byte_identical(self):
+        self.set_task_blocked(self.tf, "paused")
+        before = self.tf.read_bytes()
+        from tasks.atomic import rewrite
+        with self.assertRaises(self.CloseRaceRefused):
+            rewrite(self.tf, lambda t: self.compose_close(
+                t, receipt_heading="Verification Receipt", receipt="### closed\n"))
+        self.assertEqual(self.tf.read_bytes(), before)
+
+    def test_end_to_end_the_cli_refuses_and_keeps_the_pause(self):
+        # The real command, not the helper: a close whose task was paused
+        # mid-flight must exit non-zero and leave the pause standing.
+        import json
+        d = _tmp()
+        subprocess.run(["git", "init", "-q", str(d)], check=True, capture_output=True)
+        (d / ".agent").mkdir()
+        (d / ".agent" / "config.json").write_text(json.dumps({"verify": {"_always": []}}),
+                                                  encoding="utf-8")
+        td = d / ".agent" / "tasks" / "001-t"
+        td.mkdir(parents=True)
+        tf = td / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        env = dict(os.environ, PYTHONPATH=str(PLUGIN), PLAYBOOK_SESSION_ID="pid-058")
+        r = subprocess.run([sys.executable, "-m", "tasks.cli", "work", "1"],
+                           cwd=d, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.set_task_blocked(tf, "another session paused this")   # the race
+        r = subprocess.run([sys.executable, "-m", "tasks.cli", "work", "done"],
+                           cwd=d, env=env, capture_output=True, text=True, timeout=120)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        text = tf.read_text(encoding="utf-8")
+        self.assertIn("## Blocked", text, "the pause was overwritten")
+        self.assertNotIn("\ndone\n", text.split("## Work Plan")[0])
+
+
+class LostUpdateRegression(unittest.TestCase):
+    """The measured baseline of task 058, as a regression.
+
+    Before: the real close shape — read task.md, run the verify contract for
+    minutes, write the receipt — lost a concurrent `tasks blocked` in 5 of 5
+    trials, and the task ended `in_progress` with NO `## Blocked` section.
+    After: the pause survives, and status agrees with the section."""
+
+    BASE = ("# 001 - T\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n"
+            "## Work Plan\n- [x] G1\n")
+
+    def _slow_close(self, task_file, hold):
+        """A close that reads, works for `hold` seconds, then commits."""
+        return [sys.executable, "-c", textwrap.dedent(f"""
+            import sys, time
+            sys.path.insert(0, {str(PLUGIN)!r})
+            from pathlib import Path
+            from tasks.filelock import task_lock
+            from tasks.core import upsert_task_section, _set_status
+            tf = Path({str(task_file)!r})
+            time.sleep(0.05)
+            # The long work happens OUTSIDE the lock, exactly as the real close does.
+            time.sleep({hold})
+            with task_lock(tf):
+                upsert_task_section(tf, "Verification Receipt", "### closed\\n")
+                _set_status(tf, "done")
+        """)]
+
+    def _blocked(self, task_file, delay):
+        return [sys.executable, "-c", textwrap.dedent(f"""
+            import sys, time
+            sys.path.insert(0, {str(PLUGIN)!r})
+            from pathlib import Path
+            from tasks.core import set_task_blocked
+            time.sleep({delay})
+            set_task_blocked(Path({str(task_file)!r}), "waiting on the owner")
+        """)]
+
+    def test_a_pause_landing_during_a_close_is_not_lost(self):
+        lost = 0
+        for _ in range(5):
+            d = _tmp()
+            tf = d / "task.md"
+            tf.write_text(self.BASE, encoding="utf-8")
+            a = subprocess.Popen(self._slow_close(tf, 0.30))
+            b = subprocess.Popen(self._blocked(tf, 0.10))
+            a.wait(); b.wait()
+            text = tf.read_text(encoding="utf-8")
+            if "## Blocked" not in text:
+                lost += 1
+        self.assertEqual(lost, 0, "a concurrent pause was silently dropped")
+
+    def test_two_writers_keep_every_entry(self):
+        d = _tmp()
+        tf = d / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        procs = [subprocess.Popen([sys.executable, "-c", textwrap.dedent(f"""
+            import sys
+            sys.path.insert(0, {str(PLUGIN)!r})
+            from pathlib import Path
+            from tasks.core import upsert_task_section
+            tf = Path({str(tf)!r})
+            for i in range(20):
+                upsert_task_section(tf, "Verification Receipt", f"### P{w}-{{i}}\\n")
+        """)]) for w in range(2)]
+        for p in procs:
+            p.wait()
+        text = tf.read_text(encoding="utf-8")
+        missing = [f"P{w}-{i}" for w in range(2) for i in range(20)
+                   if f"P{w}-{i}" not in text]
+        self.assertEqual(missing, [], f"{len(missing)}/40 entries lost")
+        self.assertEqual(text.count("## Verification Receipt"), 1,
+                         "the section was duplicated by a racing writer")
+
+    def test_a_crash_between_transform_and_write_leaves_the_file_intact(self):
+        d = _tmp()
+        tf = d / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        before = tf.read_bytes()
+        crasher = subprocess.run([sys.executable, "-c", textwrap.dedent(f"""
+            import os, sys
+            sys.path.insert(0, {str(PLUGIN)!r})
+            from pathlib import Path
+            from tasks.atomic import rewrite
+            def t(text):
+                os._exit(9)          # die holding the lock, mid-transaction
+            rewrite(Path({str(tf)!r}), t)
+        """)])
+        self.assertNotEqual(crasher.returncode, 0)
+        self.assertEqual(tf.read_bytes(), before, "the crash left a torn file")
+        # …and the lock the dead process held is reclaimable.
+        with filelock.task_lock(tf, timeout=5.0):
+            pass
+
+
+class GuardReadsOnceAndRechecksThePointer(unittest.TestCase):
+    """058 plan panel P2: the destructive-command guard read task.md twice (once
+    for the status, again inside `extract_risk`), so a write between them could
+    pair one task's status with another's risk; and it cannot take the task lock
+    (a PreToolUse hook must never wait on a writer). It now reads once and
+    re-reads the POINTER, and every error keeps the command BLOCKED."""
+
+    def _project(self, risk="irreversible", status="in_progress", num="001"):
+        d = _tmp()
+        agent = d / ".agent"
+        (agent / "sessions" / "pid-1").mkdir(parents=True)
+        # The real pointer is the ZERO-PADDED number (checked against this
+        # workspace's own `.agent/sessions/<sid>/current_state`).
+        (agent / "sessions" / "pid-1" / "current_state").write_text(num, encoding="utf-8")
+        td = agent / "tasks" / f"{num}-t"
+        td.mkdir(parents=True)
+        (td / "task.md").write_text(
+            f"# {num}\n\n## Status\n{status}\n\n## Risk\n{risk}\n", encoding="utf-8")
+        return d
+
+    def _guard(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cg_under_test", PLUGIN / "scripts" / "command_guard.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_an_irreversible_active_task_acknowledges(self):
+        d = self._project()
+        g = self._guard()
+        with mock.patch.dict(os.environ, {"PLAYBOOK_SESSION_ID": "pid-1"}):
+            self.assertTrue(g._active_task_is_irreversible(str(d)))
+
+    def test_a_reversible_one_does_not(self):
+        d = self._project(risk="reversible")
+        g = self._guard()
+        with mock.patch.dict(os.environ, {"PLAYBOOK_SESSION_ID": "pid-1"}):
+            self.assertFalse(g._active_task_is_irreversible(str(d)))
+
+    def test_a_task_switch_mid_check_refuses(self):
+        # The pointer moves to another task WHILE the guard is reading: the stale
+        # irreversible task must not acknowledge for the new one.
+        d = self._project()
+        g = self._guard()
+        pointer = d / ".agent" / "sessions" / "pid-1" / "current_state"
+        real_read = Path.read_text
+        state = {"n": 0}
+
+        def _switch_once(self_path, *a, **k):
+            out = real_read(self_path, *a, **k)
+            if self_path.name == "task.md" and state["n"] == 0:
+                state["n"] = 1
+                pointer.write_text("002", encoding="utf-8")   # another session switched
+            return out
+        with mock.patch.dict(os.environ, {"PLAYBOOK_SESSION_ID": "pid-1"}), \
+             mock.patch.object(Path, "read_text", _switch_once):
+            self.assertFalse(g._active_task_is_irreversible(str(d)),
+                             "a stale pointer acknowledged after a task switch")
+
+    def test_every_error_keeps_the_command_blocked(self):
+        g = self._guard()
+        with mock.patch.dict(os.environ, {"PLAYBOOK_SESSION_ID": "pid-1"}):
+            self.assertFalse(g._active_task_is_irreversible("/nonexistent/root"))
+            self.assertFalse(g._active_task_is_irreversible(""))
+
+    def test_the_guard_takes_no_task_lock(self):
+        # Structural: a hook that waited on a minutes-long close would stall the
+        # session, so the guard must not import or call the lock at all.
+        src = (PLUGIN / "scripts" / "command_guard.py").read_text(encoding="utf-8")
+        self.assertNotIn("task_lock", src)
+        self.assertNotIn("filelock", src)
+
+
+class TagDoesNotLoseAnAppendedPrompt(unittest.TestCase):
+    """058 plan panel P11 (and 073's parked item): `tasks tag` REWRITES
+    chat_log.md from a buffer it read earlier, while the chat-log hook appends to
+    the same file — so a prompt arriving in between was silently dropped. The
+    rewrite now rendezvous on the hook's own lock file AND compare-and-swaps the
+    content, writing nothing rather than losing a message."""
+
+    def _project(self):
+        d = _tmp()
+        agent = d / ".agent"
+        agent.mkdir()
+        (agent / "chat_log.md").write_text(
+            "**[M001]** [2026-09-22 08:00:00 UTC]\nfirst\n", encoding="utf-8")
+        (agent / "bash_history").write_text(
+            "2026-09-22 08:00:00 | claude | .claude/bin/tasks work 1\n", encoding="utf-8")
+        return d
+
+    def test_an_undisturbed_tag_run_writes_its_tags(self):
+        # The negative control for the refusal above.
+        import contextlib
+        import io
+        from tasks import history
+        d = self._project()
+        chat = d / ".agent" / "chat_log.md"
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.suppress(SystemExit):
+                    history.cmd_tag([])
+        finally:
+            os.chdir(cwd)
+        self.assertIn("<!-- T001 -->", chat.read_text(encoding="utf-8"))
+
+    def test_the_rewrite_rendezvous_on_the_hooks_lock_file(self):
+        # The shell hook locks `<agent>/chat_log_counter.lock`; the Python
+        # rewriter must use the SAME path or the two protocols never meet.
+        from tasks.filelock import lock_path_for
+        d = self._project()
+        counter = d / ".agent" / "chat_log_counter"
+        self.assertEqual(lock_path_for(counter).name, "chat_log_counter.lock")
+        hook = (PLUGIN / "scripts" / "chat-log-hook").read_text(encoding="utf-8")
+        self.assertIn('200>"$counter_file.lock"', hook)
+
+    def test_tag_refuses_when_the_log_changed_under_it(self):
+        # Deterministic: the append happens exactly in the window the guard
+        # protects — after the tag buffer was read, as the lock is taken. A
+        # thread-and-sleep race is not a test (the first version of this case
+        # "passed" only because its daemon thread died at process exit, so there
+        # was nothing to lose).
+        import contextlib
+        import io
+        from tasks import history
+        d = self._project()
+        chat = d / ".agent" / "chat_log.md"
+        real_lock = history.__dict__.get("task_lock")
+
+        @contextlib.contextmanager
+        def _lock_and_append(path, *a, **k):
+            chat.write_text(chat.read_text(encoding="utf-8") +
+                            "**[M099]** [2026-09-22 09:00:00 UTC]\nlate\n",
+                            encoding="utf-8")          # the hook appends here
+            yield
+
+        cwd = os.getcwd()
+        err = io.StringIO()
+        code = None
+        with mock.patch("tasks.filelock.task_lock", _lock_and_append):
+            os.chdir(d)
+            try:
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    history.cmd_tag([])
+            except SystemExit as e:
+                code = e.code
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(code, 1, "the stale rewrite was not refused")
+        self.assertIn("changed while tags were being computed", err.getvalue())
+        text = chat.read_text(encoding="utf-8")
+        self.assertIn("M099", text, "the concurrently appended prompt was lost")
+        self.assertNotIn("<!-- T001 -->", text, "a stale rewrite landed anyway")
+
+
+class LockFileIsNotTamper(unittest.TestCase):
+    """058 plan panel P3: my Design gate ASSUMED the lock file was tamper-exempt
+    because it lives under `.agent/`. It was not — task 059's guard exempts only
+    EXACT record names in a TRACKED task dir, so a lock file first created during
+    a panel window would have surfaced as `?? …/task.md.lock` and voided a paid
+    panel. Asserted here instead of assumed."""
+
+    def test_a_lock_file_created_during_a_panel_is_not_a_mutation(self):
+        import subprocess as sp
+        from tasks import review as R
+        d = _tmp()
+        sp.run(["git", "init", "-q", str(d)], check=True, capture_output=True)
+        sp.run(["git", "-C", str(d), "config", "user.email", "x@y.z"], check=True, capture_output=True)
+        sp.run(["git", "-C", str(d), "config", "user.name", "x"], check=True, capture_output=True)
+        td = d / ".agent" / "tasks" / "001-x"
+        td.mkdir(parents=True)
+        tf = td / "task.md"
+        tf.write_text("# 001\n\n## Status\nin_progress\n", encoding="utf-8")
+        sp.run(["git", "-C", str(d), "add", "-A"], check=True, capture_output=True)
+        sp.run(["git", "-C", str(d), "commit", "-qm", "tracked task dir"], check=True, capture_output=True)
+        before = R._snapshot_repo_state(d, tf)
+        with filelock.task_lock(tf):          # the first write of the panel window
+            pass
+        self.assertTrue(filelock.lock_path_for(tf).exists())
+        full = R._detect_tamper_full(d, tf, before)
+        self.assertEqual(full["mutations"], [], full)
+
+    def test_the_seeded_gitignore_covers_it(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cmm", PLUGIN / "scripts" / "claude-md-merge.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertIn(".agent/tasks/*/*.lock", mod.GITIGNORE_ENTRIES)
+        self.assertIn(".agent/*/tasks/*/*.lock", mod.GITIGNORE_ENTRIES)
+
+
+if __name__ == "__main__":
+    unittest.main()

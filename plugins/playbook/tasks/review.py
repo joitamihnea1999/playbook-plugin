@@ -716,6 +716,30 @@ def _write_review_findings(task_file: Path, review_mode: str, findings: str) -> 
     body = _neutralise_markers(findings.strip(), review_mode)
     block = f"{open_m}\n{body}\n{close_m}"
 
+    # Task 058: the read, the splice and the write are ONE locked transaction —
+    # a panel round landing between them used to overwrite the other's work.
+    from tasks.filelock import task_lock
+    try:
+        _lock_cm = task_lock(task_file)
+        _lock_cm.__enter__()
+    except Exception as _lock_err:      # noqa: BLE001 — never block a delivered review
+        return f"could not lock {task_file.name}: {_lock_err}"
+    try:
+        return _write_review_findings_locked(task_file, review_mode, findings)
+    finally:
+        _lock_cm.__exit__(None, None, None)
+
+
+def _write_review_findings_locked(task_file: Path, review_mode: str, findings: str) -> "str | None":
+    """The body of `_write_review_findings`, run with the task lock held."""
+    section = _REVIEW_SECTIONS.get(review_mode)
+    if section is None:
+        return f"unknown review mode {review_mode!r}"
+    heading, placeholders = section
+    open_m, close_m = _findings_markers(review_mode)
+    body = _neutralise_markers(findings.strip(), review_mode)
+    block = f"{open_m}\n{body}\n{close_m}"
+
     try:
         text = task_file.read_text(encoding="utf-8")
     except OSError as e:
@@ -1065,10 +1089,15 @@ def _classify_tamper(project_path: Path, task_file: Path | None, before: dict, a
             # impl-panel r2, opus F3 / sonnet #1) and still missed the supported
             # claude backend's own `judge.log` (grok #4).
             from tasks.core import judge_log_names as _jln
+            # `task.md.lock` (task 058): the transaction lock the writers take is
+            # created in the task dir the first time anything writes there — which
+            # can be DURING a panel window, and a `??` line for it would void a
+            # paid panel (058 plan panel P3, verified against this very exemption).
             record_names = "(?:" + "|".join(
                 re.escape(n) for n in sorted(
                     {"judge.md", "judge-archive.md", "task-archive.md",
-                     "vetting-ledger.json"} | _jln())) + ")"
+                     "vetting-ledger.json", "task.md.lock", "judge.md.lock"}
+                    | _jln())) + ")"
             if tracked == "untracked":
                 line_exempt.append(_prefixed(prefix, re.escape(_td) + r"/"))
                 path_exempt.append(re.compile(r"^" + re.escape(_td) + r"/"))

@@ -121,3 +121,47 @@ def atomic_write(
         except OSError:
             pass
         raise
+
+
+def rewrite(
+    path: Union[str, "os.PathLike[str]"],
+    transform,
+    *,
+    encoding: str = "utf-8",
+    newline: "str | None" = None,
+    fsync: bool = True,
+    timeout: "float | None" = None,
+) -> "str | None":
+    """The read-transform-write TRANSACTION for a task's records (task 058).
+
+    `atomic_write` makes each WRITE all-or-nothing; this makes the whole
+    read → transform → write indivisible against another process, which is the
+    gap that actually bit: the close reads task.md, runs the verify contract for
+    minutes, then writes the receipt, and a `tasks blocked` landing in that
+    window was silently lost (measured 5/5, with the `## Blocked` record gone).
+
+    `transform(text) -> str | None` may:
+      * return new text → it is written atomically and returned;
+      * return `None` → the write is DECLINED, the file is byte-identical, and
+        `None` is returned (the `_set_status`-returns-False shape: "nothing to
+        write" is an outcome, not an error);
+      * raise → the file is byte-identical and the exception propagates.
+
+    The lock is re-entrant, so a caller that already holds `task_lock(path)` can
+    compose several `rewrite` calls into ONE transaction — which is how a
+    receipt and a status change land together or not at all. A missing file is
+    read as empty text, so a transform can create it.
+    """
+    from tasks.filelock import DEFAULT_TIMEOUT, task_lock
+
+    p = Path(path)
+    with task_lock(p, timeout=DEFAULT_TIMEOUT if timeout is None else timeout):
+        try:
+            text = p.read_text(encoding=encoding, errors="replace")
+        except FileNotFoundError:
+            text = ""
+        new = transform(text)
+        if new is None:
+            return None
+        atomic_write(p, new, encoding=encoding, newline=newline, fsync=fsync)
+        return new
