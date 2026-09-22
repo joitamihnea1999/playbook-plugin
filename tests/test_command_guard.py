@@ -1121,10 +1121,18 @@ class MorePrivilegeWrappersAndArity(unittest.TestCase):
         self.assertEqual(cg.classify_command("git push -q origin main")[0], "allow")
 
     def test_a_computed_rm_target_is_dangerous(self):
-        for cmd in ('rm -rf "$(echo /)"', "rm -rf $(pwd)", "rm -rf $DEST",
-                    "rm -rf `pwd`"):
+        # NARROWED IN ROUND 5, deliberately and with a measurement. Round 4 made
+        # ANY `$` target dangerous, which blocked `rm -rf "$WORK"` — the standard
+        # temp-dir cleanup idiom, present ~28 times in this repository alone and
+        # ALLOWED before task 077 touched anything. An over-block on that layer
+        # wedges a user who cannot route around it. What stays dangerous is a
+        # target that RUNS something, plus the known-dangerous variable NAMES.
+        for cmd in ('rm -rf "$(echo /)"', "rm -rf $(pwd)", "rm -rf `pwd`",
+                    'rm -rf "$HOME"', "rm -rf $HOME/stuff", 'rm -rf "${HOME}"'):
             self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
-        for cmd in ("rm -rf ./build", "rm -rf node_modules"):
+        for cmd in ("rm -rf ./build", "rm -rf node_modules",
+                    'rm -rf "$WORK"', 'rm -rf "$BUILD_DIR"', "rm -rf $DEST",
+                    """trap 'rm -rf "$WORK"' EXIT"""):
             self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
 
     def test_nesting_is_not_bounded_by_a_small_depth_cap(self):

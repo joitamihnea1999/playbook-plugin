@@ -103,6 +103,44 @@ def _strip_comments(text):
     return "".join(out)
 
 
+def _split_segments_keep(text, ops=_SEP_OPS):
+    """Like `_split_segments`, but keeps each segment's trailing separator so the
+    text can be rebuilt byte-for-byte."""
+    out, buf, sep, i, n, quote = [], [], "", 0, len(text), ""
+    while i < n:
+        c = text[i]
+        if quote:
+            buf.append(c)
+            if c == "\\" and quote == '"' and i + 1 < n:
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf.append(c)
+            buf.append(text[i + 1])
+            i += 2
+            continue
+        if c in "\"'":
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        hit = next((op for op in ops if text.startswith(op, i)), None)
+        if hit:
+            out.append(("".join(buf), hit))
+            buf = []
+            i += len(hit)
+            continue
+        buf.append(c)
+        i += 1
+    out.append(("".join(buf), ""))
+    return out
+
+
 def _split_segments(text, ops=_SEP_OPS):
     out, buf, i, n, quote = [], [], 0, len(text), ""
     while i < n:
@@ -164,9 +202,11 @@ def _split_segments(text, ops=_SEP_OPS):
 
 
 def _wspec(val_short="", val_long=(), terminal=(), operands=0,
-           split_short="", split_long=(), operand_satisfied_by=()):
+           split_short="", split_long=(), operand_satisfied_by=(),
+           split_positional=False):
     return {
         "sat": set(operand_satisfied_by),
+        "split_positional": split_positional,
         "val_short": set(val_short),
         "val_long": set(val_long),
         "terminal": set(terminal),
@@ -202,7 +242,7 @@ _WRAPPERS = {
                    terminal=("--help", "--version")),
     "ionice": _wspec(val_short="cnp", val_long=("--class", "--classdata", "--pid"),
                      terminal=("-h", "--help", "-V", "--version")),
-    "chrt": _wspec(val_short="pT", operands=1,
+    "chrt": _wspec(val_short="pTDP", operands=1,
                    terminal=("-h", "--help", "-V", "--version")),
     "stdbuf": _wspec(val_short="ioe",
                      val_long=("--input", "--output", "--error"),
@@ -223,9 +263,14 @@ _WRAPPERS = {
     # shell builtins that delegate
     "command": _wspec(terminal=("-v", "-V")),
     "builtin": _wspec(),
-    "watch": _wspec(val_short="nd", val_long=("--interval",),
-                    terminal=("--help", "--version")),
-    "parallel": _wspec(val_short="jP", val_long=("--jobs",),
+    # `watch '<cmd>'` hands its argument to `sh -c`, so a quoted operand is a
+    # command STRING, not a token (impl panel round 5, sol:high).
+    "watch": _wspec(val_short="n", val_long=("--interval",),
+                    terminal=("--help", "--version"),
+                    split_positional=True),
+    "parallel": _wspec(val_short="jPN", val_long=("--jobs", "--delay", "--timeout",
+                                                 "--retries", "--sshlogin",
+                                                 "--max-args", "--max-procs"),
                        terminal=("--help", "--version")),
     # `trap '<command>' SIGNAL` stores a command string that runs on the signal.
     "trap": _wspec(split_short="", split_long=(), operands=0),
@@ -239,6 +284,12 @@ _WRAPPERS = {
     "else": _wspec(),
     "elif": _wspec(),
     "if": _wspec(),
+    # `case x in  x) <cmd>;; esac` — the word and `in` are operands, the arm
+    # pattern ends with `)` and is skipped like a function header.
+    "case": _wspec(operands=2),
+    "esac": _wspec(),
+    "done": _wspec(),
+    "fi": _wspec(),
     "while": _wspec(),
     "until": _wspec(),
     # Privilege wrappers of the same class as sudo/doas (impl panel round 3).
@@ -427,14 +478,23 @@ def _walk_prefix(seg):
                     i += 1
             continue
         name = _command_name(tok)
-        if tok.endswith("()"):                         # `f() { <body>; }`
+        if tok.endswith("()") or tok == "function":    # `f() {…}` / `function f {…}`
             i += 1
+            if tok == "function" and i < len(toks):
+                i += 1                                 # the name
+            continue
+        if tok.endswith(")") and not tok.startswith(("(", "{")):
+            i += 1                                     # a `case` arm: `x) <cmd>`
             continue
         spec = _WRAPPERS.get(name) if name else None
         if spec is None:
             break                                      # this token is the command
         if name == "trap":                             # `trap '<cmd>' SIGNAL`
             i += 1
+            while i < len(toks) and toks[i][0] in ("--",):
+                i += 1
+            if i < len(toks) and toks[i][0] in ("-l", "-p", "--list", "--print"):
+                return (s, False, payloads)            # lists traps, runs nothing
             if i < len(toks):
                 payloads.append(toks[i][0])
             i = len(toks)
@@ -511,6 +571,10 @@ def _walk_prefix(seg):
                 if takes_next:
                     i += 1
                 continue
+            if spec["split_positional"] and lexed[i][3]:   # `watch '<cmd>'`
+                payloads.append(toks[i][0])
+                i = len(toks)
+                break
             if operands > 0:                           # `timeout 5 …`, `chrt 10 …`
                 operands -= 1
                 i += 1
@@ -619,10 +683,16 @@ def _rm_is_dangerous(values, kinds=None):
             if cand in ("/", "/*", "..") or cand.startswith("/") \
                     or cand.startswith(".."):
                 return True                            # a path is a path, quoted or not
-            # `$`/backtick EXPAND inside double quotes but not inside single
-            # quotes; a glob or a tilde expands in neither (impl panel round 4:
-            # `rm -rf 'build*'` and `rm -rf '$cache'` are literal names).
-            if ("$" in cand or "`" in cand) and kind != "'":
+            # A target that RUNS something (`$(pwd)`, a backtick) is dangerous:
+            # it commonly yields a rooted path. A plain variable is NOT — round 4
+            # treated every `$` as computed, which blocked `rm -rf "$WORK"`, the
+            # standard temp-dir cleanup idiom that appears ~28 times in this
+            # repository alone and was ALLOWED before this task. Measured, then
+            # narrowed (impl panel round 5, opus #2). Known-dangerous NAMES are
+            # still dangerous however they are written.
+            if kind != "'" and ("$(" in cand or "`" in cand):
+                return True
+            if kind != "'" and _DANGEROUS_VAR.search(cand):
                 return True
             if ("*" in cand or cand.startswith("~")) and not kind:
                 return True
@@ -630,6 +700,8 @@ def _rm_is_dangerous(values, kinds=None):
 
 
 _DEVICE = re.compile(r"^/dev/(sd|nvme|disk|hd)")
+# Variable names whose value is a root the user cannot afford to lose.
+_DANGEROUS_VAR = re.compile(r"\$\{?(HOME|HOMEDRIVE|HOMEPATH|USERPROFILE|ROOT|PREFIX)\b")
 _REDIR = re.compile(r"^\d*>>?")
 
 
@@ -710,8 +782,10 @@ def _unwrap_shell_c(seg):
         if v == "--":
             k += 1
             continue
-        if v.startswith("--"):                         # `--noprofile`, `--login`, …
-            k += 1
+        if v.startswith("--"):
+            # `--rcfile FILE` / `--init-file FILE` take a value; the rest are
+            # flags (impl panel round 5, sol:high).
+            k += 2 if v in _SHELL_VALUE_LONG else 1
             continue
         if v.startswith("-") and len(v) > 1:
             if "c" in v[1:]:
@@ -748,7 +822,18 @@ _EXPANSION = re.compile(r"\$\(|`|\$\{|<\(|>\(")
 _DATA_LINE = re.compile(r"^\s*(?:echo|printf)\b[^|;&<>()`$]*>{1,2}\s*" + _PATH + r"\s*$")   # single simple command only (round 3)
 
 
-def _mask_echo_literals(line):
+def _mask_echo_literals(text):
+    """Mask each echo/printf SEGMENT separately. A separator glued to a quoted
+    token (`"x";psql`) stays inside one lexer token, so deciding per token let
+    the mask run on into the next command (impl panel round 5, opus #1 — the
+    round-3 regression class in a form the round-3 test could not see).
+    `_split_segments` already tells an operator from a quoted one; use it."""
+    pieces = _split_segments_keep(text)
+    return "".join((seg if sep == "|" else _mask_one_echo(seg)) + sep
+                   for seg, sep in pieces)
+
+
+def _mask_one_echo(line):
     """An `echo`/`printf` argument that is FULLY QUOTED and carries no expansion
     is a string, not a command — whatever else is on the line. Task 073 could
     only mask a redirected echo, because a quote-blind matcher cannot tell
@@ -759,12 +844,9 @@ def _mask_echo_literals(line):
     toks = _lex(line)
     if not toks or _command_name(toks[0][2]) not in ("echo", "printf"):
         return line
-    if any("|" in raw for raw, _st, _v, quoted in toks if not quoted):
-        return line                                    # the output is piped: it RUNS
+
     out, last = [], 0
     for raw, start, value, quoted in toks[1:]:
-        if not quoted and any(ch in raw for ch in ";|&>"):
-            break                                      # the echo command ends here
         if not quoted or _EXPANSION.search(raw):
             continue
         out.append(line[last:start])
@@ -989,6 +1071,29 @@ _TOO_DEEP = ("block", "unparseable-nesting",
              "nesting too deep to classify — refusing rather than guessing")
 
 
+_SHELL_VALUE_LONG = {"--rcfile", "--init-file"}
+_SOURCERS = {".", "source"}
+
+
+def _shell_consumes_a_downloader(text):
+    """`bash <(curl …)`, `. <(curl …)`, `bash <<< "$(curl …)"`: the syntax was
+    handled by the substitution scan, but a bare downloader body classifies as
+    ALLOW on its own, so the download-execute SEMANTICS slipped through while
+    `curl … | bash` blocked (impl panel round 5, opus #3)."""
+    for line in str(text).split("\n"):
+        rest, _executes, _payloads = _walk_prefix(line)
+        lexed = _lex(rest)
+        head = _command_name(lexed[0][2]) if lexed else None
+        if head not in _SHELLS and head not in _SOURCERS:
+            continue
+        for body in _command_substitutions(line) + _herestring_payloads(line):
+            b = _lex(body)
+            name = _command_name(b[0][2]) if b else None
+            if name and _DOWNLOADER.match(name):
+                return True
+    return False
+
+
 def classify_command(command, extra_patterns=None, _depth=0, _argv=False):
     """Return ("block", name, why) or ("allow", None, None). Pure + deterministic.
 
@@ -1010,7 +1115,9 @@ def classify_command(command, extra_patterns=None, _depth=0, _argv=False):
     for seg in _split_segments(_strip_comments(command)):
         stripped, executes, payloads = _walk_prefix(seg)
         for payload in payloads:                       # `env -S "<command line>"`
-            if payload and _depth < _MAX_DEPTH:
+            if payload:
+                if _depth + 1 >= _MAX_DEPTH:
+                    return _TOO_DEEP                   # never silently open
                 v = classify_command(payload, extra_patterns, _depth + 1)
                 if v[0] == "block":
                     return v
@@ -1050,6 +1157,8 @@ def classify_command(command, extra_patterns=None, _depth=0, _argv=False):
                 if v[0] == "block":
                     return v
     if _pipes_downloader_into_shell(whole_text):
+        return ("block", "pipe-to-shell", _PIPE_WHY)
+    if _shell_consumes_a_downloader(whole_text):
         return ("block", "pipe-to-shell", _PIPE_WHY)
     for name, rx, why in _WHOLE:
         if rx.search(whole_text):
