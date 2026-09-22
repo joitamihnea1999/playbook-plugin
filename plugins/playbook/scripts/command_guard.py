@@ -227,7 +227,6 @@ _WRAPPERS = {
                     terminal=("--help", "--version")),
     "parallel": _wspec(val_short="jP", val_long=("--jobs",),
                        terminal=("--help", "--version")),
-    "timeoutcmd": _wspec(),
     # `trap '<command>' SIGNAL` stores a command string that runs on the signal.
     "trap": _wspec(split_short="", split_long=(), operands=0),
     # `eval` delegates to a STRING, so its remainder is classified, not walked.
