@@ -248,6 +248,26 @@ def _walk_prefix(seg):
     return (rest, True, payloads)
 
 
+# Finding a command position also means recognising the command when it is named
+# by PATH or escaped past an alias: `/bin/rm -rf /` and `\\rm -rf /` are the same
+# command as `rm -rf /`, but every rule here anchors on the bare name. The
+# normalised form is checked IN ADDITION to the original, never instead of it.
+# The first version of this accepted ANY non-slash run before the slashes, so a
+# quoted path at the start of a line — `"/sbin/mkfs.ext4 /dev/sdb1"` in a test
+# fixture — normalised into a command and blocked. The guard caught that on my
+# own file write. The path part is therefore restricted to path-shaped
+# characters, and nothing is normalised unless a directory or an alias-escaping
+# backslash was actually hiding the name.
+_CMD_HEAD = re.compile(r"^(\\)?((?:[A-Za-z0-9_.+-]*/)+)?([A-Za-z0-9_.+-]+)(?=\s|$)")
+
+
+def _normalize_command_head(seg):
+    m = _CMD_HEAD.match(seg)
+    if not m or not (m.group(1) or m.group(2)):
+        return seg                                     # nothing was hiding the name
+    return m.group(3) + seg[m.end():]
+
+
 def _strip_prefixes(seg):
     """Back-compatible shim: the prefix-stripped text only."""
     return _walk_prefix(seg)[0]
@@ -402,7 +422,7 @@ def _pipes_downloader_into_shell(text):
         if not executes:
             continue
         head = rest.split()[0] if rest.split() else ""
-        head = head.strip("\"'`;)").rsplit("/", 1)[-1]
+        head = head.strip("\"'`;)").lstrip("\\").rsplit("/", 1)[-1]
         if seen_downloader and head in _INTERPRETERS:
             return True
         if _DOWNLOADER.match(rest):
@@ -433,7 +453,8 @@ def classify_command(command, extra_patterns=None, _depth=0):
                     return v
         if not executes:                               # `sudo --version …` prints, runs nothing
             continue
-        hit = _segment_checks(stripped)
+        hit = (_segment_checks(stripped)
+               or _segment_checks(_normalize_command_head(stripped)))
         if hit:
             return ("block", hit[0], hit[1])
         inner = _unwrap_shell_c(stripped)

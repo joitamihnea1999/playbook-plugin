@@ -1918,7 +1918,7 @@
     {
       "id": "PB-COMMAND-DANGEROUS",
       "category": "command-safety",
-      "statement": "The command interlock blocks its enumerated high-blast command forms at command position — a position it finds THROUGH delegating wrappers and their options, so `sudo -u root rm -rf /`, `timeout 5 rm -rf /`, `chrt -f 99 rm -rf /`, `stdbuf -o0 git push --force`, `env -S '<command line>'`, a nest of them, and the same wrappers on the right of a pipe (`curl … | nice -n 19 bash`) all reach the same rules as their bare forms, while a wrapper's terminal/query mode (`sudo --version …`, `command -v …`) runs nothing and is allowed (task 077) — and, for the two whole-command rules (a downloader piped into a shell, a DB drop/truncate/delete issued to a client), anywhere in what could RUN, with only these inert DATA regions masked first — a `cat`/`tee` heredoc body written to a PLAIN file whose tag is quoted or whose body carries no `$(`/backtick/`${`/process-substitution expansion, and an echo/printf LINE redirected to a plain file with no pipe or expansion anywhere on it — so a `cat` fixture or note ABOUT such a command is data, not a command, while a heredoc fed to an interpreter or DB client, `tee >(sh)`, `echo … | sh`, an expansion, an unterminated heredoc, a `<<` inside a string, or a quoted pipe inside an echo argument are all still seen (task 073; the command-position rules are line-split and never masked) — allows the documented benign look-alikes, and lets an explicitly acknowledged command through, where acknowledgement means either an ACTIVE task whose live `## Status` is `in_progress` and whose live `## Risk` reads `irreversible` (resolved through this session's `current_state` and the CLI's fence-aware `extract_risk`; logged as an `allow` with reason `ack-irreversible-task:<rule>`) or PLAYBOOK_ALLOW_DANGEROUS set to 1/true/yes/on in the HOOK'S OWN environment by the operator (a command-line prefix typed by the agent cannot set it — the block message says so).",
+      "statement": "The command interlock blocks its enumerated high-blast command forms at command position — a position it finds THROUGH delegating wrappers and their options, so `sudo -u root rm -rf /`, `timeout 5 rm -rf /`, `chrt -f 99 rm -rf /`, `stdbuf -o0 git push --force`, `env -S '<command line>'`, a nest of them, and the same wrappers on the right of a pipe (`curl … | nice -n 19 bash`) all reach the same rules as their bare forms, while a wrapper's terminal/query mode (`sudo --version …`, `command -v …`) runs nothing and is allowed — and through a command named by PATH or escaped past an alias, `/bin/rm -rf /` and `\\\\rm -rf /`, whose normalised head is checked in addition to the raw text (task 077) — and, for the two whole-command rules (a downloader piped into a shell, a DB drop/truncate/delete issued to a client), anywhere in what could RUN, with only these inert DATA regions masked first — a `cat`/`tee` heredoc body written to a PLAIN file whose tag is quoted or whose body carries no `$(`/backtick/`${`/process-substitution expansion, and an echo/printf LINE redirected to a plain file with no pipe or expansion anywhere on it — so a `cat` fixture or note ABOUT such a command is data, not a command, while a heredoc fed to an interpreter or DB client, `tee >(sh)`, `echo … | sh`, an expansion, an unterminated heredoc, a `<<` inside a string, or a quoted pipe inside an echo argument are all still seen (task 073; the command-position rules are line-split and never masked) — allows the documented benign look-alikes, and lets an explicitly acknowledged command through, where acknowledgement means either an ACTIVE task whose live `## Status` is `in_progress` and whose live `## Risk` reads `irreversible` (resolved through this session's `current_state` and the CLI's fence-aware `extract_risk`; logged as an `allow` with reason `ack-irreversible-task:<rule>`) or PLAYBOOK_ALLOW_DANGEROUS set to 1/true/yes/on in the HOOK'S OWN environment by the operator (a command-line prefix typed by the agent cannot set it — the block message says so).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/command_guard.py",
@@ -2132,6 +2132,19 @@
           },
           "limitations": [
             "Executes the `dangerous_commands` regex docs/configuration.md offers for the stricter pipe rule, instead of leaving a documented regex nobody ran."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "CommandNamedByPathOrEscaped.test_absolute_and_escaped_forms_block",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "CommandNamedByPathOrEscaped.test_a_path_does_not_turn_data_into_a_command"
+          },
+          "limitations": [
+            "Task 077: the rules anchor on a bare command NAME, so `/bin/rm -rf /` and an alias-escaping `\\\\rm -rf /` used to walk through. The normalised head is checked IN ADDITION to the raw segment, never instead of it. The first normaliser was itself an over-block (a quoted path at line start became a command); the negative control pins that exact line."
           ]
         }
       ],
