@@ -47,6 +47,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 LOCK_SUFFIX = ".lock"
+PID_OFFSET = 1        # byte 0 is the lock byte; the pid line starts after it
 
 
 def _default_timeout() -> float:
@@ -168,7 +169,9 @@ def _holder_pid(lock_file: Path) -> str:
     """The pid recorded by the current holder — for the TIMEOUT MESSAGE only.
     Never used to decide whether a lock may be taken (see the module docstring)."""
     try:
-        txt = lock_file.read_text(encoding="utf-8", errors="replace").strip()
+        with open(lock_file, "rb") as fh:
+            fh.seek(PID_OFFSET)
+            txt = fh.read(64).decode("ascii", "replace").strip()
     except OSError:
         return "unknown"
     return txt.splitlines()[0].strip() if txt else "unknown"
@@ -256,6 +259,16 @@ def _lock_on(lock_file: Path, *, timeout: float = DEFAULT_TIMEOUT):
     # (getattr-guarded), so the opened descriptor is ALSO verified to be a regular
     # file with one link — which covers Windows and any platform that ignores the
     # flag. Anything else fails closed: no lock, no write, a loud reason.
+    # The portable half of the guard: `Path.is_symlink()` answers on every
+    # platform, while `O_NOFOLLOW` is POSIX-only and Windows silently ignores it
+    # (measured: the windows lane did not raise until this check existed).
+    try:
+        if lock_file.is_symlink():
+            raise LockTimeout(
+                f"refusing to use {lock_file.name}: it is a SYMLINK. A lock file "
+                "must be a regular file in the task directory — remove it and retry.")
+    except OSError:
+        pass
     _flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(str(lock_file), _flags, 0o644)
@@ -267,7 +280,10 @@ def _lock_on(lock_file: Path, *, timeout: float = DEFAULT_TIMEOUT):
     try:
         _st = os.fstat(fd)
         import stat as _stat_mod
-        if not _stat_mod.S_ISREG(_st.st_mode) or _st.st_nlink != 1:
+        # `st_nlink` is not meaningful on every platform, so the symlink check
+        # above is the load-bearing one; this catches a non-regular target and,
+        # where the OS reports it, a hard-linked lock file.
+        if not _stat_mod.S_ISREG(_st.st_mode) or _st.st_nlink > 1:
             raise LockTimeout(
                 f"refusing to use {lock_file.name}: it is not a plain, single-link "
                 "regular file. Remove it and retry.")
@@ -295,7 +311,10 @@ def _lock_on(lock_file: Path, *, timeout: float = DEFAULT_TIMEOUT):
         raise
 
     try:
-        os.lseek(fd, 0, os.SEEK_SET)
+        # AFTER the lock byte: `msvcrt.locking` locks byte 0 exclusively, and a
+        # waiter cannot READ a locked byte on Windows — writing the pid there made
+        # every timeout message say "pid unknown" on that lane (measured).
+        os.lseek(fd, PID_OFFSET, os.SEEK_SET)
         os.write(fd, f"{os.getpid()}\n".encode("ascii", "replace"))
     except OSError:
         pass                                        # the pid line is a courtesy, not the lock
