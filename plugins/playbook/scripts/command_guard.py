@@ -61,7 +61,47 @@ import sys
 
 # Statement separators: each becomes its own command position. Single `|` too,
 # so `foo | rm -rf /` still sees `rm` at a command position.
-_SEP = re.compile(r"&&|\|\||[;\n|&]")   # a single `&` backgrounds and separates
+# Separators are recognised OUTSIDE quotes only. Splitting the raw string first
+# cut an option value in half (so a command hidden behind it never reached a
+# command position) and blocked a separator that was merely DATA inside an echo
+# string (impl panel round 2, both directions from the same defect).
+_SEP_OPS = ("&&", "||", ";", "\n", "|", "&")
+
+
+def _split_segments(text, ops=_SEP_OPS):
+    out, buf, i, n, quote = [], [], 0, len(text), ""
+    while i < n:
+        c = text[i]
+        if quote:
+            buf.append(c)
+            if c == "\\" and quote == '"' and i + 1 < n:
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf.append(c)
+            buf.append(text[i + 1])
+            i += 2
+            continue
+        if c in "\"'":
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        hit = next((op for op in ops if text.startswith(op, i)), None)
+        if hit:
+            out.append("".join(buf))
+            buf = []
+            i += len(hit)
+            continue
+        buf.append(c)
+        i += 1
+    out.append("".join(buf))
+    return out
 # ── the wrapper grammar (task 077) ────────────────────────────────────────────
 # A WRAPPER delegates to the command that follows it. Stripping only the bare
 # wrapper token left every optioned form unguarded — `sudo rm -rf /` blocked while
@@ -137,10 +177,12 @@ _WRAPPERS = {
     "nohup": _wspec(terminal=("--help", "--version")),
     "time": _wspec(val_short="fo", val_long=("--format", "--output"),
                    terminal=("-V", "--version", "--help")),
-    "xargs": _wspec(val_short="nPIidaEeLsD",
+    # `-e`/`-i` take an OPTIONAL value that is only ever attached, so listing
+    # them as value-taking swallowed the command (impl panel round 2, sol:medium).
+    "xargs": _wspec(val_short="nPIadLsD",
                     val_long=("--max-args", "--max-procs", "--replace",
                               "--delimiter", "--arg-file", "--eof",
-                              "--max-chars", "--max-lines"),
+                              "--max-chars", "--max-lines", "--process-slot-var"),
                     terminal=("--help", "--version")),
     # shell builtins that delegate
     "command": _wspec(terminal=("-v", "-V")),
@@ -232,6 +274,20 @@ _TOKEN = re.compile(r"\S+")
 _WALK_CEILING = 10000
 
 
+def _payload_from(value, rest_tokens):
+    """A split-string option's value IS a command line, and the operands that
+    follow it are that command's arguments — `env -S 'bash -c' '<script>'` runs
+    the script. Rebuild one invocation with the boundaries preserved (impl panel
+    round 2, sol:high: merging them as raw text corrupted both)."""
+    parts = [value]
+    for tok in rest_tokens:
+        try:
+            parts.append(shlex.quote(tok))
+        except Exception:
+            parts.append(tok)
+    return " ".join(p for p in parts if p)
+
+
 def _unquote(s):
     s = s.strip()
     if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
@@ -281,8 +337,11 @@ def _walk_prefix(seg):
                 rest_toks = lexed[i:]
                 # one quoted operand → its VALUE is the command line; several
                 # tokens → the remainder as written.
-                payloads.append(rest_toks[0][2] if len(rest_toks) == 1
-                                else s[rest_toks[0][1]:])
+                if rest_toks and rest_toks[0][2] == "--":
+                    rest_toks = rest_toks[1:]          # option terminator
+                if rest_toks:
+                    payloads.append(rest_toks[0][2] if len(rest_toks) == 1
+                                    else s[rest_toks[0][1]:])
             i = len(toks)
             break
         i += 1                                         # the wrapper itself
@@ -300,9 +359,11 @@ def _walk_prefix(seg):
                     return (s, False, payloads)
                 if base in spec["split_long"]:
                     if "=" in t:
-                        payloads.append(_unquote(s[toks[i][1] + len(base) + 1:]))
+                        payloads.append(_payload_from(
+                            t.split("=", 1)[1], [v for v, _st in toks[i + 1:]]))
                     elif i + 1 < len(toks):
-                        payloads.append(_unquote(s[toks[i + 1][1]:]))
+                        payloads.append(_payload_from(
+                            toks[i + 1][0], [v for v, _st in toks[i + 2:]]))
                     i = len(toks)
                     continue
                 if base in spec["val_long"] and "=" not in t:
@@ -318,10 +379,12 @@ def _walk_prefix(seg):
                 for k, ch in enumerate(letters):
                     attached = letters[k + 1:]
                     if ch in spec["split_short"]:
-                        if attached:                   # `-S'rm -rf /'`
-                            payloads.append(_unquote(s[toks[i][1] + k + 2:]))
-                        elif i + 1 < len(toks):        # `-S 'rm -rf /'`
-                            payloads.append(_unquote(s[toks[i + 1][1]:]))
+                        if attached:                   # value attached to the flag
+                            payloads.append(_payload_from(
+                                attached, [v for v, _st in toks[i + 1:]]))
+                        elif i + 1 < len(toks):        # value in the next token
+                            payloads.append(_payload_from(
+                                toks[i + 1][0], [v for v, _st in toks[i + 2:]]))
                         i = len(toks)
                         takes_next = None              # already advanced
                         break
@@ -363,23 +426,26 @@ def _normalize_command_head(seg):
 _GIT_VALUE_SHORT = set("Cc")
 _GIT_VALUE_LONG = {"--git-dir", "--work-tree", "--namespace", "--exec-path",
                    "--super-prefix", "--config-env"}
+_GIT_FLAG_LONG = {"--paginate", "--no-pager", "--bare", "--literal-pathspecs",
+                  "--no-replace-objects", "--no-optional-locks"}
 
 
-def _strip_git_globals(seg):
-    toks = _lex(seg)
-    if not toks or _command_name(toks[0][2]) != "git":
-        return seg
-    i = 1
-    while i < len(toks):
-        t = toks[i][2]
+def _git_after_globals(args):
+    """`args` with git's leading GLOBAL options removed, so the subcommand sits
+    first. `--` ends the options (impl panel round 2, grok #2: `git -- push
+    --force` matched nothing)."""
+    i = 0
+    while i < len(args):
+        t = args[i]
+        if t == "--":
+            i += 1
+            break
         if t.startswith("--"):
             base = t.split("=", 1)[0]
             if base in _GIT_VALUE_LONG and "=" not in t:
                 i += 2
                 continue
-            if base in _GIT_VALUE_LONG or base in ("--paginate", "--no-pager",
-                                                   "--bare", "--literal-pathspecs",
-                                                   "--no-replace-objects"):
+            if base in _GIT_VALUE_LONG or base in _GIT_FLAG_LONG:
                 i += 1
                 continue
             break
@@ -391,9 +457,7 @@ def _strip_git_globals(seg):
             i += 1
             continue
         break
-    if i == 1 or i >= len(toks):
-        return seg
-    return "git " + seg[toks[i][1]:]
+    return list(args[i:])
 
 
 def _strip_prefixes(seg):
@@ -401,21 +465,23 @@ def _strip_prefixes(seg):
     return _walk_prefix(seg)[0]
 
 
-def _rm_is_dangerous(seg: str) -> bool:
-    """`rm` recursive+force against a DANGEROUS target. A relative subdir
-    (`./build`, `node_modules`) is NOT dangerous; `/`, `~`, `$HOME`, `*`, `..`,
-    or any absolute path is."""
-    if not re.match(r"rm\b", seg):
+def _rm_is_dangerous(values):
+    """`rm` recursive+force against a DANGEROUS target, decided on DEQUOTED
+    tokens. A relative subdir (`./build`, `node_modules`) is NOT dangerous; `/`,
+    `~`, `$HOME`, `*`, `..` or any absolute path is. Round 2 of the impl panel
+    found this reading raw text, so a quoted root target — the single most
+    catastrophic command, trivially quoted — walked through every check."""
+    if not values or _command_name(values[0]) != "rm":
         return False
-    toks = seg.split()
-    flags = "".join(t[1:] for t in toks if t.startswith("-") and not t.startswith("--"))
-    longs = [t for t in toks if t.startswith("--")]
+    flags = "".join(t[1:] for t in values if t.startswith("-") and not t.startswith("--"))
+    longs = [t for t in values if t.startswith("--")]
     recursive = "r" in flags or "R" in flags or "--recursive" in longs
     force = "f" in flags or "--force" in longs
     if not (recursive and force):
         return False
-    targets = [t for t in toks[1:] if not t.startswith("-")]
-    for t in targets:
+    for t in values[1:]:
+        if t.startswith("-"):
+            continue
         if (t in ("/", "/*", "~", "..") or t.startswith("/") or t.startswith("~")
                 or t.startswith("$HOME") or t.startswith("$") and "HOME" in t
                 or "*" in t or t.startswith("..")):
@@ -423,24 +489,42 @@ def _rm_is_dangerous(seg: str) -> bool:
     return False
 
 
-def _segment_checks(seg: str):
-    """Command-position checks on one prefix-stripped segment → (name, why) or None."""
-    if _rm_is_dangerous(seg):
+_DEVICE = re.compile(r"^/dev/(sd|nvme|disk|hd)")
+
+
+def _segment_checks(seg):
+    """Command-position checks on one prefix-stripped segment → (name, why) or
+    None. Everything is decided on the LEXED, dequoted tokens: the command is
+    named through quotes/escapes/paths, and so are its flags and targets."""
+    toks = _lex(seg)
+    values = [t[2] for t in toks]
+    if not values:
+        return None
+    head = _command_name(values[0])
+    if head == "git":
+        values = ["git"] + _git_after_globals(values[1:])
+    if _rm_is_dangerous([head or values[0]] + values[1:]):
         return ("rm-rf-dangerous-target", "recursive force-delete of a dangerous path")
-    if re.match(r"git\s+push\b", seg) and re.search(r"(?:^|\s)(--force|-f)\b", seg) \
-            and "--force-with-lease" not in seg:
-        return ("git-push-force", "force-push overwrites remote history irreversibly")
-    if re.match(r"git\s+reset\b", seg) and re.search(r"(?:^|\s)--hard\b", seg):
-        return ("git-reset-hard", "discards uncommitted work irrecoverably")
-    if re.match(r"git\s+clean\b", seg) and re.search(r"-[a-zA-Z]*f", seg) \
-            and re.search(r"-[a-zA-Z]*d", seg):
-        return ("git-clean-force", "deletes untracked files/dirs irrecoverably")
-    if re.match(r"dd\b", seg) and re.search(r"of=/dev/", seg):
+    if head == "git" and len(values) > 1:
+        verb, args = values[1], values[2:]
+        if verb == "push" and ("--force" in args or "-f" in args) \
+                and "--force-with-lease" not in args:
+            return ("git-push-force", "force-push overwrites remote history irreversibly")
+        if verb == "reset" and "--hard" in args:
+            return ("git-reset-hard", "discards uncommitted work irrecoverably")
+        if verb == "clean":
+            short = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+            if "f" in short and "d" in short:
+                return ("git-clean-force", "deletes untracked files/dirs irrecoverably")
+    if head == "dd" and any(a.startswith("of=/dev/") for a in values[1:]):
         return ("dd-to-device", "writes raw to a device — destroys it")
-    if re.match(r"mkfs", seg):
+    if head and head.startswith("mkfs"):
         return ("mkfs", "formats a filesystem — destroys its contents")
-    if re.search(r">\s*/dev/(sd|nvme|disk|hd)", seg):
-        return ("redirect-to-device", "overwrites a raw device")
+    for i, v in enumerate(values):                     # separated and attached forms
+        if v in (">", ">>") and i + 1 < len(values) and _DEVICE.match(values[i + 1]):
+            return ("redirect-to-device", "overwrites a raw device")
+        if v.startswith(">") and _DEVICE.match(v.lstrip(">")):
+            return ("redirect-to-device", "overwrites a raw device")
     return None
 
 
@@ -459,7 +543,7 @@ _WHOLE = [
 ]
 
 
-_SHELL_C = re.compile(r"^(?:sh|bash|zsh|ksh|dash)\b[^;]*?\s-[a-z]*c\s+(.+)$")
+_SHELL_C = re.compile(r"^(?:sh|bash|zsh|ksh|dash)\b[^;]*?\s-[a-z]*c\s*(.+)$")
 
 
 def _unwrap_shell_c(seg: str) -> "str | None":
@@ -541,7 +625,7 @@ _PIPE_WHY = "piping a downloaded script straight into a shell runs unreviewed re
 def _pipes_downloader_into_shell(text):
     """True when a downloader's output reaches an interpreter through a pipe,
     however many optioned wrappers sit in between."""
-    parts = _SINGLE_PIPE.split(text)
+    parts = _split_segments(text, ("|",))
     if len(parts) < 2:
         return False
     seen_downloader = False
@@ -633,7 +717,11 @@ def _strip_quoted_heredoc_bodies(text):
         m = _QUOTED_HEREDOC.search(line)
         if not m:
             continue
-        lexed = _lex(line)
+        # `sudo bash <<'EOF'` / `env bash <<…` / `timeout 5 sh <<…`: resolve the
+        # sink through the wrapper walk, not from the first token (impl panel
+        # round 2, sol:high + sol:medium).
+        rest, _executes, _payloads = _walk_prefix(line)
+        lexed = _lex(rest)
         sink = _command_name(lexed[0][2]) if lexed else None
         if sink in _SHELLS:
             continue                                   # the body IS a shell script
@@ -653,19 +741,19 @@ def classify_command(command, extra_patterns=None, _depth=0):
     `command` may be a str, or a list of argv tokens (Codex `exec_command`), in
     which case the joined form AND each element are checked."""
     if isinstance(command, (list, tuple)):
+        # ONE invocation, with element boundaries preserved. Classifying each
+        # element on its own blocked benign argv such as
+        # ["git","commit","-m","<a message mentioning a dangerous command>"]
+        # (impl panel round 2, sol:high + grok).
         try:
             quoted = " ".join(shlex.quote(str(p)) for p in command)
         except Exception:
             quoted = " ".join(str(p) for p in command)
-        for part in list(command) + [" ".join(str(p) for p in command), quoted]:
-            v = classify_command(part, extra_patterns, _depth)
-            if v[0] == "block":
-                return v
-        return ("allow", None, None)
+        return classify_command(quoted, extra_patterns, _depth)
     if not command or not str(command).strip():
         return ("allow", None, None)
     command = str(command)
-    for seg in _SEP.split(command):
+    for seg in _split_segments(command):
         stripped, executes, payloads = _walk_prefix(seg)
         for payload in payloads:                       # `env -S "<command line>"`
             if payload and _depth < 3:
@@ -677,7 +765,7 @@ def classify_command(command, extra_patterns=None, _depth=0):
         normalized = _normalize_command_head(stripped)
         hit = (_segment_checks(stripped)
                or _segment_checks(normalized)
-               or _segment_checks(_strip_git_globals(normalized)))
+)
         if hit:
             return ("block", hit[0], hit[1])
         inner = _unwrap_shell_c(stripped) or _unwrap_shell_c(normalized)

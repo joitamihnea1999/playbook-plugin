@@ -949,3 +949,97 @@ class ProjectPatternsHonourTheDataPromise(unittest.TestCase):
             cg.classify_command("cat > f <<'EOF'\nfly deploy --now\nEOF", [rx])[0],
             "allow", "a project pattern fired on an inert heredoc body")
         self.assertEqual(cg.classify_command("fly deploy --now", [rx])[0], "block")
+
+
+# ── impl panel round 2: the rules themselves were still quote-blind ───────────
+# Round 1 moved the COMMAND POSITION onto the lexer. Five seats then found,
+# independently, that the dangerous-command rules still read raw text — so the
+# single most catastrophic command, with its target in quotes, was allowed. The
+# rules now decide on dequoted tokens, and separators are recognised outside
+# quotes only, which closed 23 under-blocks and 5 over-blocks at once.
+
+class DangerousArgumentsAreDequotedToo(unittest.TestCase):
+    R = "rm"
+    F = "-" + "rf"
+
+    def test_quoted_targets_and_flags_block(self):
+        for cmd in (f'{self.R} {self.F} "/"', f"{self.R} {self.F} '/'",
+                    f'{self.R} {self.F} "$HOME"', f'{self.R} {self.F} "/etc"',
+                    'dd of="/dev/sda" if=/dev/zero',
+                    'git push "--force"', "git push '--force'",
+                    'git reset "--hard"', 'git clean "-fd"',
+                    'echo hi > "/dev/sda"', 'echo hi >"/dev/sda"'):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_the_benign_twins_still_allow(self):
+        for cmd in (f'{self.R} {self.F} "./build"', f"{self.R} {self.F} './build'",
+                    'git push "--force-with-lease"', 'git clean "-n"',
+                    'dd if=backup.img of="./restore.img"',
+                    'echo hi > "./log.txt"'):
+            self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
+
+
+class SeparatorsAreRecognisedOutsideQuotesOnly(unittest.TestCase):
+    D = "rm -rf /"
+
+    def test_an_operator_inside_an_option_value_does_not_split_the_command(self):
+        for cmd in (f"sudo -p 'Password; ' {self.D}", f"sudo -p 'Password & ' {self.D}",
+                    f"sudo -p 'Password | ' {self.D}", f"env -C '/tmp/a; b' {self.D}"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_an_operator_inside_a_string_is_data(self):
+        for cmd in (f"echo 'x & {self.D}'", f"echo 'x ; {self.D}'",
+                    f'echo "x | {self.D}"'):
+            self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
+
+
+class ArgvIsOneInvocation(unittest.TestCase):
+    D = "rm -rf /"
+
+    def test_benign_argv_whose_ARGUMENT_mentions_a_command_allows(self):
+        for argv in (["echo", "rm -rf /"],
+                     ["git", "commit", "-m", "rm -rf /"],
+                     ["sudo", "grep", "rm -rf /", "/etc"]):
+            self.assertEqual(cg.classify_command(argv)[0], "allow", argv)
+
+    def test_the_dangerous_argv_shapes_still_block(self):
+        for argv in (["rm", "-rf", "/"], ["sudo", "-u", "root", "rm", "-rf", "/"],
+                     ["bash", "-lc", "sudo -u root rm -rf /"],
+                     ["sudo", "-p", "password please", "rm", "-rf", "/"]):
+            self.assertEqual(cg.classify_command(argv)[0], "block", argv)
+
+
+class RemainingRound2Repairs(unittest.TestCase):
+    D = "rm -rf /"
+
+    def test_git_double_dash_ends_the_globals(self):
+        for cmd in ("git -- push --force", "git -C /repo -- push --force"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_shell_c_operand_may_be_attached(self):
+        for cmd in (f"bash -c'{self.D}'", f"bash -lc'{self.D}'"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_a_wrapped_shell_heredoc_still_expands(self):
+        for cmd in (f"sudo bash <<'EOF'\n$({self.D})\nEOF",
+                    f"env bash <<'EOF'\n$({self.D})\nEOF",
+                    f"timeout 5 sh <<'EOF'\n$({self.D})\nEOF"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_a_wrapped_NON_shell_heredoc_is_still_inert(self):
+        self.assertEqual(
+            cg.classify_command(f"sudo python3 - <<'PY'\nprint('`{self.D}`')\nPY")[0],
+            "allow")
+
+    def test_eval_option_terminator(self):
+        self.assertEqual(cg.classify_command(f"eval -- '{self.D}'")[0], "block")
+
+    def test_split_string_value_plus_its_operands_is_one_invocation(self):
+        self.assertEqual(cg.classify_command(f"env -S 'bash -c' '{self.D}'")[0], "block")
+        self.assertEqual(cg.classify_command("env -S 'bash -c' 'ls -la'")[0], "allow")
+
+    def test_xargs_optional_value_options(self):
+        for cmd in (f"xargs -e {self.D}", f"xargs -i {self.D}",
+                    f"xargs --process-slot-var SLOT {self.D}"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+        self.assertEqual(cg.classify_command("xargs -e make")[0], "allow")
