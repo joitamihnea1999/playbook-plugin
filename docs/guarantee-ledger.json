@@ -2536,6 +2536,32 @@
           "limitations": [
             "`trap '<cmd>' SIGNAL` stores a command the shell runs later; `watch` and `parallel` delegate like the other wrappers; a `f() { … }` definition header is not a command name. Found by my own sweep after the round-4 panel."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "OverBlocksTheRoundClosed.test_but_an_echo_that_FEEDS_a_shell_still_blocks",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "OverBlocksTheRoundClosed.test_echoing_dangerous_text_really_is_fine_now"
+          },
+          "limitations": [
+            "Task 077 impl panel round 5, opus #1: a separator GLUED to a quoted token (`\"x\";psql`) stays inside one lexer token, so a per-token guard never fired and the echo mask ran into the NEXT command's arguments, hiding a DB client. Masking is now per SEGMENT via the quote-aware splitter, and an echo whose own output is piped is never masked."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "MorePrivilegeWrappersAndArity.test_a_computed_rm_target_is_dangerous",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "QuotingDecidesWhatExpands.test_literal_names_in_single_quotes_are_literal"
+          },
+          "limitations": [
+            "Task 077 impl panel round 5, opus #2, NARROWED with a measurement: round 4 treated every `$` target as computed, which blocked `rm -rf \"$WORK\"` — the standard temp-dir cleanup idiom, ~28 occurrences in this repository alone, ALLOWED before this task. Dangerous now means a target that RUNS something (`$(…)`, a backtick) or a known-dangerous variable NAME (HOME/ROOT/PREFIX/…), which blocks however it is quoted. Still strictly stronger than the pre-task guard, which allowed `rm -rf \"$HOME\"` and `rm -rf $(pwd)` alike."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2562,7 +2588,8 @@
         "Task 077 impl panel round 3 produced 31 more defects on the round-2 implementation (25 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. Two of the five seats reported they could not construct any under-block while three others found twelve between them — that disagreement is the honest description of this layer: the shell surface is large, and 'no judge found one' is not evidence that none exists. The interlock is a heuristic that fails toward caution, not a shell parser; the OS sandbox remains the only deterministic layer.",
         "Task 077 impl panel round 4 produced 22 more defects (16 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. STOPPING RULE, stated rather than assumed: rounds 1-3 each invalidated an ARCHITECTURAL assumption (the command position was unlexed; the rules were unlexed; the separators were unlexed). Round 4 found one architectural regression of mine (the argv early-return) and otherwise INSTANCES - one more wrapper's arity, one more escape form. The task stops when a round returns only instances, with the residual surface disclosed here rather than implied to be empty: this is a heuristic interlock over shell text, not a shell parser, and the OS sandbox remains the only deterministic layer.",
         "Task 077 ARCHITECTURAL BOUND, pinned by `TheArchitecturalBound.test_a_computed_command_name_is_not_resolvable`: a command NAME that only exists after the shell evaluates something is out of reach for a static classifier — `alias x='<cmd>'; x`, `${X:-rm} …`, `$(echo rm) …`. These need the alias table, the variable environment, or the result of running an inner command. No amount of further parsing closes them; the OS sandbox is the layer that does.",
-        "Task 077 SCOPE BOUND, pinned by `TheArchitecturalBound.test_a_different_RULE_FAMILY_is_out_of_scope_not_covered`: the interlock answers 'where is the command and is it one of the enumerated dangerous forms', not 'is this act destructive'. Measured as ALLOWED and disclosed rather than implied: an interpreter running a destructive command inside its own language (`perl -e 'system(…)'`, `python3 -c 'os.system(…)'`), a remote command (`ssh host …`), a container bind mount, and other deletion tools (`find -delete`, `rsync --delete`, `shred`). Each would be a NEW rule family with its own false-positive profile, and adding one is a scope decision for the owner, not a bug fix."
+        "Task 077 SCOPE BOUND, pinned by `TheArchitecturalBound.test_a_different_RULE_FAMILY_is_out_of_scope_not_covered`: the interlock answers 'where is the command and is it one of the enumerated dangerous forms', not 'is this act destructive'. Measured as ALLOWED and disclosed rather than implied: an interpreter running a destructive command inside its own language (`perl -e 'system(…)'`, `python3 -c 'os.system(…)'`), a remote command (`ssh host …`), a container bind mount, and other deletion tools (`find -delete`, `rsync --delete`, `shred`). Each would be a NEW rule family with its own false-positive profile, and adding one is a scope decision for the owner, not a bug fix.",
+        "Task 077 impl panel round 5 produced 14 defects, all confirmed and fixed. The signal CHANGED in this round and that is what ended the task: rounds 1-3 each showed the DESIGN was wrong; rounds 4 and 5 found regressions introduced by my own earlier fixes (the argv early-return, the echo mask, the computed-target rule) plus instances. That is an argument for fewer edits to this module, not for more review rounds — each further round of edits to the masking engine and the target rule has itself produced a regression. The residual surface is disclosed in the bounds above rather than implied to be empty."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
