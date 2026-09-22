@@ -179,7 +179,7 @@ _WRAPPERS = {
                    terminal=("-V", "--version", "--help")),
     # `-e`/`-i` take an OPTIONAL value that is only ever attached, so listing
     # them as value-taking swallowed the command (impl panel round 2, sol:medium).
-    "xargs": _wspec(val_short="nPIadLsD",
+    "xargs": _wspec(val_short="nPIadLsDE",
                     val_long=("--max-args", "--max-procs", "--replace",
                               "--delimiter", "--arg-file", "--eof",
                               "--max-chars", "--max-lines", "--process-slot-var"),
@@ -191,10 +191,21 @@ _WRAPPERS = {
     "eval": _wspec(),
     "exec": _wspec(val_short="a", val_long=()),
     # control-flow keywords that can precede a command in a split segment
+    # Reserved words that INTRODUCE a command: the next word is the command.
     "then": _wspec(),
     "do": _wspec(),
     "else": _wspec(),
     "elif": _wspec(),
+    "if": _wspec(),
+    "while": _wspec(),
+    "until": _wspec(),
+    # Privilege wrappers of the same class as sudo/doas (impl panel round 3).
+    "pkexec": _wspec(terminal=("--version", "--help")),
+    "runuser": _wspec(val_short="ugGc", val_long=("--user", "--group", "--command"),
+                      terminal=("--version", "--help")),
+    "su": _wspec(val_short="gG", val_long=("--group",),
+                 terminal=("--version", "--help"),
+                 split_short="c", split_long=("--command",)),
 }
 
 # ── lexing and naming (impl panel round 1) ────────────────────────────────────
@@ -207,9 +218,12 @@ _WRAPPERS = {
 # everywhere a command position is decided.
 
 def _lex(s):
-    """(raw, start, value) per token. Quote- and escape-aware, and FORGIVING —
-    an unbalanced quote simply runs to the end rather than raising, because a
-    classifier that throws on hostile input fails OPEN."""
+    """(raw, start, value, quoted) per token. Quote- and escape-aware, handles
+    ANSI-C `$'…'` and shell line continuations, and is FORGIVING — an unbalanced
+    quote simply runs to the end rather than raising, because a classifier that
+    throws fails OPEN. `quoted` records whether any part of the token was inside
+    quotes, which is what lets an operator be told from a string containing one.
+    """
     toks = []
     i, n = 0, len(s)
     while i < n:
@@ -219,16 +233,24 @@ def _lex(s):
             break
         start = i
         buf = []
+        quoted = False
         while i < n:
             c = s[i]
+            if c == "\\" and i + 1 < n and s[i + 1] == "\n":
+                i += 2                                 # line continuation
+                continue
             if c.isspace():
                 break
             if c == "\\" and i + 1 < n:
                 buf.append(s[i + 1])
                 i += 2
                 continue
+            if c == "$" and i + 1 < n and s[i + 1] == "'":
+                i += 1                                 # ANSI-C quoting: `$'…'`
+                continue
             if c in "\"'":
                 q = c
+                quoted = True
                 i += 1
                 while i < n and s[i] != q:
                     if q == '"' and s[i] == "\\" and i + 1 < n:
@@ -241,7 +263,7 @@ def _lex(s):
                 continue
             buf.append(c)
             i += 1
-        toks.append((s[start:i], start, "".join(buf)))
+        toks.append((s[start:i], start, "".join(buf), quoted))
     return toks
 
 
@@ -266,12 +288,7 @@ def _command_name(value):
 
 # A leading token that groups or negates, rather than naming a command.
 _GROUPERS = ("(", "{", "!", "&&", "||")
-_ASSIGN = re.compile(r"^\w+=")
-_TOKEN = re.compile(r"\S+")
-# Termination is guaranteed by every iteration consuming at least one token; this
-# is a belt-and-braces ceiling on pathological input, never a scanning budget
-# (a cap that stopped the WALK would itself be a bypass — nest N+1 wrappers).
-_WALK_CEILING = 10000
+_ASSIGN = re.compile(r"^\w+\+?=")
 
 
 def _payload_from(value, rest_tokens):
@@ -309,7 +326,7 @@ def _walk_prefix(seg):
     """
     s = seg.strip()
     lexed = _lex(s)
-    toks = [(value, start) for _raw, start, value in lexed]
+    toks = [(value, start) for _raw, start, value, _q in lexed]
     i = 0
     payloads = []
     # Termination needs no ceiling: every path below consumes at least one token,
@@ -413,7 +430,7 @@ def _normalize_command_head(seg):
     toks = _lex(seg)
     if not toks:
         return seg
-    raw, start, value = toks[0]
+    raw, start, value, _quoted = toks[0]
     name = _command_name(value)
     if name is None or name == raw:
         return seg
@@ -427,7 +444,10 @@ _GIT_VALUE_SHORT = set("Cc")
 _GIT_VALUE_LONG = {"--git-dir", "--work-tree", "--namespace", "--exec-path",
                    "--super-prefix", "--config-env"}
 _GIT_FLAG_LONG = {"--paginate", "--no-pager", "--bare", "--literal-pathspecs",
-                  "--no-replace-objects", "--no-optional-locks"}
+                  "--no-replace-objects", "--no-optional-locks", "--no-ext-diff",
+                  "--no-lazy-fetch", "--no-advice", "--glob-pathspecs",
+                  "--noglob-pathspecs", "--icase-pathspecs", "--html-path",
+                  "--exec-path", "--no-replace-objects"}
 
 
 def _git_after_globals(args):
@@ -460,11 +480,6 @@ def _git_after_globals(args):
     return list(args[i:])
 
 
-def _strip_prefixes(seg):
-    """Back-compatible shim: the prefix-stripped text only."""
-    return _walk_prefix(seg)[0]
-
-
 def _rm_is_dangerous(values):
     """`rm` recursive+force against a DANGEROUS target, decided on DEQUOTED
     tokens. A relative subdir (`./build`, `node_modules`) is NOT dangerous; `/`,
@@ -483,13 +498,14 @@ def _rm_is_dangerous(values):
         if t.startswith("-"):
             continue
         if (t in ("/", "/*", "~", "..") or t.startswith("/") or t.startswith("~")
-                or t.startswith("$HOME") or t.startswith("$") and "HOME" in t
+                or "$" in t or "`" in t                # a COMPUTED target
                 or "*" in t or t.startswith("..")):
             return True
     return False
 
 
 _DEVICE = re.compile(r"^/dev/(sd|nvme|disk|hd)")
+_REDIR = re.compile(r"^\d*>>?")
 
 
 def _segment_checks(seg):
@@ -507,23 +523,30 @@ def _segment_checks(seg):
         return ("rm-rf-dangerous-target", "recursive force-delete of a dangerous path")
     if head == "git" and len(values) > 1:
         verb, args = values[1], values[2:]
-        if verb == "push" and ("--force" in args or "-f" in args) \
+        short = "".join(a[1:] for a in args
+                        if a.startswith("-") and not a.startswith("--"))
+        if verb == "push" and ("--force" in args or "f" in short) \
                 and "--force-with-lease" not in args:
             return ("git-push-force", "force-push overwrites remote history irreversibly")
         if verb == "reset" and "--hard" in args:
             return ("git-reset-hard", "discards uncommitted work irrecoverably")
         if verb == "clean":
-            short = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
             if "f" in short and "d" in short:
                 return ("git-clean-force", "deletes untracked files/dirs irrecoverably")
     if head == "dd" and any(a.startswith("of=/dev/") for a in values[1:]):
         return ("dd-to-device", "writes raw to a device — destroys it")
     if head and head.startswith("mkfs"):
         return ("mkfs", "formats a filesystem — destroys its contents")
-    for i, v in enumerate(values):                     # separated and attached forms
-        if v in (">", ">>") and i + 1 < len(values) and _DEVICE.match(values[i + 1]):
-            return ("redirect-to-device", "overwrites a raw device")
-        if v.startswith(">") and _DEVICE.match(v.lstrip(">")):
+    for i, (raw, _st, v, _quoted) in enumerate(toks):
+        if not _REDIR.match(raw):                      # `>`, `>>`, `1>`, `2>>`
+            continue                                   # a QUOTED `>` is data
+        op = _REDIR.match(v)
+        if not op:
+            continue
+        target = v[op.end():]                          # the TARGET may be quoted
+        if not target and i + 1 < len(toks):
+            target = toks[i + 1][2]
+        if target and _DEVICE.match(target):
             return ("redirect-to-device", "overwrites a raw device")
     return None
 
@@ -546,16 +569,31 @@ _WHOLE = [
 _SHELL_C = re.compile(r"^(?:sh|bash|zsh|ksh|dash)\b[^;]*?\s-[a-z]*c\s*(.+)$")
 
 
-def _unwrap_shell_c(seg: str) -> "str | None":
-    """`bash -lc "rm -rf /"` → `rm -rf /`. Codex wraps exec in `bash -lc <script>`,
-    which would otherwise hide the real command behind the interpreter token."""
-    m = _SHELL_C.match(seg.strip())
-    if not m:
+def _unwrap_shell_c(seg):
+    """`bash -lc "<script>"` → `<script>`. POSIX is `sh -c string [name [args]]`,
+    so ONLY the operand right after `-c` is the script — round 2 took everything
+    to end-of-line as one string, which meant a trailing `argv0` made the whole
+    thing stop looking like a script (impl panel round 3, sol:high + grok)."""
+    toks = _lex(seg.strip())
+    if not toks or _command_name(toks[0][2]) not in _SHELLS:
         return None
-    inner = m.group(1).strip()
-    if len(inner) >= 2 and inner[0] in "\"'" and inner[-1] == inner[0]:
-        inner = inner[1:-1]
-    return inner
+    for k in range(1, len(toks)):
+        v = toks[k][2]
+        if v == "--":
+            continue
+        if v.startswith("-") and len(v) > 1 and not v.startswith("--"):
+            if "c" in v[1:]:
+                attached = v[1:].split("c", 1)[1]
+                if attached:
+                    return attached
+                return toks[k + 1][2] if k + 1 < len(toks) else None
+            continue
+        if v in ("--command",) or v.startswith("--command="):
+            if "=" in v:
+                return v.split("=", 1)[1]
+            return toks[k + 1][2] if k + 1 < len(toks) else None
+        break
+    return None
 
 
 # Task 073 data-region masking, tightened by the impl panel (round 1):
@@ -577,6 +615,34 @@ _EXPANSION = re.compile(r"\$\(|`|\$\{|<\(|>\(")
 # on the line — a quote-blind matcher cannot tell `"a | sh"` from ` | sh`, so any
 # `|` on the line keeps the text (impl-panel round 2: `echo '… | sh' | bash`).
 _DATA_LINE = re.compile(r"^\s*(?:echo|printf)\b[^|;&<>()`$]*>{1,2}\s*" + _PATH + r"\s*$")   # single simple command only (round 3)
+
+
+def _mask_echo_literals(line):
+    """An `echo`/`printf` argument that is FULLY QUOTED and carries no expansion
+    is a string, not a command — whatever else is on the line. Task 073 could
+    only mask a redirected echo, because a quote-blind matcher cannot tell
+    `"a | sh"` from ` | sh`; the lexer records quoting now, so the docstring's
+    promise ("echoing dangerous text is fine") can finally be true in general
+    (impl panel round 3, opus #3). Unquoted text and anything with `$`, a
+    backtick or a process substitution is left exactly as it was."""
+    toks = _lex(line)
+    if not toks or _command_name(toks[0][2]) not in ("echo", "printf"):
+        return line
+    if any("|" in raw for raw, _st, _v, quoted in toks if not quoted):
+        return line                                    # the output is piped: it RUNS
+    out, last = [], 0
+    for raw, start, value, quoted in toks[1:]:
+        if not quoted and any(ch in raw for ch in ";|&>"):
+            break                                      # the echo command ends here
+        if not quoted or _EXPANSION.search(raw):
+            continue
+        out.append(line[last:start])
+        out.append("DATA")
+        last = start + len(raw)
+    if not out:
+        return line
+    out.append(line[last:])
+    return "".join(out)
 
 
 def _strip_data_regions(command):
@@ -606,7 +672,8 @@ def _strip_data_regions(command):
             continue                                   # expansions would run
         i = j + 1                                      # drop body + closing tag
 
-    return "\n".join("echo > file" if _DATA_LINE.match(l) else l for l in out)
+    return "\n".join("echo > file" if _DATA_LINE.match(l) else _mask_echo_literals(l)
+                     for l in out)
 
 
 # The pipe rule had its OWN wrapper list (`sudo|env|command|nice|nohup` with
@@ -625,7 +692,9 @@ _PIPE_WHY = "piping a downloaded script straight into a shell runs unreviewed re
 def _pipes_downloader_into_shell(text):
     """True when a downloader's output reaches an interpreter through a pipe,
     however many optioned wrappers sit in between."""
-    parts = _split_segments(text, ("|",))
+    # `||` is a control operator, not a pipe: `curl … || bash` is "drop to a
+    # shell if the download fails" (impl panel round 3, opus #1).
+    parts = _SINGLE_PIPE.split(text)
     if len(parts) < 2:
         return False
     seen_downloader = False
@@ -660,6 +729,26 @@ def _command_substitutions(text):
     out = []
     i, n = 0, len(text)
     while i < n:
+        # `<( … )` and `>( … )` run their body too, and `. <(…)` sources the
+        # result — the same command position as a `$( … )` substitution.
+        if text.startswith("<(", i) or text.startswith(">(", i):
+            depth, j, quote = 1, i + 2, ""
+            while j < n and depth:
+                c = text[j]
+                if quote:
+                    if c == quote:
+                        quote = ""
+                elif c in "\"'":
+                    quote = c
+                elif c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                j += 1
+            if depth == 0:
+                out.append(text[i + 2:j - 1])
+            i = j
+            continue
         if text.startswith("$(", i):
             # Balance parentheses OUTSIDE quotes: `$(rm -rf /var/lib/app '(')`
             # closed early for a quote-blind counter (impl panel round 1,
@@ -735,7 +824,32 @@ def _strip_quoted_heredoc_bodies(text):
     return "\n".join(out)
 
 
-def classify_command(command, extra_patterns=None, _depth=0):
+# `bash <<< '<script>'` hands the shell its script on stdin, so the string is a
+# command line, not an argument (found by my own sweep during the round-3 panel).
+_HERESTRING = re.compile(r"<<<\s*(.+)$", re.S)
+
+
+def _herestring_payloads(text):
+    out = []
+    for line in str(text).split("\n"):
+        m = _HERESTRING.search(line)
+        if not m:
+            continue
+        rest, _executes, _payloads = _walk_prefix(line.split("<<<")[0])
+        lexed = _lex(rest)
+        if lexed and _command_name(lexed[0][2]) in _SHELLS:
+            out.append(_unquote(m.group(1).strip()))
+    return out
+
+
+# Recursion bound. It is NOT a scanning budget on nesting: every level strips at
+# least two characters of syntax, so the real bound is the input length; this is
+# only a stack guard for pathological input (impl panel round 3, sol:high #4 —
+# the previous cap of 3 let `echo $(echo $(echo $(echo $(<destructive>))))` pass).
+_MAX_DEPTH = 64
+
+
+def classify_command(command, extra_patterns=None, _depth=0, _argv=False):
     """Return ("block", name, why) or ("allow", None, None). Pure + deterministic.
 
     `command` may be a str, or a list of argv tokens (Codex `exec_command`), in
@@ -749,14 +863,14 @@ def classify_command(command, extra_patterns=None, _depth=0):
             quoted = " ".join(shlex.quote(str(p)) for p in command)
         except Exception:
             quoted = " ".join(str(p) for p in command)
-        return classify_command(quoted, extra_patterns, _depth)
+        return classify_command(quoted, extra_patterns, _depth, _argv=True)
     if not command or not str(command).strip():
         return ("allow", None, None)
     command = str(command)
     for seg in _split_segments(command):
         stripped, executes, payloads = _walk_prefix(seg)
         for payload in payloads:                       # `env -S "<command line>"`
-            if payload and _depth < 3:
+            if payload and _depth < _MAX_DEPTH:
                 v = classify_command(payload, extra_patterns, _depth + 1)
                 if v[0] == "block":
                     return v
@@ -769,7 +883,7 @@ def classify_command(command, extra_patterns=None, _depth=0):
         if hit:
             return ("block", hit[0], hit[1])
         inner = _unwrap_shell_c(stripped) or _unwrap_shell_c(normalized)
-        if inner and _depth < 3:                       # unwrap `bash -lc "<script>"`
+        if inner and _depth < _MAX_DEPTH:                       # unwrap `bash -lc "<script>"`
             v = classify_command(inner, extra_patterns, _depth + 1)
             if v[0] == "block":
                 return v
@@ -778,10 +892,16 @@ def classify_command(command, extra_patterns=None, _depth=0):
     # command, not the command (the documented bound: echoing dangerous text is
     # fine). Segment checks above already ran on the full text.
     whole_text = _strip_data_regions(command)
-    if _depth < 3:
+    if _argv:
+        # The input arrived as argv: word splitting, substitution and pipes have
+        # already happened, so `$( … )` inside an element is DATA (impl panel
+        # round 3, opus #2 — it blocked a benign commit message).
+        return ("allow", None, None)
+    if _depth < _MAX_DEPTH:
         # On the MASKED text: a quoted heredoc written to a plain file does not
         # expand, so a fixture ABOUT `$(rm -rf /)` stays data (task 073's promise).
-        for sub in _command_substitutions(_strip_quoted_heredoc_bodies(whole_text)):
+        for sub in (_command_substitutions(_strip_quoted_heredoc_bodies(whole_text))
+                    + _herestring_payloads(whole_text)):
             if sub.strip():
                 v = classify_command(sub, extra_patterns, _depth + 1)
                 if v[0] == "block":

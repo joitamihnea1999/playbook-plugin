@@ -2354,6 +2354,84 @@
           "limitations": [
             "A split-string option's value is a command line and the operands after it are its arguments; they are rebuilt as one invocation with boundaries preserved."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "ShellSyntaxTheLexerHadToLearn.test_line_continuations_join_the_command",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "OverBlocksTheRoundClosed.test_echoing_dangerous_text_really_is_fine_now"
+          },
+          "limitations": [
+            "Task 077 impl panel round 3: line continuations, ANSI-C `$'…'` quoting, `+=` assignment prefixes, the reserved words if/while/until, process substitution and herestrings."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "ShellCTakesExactlyOneOperand.test_trailing_argv0_does_not_hide_the_script",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "ShellCTakesExactlyOneOperand.test_benign_scripts_still_pass"
+          },
+          "limitations": [
+            "POSIX is `sh -c string [name [args]]`; taking everything after `-c` as one string meant a trailing argv0 broke the unwrap."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "MorePrivilegeWrappersAndArity.test_su_pkexec_runuser",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "OverBlocksTheRoundClosed.test_substitution_syntax_inside_an_argv_element_is_data"
+          },
+          "limitations": [
+            "`su -c`, `pkexec` and `runuser` are the same privilege-wrapper class as sudo/doas."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "MorePrivilegeWrappersAndArity.test_a_computed_rm_target_is_dangerous",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "MorePrivilegeWrappersAndArity.test_git_short_option_clusters"
+          },
+          "limitations": [
+            "A recursive-force `rm` whose target is COMPUTED (`$(pwd)`, `$DEST`, a backtick) is treated as dangerous; round 2 special-cased `$HOME` and missed every other expansion."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "OverBlocksTheRoundClosed.test_but_an_echo_that_FEEDS_a_shell_still_blocks",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "OverBlocksTheRoundClosed.test_echoing_dangerous_text_really_is_fine_now"
+          },
+          "limitations": [
+            "The docstring has promised since task 073 that echoing dangerous text is fine, but a quote-blind matcher could only honour it for a REDIRECTED echo. With quoting metadata the promise is general: a pipe INSIDE the string is data, an unquoted pipe still feeds a shell. One task-073 fixture moved from STILL_BLOCK to ALLOW as a result, deliberately and recorded."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "OverBlocksTheRoundClosed.test_a_redirect_to_a_device_still_blocks_however_it_is_written",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "OverBlocksTheRoundClosed.test_echoing_dangerous_text_really_is_fine_now"
+          },
+          "limitations": [
+            "Redirect detection reads the OPERATOR from the raw token (so a quoted `>` is data) and the TARGET from the dequoted value (so a quoted device is still a device); file-descriptor prefixes such as `1>` count."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2376,7 +2454,8 @@
         "Task 077, unchanged and worth restating: the wrapper table is a model of the common wrappers, not of every program that can exec another. The interlock remains pattern-based and judgment-classified — safe-by-construction, never literal-100%; the OS sandbox is the deterministic layer.",
         "Task 077 accepted OVER-block (pinned by `SeparatorsAndSubstitutionsAreCommandPositions.test_known_conservative_over_block_is_pinned_not_hidden`): a SINGLE-quoted command substitution does not expand and is inert, but still blocks — the matcher is quote-blind by design. The documented escape is to write such a fixture inside a quoted `cat`/`tee` heredoc to a plain file, which the module already advises for the other whole-command rules. Chosen over silently allowing `echo \"$(rm -rf /)\"`, which really does delete.",
         "Task 077 impl panel round 1 produced 31 further vectors on the round-1 implementation, ALL confirmed by execution and all fixed. The lesson recorded rather than the symptom: this guard is a quote-blind pattern matcher over shell text, and 'find the command position' has a long tail (quoting, naming, separators, substitutions, verb-level options). The tail is now covered by one lexer and one naming function rather than by N normalisation sites, but the module remains pattern-based and the OS sandbox is still the only deterministic layer.",
-        "Task 077 impl panel round 2 found 28 further defects on the round-1 implementation (23 under-blocks and 5 over-blocks), all confirmed by execution and all fixed. The generalisable lesson: lexing the command POSITION is not the same as lexing the DECISION — the rules that judge flags and targets have to read the same dequoted tokens, or a quoted argument hides the payload from a guard that correctly identified the command."
+        "Task 077 impl panel round 2 found 28 further defects on the round-1 implementation (23 under-blocks and 5 over-blocks), all confirmed by execution and all fixed. The generalisable lesson: lexing the command POSITION is not the same as lexing the DECISION — the rules that judge flags and targets have to read the same dequoted tokens, or a quoted argument hides the payload from a guard that correctly identified the command.",
+        "Task 077 impl panel round 3 produced 31 more defects on the round-2 implementation (25 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. Two of the five seats reported they could not construct any under-block while three others found twelve between them — that disagreement is the honest description of this layer: the shell surface is large, and 'no judge found one' is not evidence that none exists. The interlock is a heuristic that fails toward caution, not a shell parser; the OS sandbox remains the only deterministic layer."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
