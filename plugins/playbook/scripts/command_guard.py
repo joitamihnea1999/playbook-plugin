@@ -14,6 +14,28 @@ Design for "safe without new problems":
     command position (so `echo "rm -rf /"` / `grep "DROP TABLE"` do NOT trip it),
     with narrow scope (a relative `rm -rf ./build` is fine; only dangerous
     targets flag; `--force-with-lease` is allowed, only `--force`/`-f` flags).
+  * A COMMAND POSITION IS FOUND THROUGH WRAPPERS AND THEIR OPTIONS (task 077).
+    `sudo -u root rm -rf /`, `timeout 5 rm -rf /`, `env -S 'rm -rf /'` and
+    `curl … | nice -n 19 bash` all reach the same rules as their bare forms,
+    because `_WRAPPERS` + `_walk_prefix` know each wrapper's option arity. Two
+    things that walk deliberately does NOT do: it never skips a token that is not
+    a known option or a known option's value (scanning past the command is how a
+    guard starts blocking `sudo grep -rn "rm -rf /" /etc`), and it treats a
+    wrapper's terminal/query mode as non-executing (`sudo --version rm -rf /`
+    prints a version and deletes nothing). An unknown option that takes a value
+    leaves that value at the head and the segment reads as safe — the guard
+    under-blocks there, which is the correct direction to fail for a layer whose
+    false positives a user cannot route around.
+
+RECORDED DECISION (task 077, owner-reversible) — a GENERIC pipe into a shell,
+`cat evil.sh | sh`, is NOT blocked; the pipe rule stays downloader-specific.
+`curl … | sh` is unambiguous because the code is remote and unreviewed; a LOCAL
+file may be anything, the guard cannot see inside it, and blocking that shape
+trades a real bypass for a routine false positive. The heredoc half is already
+covered — segment rules are line-split and never masked, so a heredoc body line
+`rm -rf /` blocks on its own. A project that wants the stricter rule turns it on
+without a release via `dangerous_commands` (the regex is in docs/configuration.md).
+
   * FAIL-OPEN on any internal error (a broken guard must never wedge a session);
     FAIL-CLOSED on a match (block until acknowledged).
   * ACKNOWLEDGE path: `PLAYBOOK_ALLOW_DANGEROUS=1` IN THE HOOK'S OWN ENVIRONMENT
@@ -39,18 +61,196 @@ import sys
 # Statement separators: each becomes its own command position. Single `|` too,
 # so `foo | rm -rf /` still sees `rm` at a command position.
 _SEP = re.compile(r"&&|\|\||[;\n|]")
-# Prefixes that delegate to the command that follows (the real command is next).
-_PREFIX = re.compile(r"^(sudo|env|nohup|time|command|builtin|exec|then|do|else)\b"
-                     r"|^\w+=\S*")  # also strip a leading VAR=value assignment
+# ── the wrapper grammar (task 077) ────────────────────────────────────────────
+# A WRAPPER delegates to the command that follows it. Stripping only the bare
+# wrapper token left every optioned form unguarded — `sudo rm -rf /` blocked while
+# `sudo -u root rm -rf /` ran — because the option token then sat where the
+# command should be and every rule here anchors at position 0. So each wrapper
+# declares the little grammar it actually has:
+#
+#   val_short — short options whose value is the NEXT token, but only when the
+#               option ends its cluster with nothing attached: `-n 19` takes
+#               `19`; `-n19`, `-o0` and `--long=v` carry their own value and take
+#               nothing (eating the next token there would swallow the command).
+#   val_long  — long options that take a value (`--signal KILL` / `--signal=KILL`).
+#   terminal  — query/help modes: the wrapper PRINTS and runs nothing, so the rest
+#               of the segment is not a command. `sudo --version rm -rf /` deletes
+#               nothing, and a guard that blocked it would be wrong.
+#   operands  — leading non-option operands consumed before the command
+#               (`timeout 5 …`, `chrt 10 …`). `--` ends OPTIONS, not operands.
+#   split     — options whose value IS a command line and must be classified
+#               rather than consumed (`env -S 'rm -rf /'`).
+#
+# Everything unknown is left alone: an unrecognised option that takes a value
+# leaves that value at the head and the segment reads as safe. That is the same
+# under-blocking the guard already had, and it is the right direction to fail for
+# a layer whose false positives a user cannot route around.
 
 
-def _strip_prefixes(seg: str) -> str:
+def _wspec(val_short="", val_long=(), terminal=(), operands=0,
+           split_short="", split_long=()):
+    return {
+        "val_short": set(val_short),
+        "val_long": set(val_long),
+        "terminal": set(terminal),
+        "operands": operands,
+        "split_short": set(split_short),
+        "split_long": set(split_long),
+    }
+
+
+_WRAPPERS = {
+    # privilege
+    "sudo": _wspec(
+        val_short="ugUCprtTR",
+        val_long=("--user", "--group", "--other-user", "--close-from", "--prompt",
+                  "--role", "--type", "--chroot", "--chdir", "--host",
+                  "--command-timeout"),
+        terminal=("-V", "--version", "-h", "--help", "-l", "--list",
+                  "-v", "--validate", "-K", "--remove-timestamp")),
+    "doas": _wspec(val_short="uC", val_long=(),
+                   terminal=("-L", "-V", "-h", "--help", "--version")),
+    # environment / scheduling / buffering
+    "env": _wspec(val_short="uC",
+                  val_long=("--unset", "--chdir", "--block-signal",
+                            "--default-signal", "--ignore-signal"),
+                  terminal=("--help", "--version"),
+                  split_short="S", split_long=("--split-string",)),
+    "nice": _wspec(val_short="n", val_long=("--adjustment",),
+                   terminal=("--help", "--version")),
+    "ionice": _wspec(val_short="cnp", val_long=("--class", "--classdata", "--pid"),
+                     terminal=("-h", "--help", "-V", "--version")),
+    "chrt": _wspec(val_short="p", operands=1,
+                   terminal=("-h", "--help", "-V", "--version")),
+    "stdbuf": _wspec(val_short="ioe",
+                     val_long=("--input", "--output", "--error"),
+                     terminal=("--help", "--version")),
+    "timeout": _wspec(val_short="ks", val_long=("--kill-after", "--signal"),
+                      operands=1, terminal=("--help", "--version")),
+    "setsid": _wspec(terminal=("-h", "--help", "-V", "--version")),
+    "nohup": _wspec(terminal=("--help", "--version")),
+    "time": _wspec(val_short="fo", val_long=("--format", "--output"),
+                   terminal=("-V", "--version", "--help")),
+    "xargs": _wspec(val_short="nPIidaEeLsD",
+                    val_long=("--max-args", "--max-procs", "--replace",
+                              "--delimiter", "--arg-file", "--eof",
+                              "--max-chars", "--max-lines"),
+                    terminal=("--help", "--version")),
+    # shell builtins that delegate
+    "command": _wspec(terminal=("-v", "-V")),
+    "builtin": _wspec(),
+    "exec": _wspec(val_short="a", val_long=()),
+    # control-flow keywords that can precede a command in a split segment
+    "then": _wspec(),
+    "do": _wspec(),
+    "else": _wspec(),
+    "elif": _wspec(),
+}
+
+# A leading token that groups or negates, rather than naming a command.
+_GROUPERS = ("(", "{", "!", "&&", "||")
+_ASSIGN = re.compile(r"^\w+=")
+_TOKEN = re.compile(r"\S+")
+# Termination is guaranteed by every iteration consuming at least one token; this
+# is a belt-and-braces ceiling on pathological input, never a scanning budget
+# (a cap that stopped the WALK would itself be a bypass — nest N+1 wrappers).
+_WALK_CEILING = 10000
+
+
+def _unquote(s):
+    s = s.strip()
+    if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
+        return s[1:-1]
+    return s
+
+
+def _walk_prefix(seg):
+    """Walk the wrapper/option prefix of one segment.
+
+    Returns `(rest, executes, payloads)`:
+      * `rest` — the segment text from the first token that is not part of a
+        wrapper prefix, sliced out of the ORIGINAL string so quoting and spacing
+        survive for the regex rules;
+      * `executes` — False when a terminal/query option means the segment runs
+        no command at all;
+      * `payloads` — command-line strings found inside option values (`env -S`),
+        for the caller to classify recursively.
+    """
     s = seg.strip()
-    while True:
-        m = _PREFIX.match(s)
-        if not m:
-            return s
-        s = s[m.end():].strip()
+    toks = [(m.group(0), m.start()) for m in _TOKEN.finditer(s)]
+    i = 0
+    payloads = []
+    steps = 0
+    while i < len(toks) and steps < _WALK_CEILING:
+        steps += 1
+        tok = toks[i][0]
+        if tok in _GROUPERS or _ASSIGN.match(tok):
+            i += 1                                     # consumes a token → terminates
+            continue
+        spec = _WRAPPERS.get(tok.rsplit("/", 1)[-1])
+        if spec is None:
+            break                                      # this token is the command
+        i += 1                                         # the wrapper itself
+        end_of_opts = False
+        operands = spec["operands"]
+        while i < len(toks):
+            t = toks[i][0]
+            if not end_of_opts and t == "--":
+                end_of_opts = True                     # ends OPTIONS, not operands
+                i += 1
+                continue
+            if not end_of_opts and t.startswith("--") and len(t) > 2:
+                base = t.split("=", 1)[0]
+                if base in spec["terminal"]:
+                    return (s, False, payloads)
+                if base in spec["split_long"]:
+                    if "=" in t:
+                        payloads.append(_unquote(s[toks[i][1] + len(base) + 1:]))
+                    elif i + 1 < len(toks):
+                        payloads.append(_unquote(s[toks[i + 1][1]:]))
+                    i = len(toks)
+                    continue
+                if base in spec["val_long"] and "=" not in t:
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if not end_of_opts and t.startswith("-") and len(t) > 1:
+                if t in spec["terminal"]:
+                    return (s, False, payloads)
+                letters = t[1:]
+                takes_next = False
+                for k, ch in enumerate(letters):
+                    attached = letters[k + 1:]
+                    if ch in spec["split_short"]:
+                        if attached:                   # `-S'rm -rf /'`
+                            payloads.append(_unquote(s[toks[i][1] + k + 2:]))
+                        elif i + 1 < len(toks):        # `-S 'rm -rf /'`
+                            payloads.append(_unquote(s[toks[i + 1][1]:]))
+                        i = len(toks)
+                        takes_next = None              # already advanced
+                        break
+                    if ch in spec["val_short"]:
+                        takes_next = not attached      # `-n 19` yes, `-n19`/`-o0` no
+                        break
+                if takes_next is None:
+                    continue                           # a split option consumed the rest
+                i += 1
+                if takes_next:
+                    i += 1
+                continue
+            if operands > 0:                           # `timeout 5 …`, `chrt 10 …`
+                operands -= 1
+                i += 1
+                continue
+            break                                      # the command starts here
+    rest = s[toks[i][1]:] if i < len(toks) else ""
+    return (rest, True, payloads)
+
+
+def _strip_prefixes(seg):
+    """Back-compatible shim: the prefix-stripped text only."""
+    return _walk_prefix(seg)[0]
 
 
 def _rm_is_dangerous(seg: str) -> bool:
@@ -177,6 +377,39 @@ def _strip_data_regions(command):
     return "\n".join("echo > file" if _DATA_LINE.match(l) else l for l in out)
 
 
+# The pipe rule had its OWN wrapper list (`sudo|env|command|nice|nohup` with
+# flag-only options), so every value-taking form walked past it — `curl … | sudo
+# -u root bash` ran while `curl … | sudo bash` blocked. It now walks the same
+# `_WRAPPERS` table as the segment rules. The original regex is KEPT: it still
+# catches shapes this split does not see (a pipe inside `bash -c '…'`), and two
+# independent rules that both block is the right redundancy for this layer.
+_DOWNLOADER = re.compile(r"^(?:curl|wget|fetch|aria2c)\b")
+_INTERPRETERS = {"sh", "bash", "zsh", "ksh", "dash", "ash",
+                 "python", "python3", "perl", "ruby", "node"}
+_SINGLE_PIPE = re.compile(r"(?<!\|)\|(?!\|)")
+_PIPE_WHY = "piping a downloaded script straight into a shell runs unreviewed remote code"
+
+
+def _pipes_downloader_into_shell(text):
+    """True when a downloader's output reaches an interpreter through a pipe,
+    however many optioned wrappers sit in between."""
+    parts = _SINGLE_PIPE.split(text)
+    if len(parts) < 2:
+        return False
+    seen_downloader = False
+    for part in parts:
+        rest, executes, _payloads = _walk_prefix(part)
+        if not executes:
+            continue
+        head = rest.split()[0] if rest.split() else ""
+        head = head.strip("\"'`;)").rsplit("/", 1)[-1]
+        if seen_downloader and head in _INTERPRETERS:
+            return True
+        if _DOWNLOADER.match(rest):
+            seen_downloader = True
+    return False
+
+
 def classify_command(command, extra_patterns=None, _depth=0):
     """Return ("block", name, why) or ("allow", None, None). Pure + deterministic.
 
@@ -192,7 +425,14 @@ def classify_command(command, extra_patterns=None, _depth=0):
         return ("allow", None, None)
     command = str(command)
     for seg in _SEP.split(command):
-        stripped = _strip_prefixes(seg)
+        stripped, executes, payloads = _walk_prefix(seg)
+        for payload in payloads:                       # `env -S "<command line>"`
+            if payload and _depth < 3:
+                v = classify_command(payload, extra_patterns, _depth + 1)
+                if v[0] == "block":
+                    return v
+        if not executes:                               # `sudo --version …` prints, runs nothing
+            continue
         hit = _segment_checks(stripped)
         if hit:
             return ("block", hit[0], hit[1])
@@ -206,6 +446,8 @@ def classify_command(command, extra_patterns=None, _depth=0):
     # command, not the command (the documented bound: echoing dangerous text is
     # fine). Segment checks above already ran on the full text.
     whole_text = _strip_data_regions(command)
+    if _pipes_downloader_into_shell(whole_text):
+        return ("block", "pipe-to-shell", _PIPE_WHY)
     for name, rx, why in _WHOLE:
         if rx.search(whole_text):
             return ("block", name, why)
@@ -363,8 +605,13 @@ def main() -> int:
     extra = extra if isinstance(extra, list) else []
     try:
         verdict, name, why = classify_command(command, extra)
-    except Exception:
-        return 0                                        # fail-open on any bug
+    except Exception as exc:                            # fail-open on any bug —
+        # but LOUDLY: PB-COMMAND-FAILURE-POLICY promises the guard says so on
+        # stderr whenever it cannot run, and a silent `return 0` turned a BLOCK
+        # into an ALLOW with no trace (plan panel 077, sol:medium #4).
+        print("playbook command-guard: classifier error, failing OPEN "
+              "(%s: %s)" % (exc.__class__.__name__, exc), file=sys.stderr)
+        return 0
     if verdict != "block":
         return 0
 

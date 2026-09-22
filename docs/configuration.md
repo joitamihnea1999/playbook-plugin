@@ -247,6 +247,26 @@ it can never wedge a session.
   started the agent, or the harness's env settings). The hook reads its own
   environment: a `PLAYBOOK_ALLOW_DANGEROUS=1 <cmd>` prefix typed by the agent
   cannot set it (task 073).
+- **Wrappers are followed, with their options** (task 077). `sudo`, `doas`, `env`,
+  `nice`, `ionice`, `chrt`, `stdbuf`, `timeout`, `setsid`, `nohup`, `time`,
+  `xargs`, `command`, `builtin`, `exec` each declare the option arity they really
+  have, so `sudo -u root rm -rf /`, `timeout 5 rm -rf /`, `chrt -f 99 rm -rf /`,
+  `stdbuf -o0 git push --force`, `env -S 'rm -rf /'` and `curl … | nice -n 19 bash`
+  are classified like their bare forms. A wrapper's **query mode runs nothing** and
+  stays allowed: `sudo --version rm -rf /`, `sudo -l …`, `command -v …`,
+  `timeout --help …`. An option the table does not know that takes a value hides
+  what follows it — the guard under-blocks there rather than risk blocking a safe
+  command, and that bound is deliberate.
+- **A generic pipe into a shell is NOT blocked** — `cat evil.sh | sh` is allowed;
+  only a *downloader* piped into an interpreter (`curl`/`wget`/`fetch`/`aria2c`)
+  blocks. Remote code is unreviewed and unambiguous; a local file is not, and the
+  guard cannot read it. Turn the stricter rule on per project, no release needed:
+  ```json
+  {"dangerous_commands": ["\\|\\s*(?:sudo\\s+|doas\\s+)?(?:sh|bash|zsh|ksh|dash)\\s*$"]}
+  ```
+  That blocks `cat x | sh` and `cat x | sudo bash` while leaving `sh script.sh`
+  and `cat x | bash script.sh` alone (a shell with a script operand is not reading
+  the pipe). Verified against those four forms.
 - **Extend** with project-specific patterns (e.g. a deploy/publish command):
   ```json
   {"dangerous_commands": ["^fly deploy\\b", "npm publish"]}

