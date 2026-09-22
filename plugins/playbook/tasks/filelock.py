@@ -250,7 +250,33 @@ def _lock_on(lock_file: Path, *, timeout: float = DEFAULT_TIMEOUT):
     # The lock file is opened O_RDWR|O_CREAT and NEVER truncated: truncation
     # would race a concurrent holder's pid line, and unlinking would split the
     # inode. It is only ever rewritten in place by the holder.
-    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o644)
+    # NO-FOLLOW (impl panel r3, codex-high #1, Critical): a crafted task
+    # directory could make `task.md.lock` a symlink to any writable file, and the
+    # pid line below would be written INTO that target. `O_NOFOLLOW` is POSIX-only
+    # (getattr-guarded), so the opened descriptor is ALSO verified to be a regular
+    # file with one link — which covers Windows and any platform that ignores the
+    # flag. Anything else fails closed: no lock, no write, a loud reason.
+    _flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(lock_file), _flags, 0o644)
+    except OSError as exc:
+        raise LockTimeout(
+            f"refusing to use {lock_file.name}: it could not be opened safely "
+            f"({exc}). If it is a symlink, remove it — a lock file must be a "
+            "regular file in the task directory.") from exc
+    try:
+        _st = os.fstat(fd)
+        import stat as _stat_mod
+        if not _stat_mod.S_ISREG(_st.st_mode) or _st.st_nlink != 1:
+            raise LockTimeout(
+                f"refusing to use {lock_file.name}: it is not a plain, single-link "
+                "regular file. Remove it and retry.")
+    except LockTimeout:
+        os.close(fd)
+        raise
+    except OSError:
+        os.close(fd)
+        raise
     deadline = time.monotonic() + max(0.0, float(timeout))
     try:
         while True:

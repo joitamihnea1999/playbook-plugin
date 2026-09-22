@@ -11215,6 +11215,50 @@
             "reference": "LockIdentity.test_one_lock_per_task_DIRECTORY"
           },
           "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "Round3Fixes.test_the_lock_file_is_never_opened_through_a_symlink",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "LockBasics.test_lock_file_is_persistent"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "Round2Fixes.test_a_superseded_panel_verdict_refuses_the_close",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "Round2Fixes.test_an_unchanged_panel_verdict_commits"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "Round2Fixes.test_compact_refuses_a_stale_compose",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "Round2Fixes.test_compact_still_works_undisturbed"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_task_lock.py",
+          "reference": "Round2Fixes.test_lock_timeout_prints_its_message_instead_of_a_traceback",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "Round2Fixes.test_a_second_close_of_an_already_done_task_refuses"
+          },
+          "limitations": []
         }
       ],
       "missing_evidence_or_limitation": [
@@ -11222,7 +11266,10 @@
         "Scope is one task DIRECTORY on one machine's filesystem. Behaviour on a network filesystem (NFS/SMB) is whatever that filesystem's flock semantics are, and nothing coordinates two machines.",
         "The whole-tree freshness TOCTOU stays detection-only: a task-directory lock cannot serialize edits to arbitrary source files during a multi-minute judge call. What v1.5.45 adds is a compare-and-swap of the close's OWN freshness decision at the commit.",
         "The session pointer (`sessions/<sid>/current_state`) is a different resource and is still written unlocked; the destructive-command guard handles that by re-reading the pointer rather than locking.",
-        "v1.5.45 (impl panel r1): where `flock` is unavailable (a macOS without util-linux) the chat-log hook's append is unserialized as before; `tasks tag` then still refuses a stale rewrite rather than losing a prompt, which is the safe direction but not mutual exclusion."
+        "v1.5.45 (impl panel r1): where `flock` is unavailable (a macOS without util-linux) the chat-log hook's append is unserialized as before; `tasks tag` then still refuses a stale rewrite rather than losing a prompt, which is the safe direction but not mutual exclusion.",
+        "v1.5.45 (impl panel r3, opus F2 + codex-high #3): the two-FILE protocols (judge archive, compact) roll back on an OSError, NOT on a hard crash. A `kill -9` or power loss between the archive append and the primary write leaves the appended copy, and a retry appends it again — so the guarantee there is 'no paid round is LOST', not 'exactly one copy exists'. Making the append idempotent (a commit token, or dedup on retry) is a follow-up.",
+        "v1.5.45 (impl panel r3, opus F3): `atomic.rewrite` reads with `errors=\"replace\"`, the codebase-wide convention, and writes the decoded text back — so a task record that is not valid UTF-8 would be rewritten with replacement characters. Pre-existing in every prior writer, now on one path; a strict or surrogateescape round-trip is a follow-up.",
+        "v1.5.45 (impl panel r3, codex-high #2): a close whose entry baseline cannot be read ABORTS rather than closing with its comparisons disabled. That is the safe direction, but it means an unreadable task.md blocks the close outright until the file is fixed."
       ],
       "semantic_protocol": null,
       "violation_reproduction": null,

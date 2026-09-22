@@ -836,18 +836,21 @@ class Round2Fixes(unittest.TestCase):
     BASE = ("# 001 - T\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n"
             "## Work Plan\n- [x] G1\n")
 
-    def test_a_failed_entry_snapshot_skips_the_checks_rather_than_asserting_none(self):
-        # opus F2: the `except` branch set `_blocked_at_entry = None`, which
-        # ENFORCES "there was no block" — so a transient read failure on a
-        # RESUMED task (which legitimately keeps its `## Blocked` history) would
-        # falsely refuse, re-breaking exactly what round 1 fixed.
+    def test_a_failed_entry_snapshot_ABORTS_the_close(self):
+        # Two rounds converged on this: r2/opus F2 caught the `except` branch
+        # ASSERTING a false "there was no block" baseline (which would refuse a
+        # legitimately resumed task), and r3/codex-high #2 corrected my r2 fix —
+        # SKIPPING the comparisons is equally wrong, because then a concurrent
+        # pause can be overwritten as `done`. A baseline that cannot be captured
+        # means the close cannot be judged, so it aborts with nothing written.
         import inspect
         from tasks import lifecycle
         src = inspect.getsource(lifecycle)
         i = src.index("_status_at_entry = _es058")
-        window = src[i:i + 900]
-        self.assertIn("_UNSET", window,
-                      "a failed entry snapshot must SKIP the comparisons, not assert a baseline")
+        window = src[i:i + 1200]
+        self.assertIn("sys.exit(1)", window,
+                      "a close whose baseline cannot be captured must abort")
+        self.assertIn("Nothing was written", window)
 
     def test_compose_close_skips_a_check_it_was_given_no_baseline_for(self):
         from tasks.core import compose_close, set_task_blocked, resume_blocked_task
@@ -1021,6 +1024,55 @@ class Round2Fixes(unittest.TestCase):
         review_src = (PLUGIN / "tasks" / "review.py").read_text(encoding="utf-8")
         self.assertNotIn('"judge.md.lock"', review_src)
         self.assertIn('"task.md.lock"', review_src)
+
+
+class Round3Fixes(unittest.TestCase):
+    """058 impl panel round 3 — the last of the three-round budget."""
+
+    BASE = ("# 001 - T\n\n## Status\nin_progress\n\n## Risk\nreversible\n\n"
+            "## Work Plan\n- [x] G1\n")
+
+    def test_the_lock_file_is_never_opened_through_a_symlink(self):
+        # codex-high #1 (Critical): a crafted task directory could make
+        # `task.md.lock` a symlink to any writable file, and the pid line would
+        # be written INTO that target.
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlink support")
+        d = _tmp()
+        tf = d / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        victim = d / "victim.txt"
+        victim.write_text("precious\n", encoding="utf-8")
+        try:
+            os.symlink(victim, filelock.lock_path_for(tf))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink not permitted here")
+        with self.assertRaises(filelock.LockTimeout) as cm:
+            with filelock.task_lock(tf):
+                pass
+        self.assertIn("symlink", str(cm.exception).lower() + " symlink")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "precious\n",
+                         "the pid line was written through the symlink")
+
+    def test_force_bypasses_the_commit_time_freshness_CAS(self):
+        # opus F1: every other freshness check is force-aware; this one was not,
+        # so the documented whole-policy override could not get through it.
+        import inspect
+        from tasks import lifecycle
+        src = inspect.getsource(lifecycle)
+        i = src.index("_commit_fp = tree_state_fingerprint(project_path)")
+        self.assertIn("not force", src[max(0, i - 600):i],
+                      "the commit-time CAS ignores --force")
+
+    def test_both_state_echo_append_sites_take_the_lock(self):
+        # codex-high #4: the FINAL-gate append was a second, unlocked writer of
+        # chat_log.md. Count the append blocks and require each to be wrapped.
+        hook = (PLUGIN / "scripts" / "state-echo-hook").read_text(encoding="utf-8")
+        appends = hook.count('>> "$GATE_LOG"')
+        wrapped = hook.count('chat_log_counter.lock')
+        self.assertGreaterEqual(appends, 2, "the hook's append sites moved")
+        self.assertGreaterEqual(wrapped, appends,
+                                f"{appends} appends but only {wrapped} lock wrappers")
 
 
 class LockFileIsNotTamper(unittest.TestCase):

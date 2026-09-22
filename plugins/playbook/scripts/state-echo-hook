@@ -369,6 +369,9 @@ else
         PREV_TEXT=$(read_counter "$COUNTER_FILE" gate_text)
         PREV_TASK="${PREV_KEY%%:*}"
         PREV_LINE="${PREV_KEY##*:}"
+        # Task 058 (impl panel r3, codex-high #4): the FINAL-gate append is a
+        # second writer of chat_log.md and needs the same lock as the one above.
+        _final_gate_append() {
         {
             echo "---"
             echo ""
@@ -384,6 +387,12 @@ else
             fi
             echo ""
         } >> "$GATE_LOG" 2>/dev/null || PLAYBOOK_WRITE_FAILED=true
+        }
+        if command -v flock &>/dev/null; then
+            ( flock -x 203; _final_gate_append ) 203>"$AGENT_DIR/chat_log_counter.lock"
+        else
+            _final_gate_append
+        fi
         # Clear gate_* fields (task complete), keep tools/writes
         write_counter "$COUNTER_FILE" gate_key ""
         write_counter "$COUNTER_FILE" gate_count ""

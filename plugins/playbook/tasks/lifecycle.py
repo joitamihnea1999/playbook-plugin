@@ -268,15 +268,17 @@ def cmd_work(cmd_args):
                 _chk, _tot = _gc058(_entry_text)
                 _open_gates_at_entry = _tot - _chk
                 _judge_at_entry = _jd058(task_file)
-            except Exception:      # noqa: BLE001 — a snapshot we could not take must SKIP
-                # its comparisons, never assert a baseline: `None` for
-                # `expect_blocked` MEANS "there was no block", which would falsely
-                # refuse a legitimately resumed task (impl panel r2, opus F2).
-                from tasks.core import _UNSET as _UNSET058
-                _status_at_entry = None
-                _blocked_at_entry = _UNSET058
-                _open_gates_at_entry = None
-                _judge_at_entry = _UNSET058
+            except Exception as _snap_err:      # noqa: BLE001
+                # A close whose baseline cannot be captured must ABORT, not
+                # proceed with its safety comparisons disabled (impl panel r3,
+                # codex-high #2 — which corrected r2's "skip rather than assert a
+                # false baseline": skipping ALSO lets a concurrent pause be
+                # overwritten as `done`). Nothing has been written at this point.
+                print(f"Blocked: cannot close task {prev_task} — task.md could not be "
+                      f"read to capture the state this close is authorised on "
+                      f"({_snap_err}). Nothing was written; fix the file and re-run "
+                      "`tasks work done`.", file=sys.stderr, flush=True)
+                sys.exit(1)
             if _live_status_index(_st_lines) is None:
                 print(f"Error: {task_file} has no live `## Status` heading with a "
                       "value line (missing, hidden inside a code fence, or directly "
@@ -681,7 +683,12 @@ def cmd_work(cmd_args):
                 # at the commit, and refuse if the tree moved — narrow and honest:
                 # it does not make the whole-tree TOCTOU preventable, it makes THIS
                 # close's own decision non-stale.
-                if _now_fp:
+                # `--force` is the blunt whole-policy override (verify, review and
+                # freshness alike), so it bypasses this CAS too — otherwise the one
+                # escape that exists for an actively-edited repo could not get
+                # through it (impl panel r3, opus F1). The forced close's reason is
+                # already recorded in the receipt.
+                if _now_fp and not force:
                     _commit_fp = tree_state_fingerprint(project_path)
                     # An UNREADABLE fingerprint at the commit must block too (058
                     # impl panel r1, codex ×2 + grok): `if _commit_fp and …` let an
