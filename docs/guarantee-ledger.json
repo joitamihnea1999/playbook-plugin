@@ -2432,6 +2432,97 @@
           "limitations": [
             "Redirect detection reads the OPERATOR from the raw token (so a quoted `>` is data) and the TARGET from the dequoted value (so a quoted device is still a device); file-descriptor prefixes such as `1>` count."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "ArgvStillGetsTheWholeCommandRules.test_argv_delivered_sql_and_project_patterns_are_not_skipped",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "ArgvStillGetsTheWholeCommandRules.test_the_round_3_over_block_stays_fixed"
+          },
+          "limitations": [
+            "Task 077 impl panel round 4, four of five seats: the round-3 argv early-return was over-scoped and took the DB-client rule and every project `dangerous_commands` pattern with it. Only the substitution scan is skipped for argv now."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "ShellOptionsBeforeDashC.test_the_shells_own_options_do_not_hide_the_script",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "ShellOptionsBeforeDashC.test_benign_scripts_with_options_still_pass"
+          },
+          "limitations": [
+            "`bash -O extglob -c …`, `bash --noprofile -c …`, `sh -o noglob -c …`."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "PrivilegeWrapperArityRound4.test_positional_user_and_command_payloads",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "PrivilegeWrapperArityRound4.test_the_forms_that_already_worked_did_not_regress"
+          },
+          "limitations": [
+            "`su root -c`, `runuser root -c`, `runuser -c`, `pkexec --user`, `chrt -T`: the round-3 wrappers repeated the original arity bug on their own options."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "QuotingDecidesWhatExpands.test_what_the_shell_really_expands_still_blocks",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "QuotingDecidesWhatExpands.test_literal_names_in_single_quotes_are_literal"
+          },
+          "limitations": [
+            "The shell expands `$` inside double quotes but not single ones, and expands a glob or tilde inside neither. Round 3 treated any metacharacter as computed, which blocked literal names like `rm -rf 'build*'`. Brace alternatives are expanded before the target test."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "AnsiCEscapesAreDecoded.test_hex_encoded_command_and_arguments",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "AnsiCEscapesAreDecoded.test_ordinary_ansi_c_strings_are_not_commands"
+          },
+          "limitations": [
+            "Round 3 recognised `$'…'` syntax without decoding its escapes, which moved the bypass one layer in: `$'\\\\x72\\\\x6d'` is `rm`."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "CommentsAndDepth.test_nesting_past_the_limit_fails_CLOSED",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "CommentsAndDepth.test_a_shell_comment_is_not_a_command"
+          },
+          "limitations": [
+            "A depth cutoff that ALLOWS is a bypass by arithmetic; past the limit the classifier refuses instead of guessing. Shell comments are recognised at an unquoted word start, so an inert `echo ok # …` is no longer classified as if the comment ran."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "ForceFlagsAndPipePayloads.test_force_with_lease_does_not_cancel_force",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "ForceFlagsAndPipePayloads.test_a_downloader_inside_an_option_payload_counts"
+          },
+          "limitations": [
+            "`git push --force --force-with-lease` still force-pushes; and a downloader can sit inside an option payload on the left of a pipe."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2455,7 +2546,8 @@
         "Task 077 accepted OVER-block (pinned by `SeparatorsAndSubstitutionsAreCommandPositions.test_known_conservative_over_block_is_pinned_not_hidden`): a SINGLE-quoted command substitution does not expand and is inert, but still blocks — the matcher is quote-blind by design. The documented escape is to write such a fixture inside a quoted `cat`/`tee` heredoc to a plain file, which the module already advises for the other whole-command rules. Chosen over silently allowing `echo \"$(rm -rf /)\"`, which really does delete.",
         "Task 077 impl panel round 1 produced 31 further vectors on the round-1 implementation, ALL confirmed by execution and all fixed. The lesson recorded rather than the symptom: this guard is a quote-blind pattern matcher over shell text, and 'find the command position' has a long tail (quoting, naming, separators, substitutions, verb-level options). The tail is now covered by one lexer and one naming function rather than by N normalisation sites, but the module remains pattern-based and the OS sandbox is still the only deterministic layer.",
         "Task 077 impl panel round 2 found 28 further defects on the round-1 implementation (23 under-blocks and 5 over-blocks), all confirmed by execution and all fixed. The generalisable lesson: lexing the command POSITION is not the same as lexing the DECISION — the rules that judge flags and targets have to read the same dequoted tokens, or a quoted argument hides the payload from a guard that correctly identified the command.",
-        "Task 077 impl panel round 3 produced 31 more defects on the round-2 implementation (25 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. Two of the five seats reported they could not construct any under-block while three others found twelve between them — that disagreement is the honest description of this layer: the shell surface is large, and 'no judge found one' is not evidence that none exists. The interlock is a heuristic that fails toward caution, not a shell parser; the OS sandbox remains the only deterministic layer."
+        "Task 077 impl panel round 3 produced 31 more defects on the round-2 implementation (25 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. Two of the five seats reported they could not construct any under-block while three others found twelve between them — that disagreement is the honest description of this layer: the shell surface is large, and 'no judge found one' is not evidence that none exists. The interlock is a heuristic that fails toward caution, not a shell parser; the OS sandbox remains the only deterministic layer.",
+        "Task 077 impl panel round 4 produced 22 more defects (16 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. STOPPING RULE, stated rather than assumed: rounds 1-3 each invalidated an ARCHITECTURAL assumption (the command position was unlexed; the rules were unlexed; the separators were unlexed). Round 4 found one architectural regression of mine (the argv early-return) and otherwise INSTANCES - one more wrapper's arity, one more escape form. The task stops when a round returns only instances, with the residual surface disclosed here rather than implied to be empty: this is a heuristic interlock over shell text, not a shell parser, and the OS sandbox remains the only deterministic layer."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],

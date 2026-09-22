@@ -68,6 +68,41 @@ import sys
 _SEP_OPS = ("&&", "||", ";", "\n", "|", "&")
 
 
+def _strip_comments(text):
+    """Drop an unquoted `#` word and the rest of its line. Without this, an
+    inert `echo ok # <anything>` was classified as if the comment ran (impl
+    panel round 4, sol:medium)."""
+    out, i, n, quote, word_start = [], 0, len(text), "", True
+    while i < n:
+        c = text[i]
+        if quote:
+            out.append(c)
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(c)
+            out.append(text[i + 1])
+            i += 2
+            word_start = False
+            continue
+        if c in "\"'":
+            quote = c
+            out.append(c)
+            i += 1
+            word_start = False
+            continue
+        if c == "#" and word_start:
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        out.append(c)
+        word_start = c.isspace() or c in ";|&("
+        i += 1
+    return "".join(out)
+
+
 def _split_segments(text, ops=_SEP_OPS):
     out, buf, i, n, quote = [], [], 0, len(text), ""
     while i < n:
@@ -129,8 +164,9 @@ def _split_segments(text, ops=_SEP_OPS):
 
 
 def _wspec(val_short="", val_long=(), terminal=(), operands=0,
-           split_short="", split_long=()):
+           split_short="", split_long=(), operand_satisfied_by=()):
     return {
+        "sat": set(operand_satisfied_by),
         "val_short": set(val_short),
         "val_long": set(val_long),
         "terminal": set(terminal),
@@ -166,7 +202,7 @@ _WRAPPERS = {
                    terminal=("--help", "--version")),
     "ionice": _wspec(val_short="cnp", val_long=("--class", "--classdata", "--pid"),
                      terminal=("-h", "--help", "-V", "--version")),
-    "chrt": _wspec(val_short="p", operands=1,
+    "chrt": _wspec(val_short="pT", operands=1,
                    terminal=("-h", "--help", "-V", "--version")),
     "stdbuf": _wspec(val_short="ioe",
                      val_long=("--input", "--output", "--error"),
@@ -200,12 +236,16 @@ _WRAPPERS = {
     "while": _wspec(),
     "until": _wspec(),
     # Privilege wrappers of the same class as sudo/doas (impl panel round 3).
-    "pkexec": _wspec(terminal=("--version", "--help")),
-    "runuser": _wspec(val_short="ugGc", val_long=("--user", "--group", "--command"),
-                      terminal=("--version", "--help")),
+    "pkexec": _wspec(val_long=("--user",), terminal=("--version", "--help")),
+    # `-c`/`--command` is a COMMAND STRING, not a consumed value, and the user
+    # may be a positional operand: `su root -c '…'` (impl panel round 4).
+    "runuser": _wspec(val_short="ugG", val_long=("--user", "--group"),
+                      terminal=("--version", "--help"), operands=1,
+                      operand_satisfied_by=("u", "--user"),
+                      split_short="c", split_long=("--command", "--session-command")),
     "su": _wspec(val_short="gG", val_long=("--group",),
-                 terminal=("--version", "--help"),
-                 split_short="c", split_long=("--command",)),
+                 terminal=("--version", "--help"), operands=1,
+                 split_short="c", split_long=("--command", "--session-command")),
 }
 
 # ── lexing and naming (impl panel round 1) ────────────────────────────────────
@@ -216,6 +256,27 @@ _WRAPPERS = {
 # NAMED many ways (`'rm'`, `"/bin/rm"`, `r\m`, `~/rm`, `$HOME/bin/rm`) while the
 # rules all anchor on the bare word. So: one lexer, one naming function, used
 # everywhere a command position is decided.
+
+_ANSI_C = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|[0-7]{1,3}|u[0-9A-Fa-f]{1,4}|.)")
+_ANSI_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b",
+                "f": "\f", "v": "\v", "e": "\x1b", "\\": "\\", "'": "'", '"': '"'}
+
+
+def _ansi_c_decode(body):
+    def one(m):
+        tok = m.group(1)
+        try:
+            if tok[0] == "x":
+                return chr(int(tok[1:], 16))
+            if tok[0] == "u":
+                return chr(int(tok[1:], 16))
+            if tok[0] in "01234567":
+                return chr(int(tok, 8))
+        except (ValueError, OverflowError):
+            return tok
+        return _ANSI_SIMPLE.get(tok, tok)
+    return _ANSI_C.sub(one, body)
+
 
 def _lex(s):
     """(raw, start, value, quoted) per token. Quote- and escape-aware, handles
@@ -233,7 +294,7 @@ def _lex(s):
             break
         start = i
         buf = []
-        quoted = False
+        kinds = set()
         while i < n:
             c = s[i]
             if c == "\\" and i + 1 < n and s[i + 1] == "\n":
@@ -246,11 +307,26 @@ def _lex(s):
                 i += 2
                 continue
             if c == "$" and i + 1 < n and s[i + 1] == "'":
-                i += 1                                 # ANSI-C quoting: `$'…'`
+                # ANSI-C quoting DECODES its escapes: `$'\x72\x6d'` is `rm`.
+                # Recognising the syntax without decoding it (round 3) just moved
+                # the bypass one layer in (impl panel round 4, sol:high).
+                j = i + 2
+                body = []
+                while j < n and s[j] != "'":
+                    if s[j] == "\\" and j + 1 < n:
+                        body.append(s[j])
+                        body.append(s[j + 1])
+                        j += 2
+                        continue
+                    body.append(s[j])
+                    j += 1
+                buf.append(_ansi_c_decode("".join(body)))
+                kinds.add("'")
+                i = j + 1
                 continue
             if c in "\"'":
                 q = c
-                quoted = True
+                kinds.add(q)
                 i += 1
                 while i < n and s[i] != q:
                     if q == '"' and s[i] == "\\" and i + 1 < n:
@@ -263,7 +339,7 @@ def _lex(s):
                 continue
             buf.append(c)
             i += 1
-        toks.append((s[start:i], start, "".join(buf), quoted))
+        toks.append((s[start:i], start, "".join(buf), "".join(sorted(kinds))))
     return toks
 
 
@@ -384,8 +460,12 @@ def _walk_prefix(seg):
                     i = len(toks)
                     continue
                 if base in spec["val_long"] and "=" not in t:
+                    if base in spec["sat"]:
+                        operands = 0
                     i += 2
                     continue
+                if base in spec["sat"]:                # `--user=root`
+                    operands = 0
                 i += 1
                 continue
             if not end_of_opts and t.startswith("-") and len(t) > 1:
@@ -406,6 +486,8 @@ def _walk_prefix(seg):
                         takes_next = None              # already advanced
                         break
                     if ch in spec["val_short"]:
+                        if ch in spec["sat"]:          # the operand came as an option
+                            operands = 0
                         takes_next = not attached      # `-n 19` yes, `-n19`/`-o0` no
                         break
                 if takes_next is None:
@@ -480,7 +562,26 @@ def _git_after_globals(args):
     return list(args[i:])
 
 
-def _rm_is_dangerous(values):
+def _brace_alternatives(t):
+    """`{/,./build}` expands to `/` and `./build`, so a brace list is dangerous
+    when any ALTERNATIVE is (impl panel round 4, sol:medium)."""
+    out, i, n = [], 0, len(t)
+    while i < n:
+        if t[i] == "{":
+            j = t.find("}", i)
+            if j == -1:
+                break
+            inner = t[i + 1:j]
+            if "," in inner:
+                head, tail = t[:i], t[j + 1:]
+                return [head + alt + tail for alt in inner.split(",")]
+            i = j + 1
+            continue
+        i += 1
+    return out
+
+
+def _rm_is_dangerous(values, kinds=None):
     """`rm` recursive+force against a DANGEROUS target, decided on DEQUOTED
     tokens. A relative subdir (`./build`, `node_modules`) is NOT dangerous; `/`,
     `~`, `$HOME`, `*`, `..` or any absolute path is. Round 2 of the impl panel
@@ -488,19 +589,28 @@ def _rm_is_dangerous(values):
     catastrophic command, trivially quoted — walked through every check."""
     if not values or _command_name(values[0]) != "rm":
         return False
+    kinds = kinds or [""] * len(values)
     flags = "".join(t[1:] for t in values if t.startswith("-") and not t.startswith("--"))
     longs = [t for t in values if t.startswith("--")]
     recursive = "r" in flags or "R" in flags or "--recursive" in longs
     force = "f" in flags or "--force" in longs
     if not (recursive and force):
         return False
-    for t in values[1:]:
+    for idx, t in enumerate(values[1:], start=1):
         if t.startswith("-"):
             continue
-        if (t in ("/", "/*", "~", "..") or t.startswith("/") or t.startswith("~")
-                or "$" in t or "`" in t                # a COMPUTED target
-                or "*" in t or t.startswith("..")):
-            return True
+        kind = kinds[idx] if idx < len(kinds) else ""
+        for cand in [t] + _brace_alternatives(t):
+            if cand in ("/", "/*", "..") or cand.startswith("/") \
+                    or cand.startswith(".."):
+                return True                            # a path is a path, quoted or not
+            # `$`/backtick EXPAND inside double quotes but not inside single
+            # quotes; a glob or a tilde expands in neither (impl panel round 4:
+            # `rm -rf 'build*'` and `rm -rf '$cache'` are literal names).
+            if ("$" in cand or "`" in cand) and kind != "'":
+                return True
+            if ("*" in cand or cand.startswith("~")) and not kind:
+                return True
     return False
 
 
@@ -519,14 +629,16 @@ def _segment_checks(seg):
     head = _command_name(values[0])
     if head == "git":
         values = ["git"] + _git_after_globals(values[1:])
-    if _rm_is_dangerous([head or values[0]] + values[1:]):
+    kinds = [t[3] for t in toks]
+    if _rm_is_dangerous([head or values[0]] + values[1:], kinds):
         return ("rm-rf-dangerous-target", "recursive force-delete of a dangerous path")
     if head == "git" and len(values) > 1:
         verb, args = values[1], values[2:]
         short = "".join(a[1:] for a in args
                         if a.startswith("-") and not a.startswith("--"))
-        if verb == "push" and ("--force" in args or "f" in short) \
-                and "--force-with-lease" not in args:
+        # `git push --force --force-with-lease` still force-pushes: the presence
+        # of the safe flag does not cancel the unsafe one (impl panel round 4).
+        if verb == "push" and ("--force" in args or "f" in short):
             return ("git-push-force", "force-push overwrites remote history irreversibly")
         if verb == "reset" and "--hard" in args:
             return ("git-reset-hard", "discards uncommitted work irrecoverably")
@@ -577,21 +689,25 @@ def _unwrap_shell_c(seg):
     toks = _lex(seg.strip())
     if not toks or _command_name(toks[0][2]) not in _SHELLS:
         return None
-    for k in range(1, len(toks)):
+    k = 1
+    while k < len(toks):
         v = toks[k][2]
         if v == "--":
+            k += 1
             continue
-        if v.startswith("-") and len(v) > 1 and not v.startswith("--"):
+        if v.startswith("--"):                         # `--noprofile`, `--login`, …
+            k += 1
+            continue
+        if v.startswith("-") and len(v) > 1:
             if "c" in v[1:]:
                 attached = v[1:].split("c", 1)[1]
                 if attached:
                     return attached
                 return toks[k + 1][2] if k + 1 < len(toks) else None
+            # `-O extglob`, `-o noglob` take a value; other short flags do not
+            # (impl panel round 4: they stopped the scan before `-c` was seen).
+            k += 2 if v[-1] in "Oo" else 1
             continue
-        if v in ("--command",) or v.startswith("--command="):
-            if "=" in v:
-                return v.split("=", 1)[1]
-            return toks[k + 1][2] if k + 1 < len(toks) else None
         break
     return None
 
@@ -719,6 +835,13 @@ def _pipes_downloader_into_shell(text):
                 return True
         if head and _DOWNLOADER.match(head):
             seen_downloader = True
+        else:
+            for payload in payloads:                   # `env -S 'curl …' | …`
+                p = _lex(payload)
+                name = _command_name(p[0][2]) if p else None
+                if name and _DOWNLOADER.match(name):
+                    seen_downloader = True
+                    break
     return False
 
 
@@ -847,6 +970,8 @@ def _herestring_payloads(text):
 # only a stack guard for pathological input (impl panel round 3, sol:high #4 —
 # the previous cap of 3 let `echo $(echo $(echo $(echo $(<destructive>))))` pass).
 _MAX_DEPTH = 64
+_TOO_DEEP = ("block", "unparseable-nesting",
+             "nesting too deep to classify — refusing rather than guessing")
 
 
 def classify_command(command, extra_patterns=None, _depth=0, _argv=False):
@@ -867,7 +992,7 @@ def classify_command(command, extra_patterns=None, _depth=0, _argv=False):
     if not command or not str(command).strip():
         return ("allow", None, None)
     command = str(command)
-    for seg in _split_segments(command):
+    for seg in _split_segments(_strip_comments(command)):
         stripped, executes, payloads = _walk_prefix(seg)
         for payload in payloads:                       # `env -S "<command line>"`
             if payload and _depth < _MAX_DEPTH:
@@ -891,18 +1016,21 @@ def classify_command(command, extra_patterns=None, _depth=0, _argv=False):
     # body or an echo/printf string being written to a file is text about a
     # command, not the command (the documented bound: echoing dangerous text is
     # fine). Segment checks above already ran on the full text.
-    whole_text = _strip_data_regions(command)
-    if _argv:
-        # The input arrived as argv: word splitting, substitution and pipes have
-        # already happened, so `$( … )` inside an element is DATA (impl panel
-        # round 3, opus #2 — it blocked a benign commit message).
-        return ("allow", None, None)
-    if _depth < _MAX_DEPTH:
+    whole_text = _strip_comments(_strip_data_regions(command))
+    # The input arrived as argv: word splitting, substitution and pipes have
+    # already happened, so `$( … )` inside an element is DATA (impl panel round 3,
+    # opus #2 — it blocked a benign commit message). Round 4, four seats: skipping
+    # the SUBSTITUTION scan was right, skipping everything after it was my
+    # regression — it took the DB-client rule and every project `dangerous_commands`
+    # pattern with it, on the one delivery shape this task added fixtures for.
+    if not _argv and _depth < _MAX_DEPTH:
         # On the MASKED text: a quoted heredoc written to a plain file does not
         # expand, so a fixture ABOUT `$(rm -rf /)` stays data (task 073's promise).
         for sub in (_command_substitutions(_strip_quoted_heredoc_bodies(whole_text))
                     + _herestring_payloads(whole_text)):
             if sub.strip():
+                if _depth + 1 >= _MAX_DEPTH:
+                    return _TOO_DEEP                   # fail CLOSED, never silently open
                 v = classify_command(sub, extra_patterns, _depth + 1)
                 if v[0] == "block":
                     return v
