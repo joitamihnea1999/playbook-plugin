@@ -258,10 +258,18 @@ def cmd_work(cmd_args):
             # Task 058: remember the status this close was AUTHORISED on, so the
             # final transaction can refuse if it changed while verify/judges ran.
             from tasks.core import _extract_status as _es058
+            from tasks.core import _gate_counts as _gc058
+            from tasks.core import blocked_digest as _bd058
             try:
+                _entry_text = task_file.read_text(encoding="utf-8", errors="replace")
                 _status_at_entry = _es058(task_file)
+                _blocked_at_entry = _bd058(_entry_text)
+                _chk, _tot = _gc058(_entry_text)
+                _open_gates_at_entry = _tot - _chk
             except Exception:      # noqa: BLE001 — advisory; the transform re-checks anyway
                 _status_at_entry = None
+                _blocked_at_entry = None
+                _open_gates_at_entry = None
             if _live_status_index(_st_lines) is None:
                 print(f"Error: {task_file} has no live `## Status` heading with a "
                       "value line (missing, hidden inside a code fence, or directly "
@@ -668,10 +676,15 @@ def cmd_work(cmd_args):
                 # close's own decision non-stale.
                 if _now_fp:
                     _commit_fp = tree_state_fingerprint(project_path)
-                    if _commit_fp and _commit_fp != _now_fp:
+                    # An UNREADABLE fingerprint at the commit must block too (058
+                    # impl panel r1, codex ×2 + grok): `if _commit_fp and …` let an
+                    # empty result — git broken, a corrupt index — pass as "no
+                    # mismatch", which is the fail-open direction this whole task
+                    # exists to remove.
+                    if _commit_fp != _now_fp:
                         print(f"Blocked: cannot close task {prev_task} — the tree "
                               f"changed while this close was running (tree-state "
-                              f"{_now_fp} → {_commit_fp}); the freshness decision "
+                              f"{_now_fp} → {_commit_fp or 'UNREADABLE'}); the freshness decision "
                               "above was made on the earlier state. Nothing was "
                               "written; re-run `tasks work done`.",
                               file=sys.stderr, flush=True)
@@ -680,7 +693,10 @@ def cmd_work(cmd_args):
                 try:
                     _rewrite(task_file, lambda _txt: compose_close(
                         _txt, receipt_heading="Verification Receipt",
-                        receipt=receipt, expect_status=_status_at_entry))
+                        receipt=receipt, expect_status=_status_at_entry,
+                        expect_blocked=_blocked_at_entry,
+                        expect_risk=risk if risk else None,
+                        expect_open_gates=_open_gates_at_entry))
                 except CloseRaceRefused as _race:
                     print(f"Blocked: cannot close task {prev_task} — {_race} "
                           "Nothing was written; the session pointer is kept.",

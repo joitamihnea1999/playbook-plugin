@@ -203,13 +203,31 @@ SESSION_ID="$(resolve_session_id)"
 SESSION_DIR="$AGENT_DIR/sessions/$SESSION_ID"
 PROVIDER="${PLAYBOOK_PROVIDER:-claude}"
 
-# Append to local chat log with message ID and PID tag
-echo "---" >> "$LOCAL_LOG"
-echo "" >> "$LOCAL_LOG"
-echo "**[$MSG_ID]** [$TIMESTAMP] \`HOST\` ($PROVIDER/$SESSION_ID)" >> "$LOCAL_LOG"
-echo "" >> "$LOCAL_LOG"
-echo "$USER_MESSAGE" >> "$LOCAL_LOG"
-echo "" >> "$LOCAL_LOG"
+# Append to local chat log with message ID and PID tag.
+#
+# Task 058: hold the SAME lock the counter uses across the whole append, not
+# just around the id allocation. `tasks tag` REWRITES this file (tag insertion),
+# and an append that began while that rewrite was in flight was replaced away
+# with it — the prompt was simply gone. With both sides on this lock the two
+# protocols serialize; where `flock` is unavailable (macOS without util-linux)
+# the append is unchanged and `tasks tag` still refuses a stale rewrite rather
+# than losing a message.
+append_message() {
+    echo "---" >> "$LOCAL_LOG"
+    echo "" >> "$LOCAL_LOG"
+    echo "**[$MSG_ID]** [$TIMESTAMP] \`HOST\` ($PROVIDER/$SESSION_ID)" >> "$LOCAL_LOG"
+    echo "" >> "$LOCAL_LOG"
+    echo "$USER_MESSAGE" >> "$LOCAL_LOG"
+    echo "" >> "$LOCAL_LOG"
+}
+if command -v flock &>/dev/null; then
+    (
+        flock -x 201
+        append_message
+    ) 201>"$COUNTER_FILE.lock"
+else
+    append_message
+fi
 
 # Reset tool/write counters for this session (new user prompt = fresh count)
 mkdir -p "$SESSION_DIR"

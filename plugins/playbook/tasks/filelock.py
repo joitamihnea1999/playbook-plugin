@@ -81,18 +81,36 @@ def selected_backend() -> str:
 
 
 def lock_path_for(path) -> Path:
-    """The lock file that guards `path` — a sibling, so a task's records are
-    serialized by their own directory and two different tasks never contend."""
+    """The lock file that guards a task's records: ONE per task DIRECTORY.
+
+    Not per filename (058 impl panel r1, codex-high #5): the close reads
+    judge.md for its evidence while writing task.md, so a per-file lock would let
+    a panel replace the newest verdict between the two. One directory, one lock;
+    two different tasks never contend.
+    """
     p = Path(path)
-    return p.parent / (p.name + LOCK_SUFFIX)
+    base = p if p.is_dir() else p.parent
+    return base / ("task.md" + LOCK_SUFFIX)
+
+
+def _key_for(path) -> str:
+    """The holder-table key. Derived IDENTICALLY here and in `task_lock` (058
+    impl panel r1, opus F1 / sonnet #1: one side resolved the path and the other
+    did not, so on macOS — where a temp dir resolves `/var` → `/private/var` —
+    the lookup always missed and every "the lock was released" assertion in the
+    tests was vacuous)."""
+    lp = lock_path_for(path)
+    try:
+        return str(lp.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return str(lp)
 
 
 def _depth_for(path) -> int:
     """Current re-entrancy depth for `path` in THIS process (tests read it to
     prove the lock was released on every exit path)."""
-    key = str(lock_path_for(path).resolve()) if lock_path_for(path).exists() else str(lock_path_for(path))
     with _STATE_LOCK:
-        held = _HOLDERS.get(key)
+        held = _HOLDERS.get(_key_for(path))
         return held[1] if held else 0
 
 
@@ -143,6 +161,16 @@ def _holder_pid(lock_file: Path) -> str:
 
 
 @contextmanager
+def named_lock(lock_file, *, timeout: float = DEFAULT_TIMEOUT):
+    """`task_lock` on an EXPLICIT lock file — for a resource that already has a
+    lock protocol of its own. The only caller today is `tasks tag`, which must
+    rendezvous on the lock file the shell `chat-log-hook` uses for its counter
+    (`<agent>/chat_log_counter.lock`) rather than on a task directory's lock."""
+    with _lock_on(Path(lock_file), timeout=timeout):
+        yield
+
+
+@contextmanager
 def task_lock(path, *, timeout: float = DEFAULT_TIMEOUT):
     """Serialize the read-transform-write transactions on `path`'s records.
 
@@ -152,13 +180,22 @@ def task_lock(path, *, timeout: float = DEFAULT_TIMEOUT):
     platform with no backend it yields after one loud advisory — the write still
     happens, unserialized, and the operator is told.
     """
+    with _lock_on(lock_path_for(path), timeout=timeout):
+        yield
+
+
+@contextmanager
+def _lock_on(lock_file: Path, *, timeout: float = DEFAULT_TIMEOUT):
+    """The lock itself, on an exact lock-file path."""
     global _ADVISED
-    lock_file = lock_path_for(path)
     try:
         lock_file.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
-    key = str(lock_file)
+    try:
+        key = str(lock_file.resolve())
+    except (OSError, RuntimeError, ValueError):
+        key = str(lock_file)
 
     if _BACKEND == "none":
         if not _ADVISED:
@@ -170,11 +207,19 @@ def task_lock(path, *, timeout: float = DEFAULT_TIMEOUT):
         yield
         return
 
+    me = threading.get_ident()
     with _STATE_LOCK:
         held = _HOLDERS.get(key)
-        if held is not None:                       # already ours: nest, don't re-lock
+        if held is not None and held[2] == me:     # ours, same THREAD: nest
             held[1] += 1
             nested = True
+        elif held is not None:
+            # Another thread in this process holds it. Re-entrancy belongs to the
+            # owner (058 impl panel r1, codex-high #4): a second thread used to
+            # walk straight into the protected region. It must wait like any
+            # other contender — and the OS lock is already held by this process,
+            # so waiting means waiting on the in-process holder.
+            nested = False
         else:
             nested = False
     if nested:
@@ -194,11 +239,13 @@ def task_lock(path, *, timeout: float = DEFAULT_TIMEOUT):
     deadline = time.monotonic() + max(0.0, float(timeout))
     try:
         while True:
-            if _try_lock(fd):
+            with _STATE_LOCK:
+                other_thread_holds = key in _HOLDERS      # a sibling thread owns it
+            if not other_thread_holds and _try_lock(fd):
                 break
             if time.monotonic() >= deadline:
                 raise LockTimeout(
-                    f"another playbook process (pid {_holder_pid(lock_file)}) has held "
+                    f"another playbook holder (pid {_holder_pid(lock_file)}) has held "
                     f"{lock_file.name} for more than {timeout:g}s — it is probably mid-close "
                     f"or mid-panel. Wait for it, or check with `tasks status`.")
             time.sleep(_POLL_SECS)
@@ -212,7 +259,7 @@ def task_lock(path, *, timeout: float = DEFAULT_TIMEOUT):
     except OSError:
         pass                                        # the pid line is a courtesy, not the lock
     with _STATE_LOCK:
-        _HOLDERS[key] = [fd, 1]
+        _HOLDERS[key] = [fd, 1, me]
     try:
         yield
     finally:

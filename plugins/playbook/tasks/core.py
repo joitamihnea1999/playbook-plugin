@@ -2617,11 +2617,11 @@ def stack_judge_round(judge_md: Path, round_text: str,
       double-archive the same overflow and inflate the documented count (F3;
       mirrors `compact.py`'s archive-then-rollback).
 
-    NOTE: like the pre-existing judge.md / receipt writers, this is a plain
-    read-modify-write with no cross-process lock, so two panels stacking the
-    SAME task concurrently can still last-writer-win a round — best-effort under
-    concurrency, tracked as a follow-up that should serialize all of core.py's
-    stackers at once (round-2 panel F4)."""
+    Concurrency (task 058, closing round-2 panel F4): this whole two-file
+    sequence runs under the task's lock, so two panels stacking the SAME task
+    can no longer last-writer-win a round. The protocol itself is unchanged —
+    its archive-then-primary order and rollback ARE the crash contract, which a
+    single-file transaction could not express."""
     # Task 058 (plan panel P8): this is a TWO-FILE protocol (archive then
     # judge.md, with a rollback) and must NOT be squashed into one
     # single-file transaction — its own compensation logic is the
@@ -3776,6 +3776,9 @@ def upsert_task_section(task_file: Path, heading: str, entry: str) -> None:
     _rewrite(p, _t)
 
 
+_UNSET = object()     # "the caller captured no baseline for this check" (task 058)
+
+
 class CloseRaceRefused(RuntimeError):
     """The close's final transaction found the task changed under it (task 058).
 
@@ -3788,25 +3791,72 @@ class CloseRaceRefused(RuntimeError):
     """
 
 
+def blocked_digest(text: str) -> "str | None":
+    """A stable digest of the LIVE `## Blocked` section, or None when there is
+    none (task 058, impl panel r1).
+
+    The close cannot refuse on the section's PRESENCE: `resume_blocked_task`
+    keeps it as history and only stamps `> Resumed`, so a presence check bricked
+    every block→resume→close flow — the whole handoff path (two judges found it
+    independently, one by running the sequence). What a close must refuse is a
+    block that APPEARED or CHANGED since it began, which is what this digest
+    compares."""
+    import hashlib
+    lines = _physical_lines(text)
+    span = _live_section_span(lines, "## Blocked")
+    if span is None:
+        return None
+    body = "\n".join(lines[span[0]:span[1]])
+    return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
+
+
 def compose_close(text: str, *, receipt_heading: str, receipt: str,
-                  expect_status: "str | None" = "in_progress") -> str:
+                  expect_status: "str | None" = "in_progress",
+                  expect_blocked: "str | None" = _UNSET,
+                  expect_risk: "str | None" = None,
+                  expect_open_gates: "int | None" = None) -> str:
     """The close's ONE transform: insert the receipt AND set `done`, on the bytes
     just read, after re-checking what earned the close (task 058, plan panel
-    P1/P10). Raises `CloseRaceRefused` — leaving the file byte-identical — when
-    the task moved underneath: a different live status (someone paused or closed
-    it) or a live `## Blocked` section that was not there when the close began.
+    P1/P10 and impl panel r1). Raises `CloseRaceRefused` — leaving the file
+    byte-identical — when the task moved underneath.
+
+    What is re-checked, and why each: the live STATUS (someone paused or closed
+    it), the `## Blocked` DIGEST against the one captured when the close began
+    (a NEW pause, not the durable history of an old one), the `## Risk` token
+    (an edit during verify would close under a different bar) and the number of
+    OPEN GATES (a gate unchecked during verify means the work is no longer
+    finished). Each comparison is skipped when the caller passes nothing for it,
+    so a caller that never captured a baseline is not forced to invent one.
     """
     lines = _physical_lines(text)
-    if _live_section_span(lines, "## Blocked") is not None:
-        raise CloseRaceRefused(
-            "a `## Blocked` section appeared while this close was running (another "
-            "session paused the task) — refusing to overwrite the pause. Re-read "
-            "task.md, then re-run `tasks work done` if the close is still right.")
     live = _status_from_lines(lines)      # the same reader `_extract_status` uses
     if expect_status is not None and live != expect_status:
         raise CloseRaceRefused(
             f"task status changed to `{live}` while this close was running "
             f"(expected `{expect_status}`) — refusing to overwrite it.")
+    if expect_blocked is not _UNSET:
+        now_blocked = blocked_digest(text)
+        if now_blocked != expect_blocked:
+            raise CloseRaceRefused(
+                "the `## Blocked` section changed while this close was running "
+                "(another session paused the task) — refusing to overwrite the "
+                "pause. Re-read task.md, then re-run `tasks work done` if the "
+                "close is still right.")
+    if expect_risk is not None:
+        now_risk = _risk_from_lines(text.splitlines())
+        if now_risk != expect_risk:
+            raise CloseRaceRefused(
+                f"`## Risk` changed from `{expect_risk}` to `{now_risk}` while this "
+                "close was running — the close was authorised under the earlier "
+                "classification; re-run `tasks work done`.")
+    if expect_open_gates is not None:
+        _checked, _total = _gate_counts(text)      # (checked, total)
+        _open = _total - _checked
+        if _open != expect_open_gates:
+            raise CloseRaceRefused(
+                f"the open-gate count changed ({expect_open_gates} → {_open}) while "
+                "this close was running — a gate was unchecked or added, so the "
+                "work is no longer the work that earned this close.")
     with_receipt = _compose_upsert(text, f"## {receipt_heading}", receipt)
     out = _physical_lines(with_receipt, keepends=True)
     pair = _live_status_pair(out)

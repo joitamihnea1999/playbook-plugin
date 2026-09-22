@@ -467,9 +467,9 @@ def cmd_tag(cmd_args):
         #      rather than ignore each other;
         #   2. a compare-and-swap on the CONTENT — if the log changed since the
         #      buffer these tags were computed from, write NOTHING and say so.
-        from tasks.filelock import task_lock
-        counter = resolve_agent_dir(project_path) / "chat_log_counter"
-        with task_lock(counter):
+        from tasks.filelock import named_lock
+        counter_lock = resolve_agent_dir(project_path) / "chat_log_counter.lock"
+        with named_lock(counter_lock):
             if chat_log.read_text(encoding="utf-8", errors="replace") != _tag_source:
                 print("chat_log.md changed while tags were being computed (the "
                       "chat-log hook appended a message) — nothing was written, "

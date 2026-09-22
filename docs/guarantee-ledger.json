@@ -11050,7 +11050,7 @@
         {
           "type": "executable integration",
           "path": "tests/test_task_lock.py",
-          "reference": "CloseRefusesARaceItWouldOverwrite.test_end_to_end_the_cli_refuses_and_keeps_the_pause",
+          "reference": "CloseRefusesARaceItWouldOverwrite.test_end_to_end_a_pause_DURING_the_close_is_refused",
           "boundary": "subprocess",
           "negative_control": {
             "path": "tests/test_task_lock.py",
@@ -11160,13 +11160,69 @@
             "reference": "LockFileIsNotTamper.test_the_seeded_gitignore_covers_it"
           },
           "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_task_lock.py",
+          "reference": "ResumedTaskCanStillClose.test_end_to_end_a_resumed_task_closes_through_the_cli",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "ResumedTaskCanStillClose.test_a_pause_that_APPEARED_during_the_close_still_refuses"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "RiskAndGatesAreRecheckedAtCommit.test_a_risk_edited_during_the_close_refuses",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "RiskAndGatesAreRecheckedAtCommit.test_an_unchanged_risk_commits"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "RiskAndGatesAreRecheckedAtCommit.test_a_gate_unchecked_during_the_close_refuses",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "RiskAndGatesAreRecheckedAtCommit.test_unchanged_gates_commit"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "LockIdentity.test_another_THREAD_waits_rather_than_walking_in",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "LockIdentity.test_depth_uses_the_same_key_as_the_holder"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_task_lock.py",
+          "reference": "JudgeRoundsSurviveConcurrentPanels.test_two_processes_stacking_rounds_lose_none",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "LockIdentity.test_one_lock_per_task_DIRECTORY"
+          },
+          "limitations": []
         }
       ],
       "missing_evidence_or_limitation": [
         "The lock is ADVISORY: a process that writes task.md without the primitive is not stopped. The structural test `NoUnapprovedDirectWriters` fails the build when a new unapproved writer appears in the package, but nothing constrains a third-party editor or a hand-run script.",
         "Scope is one task DIRECTORY on one machine's filesystem. Behaviour on a network filesystem (NFS/SMB) is whatever that filesystem's flock semantics are, and nothing coordinates two machines.",
         "The whole-tree freshness TOCTOU stays detection-only: a task-directory lock cannot serialize edits to arbitrary source files during a multi-minute judge call. What v1.5.45 adds is a compare-and-swap of the close's OWN freshness decision at the commit.",
-        "The session pointer (`sessions/<sid>/current_state`) is a different resource and is still written unlocked; the destructive-command guard handles that by re-reading the pointer rather than locking."
+        "The session pointer (`sessions/<sid>/current_state`) is a different resource and is still written unlocked; the destructive-command guard handles that by re-reading the pointer rather than locking.",
+        "v1.5.45 (impl panel r1): where `flock` is unavailable (a macOS without util-linux) the chat-log hook's append is unserialized as before; `tasks tag` then still refuses a stale rewrite rather than losing a prompt, which is the safe direction but not mutual exclusion."
       ],
       "semantic_protocol": null,
       "violation_reproduction": null,
