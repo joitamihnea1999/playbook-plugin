@@ -2407,6 +2407,12 @@ def tail_cert_delta(project_path: Path, snapshot: "dict | None",
     return (True, sorted(all_behavioral), sorted(all_non))
 
 
+# Paths a records-only commit may touch (task 085 round 3, U4): a task's own
+# record directory, the session pointers, the enforcement journal, the chat log.
+_RECORD_PATH = re.compile(
+    r"(^|/)\.agent/(?:[^/]+/)?(?:tasks|sessions|journal)/|(^|/)\.agent/(?:[^/]+/)?chat_log\.md$")
+
+
 def records_only_delta(project_path: Path, snapshot: "dict | None",
                        round_tree_fp: str) -> bool:
     """True when a STALE verdict is explained ENTIRELY by outer-HEAD commits that
@@ -2439,6 +2445,17 @@ def records_only_delta(project_path: Path, snapshot: "dict | None",
         diff = subprocess.run(["git", "diff", "--quiet", f0, "HEAD", "--", ".", *exclude],
                               cwd=project_path, capture_output=True, timeout=60)
         if diff.returncode != 0:          # 1 = a non-excluded path changed; >1 = error
+            return False
+        # Round 3 (U4): only TASK RECORDS may make a commit "records-only" —
+        # `.agent/config.json` (the verify contract) and `models.json` are
+        # fingerprint-excluded too, but a committed policy change stays STALE.
+        names = subprocess.run(["git", "diff", "--name-only", "-z", f0, "HEAD"],
+                               cwd=project_path, capture_output=True, text=True,
+                               timeout=60)
+        if names.returncode != 0:
+            return False
+        changed = [n for n in names.stdout.split("\0") if n]
+        if not changed or not all(_RECORD_PATH.search(n) for n in changed):
             return False
         return tree_state_fingerprint(Path(project_path), outer_head_override=f0) == round_tree_fp
     except Exception:

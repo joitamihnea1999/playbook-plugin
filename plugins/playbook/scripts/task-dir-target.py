@@ -37,6 +37,12 @@ import shlex
 import sys
 
 _TASK_DIR = re.compile(r"\.agent(/[^/]+)?/tasks(/|$)")
+# case-folded twin: `.AGENT/TASKS` is the live tree on a case-insensitive disk
+_TASK_DIR_ANYCASE = re.compile(_TASK_DIR.pattern, re.I)
+# a word the shell still rewrites at run time: a variable, a backtick, or a glob
+# (kept strict as in round 1, although a glob cannot create a new path)
+_UNRESOLVED = re.compile(r"\$[A-Za-z_{(0-9]|`|[?*\[]")
+_NAME_HINT = re.compile(r"\.ag|tasks", re.I)
 _MSYS_DRIVE = re.compile(r"^/([A-Za-z])(/|$)")
 _WIN_DRIVE = re.compile(r"^[A-Za-z]:/")
 _SHELL_EXPANDS = set("$`*?[{")
@@ -236,7 +242,19 @@ def names_a_task_dir(command: str) -> bool:
     sp = _spellings(command)
     if sp is None:
         return True
-    return any(".ag" in s and "tasks" in s for s in sp)
+    # Round 3 (U1, U7): a WORD of some spelling must be a task-dir path — the
+    # real pattern after `..`/`//` collapse, case-folded (a case-insensitive disk
+    # maps `.AGENT/TASKS` onto the live tree). Two loose substrings blocked
+    # `.agentic/tasks` and `.agent-stuff/my-tasks`.
+    if any(_TASK_DIR_ANYCASE.search(_collapsed(w)) for s in sp for w in s.split()):
+        return True
+    # Round 3 (U2): `$` was stripped above, so a variable can bridge the name
+    # (`.$D/tasks`, `.agent/$T`). A word holding an unresolved variable or a
+    # backtick that also SHOWS part of the name is judged strictly (blocks);
+    # one with no visible hint (`"$D/build"`, `$A/$B`) stays allowed — the
+    # owner's call on unknown variables (2026-09-23).
+    decoded = _decode_ansi_c(command) or command
+    return any(_UNRESOLVED.search(w) and _NAME_HINT.search(w) for w in decoded.split())
 
 
 def may_be_inside(command: str, project: str) -> bool:
@@ -260,7 +278,7 @@ def may_be_inside(command: str, project: str) -> bool:
         return True
     if any(set(t) <= _OPERATORS for t in tokens):
         return True
-    targets = [t for t in tokens if _TASK_DIR.search(_collapsed(t))]
+    targets = [t for t in tokens if _TASK_DIR_ANYCASE.search(_collapsed(t))]
     if not targets:
         # The hook's trigger matched text shlex does not return as one token
         # (e.g. spread across quoting) — cannot judge, keep the guard.

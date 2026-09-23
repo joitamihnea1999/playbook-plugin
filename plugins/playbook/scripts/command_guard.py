@@ -335,7 +335,9 @@ _WRAPPERS = {
 # rules all anchor on the bare word. So: one lexer, one naming function, used
 # everywhere a command position is decided.
 
-_ANSI_C = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|[0-7]{1,3}|u[0-9A-Fa-f]{1,4}|.)")
+# `\UXXXXXXXX` (up to 8 hex) is bash too — task 085 round 3 (U5): without it
+# `$'\U00000072'm -rf /` read as `U00000072m` and was allowed.
+_ANSI_C = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|[0-7]{1,3}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|.)")
 _ANSI_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b",
                 "f": "\f", "v": "\v", "e": "\x1b", "\\": "\\", "'": "'", '"': '"'}
 
@@ -346,7 +348,7 @@ def _ansi_c_decode(body):
         try:
             if tok[0] == "x":
                 return chr(int(tok[1:], 16))
-            if tok[0] == "u":
+            if tok[0] in "uU":
                 return chr(int(tok[1:], 16))
             if tok[0] in "01234567":
                 return chr(int(tok, 8))
@@ -596,7 +598,9 @@ def _walk_prefix(seg):
                 if takes_next:
                     i += 1
                 continue
-            if spec["split_positional"] and lexed[i][3]:   # `watch '<cmd>'`
+            if spec["split_positional"]:               # `watch <cmd words>`
+                # joined whether or not the first word is quoted (task 085
+                # round 3, U6: `watch echo ';' …` was walked as a plain echo).
                 # The tool JOINS every command word with spaces and hands the
                 # line to a shell, so the payload is all of them, not the first
                 # (task 085 round 2, T1: `parallel 'rm' '-rf' '/' ::: 1`).

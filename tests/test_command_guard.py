@@ -1356,6 +1356,35 @@ class TemplateWordsAreJoined(unittest.TestCase):
             self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
 
 
+class TemplateWordsJoinedWhateverTheQuoting(unittest.TestCase):
+    """Task 085 round 3, U6 (impl panel round 2, sol-high #3 / sol-medium #1):
+    round 2 joined the template only when its FIRST word was quoted; the tools
+    join every word either way. Allowed by 1.5.45 and by round 2."""
+
+    def test_unquoted_template_heads_block(self):
+        for cmd in ("watch echo '; rm -rf /'", "watch echo ';' rm -rf /",
+                    "parallel echo '; rm -rf /' ::: 1"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_their_benign_twins(self):
+        for cmd in ("watch -n 5 ls -la", "watch echo 'rm -rf / is dangerous'",
+                    "parallel -j4 make ::: a b", "parallel gzip -9 ::: a.log"):
+            self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
+
+
+class AnsiCLongUnicodeEscape(unittest.TestCase):
+    """Task 085 round 3, U5 (impl panel round 2, sol-high #2): bash's eight-digit
+    `\\UXXXXXXXX` escape was not decoded, so a command name spelled with it was
+    not recognised. Allowed by 1.5.45 and by round 2."""
+
+    def test_long_unicode_escape_is_decoded(self):
+        for cmd in ("$'\\U00000072'm -rf /", "$'\\U72\\U6d' -rf /"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_its_benign_twin(self):
+        self.assertEqual(cg.classify_command("echo $'\\U00000041'")[0], "allow")
+
+
 class SuShellArgumentsAfterTheUser(unittest.TestCase):
     """Task 085 round 2, T3 (impl panel sol-medium #3): after `--`, `su` (and
     `runuser` without `-u`) takes the user and passes every remaining argument
@@ -1387,7 +1416,8 @@ class TheArchitecturalBound(unittest.TestCase):
     def test_a_computed_command_name_is_not_resolvable(self):
         for cmd in (f"alias x='{self.D}'; x",          # needs the alias table
                     "${X:-rm} -rf /",                   # needs the variable
-                    "$(echo rm) -rf /"):                # needs to run the inner command
+                    "$(echo rm) -rf /",                 # needs to run the inner command
+                    "/bin/r? -rf /"):                   # needs the filesystem (task 085 U8)
             self.assertEqual(
                 cg.classify_command(cmd)[0], "allow",
                 "if this now blocks, the bound moved — update the ledger, do not "

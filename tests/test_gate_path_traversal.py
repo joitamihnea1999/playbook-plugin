@@ -268,6 +268,38 @@ class ManualTaskDirGuard(unittest.TestCase):
             r = self._run(cmd)
             self.assertEqual(r.returncode, 0, f"ordinary command refused: {cmd!r}: {r.stderr}")
 
+    def test_round3_spellings_are_blocked(self):
+        # Task 085 round 3 (impl panel round 2): each makes bash create a real
+        # task dir (measured in scratchpad triage_r2.sh) or, for `.AGENT/TASKS`,
+        # lands in the real tree on a case-insensitive disk (U7).
+        mk = self.MK
+        for cmd in ("D=agent; " + mk + " -p .$D/tasks/999-x",            # U2
+                    "T=tasks; " + mk + " -p .agent/$T/999-x",           # U2
+                    "mk{d,z}ir -p .agent/tasks/999-x",                  # U3
+                    "m{k,foo}dir -p .agent/tasks/999-x",                # U3
+                    f"{mk} -p .agent/ta$'\\U00000073'ks/999-x",         # U5
+                    f"{mk} -p .AGENT/TASKS/999-x"):                     # U7
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 2, f"task dir spelling allowed: {cmd!r}")
+
+    def test_round3_lookalikes_are_allowed(self):
+        # U1: round 1's two-substring test blocked names that merely contain
+        # `.ag…` and `tasks` (1.5.45 allowed the first and third).
+        mk = self.MK
+        for cmd in (f"{mk} -p .agentic/tasks", f"{mk} -p .agent-stuff/my-tasks",
+                    f"{mk} -p .agent/tasks_archive", f'{mk} -p "$D/build"',
+                    "echo {a,b}", "jq '{x: 1}' f.json"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 0, f"ordinary command refused: {cmd!r}: {r.stderr}")
+
+    def test_the_bound_a_globbed_command_name(self):
+        # U8, a documented bound (same class as command_guard's
+        # TheArchitecturalBound): a glob in the command NAME only resolves
+        # against the filesystem at run time. If this starts blocking, the
+        # bound moved — update docs/architecture.md, do not delete this test.
+        r = self._run("/bin/mk?ir -p .agent/tasks/999-x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_a_task_dir_named_on_an_earlier_line_is_blocked(self):
         # Task 085 G2, measured after the fix: the old per-line trigger never saw a
         # path assigned on one line and created on the next (allowed by 1.5.45).

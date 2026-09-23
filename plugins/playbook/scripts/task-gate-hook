@@ -480,8 +480,10 @@ MSG
     # Round 2 (T2): the word is looked for with quotes and backslashes removed
     # (`m\kdir`, `m'kdir'`), and any `$'…'` also triggers — only the helper can
     # decode it (`$'\x6d'kdir`); it allows a command that runs no mkdir.
+    # Round 3 (U3): any `{` too — a brace can spell the command word itself
+    # (`mk{d,z}ir`), which only the helper's brace expansion can see.
     if { printf '%s' "$CMD" | tr -d "'\"\\\\" | grep -qE '(^|[^[:alnum:]_])mkdir([^[:alnum:]_]|$)' \
-         || printf '%s' "$CMD" | grep -qF "\$'"; } \
+         || printf '%s' "$CMD" | grep -qF -e "\$'" -e "{"; } \
        && ! printf '%s' "$CMD" | PB_PROJECT="$PROJECT_DIR" python3 "$HOOK_DIR/task-dir-target.py" 2>/dev/null; then
         cat >&2 <<'MSG'
 BLOCKED: Don't create task directories manually.

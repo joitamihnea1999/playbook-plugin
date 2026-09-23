@@ -30,21 +30,29 @@ plus the tool defect found at its close. Each fix was written against a test tha
   - *`su` / `runuser` / `parallel` / `watch`.* `su` and `runuser` now read `-s`/`--shell` and
     `-w`/`--whitelist-environment` as options with a value and a bare `-` as the login flag, and
     after `su -- USER` a `-c` goes to the user's shell and is classified. `parallel` and `watch`
-    join every word of their command template, as the tools themselves do (`parallel 'rm' '-rf'
-    '/' ::: 1`, `watch 'rm' '-rf' '/'`). 9 of the 11 first-round test commands were allowed by
+    join every word of their command template, quoted or not, as the tools themselves do
+    (`parallel 'rm' '-rf' '/' ::: 1`, `watch echo ';' rm -rf /`). ANSI-C quoting now also decodes
+    bash's eight-digit `\U` escape. 9 of the 11 first-round test commands were allowed by
     the 1.5.45 guard. Still not covered (documented): a target that only arrives at run time,
     on stdin to `xargs` or through `:::` into a quoted `parallel` template.
   - *Quoted task-directory names.* The "don't create task directories manually" rule matched
     the raw command text, so a quoted, backslashed, `$'…'` or split spelling of the directory
     name, a brace expansion (`ta{sk,zz}s`, `ta{r..t}ks`) or a respelled command (`m\kdir`,
     `m'kdir'`) got through. It now decodes ANSI-C quoting, removes quotes and backslashes and
-    expands braces before judging, for the command word and the path alike.
+    expands braces before judging, for the command word and the path alike, and matches the real
+    task-directory pattern case-insensitively (so `.agentic/tasks` is no longer refused, and
+    `.AGENT/TASKS` is refused, which matters on case-insensitive disks). A word that still holds
+    a variable or a glob is judged strictly only when it also shows part of the name.
+    Still not covered, and documented: a globbed or computed command name, a path built entirely
+    from variables, and other ways of creating a directory (`install -d`, `cp -r`, an interpreter);
+    the guard catches mistakes, it is not a boundary.
 - **Committing the task record no longer makes its panel stale** (task 085). The fingerprint
   ignores `.agent/`, but a commit moves the outer `HEAD`, so a task record committed after its
   panel read STALE with nothing to review (task 083's close needed `--stale-panel-ok`). The close
   now reads that case as FRESH, with `records-only delta` in the receipt, when the commits touch
-  only excluded paths and the fingerprint recomputed at the panel's commit equals the stamp. Any
-  other difference is still STALE.
+  only task records (`.agent[/<lane>]/tasks/`, session pointers, the journal, the chat log) and the
+  fingerprint recomputed at the panel's commit equals the stamp. A committed change to
+  `.agent/config.json` or `models.json`, or any other difference, is still STALE.
 
 ## [1.5.45] — 2026-09-23
 

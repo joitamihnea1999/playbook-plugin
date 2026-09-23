@@ -1228,8 +1228,24 @@ class RecordsOnlyDelta(unittest.TestCase):
     _receipt = ClosePathTailCert._receipt
 
     def _commit_records(self, d, *extra):
-        _git(d, "add", "-A", ".agent", *extra)
+        # the realistic shape: the task's own record directory (round 3, U4)
+        _git(d, "add", "-A", ".agent/tasks", *extra)
         _git(d, "commit", "-qm", "record")
+
+    def test_a_committed_policy_file_still_blocks(self):
+        # Task 085 round 3, U4 (impl panel round 2, sol-high #1): `.agent/` is
+        # excluded from the fingerprint, but only TASK RECORDS may make a commit
+        # "records-only" — a committed `.agent/config.json` (the verify
+        # contract) or `models.json` change must not read FRESH.
+        d, td, env = self._setup()
+        cfg = d / ".agent" / "config.json"
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        data["verify"] = {"_always": ["true"]}
+        cfg.write_text(json.dumps(data), encoding="utf-8")
+        self._commit_records(d, ".agent/config.json")
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        self.assertIn("pending", self._receipt(td))
 
     def test_a_records_only_commit_reads_fresh(self):
         d, td, env = self._setup()
