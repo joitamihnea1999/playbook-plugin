@@ -6,7 +6,7 @@ this only after its own trigger regex has matched, to decide whether the match
 is a real task directory or a fixture elsewhere (task 080, S1d — the 073 flag
 C15: `<tmp>/.agent/tasks/001-x` in a temp dir was refused).
 
-Usage:   PB_CMD=<command> PB_PROJECT=<project root> python3 task-dir-target.py
+Usage:   printf '%s' <command> | PB_PROJECT=<project root> python3 task-dir-target.py
 Exit 0   every `.agent[/<lane>]/tasks/` token is an absolute path outside the project
 Exit 1   some token is, or may be, inside it — the hook blocks
 Other    (a crash) — the hook blocks too; this script can only NARROW the guard
@@ -140,7 +140,11 @@ def may_be_inside(command: str, project: str) -> bool:
 
 
 def main() -> int:
-    command = os.environ.get("PB_CMD", "")
+    # The command arrives on STDIN, never in the environment: Git Bash (MSYS)
+    # rewrites an env value that starts with `/` into a Windows path before a
+    # native python sees it (`/bin/mkdir …` became `C:/Program Files/…`) — CI
+    # windows lane, task 080. PB_PROJECT may be rewritten; _canon accepts both.
+    command = sys.stdin.read()
     project = os.environ.get("PB_PROJECT", "")
     if not command or not project:
         return 1

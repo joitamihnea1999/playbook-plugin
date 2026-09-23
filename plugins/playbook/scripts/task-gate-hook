@@ -475,7 +475,7 @@ MSG
     # `.agent//tasks//` slipped past `\.agent(/[^/]+)?/tasks/`) — a wider
     # trigger can only block more; the helper does the narrowing.
     if echo "$CMD" | grep -qE 'mkdir.*\.agent/.*tasks' \
-       && ! PB_CMD="$CMD" PB_PROJECT="$PROJECT_DIR" python3 "$HOOK_DIR/task-dir-target.py" 2>/dev/null; then
+       && ! printf '%s' "$CMD" | PB_PROJECT="$PROJECT_DIR" python3 "$HOOK_DIR/task-dir-target.py" 2>/dev/null; then
         cat >&2 <<'MSG'
 BLOCKED: Don't create task directories manually.
 

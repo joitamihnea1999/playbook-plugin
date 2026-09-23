@@ -342,6 +342,22 @@ class ManualTaskDirHelperPortability(unittest.TestCase):
             self.assertTrue(m._lexically_inside("C:/Proj/.agent/tasks/1", "/c/proj"))
             self.assertFalse(m._lexically_inside("D:/fixture/.agent/tasks/1", "/c/proj"))
 
+    def test_command_is_read_from_stdin_not_the_environment(self):
+        # CI windows lane (task 080): Git Bash rewrites an env value starting
+        # with `/` into a Windows path, so `/bin/mkdir …` reached python as
+        # `C:/Program Files/Git/usr/bin/mkdir …` and was refused. Simulated here:
+        # a mangled PB_CMD in the environment, the real command on stdin.
+        import sys as _sys
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "proj"
+            (proj / ".agent" / "tasks").mkdir(parents=True)
+            real = f"/bin/{'mk' + 'dir'} -p {(Path(tmp) / 'fixture').as_posix()}/.agent/tasks/001-x"
+            env = dict(os.environ, PB_PROJECT=proj.as_posix(),
+                       PB_CMD="C:/Program Files/Git/usr/bin/" + real[len("/bin/"):])
+            r = subprocess.run([_sys.executable, str(HOOK.parent / "task-dir-target.py")],
+                               input=real, env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, f"stdin command not judged: {r.stderr}")
+
     def test_nt_msys_rooted_token_may_be_inside(self):
         # `/tmp/...` under Git Bash is an MSYS mount Python cannot resolve.
         from unittest import mock
