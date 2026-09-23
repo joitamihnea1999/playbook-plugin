@@ -397,6 +397,12 @@ def generate_retro_task(
     lines.append("pending")
     lines.append("")
 
+    # Risk — S1c (task 080): offered like every other template, so the retro's
+    # close is held to the strict bar until its author classifies it.
+    from tasks.template import risk
+    lines.append(risk())
+    lines.append("")
+
     # Structural summary
     lines.append("## Structural Summary")
     lines.append("")

@@ -417,20 +417,46 @@ def current_state_file(project_root: Path, session_id: str) -> Path:
     return resolve_agent_dir(project_root) / "sessions" / session_id / "current_state"
 
 
-def _task_status_is_done(task_file: Path) -> bool:
-    """True iff the task.md's ## Status (last one wins, matching tasks.core
-    `_extract_status`) STARTS WITH `done` — the same rule as the CLI authority
-    tasks.core `_is_done`, so "done (2026-…)" counts. An unreadable/absent
-    status is NOT done — F3 must never turn a parse failure into a new block."""
+def _task_status(task_file: Path) -> str:
+    """The task.md's ## Status value (last one wins, matching tasks.core
+    `_extract_status`); "" when unreadable or absent."""
     try:
         lines = task_file.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return False
+        return ""
     status = ""
     for i, line in enumerate(lines):
         if line.strip() == "## Status" and i + 1 < len(lines):
             status = lines[i + 1].strip()
-    return status.startswith("done")
+    return status
+
+
+def _task_status_is_done(task_file: Path) -> bool:
+    """True iff the ## Status STARTS WITH `done` — the same rule as the CLI
+    authority tasks.core `_is_done`, so "done (2026-…)" counts. An
+    unreadable/absent status is NOT done — F3 must never turn a parse failure
+    into a new block."""
+    return _task_status(task_file).startswith("done")
+
+
+def blocked_active_task(project_root: Path, session_id: str) -> str | None:
+    """The pointed task's number when its ## Status is exactly `blocked`
+    (tasks.core `_is_blocked`), else None. S1a (task 080), parity with the
+    bash gate: a blocked task is paused on the owner's decision, so it does not
+    authorize code edits. Deliberately separate from `has_active_task`, which
+    also drives the Codex Stop decision — a blocked task's stop is the
+    active-task path's business, not the no-task code-change baseline's."""
+    state_file = current_state_file(project_root, session_id)
+    try:
+        task_num = state_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not task_num:
+        return None
+    task_file = _find_task_file(project_root, task_num)
+    if task_file is None or _task_status(task_file) != "blocked":
+        return None
+    return task_num
 
 
 def has_active_task(project_root: Path, session_id: str) -> bool:
@@ -481,7 +507,8 @@ def apply_patch_pre_decision(
         could be parsed, deny with "could not parse" reason (finding 4) — a
         new/malformed patch shape must not slip through unblocked.
     """
-    if has_active_task(project_root, session_id):
+    blocked = blocked_active_task(project_root, session_id)
+    if blocked is None and has_active_task(project_root, session_id):
         return None
 
     # Since this hook is matcher-scoped to ^apply_patch$, getting here means
@@ -533,6 +560,15 @@ def apply_patch_pre_decision(
         return None
 
     listed = ", ".join(code_paths)
+    if blocked is not None:
+        return {
+            "decision": "block",
+            "reason": (
+                f"task {blocked} is blocked (paused on a decision that is not the "
+                f"agent's) — resume it with `.claude/bin/tasks work {blocked}` "
+                f"before editing code: {listed}"
+            ),
+        }
     return {
         "decision": "block",
         "reason": (

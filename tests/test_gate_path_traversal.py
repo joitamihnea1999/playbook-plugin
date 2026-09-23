@@ -179,5 +179,73 @@ class GatePathTraversal(unittest.TestCase):
                          f"CR doc path was wrongly blocked: {r.stderr}")
 
 
+class ManualTaskDirGuard(unittest.TestCase):
+    """PLAN S1d (task 073 flag C15, measured live by task 079 and again by task
+    080): "don't create task directories manually" matched the WHOLE command
+    text, so a temp-dir fixture outside the project (`<tmp>/.agent/tasks/001-x`)
+    was refused. Only a target that is — or may be — under the project root
+    is a task dir. The literal `mkdir` is assembled at runtime so this file's
+    own text never trips the guard it tests."""
+
+    MK = "mk" + "dir"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Forward-slash spellings: POSIX shell quoting eats backslashes, so a
+        # Windows `C:\\…` literal is not what anyone types into Git Bash.
+        self.base = Path(self._tmp.name)
+        (self.base / "proj" / ".agent" / "tasks").mkdir(parents=True)
+        self.project = (self.base / "proj").as_posix()
+        self.outside = (self.base / "fixture").as_posix()   # a sibling temp dir, NOT under proj
+
+    def _run(self, command):
+        env = dict(os.environ, PLAYBOOK_SESSION_ID="pid-mkdir-test")
+        env.pop("BASH_ENV", None)
+        return subprocess.run(
+            [bash_or_skip(), str(HOOK)], cwd=self.base / "proj", env=env, text=True,
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+            capture_output=True)
+
+    def test_temp_dir_agent_tasks_is_not_a_task_dir(self):
+        for cmd in (f"{self.MK} -p {self.outside}/.agent/tasks/001-x",
+                    f"{self.MK} -p {self.outside}/.agent/tasks",
+                    f"{self.MK} -p {self.outside}/.agent/alice/tasks/001-x",
+                    f"{self.MK} -p '{self.outside}/.agent/tasks/001-x'",
+                    f"cd /tmp && {self.MK} -p {self.outside}/.agent/tasks/001-x/sub"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 0, f"temp fixture refused: {cmd!r}: {r.stderr}")
+
+    def test_project_agent_tasks_is_still_blocked(self):
+        mk = self.MK
+        for cmd in (f"{mk} -p {self.project}/.agent/tasks/001-x",
+                    f"{mk} -p .agent/tasks/001-x",
+                    f"{mk} -p ./.agent/tasks/001-x",
+                    f"{mk} -p {self.project}/.agent/alice/tasks/001-x",
+                    f"{mk} -p ~/.agent/tasks/001-x",
+                    f"{mk} -p $HOME/.agent/tasks/001-x",
+                    f"{mk} -p \"$PWD\"/.agent/tasks/001-x",
+                    f"{mk} -p {self.outside}/../proj/.agent/tasks/001-x",
+                    f"{mk} -p {self.outside}/.agent/tasks/001-x && {mk} -p .agent/tasks/002-y",
+                    f"{mk} -p {self.outside}/.agent/tasks/001-x {self.project}/.agent/tasks/002-y"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 2, f"in-project task dir allowed: {cmd!r}")
+            self.assertIn("task directories manually", r.stderr)
+
+    def test_symlink_into_project_is_still_blocked(self):
+        # A literal absolute path OUTSIDE the project that resolves INTO it is
+        # still a task dir — inside-ness is judged through the filesystem too.
+        link = self.base / "link-to-proj"
+        try:
+            os.symlink(self.base / "proj", link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable (unprivileged Windows)")
+        r = self._run(f"{self.MK} -p {link.as_posix()}/.agent/tasks/001-x")
+        self.assertEqual(r.returncode, 2, f"symlink into the project allowed: {r.stderr}")
+        # Control: the helper still allows a real outside path in the same run shape.
+        r = self._run(f"{self.MK} -p {self.outside}/.agent/tasks/001-x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

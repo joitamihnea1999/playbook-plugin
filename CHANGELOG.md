@@ -6,6 +6,29 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- **Four live-enforcement holes closed** (task 080 = PLAN.md step S1, from task 079's blind
+  audit; each fix red-first against a pinned test name).
+  - *S1a — the edit gate now refuses code edits while the active task is `blocked`.* The CLI
+    already treated a blocked task as not active, but the gate refused only a `done` status, so
+    code edits went through while the task waited on the owner's decision. The refusal names
+    `tasks work <N>` as the resume. The Codex apply_patch gate got the same rule.
+  - *S1b — `tasks handoff` rejects arguments.* It never read them, so a typo or a guessed flag
+    (`tasks handoff --bogus`) wrote a `## Handoff` section and blocked the active task. Anything
+    other than `-h`/`--help` now prints usage on stderr, exits 1 and writes nothing.
+  - *S1c — the retro scaffold carries `## Risk`.* Without the heading the close read the retro as a
+    pre-1.5.0 task and took the lenient legacy path — a fail-open, not the block it was assumed to
+    be (stub 065). It now starts `unclassified`, so the close is held to the strict bar until the
+    retro's author classifies it.
+  - *S1d — "don't create task directories manually" no longer fires outside the project.* The
+    guard matched the whole command text, so a test fixture such as `<tmp>/.agent/tasks/001-x`
+    was refused (it refused task 079's and task 080's own scratch fixtures). A new helper
+    (`scripts/task-dir-target.py`) lets the command through only when every such target is a
+    literal absolute path outside the project, judged by path and through the filesystem
+    (symlinks, case-insensitive disks); a relative path, `~`, a variable, or anything it cannot
+    parse is still refused, as is any error in the helper.
+  Ledger: `PB-TASK-ACTIVATE`, `PB-TASK-BLOCKED` and `PB-CLI-RETRO` gain the new proofs and
+  statement clauses; no status moved.
+
 - **Task records are written in transactions, not just atomic writes** (task 058; parked
   T006/T008/T020/T024/T030/T032/T033/T035/T036/T040/T043; plan panel PASS 5/5 whose 24 findings
   corrected the DESIGN before a line was written). Measured first: the real close shape — read

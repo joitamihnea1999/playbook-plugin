@@ -140,3 +140,34 @@ class GauntletRetroType(unittest.TestCase):
         quick = "# 001 - First\n\n## Status\npending\n\n## Work\n- [ ] Do the work\n"
         self.assertEqual(_detect_type(light), "light")
         self.assertEqual(_detect_type(quick), "quick")
+
+
+class ScaffoldRisk(unittest.TestCase):
+    """PLAN S1c (task 079 finding P1-05): the retro scaffold emitted `## Status`
+    and no `## Risk`, so `has_risk_section` read the record as a pre-1.5.0 task
+    and `close_decision` took the LENIENT legacy path — a fail-open, not the
+    block stub 065 assumed. The scaffold is created through the real CLI."""
+
+    def test_fresh_scaffold_has_risk_section(self):
+        import subprocess
+        from tasks.core import extract_risk, has_risk_section
+        proj = Path(tempfile.mkdtemp())
+        td = proj / ".agent" / "tasks" / "001-first"
+        td.mkdir(parents=True)
+        (td / "task.md").write_text(
+            "# 001 - First\n\n## Status\ndone (2026-09-01)\n\n## Risk\nreversible\n\n"
+            "## Work\n- [x] Do the work — did it\n", encoding="utf-8")
+        env = dict(os.environ, PYTHONPATH=str(_PLUGIN), PLAYBOOK_SESSION_ID="pid-retro-risk")
+        r = subprocess.run([sys.executable, "-m", "tasks.cli", "retro"], cwd=proj, env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        made = sorted((proj / ".agent" / "tasks").glob("002-retro-*/task.md"))
+        self.assertEqual(len(made), 1, f"retro scaffold not created: {r.stdout}")
+        scaffold = made[0]
+        self.assertTrue(has_risk_section(scaffold), "retro scaffold has no ## Risk heading")
+        self.assertEqual(extract_risk(scaffold), "unclassified")
+        text = scaffold.read_text(encoding="utf-8")
+        self.assertLess(text.index("\n## Status\n"), text.index("\n## Risk\n"),
+                        "## Risk must follow ## Status, as in every other template")
+        self.assertIn("Set this at the Structure gate", text,
+                      "the scaffold must carry the template's explanation of the field")

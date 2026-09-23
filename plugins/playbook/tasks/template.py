@@ -38,6 +38,15 @@ pending
 
 > **Before filling this in:** run `.claude/bin/tasks work <N>` to activate this task. Hooks won't enforce until activated.
 
+""" + risk()
+
+
+def risk() -> str:
+    """The `## Risk` field with its explanation. Its own function so a generator
+    that writes its own `## Status` (the retro scaffold — task 080, S1c) still
+    offers the field: without the heading, `has_risk_section` reads the record
+    as pre-1.5.0 and the close takes the lenient legacy path."""
+    return """\
 ## Risk
 unclassified
 

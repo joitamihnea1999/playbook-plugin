@@ -54,6 +54,23 @@ class CodexActiveTaskStatus(unittest.TestCase):
             "## Status\nin_progress\n...\n## Status\ndone\n", encoding="utf-8")
         self.assertTrue(_task_status_is_done(self.task_dir / "task.md"))
 
+    def test_blocked_task_refuses_apply_patch_on_code(self):
+        # S1a (task 080) parity with the bash gate: a BLOCKED task is paused on
+        # the owner, so it authorizes no code edit — and the reason names the resume.
+        from provider.codex_hooks import apply_patch_pre_decision
+        patch = {"tool_input": {"command": "*** Begin Patch\n*** Update File: src/main.py\n"
+                                           "@@\n-a\n+b\n*** End Patch\n"}}
+        self._write_status("in_progress")
+        self.assertIsNone(apply_patch_pre_decision(patch, self.root, SID), "control: active allows")
+        self._write_status("blocked")
+        d = apply_patch_pre_decision(patch, self.root, SID)
+        self.assertIsNotNone(d, "a blocked task authorized an apply_patch on code")
+        self.assertEqual(d["decision"], "block")
+        self.assertIn("tasks work 001", d["reason"])
+        # Exact token, like core._is_blocked: `blockedness` is not the blocked state.
+        self._write_status("blockedness")
+        self.assertIsNone(apply_patch_pre_decision(patch, self.root, SID))
+
     def test_done_with_suffix_is_done(self):
         # 1.5.20: parity with the CLI `_is_done` (startswith "done").
         self._write_status("done (2026-08-15)")

@@ -1236,5 +1236,65 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"a CR after `blocked` must not defeat the release: {r.stderr}")
 
 
+class EditGateWhileBlocked(unittest.TestCase):
+    """PLAN S1a (task 079 finding P1-03): the CLI treats a blocked task as not
+    active (`_find_active_task` skips it) but the edit gate refused only a
+    `done*` status, so code edits sailed through while the task waited on the
+    owner. The task is blocked through the REAL CLI (`tasks blocked`), which
+    leaves the session pointer in place — the state the owner is actually in."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.project = Path(self._tmp.name) / "proj"
+        td = self.project / ".agent" / "tasks" / "012-decide"
+        td.mkdir(parents=True)
+        (td / "task.md").write_text(TASK.format(n="012"), encoding="utf-8")
+        self.task_file = td / "task.md"
+
+    def _env(self):
+        env = dict(os.environ, PYTHONPATH=str(PLUGIN), PLAYBOOK_SESSION_ID=SID)
+        env.pop("BASH_ENV", None)
+        return env
+
+    def _tasks(self, *args):
+        return subprocess.run([sys.executable, "-m", "tasks.cli", *args], cwd=self.project,
+                              env=self._env(), capture_output=True, text=True)
+
+    def _edit_code(self):
+        payload = json.dumps({"tool_name": "Edit",
+                              "tool_input": {"file_path": str(self.project / "src" / "main.py")}})
+        return subprocess.run([bash_or_skip(), str(SCRIPTS / "task-gate-hook")], input=payload,
+                              cwd=self.project, env=self._env(), capture_output=True, text=True)
+
+    def _pointer(self):
+        return (self.project / ".agent" / "sessions" / SID / "current_state").read_text(
+            encoding="utf-8").strip()
+
+    def test_code_edit_is_refused_while_active_task_is_blocked(self):
+        self.assertEqual(self._tasks("work", "012").returncode, 0)
+        b = self._tasks("blocked", "rewrite or cancel is the owner's call")
+        self.assertEqual(b.returncode, 0, b.stderr)
+        # Preconditions: the pointer still names 012 and the live status is blocked —
+        # otherwise a BLOCK below would come from "no active task", not from S1a.
+        self.assertEqual(self._pointer(), "012")
+        self.assertEqual(_extract_status(self.task_file), "blocked")
+        r = self._edit_code()
+        self.assertEqual(r.returncode, 2, f"a blocked task authorized a code edit: {r.stderr}")
+        self.assertIn("blocked", r.stderr.lower())
+        self.assertIn("tasks work 012", r.stderr, "the block must name the resume command")
+        # Resuming through the CLI re-authorizes (the block is not a dead end).
+        self.assertEqual(self._tasks("work", "012").returncode, 0)
+        self.assertEqual(self._edit_code().returncode, 0)
+
+    def test_code_edit_is_allowed_while_active_task_is_in_progress(self):
+        # Negative control: same fixture, same hook, the task is merely active.
+        self.assertEqual(self._tasks("work", "012").returncode, 0)
+        self.assertEqual(self._pointer(), "012")
+        self.assertNotEqual(_extract_status(self.task_file), "blocked")
+        r = self._edit_code()
+        self.assertEqual(r.returncode, 0, f"an active task's code edit was refused: {r.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main()

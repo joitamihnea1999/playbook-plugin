@@ -150,6 +150,36 @@ class HandoffSection(_Base):
         self.assertEqual(self._status(td), "blocked")
 
 
+class HandoffArguments(_Base):
+    """PLAN S1b (task 079 finding P1-04): `cmd_handoff` never read its
+    arguments, so `tasks handoff --bogus` (a typo, a guessed flag) wrote a
+    `## Handoff` and BLOCKED the active task. Only -h/--help is accepted —
+    and that one is dry."""
+
+    def test_unknown_argument_is_rejected_and_writes_nothing(self):
+        d, td = self._project()
+        before = (td / "task.md").read_bytes()
+        for bad in (["--bogus"], ["now"], ["--since", "3"]):
+            r = _cli(d, "handoff", *bad)
+            self.assertNotEqual(r.returncode, 0, f"handoff {bad} was accepted: {r.stdout}")
+            self.assertIn("usage", r.stderr.lower(), f"handoff {bad}: no usage on stderr")
+            self.assertEqual((td / "task.md").read_bytes(), before,
+                             f"handoff {bad} changed task.md")
+        # Control: the bare verb still works on the same, untouched task.
+        r = _cli(d, "handoff")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._status(td), "blocked")
+
+    def test_help_is_dry(self):
+        d, td = self._project()
+        before = (td / "task.md").read_bytes()
+        for flag in ("--help", "-h"):
+            r = _cli(d, "handoff", flag)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("handoff", r.stdout)
+            self.assertEqual((td / "task.md").read_bytes(), before, f"handoff {flag} wrote")
+
+
 class BootstrapSurfacing(_Base):
     def test_bootstrap_surfaces_unconsumed_handoff(self):
         d, td = self._project()

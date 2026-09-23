@@ -1228,6 +1228,15 @@ def cmd_handoff(cmd_args):
     judgment ~20%, then blocks the task with reason "handoff" (reusing the
     honest blocked state — never a faked checkbox). `tasks bootstrap` surfaces
     the newest unconsumed handoff; `tasks work <N>` consumes it."""
+    # S1b (task 080): the verb takes no arguments. It used to ignore them, so a
+    # typo or a guessed flag (`handoff --bogus`) wrote a `## Handoff` and BLOCKED
+    # the active task. Refuse before any read or write. (-h/--help never gets
+    # here: cli.main intercepts help globally, dry.)
+    if cmd_args:
+        print(f"Error: tasks handoff takes no arguments (got: {' '.join(cmd_args)}). "
+              "Nothing changed.", file=sys.stderr)
+        print("Usage: tasks handoff", file=sys.stderr)
+        sys.exit(1)
     project_path = find_project_root()
     agent_dir = resolve_agent_dir(project_path)
     session_id = resolve_session_id()

@@ -6,7 +6,7 @@
     {
       "id": "PB-TASK-ACTIVATE",
       "category": "task-lifecycle",
-      "statement": "tasks work resolves the active task from the per-session pointer, and the edit gate refuses to authorize a code edit when that pointer is junk, a stale number, glob-bearing, or points at a done task, while a real pending pointer authorizes.",
+      "statement": "tasks work resolves the active task from the per-session pointer, and the edit gate refuses to authorize a code edit when that pointer is junk, a stale number, glob-bearing, or points at a done task or at a blocked one (paused on the owner's decision; the refusal names `tasks work <N>` as the resume), while a real pending pointer authorizes.",
       "owner": [
         {
           "path": "plugins/playbook/tasks/lifecycle.py",
@@ -72,6 +72,19 @@
           "boundary": "subprocess",
           "negative_control": null,
           "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_blocked_state.py",
+          "reference": "EditGateWhileBlocked.test_code_edit_is_refused_while_active_task_is_blocked",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_blocked_state.py",
+            "reference": "EditGateWhileBlocked.test_code_edit_is_allowed_while_active_task_is_in_progress"
+          },
+          "limitations": [
+            "The task is blocked through the real `tasks blocked` and the real hook runs as a subprocess; hermetic, not a live provider hook invocation."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -182,7 +195,7 @@
     {
       "id": "PB-TASK-BLOCKED",
       "category": "task-lifecycle",
-      "statement": "tasks blocked refuses an empty reason, records the reason without touching gates or minting a heading, locates the `## Blocked` section fence-aware so a fenced `## Blocked`/`## Handoff` example in task.md cannot delete or mis-splice the `## Blocked`/`## Handoff` section, reads and writes `## Status` fence-aware through the ONE shared reader (`_live_status_index`: LAST live heading, strict ATX, fail closed on an unclosed fence) so a fenced `## Status`/blocked example is never read as, or clobbered as, the status, refuses (writing nothing) when the blocked status cannot land live, and tasks work on the blocked task restores in_progress. The stop-hook reads the status through the same Python reader (`scripts/task-status.py`) so the enforcing hook and the CLI cannot disagree about the same file. task-gate-hook's F3 done-check reads the resolved task's `## Status` through the same script (task 055), so the three `## Status` consumers on the enforcing path — CLI, stop-hook, task-gate-hook — are one reader.",
+      "statement": "tasks blocked refuses an empty reason, records the reason without touching gates or minting a heading, locates the `## Blocked` section fence-aware so a fenced `## Blocked`/`## Handoff` example in task.md cannot delete or mis-splice the `## Blocked`/`## Handoff` section, reads and writes `## Status` fence-aware through the ONE shared reader (`_live_status_index`: LAST live heading, strict ATX, fail closed on an unclosed fence) so a fenced `## Status`/blocked example is never read as, or clobbered as, the status, refuses (writing nothing) when the blocked status cannot land live, and tasks work on the blocked task restores in_progress. The stop-hook reads the status through the same Python reader (`scripts/task-status.py`) so the enforcing hook and the CLI cannot disagree about the same file. task-gate-hook's F3 done-check reads the resolved task's `## Status` through the same script (task 055), so the three `## Status` consumers on the enforcing path — CLI, stop-hook, task-gate-hook — are one reader. `tasks handoff` takes no arguments: any argument other than -h/--help is refused before anything is read or written (usage on stderr, exit 1, task.md byte-identical).",
       "owner": [
         {
           "path": "plugins/playbook/tasks/lifecycle.py",
@@ -211,6 +224,10 @@
         {
           "path": "plugins/playbook/scripts/task-status.py",
           "reference": "symbol:main"
+        },
+        {
+          "path": "plugins/playbook/tasks/lifecycle.py",
+          "reference": "symbol:cmd_handoff"
         }
       ],
       "failure_consequence": "Medium",
@@ -587,6 +604,19 @@
           "negative_control": null,
           "limitations": [
             "`tasks work done` and `tasks handoff` on a `prose\\x85## Status\\x85pending` file are refused with task.md byte-identical (no receipt, no `## Handoff`). Local subprocess only."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_handoff.py",
+          "reference": "HandoffArguments.test_unknown_argument_is_rejected_and_writes_nothing",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_handoff.py",
+            "reference": "HandoffArguments.test_help_is_dry"
+          },
+          "limitations": [
+            "Three refused shapes (`--bogus`, a bare word, `--since 3`); the bare verb is re-run on the same task inside the test as the positive control."
           ]
         }
       ],
@@ -9667,11 +9697,19 @@
     {
       "id": "PB-CLI-RETRO",
       "category": "cli-contracts",
-      "statement": "tasks retro reconstructs a cross-task retrospective, counting a task's completed gates from bare checkmarks without miscounting annotated continuation lines.",
+      "statement": "tasks retro reconstructs a cross-task retrospective, counting a task's completed gates from bare checkmarks without miscounting annotated continuation lines. Its scaffold offers the `## Risk` field (`unclassified`, with the template's explanation) right after `## Status`, so the retro's close is held to the strict bar instead of the pre-1.5.0 lenient path.",
       "owner": [
         {
           "path": "plugins/playbook/tasks/history.py",
           "reference": "symbol:cmd_retro"
+        },
+        {
+          "path": "plugins/playbook/tasks/retro.py",
+          "reference": "symbol:generate_retro_task"
+        },
+        {
+          "path": "plugins/playbook/tasks/template.py",
+          "reference": "symbol:risk"
         }
       ],
       "failure_consequence": "Medium",
@@ -9687,6 +9725,16 @@
             "reference": "BareCheckmarkTest.test_continuation_annotated_gates_not_bare"
           },
           "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_retro_quirks.py",
+          "reference": "ScaffoldRisk.test_fresh_scaffold_has_risk_section",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": [
+            "Runs `tasks retro` end to end but asserts only the scaffold's Risk field and its position."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -9701,7 +9749,7 @@
       ],
       "status": "partially_evidenced",
       "missing_evidence_or_limitation": [
-        "Only the gate-counting helper the retro reads is proved; no test runs `tasks retro` end to end or asserts its --since window or rendered report.",
+        "Proved: the gate-counting helper the retro reads, and the scaffold's Risk field (one end-to-end `tasks retro` run). No test asserts its --since window or the rest of the rendered report.",
         "Owner decision 2026-08-21: antigravity and pi are experimental everywhere (adapter code retained, no support claim, no live evidence) and are removed from applicable_providers here; supported providers are Claude (agent+judge) and grok/codex (judge-seat, live-verified 2026-08-22)."
       ],
       "follow_up_phases": [

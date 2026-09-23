@@ -399,7 +399,21 @@ MSG
                     # Match the CLI authority core._is_done (status STARTS WITH
                     # "done", so "done (2026-…)" counts). Empty/unparsable/unknown
                     # or any active status → authorize (never a new false block).
+                    # S1a (task 080): a BLOCKED task is paused on the owner's
+                    # decision — the CLI does not treat it as active
+                    # (_find_active_task skips it), so neither does the gate.
+                    # EXACT token, like core._is_blocked (`blockedness` is not it).
                     case "$STATUS" in
+                        blocked)
+                            journal_enforcement "$PB_JOURNAL_DIR" task-gate block "pointer to blocked task" \
+                                "$SESSION_ID" "$TOOL_NAME" "$NORM_PATH"
+                            cat >&2 <<MSG
+BLOCKED: task ${TASK} is blocked — paused on a decision that is not the agent's.
+
+Code edits wait until the task resumes. When the decision is made, resume with:
+  .claude/bin/tasks work ${TASK}
+MSG
+                            exit 2 ;;
                         done*) BLOCK_REASON="pointer to done task" ;;  # fall through to BLOCK
                         *)     # active (or unreadable) → authorize
                             journal_enforcement "$PB_JOURNAL_DIR" task-gate allow "active task" \
@@ -460,7 +474,13 @@ EOFX
         exit 0
     fi
 
-    if echo "$CMD" | grep -qE 'mkdir.*\.agent(/[^/]+)?/tasks/'; then
+    # S1d (task 080, flag C15): the trigger matches the whole command text, so
+    # a fixture in a temp dir (`<tmp>/.agent/tasks/001-x`) was refused. When it
+    # fires, task-dir-target.py narrows it: exit 0 = every such target is a
+    # literal absolute path outside the project → allow. Exit 1, a crash, or a
+    # missing python3 → block, exactly as before (it can only narrow).
+    if echo "$CMD" | grep -qE 'mkdir.*\.agent(/[^/]+)?/tasks/' \
+       && ! PB_CMD="$CMD" PB_PROJECT="$PROJECT_DIR" python3 "$HOOK_DIR/task-dir-target.py" 2>/dev/null; then
         cat >&2 <<'MSG'
 BLOCKED: Don't create task directories manually.
 
