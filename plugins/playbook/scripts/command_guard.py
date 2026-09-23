@@ -203,8 +203,15 @@ def _split_segments(text, ops=_SEP_OPS):
 
 def _wspec(val_short="", val_long=(), terminal=(), operands=0,
            split_short="", split_long=(), operand_satisfied_by=(),
-           split_positional=False, bare_dash=False):
+           split_positional=False, bare_dash=False, positional_stop=(),
+           shell_args=False):
     return {
+        # `su`/`runuser` (su mode): after the positional USER, every remaining
+        # argument goes to the user's SHELL, so a `-c` there is a command string
+        # (task 085 round 2, T3).
+        "shell_args": shell_args,
+        # words that END a split-positional template (`parallel … ::: args`).
+        "positional_stop": set(positional_stop),
         # `su -` / `runuser -`: a lone `-` is the LOGIN flag, not an operand
         # (task 085 G1 — reading it as the user moved the command position).
         "bare_dash": bare_dash,
@@ -277,7 +284,8 @@ _WRAPPERS = {
                                                  "--retries", "--sshlogin",
                                                  "--max-args", "--max-procs"),
                        terminal=("--help", "--version"),
-                       split_positional=True),
+                       split_positional=True,
+                       positional_stop=(":::", "::::", ":::+", "::::+")),
     # `trap '<command>' SIGNAL` stores a command string that runs on the signal.
     "trap": _wspec(split_short="", split_long=(), operands=0),
     # `eval` delegates to a STRING, so its remainder is classified, not walked.
@@ -310,12 +318,12 @@ _WRAPPERS = {
                       terminal=("--version", "--help"), operands=1,
                       operand_satisfied_by=("u", "--user"),
                       split_short="c", split_long=("--command", "--session-command"),
-                      bare_dash=True),
+                      bare_dash=True, shell_args=True),
     "su": _wspec(val_short="gGsw", val_long=("--group", "--shell",
                                              "--whitelist-environment"),
                  terminal=("--version", "--help"), operands=1,
                  split_short="c", split_long=("--command", "--session-command"),
-                 bare_dash=True),
+                 bare_dash=True, shell_args=True),
 }
 
 # ── lexing and naming (impl panel round 1) ────────────────────────────────────
@@ -528,6 +536,7 @@ def _walk_prefix(seg):
         i += 1                                         # the wrapper itself
         end_of_opts = False
         operands = spec["operands"]
+        user_positional = False                        # T3: `su -- root -c …`
         while i < len(toks):
             t = toks[i][0]
             if not end_of_opts and t == "--":
@@ -588,11 +597,27 @@ def _walk_prefix(seg):
                     i += 1
                 continue
             if spec["split_positional"] and lexed[i][3]:   # `watch '<cmd>'`
-                payloads.append(toks[i][0])
+                # The tool JOINS every command word with spaces and hands the
+                # line to a shell, so the payload is all of them, not the first
+                # (task 085 round 2, T1: `parallel 'rm' '-rf' '/' ::: 1`).
+                words = []
+                while i < len(toks) and toks[i][0] not in spec["positional_stop"]:
+                    words.append(toks[i][0])
+                    i += 1
+                payloads.append(" ".join(words))
+                i = len(toks)
+                break
+            if (spec["shell_args"] and user_positional and end_of_opts
+                    and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", t)):
+                # after the user, `su` passes the rest to the SHELL: `-c X`
+                # is the shell's command string (task 085 round 2, T3)
+                if i + 1 < len(toks):
+                    payloads.append(toks[i + 1][0])
                 i = len(toks)
                 break
             if operands > 0:                           # `timeout 5 …`, `chrt 10 …`
                 operands -= 1
+                user_positional = spec["shell_args"]
                 i += 1
                 continue
             break                                      # the command starts here

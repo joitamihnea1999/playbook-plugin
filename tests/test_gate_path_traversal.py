@@ -247,6 +247,27 @@ class ManualTaskDirGuard(unittest.TestCase):
             r = self._run(cmd)
             self.assertEqual(r.returncode, 2, f"shell spelling of a task dir allowed: {cmd!r}")
 
+    def test_expanded_and_respelled_forms_are_blocked(self):
+        # Task 085 round 2, T2 (impl panel opus #1, sol-high #1, sol-medium #4):
+        # each of these makes bash create a real task dir; all were allowed by
+        # 1.5.45 AND by 085 round 1 (measured in scratchpad triage_085.sh).
+        mk = self.MK
+        for cmd in (f"{mk} -p .agent/ta$'\\x73'ks/999-x", f"{mk} -p .agent/ta$'\\163'ks/999-x",
+                    f"{mk} -p .agent/ta{{sk,zz}}s/999-x", f"{mk} -p .agent/ta{{r..t}}ks/999-x",
+                    f"{mk} -p .{{a,b}}gent/{{x,tasks}}/999-x",
+                    "m\\kdir -p .agent/tasks/999-x", "m'kdir' -p .agent/tasks/999-x",
+                    "$'\\x6d'kdir -p .agent/tasks/999-x"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 2, f"task dir spelling allowed: {cmd!r}")
+
+    def test_expansions_that_name_no_task_dir_stay_allowed(self):
+        mk = self.MK
+        for cmd in (f"{mk} -p src/{{a,b}}/lib", f"{mk} -p build/{{1..3}}",
+                    "printf $'a\\tb\\n' > notes.txt", f"{mk} -p $'logs'/today",
+                    f"{mk} -p .agent/{{notes,cache}}"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 0, f"ordinary command refused: {cmd!r}: {r.stderr}")
+
     def test_a_task_dir_named_on_an_earlier_line_is_blocked(self):
         # Task 085 G2, measured after the fix: the old per-line trigger never saw a
         # path assigned on one line and created on the next (allowed by 1.5.45).

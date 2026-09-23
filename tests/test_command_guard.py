@@ -1335,6 +1335,48 @@ class PrivilegeWrapperShellAndLoginOptions(unittest.TestCase):
             self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
 
 
+class TemplateWordsAreJoined(unittest.TestCase):
+    """Task 085 round 2, T1 (impl panel sol-medium #2): `watch` and GNU `parallel`
+    join ALL their command words with spaces and hand the result to a shell; the
+    walker kept only the first quoted word. `parallel 'rm' '-rf' '/' ::: 1` was
+    blocked by 1.5.45 (it read `'rm'` as the command name) and ALLOWED after
+    085 G1 — a regression; the `watch` forms were allowed by both."""
+
+    def test_split_word_templates_block(self):
+        for cmd in ("parallel 'rm' '-rf' '/' ::: 1", "parallel 'rm -rf' '/' ::: 1",
+                    "parallel -j2 'rm' -rf / ::: a b", "watch 'rm' '-rf' '/'",
+                    "watch 'rm -rf' /", "watch -n 5 'rm' '-rf' '/'"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_their_benign_twins(self):
+        # the input values after `:::` are data, not template words
+        for cmd in ("parallel 'gzip' '-9' ::: a.log b.log", "parallel 'echo' ::: rm -rf /x",
+                    "watch 'ls' '-la'", "watch -n 5 'df' '-h'",
+                    "watch 'echo' '\"; rm -rf /\"'"):
+            self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
+
+
+class SuShellArgumentsAfterTheUser(unittest.TestCase):
+    """Task 085 round 2, T3 (impl panel sol-medium #3): after `--`, `su` (and
+    `runuser` without `-u`) takes the user and passes every remaining argument
+    to the user's SHELL — so `-c '<cmd>'` there is the shell's command string.
+    The walker read `-c` as the command name. Allowed by 1.5.45 and by 085 r1."""
+    D = "rm -rf /"
+
+    def test_shell_c_after_the_user_blocks(self):
+        for cmd in (f"su -- root -c '{self.D}'", f"su root -- -c '{self.D}'",
+                    f"su -l -- root -c '{self.D}'", f"su - -- root -lc '{self.D}'",
+                    f"runuser -- root -c '{self.D}'", f"runuser root -- -c '{self.D}'"):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_their_benign_twins(self):
+        # `runuser -u USER -- CMD` execs CMD directly: `-c` there is a command
+        # NAME that does not exist, so nothing destructive runs
+        for cmd in ("su -- root -c 'id'", "su root -- -c 'whoami'",
+                    f"runuser -u root -- -c '{self.D}'", "su -- root"):
+            self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
+
+
 class TheArchitecturalBound(unittest.TestCase):
     """What a STATIC classifier cannot do, pinned so the limit is visible instead
     of implied. Each of these needs the shell's runtime state, not more parsing:

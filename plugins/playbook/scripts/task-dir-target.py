@@ -109,17 +109,139 @@ def _collapsed(token: str) -> str:
     return posixpath.normpath(token.replace("\\", "/"))
 
 
+_ANSI_C_QUOTE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+_BRACE_CAP = 512          # more spellings than this → judged strictly (blocks)
+
+
+def _decode_ansi_c(command: str) -> "str | None":
+    """Replace every `$'…'` with what bash makes of it (`$'\\x73'` → `s`).
+    None when the decoder is unavailable — the caller then fails closed."""
+    if "$'" not in command:
+        return command
+    try:
+        from command_guard import _ansi_c_decode
+    except Exception:
+        return None
+    return _ANSI_C_QUOTE.sub(lambda m: _ansi_c_decode(m.group(1)), command)
+
+
+def _brace_expand(text: str) -> "list[str] | None":
+    """Every spelling bash's brace expansion can produce: comma lists (nested)
+    and `{a..z}` / `{1..9}` sequences. None past _BRACE_CAP (fail closed)."""
+    out, work = [], [text]
+    while work:
+        t = work.pop()
+        m = None
+        depth, start = 0, -1
+        for k, ch in enumerate(t):                # expand the FIRST complete,
+            if ch == "{":                         # expandable top-level group
+                if depth == 0:
+                    start = k
+                depth += 1
+            elif ch == "}" and depth:
+                depth -= 1
+                if depth == 0 and _expandable(t[start + 1:k]):
+                    m = (start, k)
+                    break
+        if m is None:
+            out.append(t)
+        else:
+            s, e = m
+            head, inner, tail = t[:s], t[s + 1:e], t[e + 1:]
+            seq = _SEQ.fullmatch(inner)
+            if seq and "," not in _top_level(inner):
+                a, b = seq.group(1), seq.group(2)
+                if a.lstrip("-").isdigit() and b.lstrip("-").isdigit():
+                    lo, hi = sorted((int(a), int(b)))
+                    if hi - lo > _BRACE_CAP:
+                        return None
+                    alts = [str(v) for v in range(lo, hi + 1)]
+                elif len(a) == 1 and len(b) == 1:
+                    lo, hi = sorted((ord(a), ord(b)))
+                    alts = [chr(v) for v in range(lo, hi + 1)]
+                else:
+                    alts = [inner]
+            else:
+                alts = _split_top_level(inner)
+            work.extend(head + alt + tail for alt in alts)
+        if len(out) + len(work) > _BRACE_CAP:
+            return None
+    return out
+
+
+_SEQ = re.compile(r"(-?\w+)\.\.(-?\w+)(?:\.\.-?\d+)?")
+
+
+def _expandable(inner: str) -> bool:
+    """A `{…}` bash expands: a top-level comma list or an `a..b` sequence
+    (`{x}` and `{}` stay literal)."""
+    return "," in _top_level(inner) or bool(_SEQ.fullmatch(inner))
+
+
+def _top_level(inner: str) -> str:
+    """`inner` with nested `{…}` groups removed (their commas are not ours)."""
+    depth, keep = 0, []
+    for ch in inner:
+        if ch == "{":
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+        elif depth == 0:
+            keep.append(ch)
+    return "".join(keep)
+
+
+def _split_top_level(inner: str) -> "list[str]":
+    parts, depth, cur = [], 0, []
+    for ch in inner:
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+        cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+
+def _spellings(command: str) -> "list[str] | None":
+    """What the shell can turn this command's words into, loosely: ANSI-C
+    decoded, quotes/backslashes/`$` removed, braces expanded. None = cannot
+    tell (decoder missing, expansion too large) → the caller fails closed."""
+    decoded = _decode_ansi_c(command)
+    if decoded is None:
+        return None
+    return _brace_expand(re.sub(r"[\"'\\\\$]", "", decoded))
+
+
+def runs_mkdir(command: str) -> bool:
+    """Does any spelling contain the word `mkdir`? (task 085 round 2, T2: the
+    hook's own trigger also fires on `$'…'`, which it cannot decode.)"""
+    sp = _spellings(command)
+    if sp is None:
+        return True
+    return any(re.search(r"(^|[^\w])mkdir($|[^\w])", s) for s in sp)
+
+
 def names_a_task_dir(command: str) -> bool:
-    """Could this command, once the shell dequotes/unescapes it, name a task
-    directory at all? (task 085 G2). Quotes, backslashes and `$` are removed
-    first, so `.ag'ent/tasks'`, `.ag\\ent`, `.ag$'e'nt` and `ta''sks` all read as
-    what the shell creates; a glob (`.ag?nt`) keeps its `.ag` prefix. Loose on
-    purpose: a match only sends the command to the strict path below."""
-    loose = re.sub(r"[\"'\\\\$]", "", command)
-    return ".ag" in loose and "tasks" in loose
+    """Could this command, once the shell dequotes/unescapes/expands it, name a
+    task directory at all? (task 085 G2 + round 2 T2). `.ag'ent/tasks'`,
+    `.ag\\ent`, `ta''sks`, `ta$'\\x73'ks`, `ta{sk,zz}s` and `ta{r..t}ks` all read
+    as what the shell creates; a glob needs no help (it only matches paths that
+    already exist, so it cannot create a new task dir). Loose on purpose: a
+    match only sends the command to the strict path below."""
+    sp = _spellings(command)
+    if sp is None:
+        return True
+    return any(".ag" in s and "tasks" in s for s in sp)
 
 
 def may_be_inside(command: str, project: str) -> bool:
+    if not runs_mkdir(command):
+        return False                              # the `$'…'` trigger: no mkdir at all
     if not names_a_task_dir(command):
         return False                              # an ordinary mkdir (task 085 G2)
     # Only a SIMPLE command is ever judged (task 080 round 2). The judgment reads

@@ -18,20 +18,27 @@ plus the tool defect found at its close. Each fix was written against a test tha
     taken after the judges finished, so a commit made while they ran was recorded as if they had
     seen it. The panel now fingerprints the tree before it starts the judges and stamps that; if
     the tree moved, the round says so (`**Tree moved during review:** yes`), prints a warning and
-    carries no tail-certification descriptor, so the close reads STALE.
+    carries no tail-certification descriptor, so the close reads STALE. The round's `**Commit:**`
+    line is read at the same moment. If git cannot fingerprint the tree before the review, the
+    round carries no stamp at all (a high-consequence close then reads NO-STAMP) instead of the
+    post-review one.
   - *A delayed block or resume can no longer undo a close.* `tasks blocked` / `tasks handoff`
     refuse a task that is already done, and `tasks work <N>` resumes only a task whose status is
     exactly `blocked`; both checks run inside the locked write, and a refusal leaves task.md
     unchanged.
 - **Two bypasses of the command guards** (task 085).
-  - *`su` / `runuser` / `parallel`.* `su` and `runuser` now read `-s`/`--shell` and
+  - *`su` / `runuser` / `parallel` / `watch`.* `su` and `runuser` now read `-s`/`--shell` and
     `-w`/`--whitelist-environment` as options with a value and a bare `-` as the login flag, and
-    `parallel`'s quoted template is split into words. 9 of the 11 new test commands were allowed
-    by the 1.5.45 guard. Still not covered (documented): a target that only arrives at run time,
+    after `su -- USER` a `-c` goes to the user's shell and is classified. `parallel` and `watch`
+    join every word of their command template, as the tools themselves do (`parallel 'rm' '-rf'
+    '/' ::: 1`, `watch 'rm' '-rf' '/'`). 9 of the 11 first-round test commands were allowed by
+    the 1.5.45 guard. Still not covered (documented): a target that only arrives at run time,
     on stdin to `xargs` or through `:::` into a quoted `parallel` template.
   - *Quoted task-directory names.* The "don't create task directories manually" rule matched
-    the raw command text, so a quoted, backslashed, `$'…'`, globbed or split spelling of the
-    directory name got through. It now looks at every `mkdir` and judges the dequoted spelling.
+    the raw command text, so a quoted, backslashed, `$'…'` or split spelling of the directory
+    name, a brace expansion (`ta{sk,zz}s`, `ta{r..t}ks`) or a respelled command (`m\kdir`,
+    `m'kdir'`) got through. It now decodes ANSI-C quoting, removes quotes and backslashes and
+    expands braces before judging, for the command word and the path alike.
 - **Committing the task record no longer makes its panel stale** (task 085). The fingerprint
   ignores `.agent/`, but a commit moves the outer `HEAD`, so a task record committed after its
   panel read STALE with nothing to review (task 083's close needed `--stale-panel-ok`). The close

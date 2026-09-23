@@ -2634,6 +2634,32 @@
           "limitations": [
             "Task 085 G1: `su`/`runuser` `-s/--shell` and `-w/--whitelist-environment` take a value, a bare `-` is the login flag, and `parallel`'s quoted template is split; 9 of the 11 vectors were allowed by the 1.5.45 guard."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "TemplateWordsAreJoined.test_split_word_templates_block",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "TemplateWordsAreJoined.test_their_benign_twins"
+          },
+          "limitations": [
+            "Task 085 round 2 (T1): `parallel`/`watch` join every template word (parallel up to `:::`/`::::`); `parallel 'rm' '-rf' '/' ::: 1` was a REGRESSION of 085 round 1 (blocked by 1.5.45)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "SuShellArgumentsAfterTheUser.test_shell_c_after_the_user_blocks",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "SuShellArgumentsAfterTheUser.test_their_benign_twins"
+          },
+          "limitations": [
+            "Task 085 round 2 (T3): after a POSITIONAL user and end-of-options, `su`/`runuser` pass the rest to the shell; `runuser -u USER -- …` execs directly and stays a plain command walk."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -3830,7 +3856,7 @@
     {
       "id": "PB-PANEL-FRESHNESS",
       "category": "judges-and-reviews",
-      "statement": "Panel evidence is stamped to the reviewed tree — the tree fingerprinted BEFORE the judges spawn; when the tree moves during the review the round keeps that pre-review stamp, says so in its header, and carries no tail-certification descriptor (task 085); when panel evidence is required by policy (panel_required_for), a close held to the high-consequence bar (assertive, irreversible, or an unset/unclassified risk) blocks on stale evidence while a reversible close stays advisory, the override is refused without a reason and records the reason when given, and a fresh stamp closes cleanly. As of task 036 (owner decision A, 2026-08-27) a STALE close whose only post-panel delta is in non-behavioral file classes (a *.md under docs/ or named README*/CHANGELOG*/MIND_MAP*, a *.json under docs/, the repo-root CLAUDE.md, and anything under tests/; root .agent/ task records are instead excluded from the freshness fingerprint entirely, so an .agent/ edit never stales a panel and never enters the certified delta) may instead satisfy freshness via a single-judge TAIL CERTIFICATION that re-reviews the F0-anchored close delta (the changed-path set and the current closing content; an original uncommitted at F0 is not persisted, so that path is reviewed current-vs-HEAD) and emits a structured TAIL-CERT: PASS/FAIL; any behavioral (code) delta — including a code comment, a config.json, a non-doc top-level file, or the source endpoint of a rename into docs/ — still forces a fresh full panel, and the mechanism fails closed on a missing/mismatched descriptor, a changed code_roots scope set or fingerprint_exclude set (the exclude pathspecs are hashed into the fingerprint since task 051, so a post-panel exclude reads STALE instead of FRESH and is then rejected), a git error, a stale tree with no attributable delta, a non-PASS verdict, a tree that mutates during the judge call (a TOCTOU compare-and-swap), a `code_roots` scope whose RESOLVED identity (real path relative to the project) differs from the descriptor's, or an owner `fingerprint_exclude` that covers source. Task 060: an ABSENT fingerprint is no longer fail-open — in a git repo, a carrying high-consequence close blocks NO-STAMP (the round has no `**Tree-state:**`) and UNREADABLE (git cannot fingerprint the tree at close: every git return code on the outer path is read, a corrupt index / missing HEAD / unresolvable toplevel yields no fingerprint instead of a clean-looking one), with the same two exits as STALE and a receipt line on the override path; a non-git project keeps the advisory NO-STAMP. EXCLUDE-COVERS-CODE: an owner `fingerprint_exclude` pathspec that covers a source path (behavioral by file class and not bookkeeping-shaped `.md/.rst/.log`) makes every fingerprint blind to that code, so the close blocks it regardless of FRESH/STALE, the panel stamp warns and emits no descriptor, and tail certification refuses. The fingerprint resolves untracked content against the repo toplevel (a project in a SUBDIRECTORY of a larger repo hashes real content, not a doubled-prefix miss), decodes every git text read with `surrogateescape` and hashes the material with it (a `core.quotePath=false` non-UTF-8 name neither crashes the close nor collides with a sibling), tokens an untracked symlink by its link text, and binds each `code_roots` scope's resolved identity into the material and the descriptor. A STALE read explained ENTIRELY by outer-HEAD commits that touch only fingerprint-excluded paths (typically committing the task's own `.agent/` record after its panel) reads FRESH and the receipt says `records-only delta`: the round's descriptor must authenticate to its stamp, the exclude set must be unchanged, `git diff F0 HEAD` outside the excluded pathspecs must be empty, and the fingerprint recomputed with the outer HEAD set back to the round's F0 commit must equal the stamp; any doubt or git error keeps it STALE (task 085).",
+      "statement": "Panel evidence is stamped to the reviewed tree — the tree fingerprinted BEFORE the judges spawn; when the tree moves during the review the round keeps that pre-review stamp, says so in its header, and carries no tail-certification descriptor, and when git cannot fingerprint it before the review the round carries NO stamp rather than the post-review one (task 085); when panel evidence is required by policy (panel_required_for), a close held to the high-consequence bar (assertive, irreversible, or an unset/unclassified risk) blocks on stale evidence while a reversible close stays advisory, the override is refused without a reason and records the reason when given, and a fresh stamp closes cleanly. As of task 036 (owner decision A, 2026-08-27) a STALE close whose only post-panel delta is in non-behavioral file classes (a *.md under docs/ or named README*/CHANGELOG*/MIND_MAP*, a *.json under docs/, the repo-root CLAUDE.md, and anything under tests/; root .agent/ task records are instead excluded from the freshness fingerprint entirely, so an .agent/ edit never stales a panel and never enters the certified delta) may instead satisfy freshness via a single-judge TAIL CERTIFICATION that re-reviews the F0-anchored close delta (the changed-path set and the current closing content; an original uncommitted at F0 is not persisted, so that path is reviewed current-vs-HEAD) and emits a structured TAIL-CERT: PASS/FAIL; any behavioral (code) delta — including a code comment, a config.json, a non-doc top-level file, or the source endpoint of a rename into docs/ — still forces a fresh full panel, and the mechanism fails closed on a missing/mismatched descriptor, a changed code_roots scope set or fingerprint_exclude set (the exclude pathspecs are hashed into the fingerprint since task 051, so a post-panel exclude reads STALE instead of FRESH and is then rejected), a git error, a stale tree with no attributable delta, a non-PASS verdict, a tree that mutates during the judge call (a TOCTOU compare-and-swap), a `code_roots` scope whose RESOLVED identity (real path relative to the project) differs from the descriptor's, or an owner `fingerprint_exclude` that covers source. Task 060: an ABSENT fingerprint is no longer fail-open — in a git repo, a carrying high-consequence close blocks NO-STAMP (the round has no `**Tree-state:**`) and UNREADABLE (git cannot fingerprint the tree at close: every git return code on the outer path is read, a corrupt index / missing HEAD / unresolvable toplevel yields no fingerprint instead of a clean-looking one), with the same two exits as STALE and a receipt line on the override path; a non-git project keeps the advisory NO-STAMP. EXCLUDE-COVERS-CODE: an owner `fingerprint_exclude` pathspec that covers a source path (behavioral by file class and not bookkeeping-shaped `.md/.rst/.log`) makes every fingerprint blind to that code, so the close blocks it regardless of FRESH/STALE, the panel stamp warns and emits no descriptor, and tail certification refuses. The fingerprint resolves untracked content against the repo toplevel (a project in a SUBDIRECTORY of a larger repo hashes real content, not a doubled-prefix miss), decodes every git text read with `surrogateescape` and hashes the material with it (a `core.quotePath=false` non-UTF-8 name neither crashes the close nor collides with a sibling), tokens an untracked symlink by its link text, and binds each `code_roots` scope's resolved identity into the material and the descriptor. A STALE read explained ENTIRELY by outer-HEAD commits that touch only fingerprint-excluded paths (typically committing the task's own `.agent/` record after its panel) reads FRESH and the receipt says `records-only delta`: the round's descriptor must authenticate to its stamp, the exclude set must be unchanged, `git diff F0 HEAD` outside the excluded pathspecs must be empty, and the fingerprint recomputed with the outer HEAD set back to the round's F0 commit must equal the stamp; any doubt or git error keeps it STALE (task 085).",
       "owner": [
         {
           "path": "plugins/playbook/tasks/core.py",
@@ -4298,7 +4324,20 @@
             "reference": "RoundStampPreSpawn.test_an_unchanged_tree_is_stamped_as_before"
           },
           "limitations": [
-            "Task 085 R2: drives `_round_tree_stamp` on a real git repo with a concurrent commit; that `cmd_panel_review` fingerprints before `executor.submit(run_judge` is pinned by a SOURCE-ORDER check (RoundStampPreSpawn.test_the_panel_fingerprints_before_spawning_and_uses_it) — `run_judge` wraps the real judge CLIs, so there is no end-to-end panel harness."
+            "Task 085 R2: `_round_tree_stamp` on a real git repo with a concurrent commit. The wiring into `cmd_panel_review` is proven behaviourally by PanelStampEndToEnd (round 2, T6)."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "PanelStampEndToEnd.test_a_commit_during_a_real_panel_run_stamps_the_pre_review_tree",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "PanelStampEndToEnd.test_an_undisturbed_panel_run_stamps_and_describes_the_tree"
+          },
+          "limitations": [
+            "Task 085 round 2 (T4/T6): the REAL `cmd_panel_review` with judges faked at the adapter and the tamper detector stubbed clean; asserts the pre-spawn stamp, the moved line, no descriptor and the pre-review `**Commit:**`. Boundary is in-process git subprocesses, not a live provider. Sibling: PanelStampEndToEnd.test_no_pre_spawn_fingerprint_emits_no_stamp (T5)."
           ]
         }
       ],

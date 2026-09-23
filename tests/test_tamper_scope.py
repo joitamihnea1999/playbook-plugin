@@ -1050,8 +1050,8 @@ class RoundStampPreSpawn(unittest.TestCase):
         before = tree_state_fingerprint(d)                 # judges spawned here
         (d / "a.py").write_text("a = 2  # landed while the judges ran\n", encoding="utf-8")
         _git("commit", "-qam", "concurrent commit", cwd=d)
-        stamp, moved = R._round_tree_stamp(d, before)
-        self.assertTrue(moved, "the concurrent commit was not noticed")
+        stamp, note = R._round_tree_stamp(d, before)
+        self.assertEqual(note, "moved", "the concurrent commit was not noticed")
         self.assertEqual(stamp, before, "the post-review tree was stamped as reviewed")
         self.assertNotEqual(stamp, tree_state_fingerprint(d))
 
@@ -1059,9 +1059,25 @@ class RoundStampPreSpawn(unittest.TestCase):
         from tasks.core import tree_state_fingerprint
         d = self._proj()
         before = tree_state_fingerprint(d)
-        stamp, moved = R._round_tree_stamp(d, before)
-        self.assertFalse(moved)
+        stamp, note = R._round_tree_stamp(d, before)
+        self.assertEqual(note, "")
         self.assertEqual(stamp, before)
+
+    def test_no_pre_spawn_fingerprint_is_never_replaced_by_the_post_review_one(self):
+        # Task 085 round 2, T5 (impl panel sol-high #2): git failing at spawn time
+        # used to fall back to the POST-review fingerprint with moved=False — a
+        # fresh-looking stamp for a tree no judge was shown.
+        d = self._proj()
+        stamp, note = R._round_tree_stamp(d, "")
+        self.assertEqual((stamp, note), ("", "no-before"))
+
+    def test_an_unreadable_tree_after_the_review_carries_no_descriptor(self):
+        from tasks.core import tree_state_fingerprint
+        d = self._proj()
+        before = tree_state_fingerprint(d)
+        with mock.patch("tasks.core.tree_state_fingerprint", return_value=""):
+            stamp, note = R._round_tree_stamp(d, before)
+        self.assertEqual((stamp, note), (before, "no-after"))
 
     def test_the_panel_fingerprints_before_spawning_and_uses_it(self):
         import inspect
@@ -1071,6 +1087,101 @@ class RoundStampPreSpawn(unittest.TestCase):
                         src.index("executor.submit(run_judge"),
                         "the pre-spawn fingerprint must be taken before the judges run")
         self.assertIn("_round_tree_stamp(project_path, _fp_before)", src)
+
+
+class PanelStampEndToEnd(unittest.TestCase):
+    """Task 085 round 2, T4/T5/T6: the round header of a REAL `cmd_panel_review`
+    run (judges faked at the adapter; the tamper detector stubbed clean so the
+    host's containment does not decide the outcome). R2's first proof was only a
+    source-order check (impl panel opus #2)."""
+
+    def setUp(self):
+        from tasks.core import tree_state_fingerprint
+        self.tsf = tree_state_fingerprint
+        self.d = _repo()
+        (self.d / "a.py").write_text("a = 1\n", encoding="utf-8")
+        _git("add", "-A", cwd=self.d)
+        _git("commit", "-qm", "seed", cwd=self.d)
+        self.tdir = self.d / ".agent" / "tasks" / "042-demo"
+        self.tdir.mkdir(parents=True)
+        (self.tdir / "task.md").write_text(
+            "# 042 - demo\n## Status\npending\n## Intent\nx\n"
+            "## Work Plan\n- [ ] a gate\n", encoding="utf-8")
+        (self.d / ".agent" / "models.json").write_text(
+            '{"panel": ["claude:opus", "claude:sonnet"], "default_judge": "claude:opus"}',
+            encoding="utf-8")
+        R._PB_JOURNAL_MOD = None
+        R._PB_JOURNAL_LOADED = False
+
+    def _panel(self, judge):
+        import contextlib
+        from provider.adapters.claude import ClaudeAdapter
+        old = os.getcwd()
+        patches = [
+            mock.patch.object(ClaudeAdapter, "is_available", classmethod(lambda cls: True)),
+            mock.patch.object(ClaudeAdapter, "run_headless_judge", judge),
+            mock.patch.object(R, "_detect_tamper_full",
+                              lambda pp, t, b: {"mutations": [], "cautions": [], "degraded": False}),
+        ]
+        for p in patches:
+            p.start()
+        os.chdir(self.d)
+        try:
+            with open(os.devnull, "w") as sink, contextlib.suppress(SystemExit), \
+                 contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
+                R.cmd_panel_review(["042", "--mode", "impl",
+                                    "--models", "claude:opus,claude:sonnet"])
+        finally:
+            os.chdir(old)
+            for p in reversed(patches):
+                p.stop()
+        return (self.tdir / "judge.md").read_text(encoding="utf-8")
+
+    def _head(self):
+        return _git("rev-parse", "HEAD", cwd=self.d).stdout.strip()
+
+    def test_a_commit_during_a_real_panel_run_stamps_the_pre_review_tree(self):
+        import threading
+        fp0, head0 = self.tsf(self.d), self._head()
+        once = threading.Lock()
+        done = []
+
+        def judge(adapter, **kw):
+            with once:
+                if not done:
+                    (self.d / "a.py").write_text("a = 2  # landed mid-review\n", encoding="utf-8")
+                    _git("commit", "-qam", "concurrent", cwd=self.d)
+                    done.append(1)
+            return "1. **Note** — fine.\n"
+
+        text = self._panel(judge)
+        self.assertNotEqual(self.tsf(self.d), fp0, "the fixture did not move the tree")
+        self.assertIn(f"**Tree-state:** {fp0}", text)
+        self.assertIn("**Tree moved during review:** yes", text)
+        self.assertNotIn("**Panel-snapshot:**", text)
+        self.assertIn(f"**Commit:** {head0}", text,
+                      "the post-review HEAD was recorded as the reviewed commit")
+
+    def test_an_undisturbed_panel_run_stamps_and_describes_the_tree(self):
+        fp0, head0 = self.tsf(self.d), self._head()
+        text = self._panel(lambda adapter, **kw: "1. **Note** — fine.\n")
+        self.assertIn(f"**Tree-state:** {fp0}", text)
+        self.assertIn("**Panel-snapshot:**", text)
+        self.assertIn(f"**Commit:** {head0}", text)
+        self.assertNotIn("Tree moved during review", text)
+
+    def test_no_pre_spawn_fingerprint_emits_no_stamp(self):
+        real, calls = self.tsf, []
+
+        def flaky(project_path, **kw):
+            calls.append(1)
+            return "" if len(calls) == 1 else real(project_path, **kw)
+
+        with mock.patch("tasks.core.tree_state_fingerprint", flaky):
+            text = self._panel(lambda adapter, **kw: "1. **Note** — fine.\n")
+        self.assertNotIn("**Tree-state:**", text)
+        self.assertNotIn("**Panel-snapshot:**", text)
+        self.assertIn("**Tree-state unavailable:**", text)
 
 
 if __name__ == "__main__":

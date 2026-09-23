@@ -387,18 +387,27 @@ def _taskdir_identity(task_file: Path) -> dict:
     return out
 
 
-def _round_tree_stamp(project_path: Path, fp_before: str) -> "tuple[str, bool]":
-    """(stamp, moved) for a panel round (task 085 R2). The stamp is the tree the
-    judges were SPAWNED on: when the fingerprint moved while they ran (a
-    concurrent commit or edit), the pre-spawn value is returned with moved=True,
-    so the round never vouches for code the judges did not see. Without a
-    pre-spawn fingerprint (not a git repo, or git failed then) the post-review
-    value is returned unchanged — the historical behaviour."""
+def _round_tree_stamp(project_path: Path, fp_before: str) -> "tuple[str, str]":
+    """(stamp, note) for a panel round (task 085 R2 + round 2 T5). The stamp is
+    ALWAYS the tree the judges were SPAWNED on — never the post-review one:
+      ""          — unchanged; stamp = the pre-spawn fingerprint.
+      "moved"     — it changed while they ran (a concurrent commit or edit);
+                    stamp = the pre-spawn value, so a close reads STALE.
+      "no-after"  — it could not be re-read after the review; stamp = the
+                    pre-spawn value, but nothing may vouch it is unchanged.
+      "no-before" — git could not fingerprint it at spawn time; NO stamp (a
+                    high-consequence close then reads NO-STAMP and blocks).
+    Any note but "" means: no tail-certification descriptor. In a non-git
+    project both reads are empty and the stamp stays empty, as before."""
     from tasks.core import tree_state_fingerprint
     fp_after = tree_state_fingerprint(project_path)
-    if fp_before and fp_after and fp_before != fp_after:
-        return fp_before, True
-    return fp_after, False
+    if not fp_before:
+        return "", ("no-before" if fp_after else "")
+    if not fp_after:
+        return fp_before, "no-after"
+    if fp_after != fp_before:
+        return fp_before, "moved"
+    return fp_before, ""
 
 
 def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int = 0) -> dict:
@@ -1650,6 +1659,14 @@ def cmd_panel_review(cmd_args):
     # Task 085 R2: the tree the judges are about to see — the stamp's reference.
     from tasks.core import tree_state_fingerprint
     _fp_before = tree_state_fingerprint(project_path)
+    # T4 (task 085 round 2): the commit the judges were given, read with the
+    # fingerprint — reading HEAD after the review recorded a concurrent commit.
+    try:
+        _head_before = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=project_path,
+            capture_output=True, text=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        _head_before = ""
 
     # Run all judges in parallel
     import concurrent.futures
@@ -1756,14 +1773,8 @@ def cmd_panel_review(cmd_args):
     # gate's freshness advisory compares against — mtimes lie, content
     # doesn't.
     from tasks.core import tree_state_fingerprint
-    try:
-        _judged_head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=project_path,
-            capture_output=True, text=True).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        _judged_head = ""
-    if _judged_head:
-        lines.append(f"**Commit:** {_judged_head}\n")
+    if _head_before:
+        lines.append(f"**Commit:** {_head_before}\n")
     # Tamper-guard receipt (task 059): what the guard could and could not verify
     # for THIS round, on one line the close-gate reader can key on.
     # `degraded` marks the GUARD, not merely "something was noticed": a
@@ -1775,13 +1786,26 @@ def cmd_panel_review(cmd_args):
     # concurrent commit during the review (a caution on a contained host) used to
     # be fingerprinted here and stamped as reviewed; now the pre-spawn value is
     # stamped (the close reads STALE) and no tail-cert descriptor is emitted.
-    _fp, _tree_moved = _round_tree_stamp(project_path, _fp_before)
-    if _tree_moved:
+    _fp, _stamp_note = _round_tree_stamp(project_path, _fp_before)
+    _tree_moved = bool(_stamp_note)                   # any note → no descriptor
+    if _stamp_note == "moved":
         print("  ⚠ the tree changed while the judges ran — this round is stamped with "
               "the tree they were given, so a close will read it as STALE",
               file=sys.stderr, flush=True)
         lines.append("**Tree moved during review:** yes — stamped the pre-review tree; "
                      "no tail-cert descriptor\n")
+    elif _stamp_note == "no-after":
+        print("  ⚠ git could not fingerprint the tree after the review — stamped the "
+              "tree the judges were given, with no tail-cert descriptor",
+              file=sys.stderr, flush=True)
+        lines.append("**Tree re-read after review:** failed — stamped the pre-review "
+                     "tree; no tail-cert descriptor\n")
+    elif _stamp_note == "no-before":
+        print("  ⚠ git could not fingerprint the tree before the judges ran — this "
+              "round carries NO tree stamp (a high-consequence close reads NO-STAMP)",
+              file=sys.stderr, flush=True)
+        lines.append("**Tree-state unavailable:** git could not fingerprint the tree "
+                     "before the review — no stamp, no tail-cert descriptor\n")
     if _fp:
         lines.append(f"**Tree-state:** {_fp}\n")
         # Tail-cert F0 descriptor (task 036, finding F): ride the snapshot on the
