@@ -2,6 +2,43 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
+## [Unreleased]
+
+Task 085 (branch `fix/1.5.46-batch`): the six defects parked by the 1.5.45 release panel (task 083)
+plus the tool defect found at its close. Each fix was written against a test that failed first.
+
+### Fixed
+
+- **Three races on the close path** (task 085).
+  - *A replaced panel round with the same header no longer slips past the close.* The close
+    compared only the newest round's mode, verdict and tree stamp, so a round replaced by one with
+    the same header but different findings looked unchanged. The comparison now covers the whole
+    round.
+  - *A commit made during a panel is no longer stamped as reviewed.* The round's tree stamp was
+    taken after the judges finished, so a commit made while they ran was recorded as if they had
+    seen it. The panel now fingerprints the tree before it starts the judges and stamps that; if
+    the tree moved, the round says so (`**Tree moved during review:** yes`), prints a warning and
+    carries no tail-certification descriptor, so the close reads STALE.
+  - *A delayed block or resume can no longer undo a close.* `tasks blocked` / `tasks handoff`
+    refuse a task that is already done, and `tasks work <N>` resumes only a task whose status is
+    exactly `blocked`; both checks run inside the locked write, and a refusal leaves task.md
+    unchanged.
+- **Two bypasses of the command guards** (task 085).
+  - *`su` / `runuser` / `parallel`.* `su` and `runuser` now read `-s`/`--shell` and
+    `-w`/`--whitelist-environment` as options with a value and a bare `-` as the login flag, and
+    `parallel`'s quoted template is split into words. 9 of the 11 new test commands were allowed
+    by the 1.5.45 guard. Still not covered (documented): a target that only arrives at run time,
+    on stdin to `xargs` or through `:::` into a quoted `parallel` template.
+  - *Quoted task-directory names.* The "don't create task directories manually" rule matched
+    the raw command text, so a quoted, backslashed, `$'…'`, globbed or split spelling of the
+    directory name got through. It now looks at every `mkdir` and judges the dequoted spelling.
+- **Committing the task record no longer makes its panel stale** (task 085). The fingerprint
+  ignores `.agent/`, but a commit moves the outer `HEAD`, so a task record committed after its
+  panel read STALE with nothing to review (task 083's close needed `--stale-panel-ok`). The close
+  now reads that case as FRESH, with `records-only delta` in the receipt, when the commits touch
+  only excluded paths and the fingerprint recomputed at the panel's commit equals the stamp. Any
+  other difference is still STALE.
+
 ## [1.5.45] — 2026-09-23
 
 Five tasks from the 1.5.45 candidate branch (`fix/1.5.45-batch`, tasks 058/059/076/077/080):

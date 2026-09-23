@@ -387,6 +387,20 @@ def _taskdir_identity(task_file: Path) -> dict:
     return out
 
 
+def _round_tree_stamp(project_path: Path, fp_before: str) -> "tuple[str, bool]":
+    """(stamp, moved) for a panel round (task 085 R2). The stamp is the tree the
+    judges were SPAWNED on: when the fingerprint moved while they ran (a
+    concurrent commit or edit), the pre-spawn value is returned with moved=True,
+    so the round never vouches for code the judges did not see. Without a
+    pre-spawn fingerprint (not a git repo, or git failed then) the post-review
+    value is returned unchanged — the historical behaviour."""
+    from tasks.core import tree_state_fingerprint
+    fp_after = tree_state_fingerprint(project_path)
+    if fp_before and fp_after and fp_before != fp_after:
+        return fp_before, True
+    return fp_after, False
+
+
 def _snapshot_repo_state(project_path: Path, task_file: Path | None, _depth: int = 0) -> dict:
     """Capture the repo's mutable state before spawning judges, so a rogue judge
     that writes the working tree can be detected afterward (#1 tamper guard).
@@ -1633,6 +1647,9 @@ def cmd_panel_review(cmd_args):
               "the tamper guard is the only defense against repo mutation.",
               file=sys.stderr, flush=True)
     _tamper_before = _snapshot_repo_state(project_path, task_file)
+    # Task 085 R2: the tree the judges are about to see — the stamp's reference.
+    from tasks.core import tree_state_fingerprint
+    _fp_before = tree_state_fingerprint(project_path)
 
     # Run all judges in parallel
     import concurrent.futures
@@ -1754,7 +1771,17 @@ def cmd_panel_review(cmd_args):
     # marking such a round degraded made tail certification unreachable after
     # any background commit (059 impl-panel r2, opus F2).
     lines.append("**Tamper guard:** " + _tamper_mark_text(_tamper_full) + "\n")
-    _fp = tree_state_fingerprint(project_path)
+    # Task 085 R2: stamp the tree as it was when the judges were SPAWNED. A
+    # concurrent commit during the review (a caution on a contained host) used to
+    # be fingerprinted here and stamped as reviewed; now the pre-spawn value is
+    # stamped (the close reads STALE) and no tail-cert descriptor is emitted.
+    _fp, _tree_moved = _round_tree_stamp(project_path, _fp_before)
+    if _tree_moved:
+        print("  ⚠ the tree changed while the judges ran — this round is stamped with "
+              "the tree they were given, so a close will read it as STALE",
+              file=sys.stderr, flush=True)
+        lines.append("**Tree moved during review:** yes — stamped the pre-review tree; "
+                     "no tail-cert descriptor\n")
     if _fp:
         lines.append(f"**Tree-state:** {_fp}\n")
         # Tail-cert F0 descriptor (task 036, finding F): ride the snapshot on the
@@ -1796,7 +1823,7 @@ def cmd_panel_review(cmd_args):
             # omit it (a missing descriptor makes the close fail closed to a fresh
             # panel — never a silent stale baseline). None (a scope that could not
             # be captured cleanly, impl-panel opus#2/grok#3) is likewise omitted.
-            if _snap is not None and _tsf(project_path) == _fp:
+            if _snap is not None and not _tree_moved and _tsf(project_path) == _fp:
                 lines.append(format_panel_snapshot_line(_snap) + "\n")
         except Exception:
             pass

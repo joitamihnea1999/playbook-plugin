@@ -257,9 +257,10 @@ it can never wedge a session.
   `timeout --help …`. An option the table does not know that takes a value hides
   what follows it — the guard under-blocks there rather than risk blocking a safe
   command, and that bound is deliberate.
-- **What the interlock does NOT cover** (task 077, measured and pinned by tests rather than left implied). A command name that only exists after the shell evaluates something — an `alias`, `${X:-rm}`, `$(echo rm)` — cannot be resolved by a static classifier; the OS sandbox is the layer that covers those. And the guard answers *where is the command and is it one of the enumerated dangerous forms*, not *is this act destructive*: an interpreter running a deletion inside its own language (`perl -e 'system(…)'`), a remote `ssh host …`, a container bind mount, `find -delete`, `rsync --delete` and `shred` are all allowed. Adding one of those is a new rule family with its own false-positive profile — a scope decision, not a bug fix. Use `dangerous_commands` if your project wants one of them today.
+- **What the interlock does NOT cover** (task 077, measured and pinned by tests rather than left implied). A command name that only exists after the shell evaluates something — an `alias`, `${X:-rm}`, `$(echo rm)` — cannot be resolved by a static classifier; the OS sandbox is the layer that covers those. And the guard answers *where is the command and is it one of the enumerated dangerous forms*, not *is this act destructive*: an interpreter running a deletion inside its own language (`perl -e 'system(…)'`), a remote `ssh host …`, a container bind mount, `find -delete`, `rsync --delete` and `shred` are all allowed. So is a target that only arrives at run time — on stdin to `xargs` (`echo / | xargs rm -rf`) or through `:::` into a quoted `parallel` template (`parallel 'rm -rf {}' ::: /`): the classifier sees the command, not the data it will be fed (measured in task 085). Adding one of those is a new rule family with its own false-positive profile — a scope decision, not a bug fix. Use `dangerous_commands` if your project wants one of them today.
 - **What quoting means for a target** (task 077): the shell expands `$` inside double quotes but not single ones, and expands a glob or a `~` inside neither — so `rm -rf "$HOME"` blocks while `rm -rf 'build*'` is a literal file name and passes. Brace alternatives are expanded before the test, ANSI-C `$'\x72\x6d'` escapes are decoded, an unquoted `#` starts a comment, and nesting past the classifier's limit REFUSES rather than allowing. An argv-delivered command still gets the DB-client rule and your `dangerous_commands` patterns; only the substitution scan is skipped for it, because word splitting has already happened.
 - **Shell syntax the classifier now reads** (task 077): line continuations, ANSI-C `$'…'` quoting, `+=` assignment prefixes, the reserved words `if`/`while`/`until`, process substitution `<( … )`, herestrings `<<<`, file-descriptor redirects such as `1>`, git short option clusters (`push -qf`), and the privilege wrappers `su -c`, `pkexec` and `runuser`. A recursive-force `rm` whose target is COMPUTED (`$(pwd)`, `$DEST`) counts as dangerous. `sh -c` takes exactly one script operand, so a trailing argv0 no longer hides it. **Echoing dangerous text really is fine now**: a pipe inside a quoted string is data, while an unquoted pipe that feeds a shell still blocks.
+- **Privilege-wrapper options that take a value** (task 085). `su` and `runuser` read `-s`/`--shell` and `-w`/`--whitelist-environment` as options with a value, and a bare `-` as the login flag, so `su - root -c '…'`, `su -s /bin/sh root -c '…'` and `runuser -w PATH root -c '…'` are classified like `su root -c '…'`. `parallel`'s quoted command template is split into words, so `parallel 'rm -rf /' ::: 1` blocks like `parallel rm -rf /`.
 - **Quoting is seen in the ARGUMENTS too** (task 077). Flags and targets are read from the same dequoted tokens as the command name, so a quoted root target or a quoted `--force` is classified like its bare form, while the benign twins (`"./build"`, `"--force-with-lease"`) still pass. Command separators are recognised outside quotes only: an operator inside an option value no longer splits the command, and an operator inside an echoed string is data. An argv list from a provider is classified as ONE invocation, so a commit message that merely mentions a dangerous command is not blocked.
 - **Quoting and naming are seen** (task 077). The classifier lexes the command quote- and escape-aware, and resolves the command NAME through quotes, a leading backslash, a directory, `~/` and `$VAR/` — so `sudo -p 'Password: ' rm -rf /`, `'rm' -rf /`, `~/rm -rf /` and `/bin/bash -c '...'` are classified like their plain forms. A quoted string containing spaces is never treated as a command name, which is what keeps a source line full of such strings from blocking. `git`'s global options (`-C`, `-c`, `--git-dir=` ...) no longer hide its subcommand.
 - **A command substitution is a command** (task 077). The body of `$( ... )` and of a backtick form is classified in its own right, because it runs whatever surrounds it. A single `&` separates commands like `;` does, and `|&` or a grouped `(bash)` reach the same interpreter as `| bash`. Inert DATA is still inert: a quoted `cat`/`tee` heredoc written to a plain file is not scanned, which is how you write a fixture ABOUT a dangerous command. The one accepted cost is that a single-quoted substitution, which the shell would not expand, still blocks — the matcher cannot see quoting, and allowing it would mean allowing the double-quoted form that really runs.
@@ -340,6 +341,26 @@ freshness cannot be judged and the close blocks naming git rather than reading
 a broken tree as FRESH; and **NO-STAMP** — the panel round
 carries no fingerprint stamp although the project is a git repo (a non-git
 project keeps the advisory record). The same manual exits apply.
+
+**What the stamp means** (task 085). The panel fingerprints the tree *before*
+it spawns the judges, and stamps that value. If the tree moves while the judges
+run (you commit or edit during the review), the round keeps the pre-review
+stamp, prints a warning, records `**Tree moved during review:** yes` and carries
+no tail-certification descriptor — so the close reads STALE instead of
+certifying code no judge was shown.
+
+**Committing the task's own record does not stale the panel** (task 085). The
+fingerprint already ignores `.agent/`, but a commit moves the outer `HEAD`,
+which the fingerprint does include — so committing the task record after its
+panel used to read STALE with nothing to review. The close now accepts that
+case as FRESH, and the receipt says `records-only delta`, when all of these
+hold: the round's descriptor matches its stamp, the exclude set is unchanged,
+`git diff <panel commit> HEAD` outside the excluded paths is empty, and the
+fingerprint recomputed with `HEAD` set back to the panel's commit equals the
+stamp (so the working tree and every `code_roots` repo are exactly what the
+panel saw). Any other difference, or any git error, is still STALE. Only the
+outer `HEAD` gets this treatment; a commit inside a `code_roots` repo still
+reads STALE.
 
 The stamp compares a tree-state fingerprint of the **outer** git repository. If
 your project keeps code in a gitignored **nested checkout** (this workspace's

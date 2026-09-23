@@ -35,7 +35,7 @@ The task gate runs two guards before the no-active-task check, both on edits to 
 - **Guard 0 — manual-creation block.** A `Write` that would create a *new* `.agent/**/tasks/<N>-…/task.md` is blocked; only `tasks new` mints task files (it owns templates and numbering). Editing an existing task.md is fine.
 - **Guard 0.5 — annotated batch-close.** Closing several ALREADY-DONE gates in one write is allowed only when each newly-checked line carries its own outcome note. The logic lives in `gate-batch-check.py` (shared and unit-tested; the hook delegates to it): one gate (n ≤ 1) is always allowed; a batch of 2–5 is allowed only if no line is *born-checked* (checked text with no matching open original — usually a rewritten gate) and every closed line appends ≥ 8 non-whitespace characters of outcome (`→ 283 green` passes, `— done` does not, a pointer like `— see Round 2 Result` is the sanctioned idiom); 6+ blocks even fully annotated; and a second batch with no intervening tool call blocks (kills end-of-task ticking). The helper **fails OPEN** on any internal error — only an explicit block exits non-zero — so a crashed guard never bricks the session.
 
-The no-active-task check refuses a code edit when the session pointer is junk, stale, glob-bearing, or names a done task — and, since 1.5.45, when it names a `blocked` task (paused on a decision that is not the agent's); the refusal names `tasks work <N>` as the resume. On shell commands the gate also refuses creating a task directory by hand (task directories come from `tasks new`). Since 1.5.45 that rule applies only inside the project: a single, simple `mkdir` of a literal absolute path outside it — a test fixture in a temp dir — goes through, judged by path and through the filesystem (symlinks, case-insensitive disks), while a compound command, a relative path, `~`, a variable, a glob or brace, or an error in the check is still refused.
+The no-active-task check refuses a code edit when the session pointer is junk, stale, glob-bearing, or names a done task — and, since 1.5.45, when it names a `blocked` task (paused on a decision that is not the agent's); the refusal names `tasks work <N>` as the resume. On shell commands the gate also refuses creating a task directory by hand (task directories come from `tasks new`). Since 1.5.45 that rule applies only inside the project: a single, simple `mkdir` of a literal absolute path outside it — a test fixture in a temp dir — goes through, judged by path and through the filesystem (symlinks, case-insensitive disks), while a compound command, a relative path, `~`, a variable, a glob or brace, or an error in the check is still refused. Since task 085 the rule is triggered by any `mkdir` and judged on the dequoted spelling, so `.ag'ent/tasks'`, `.ag\ent/tasks`, `.ag$'e'nt/tasks` or `ta''sks` no longer slip past a raw-text match, while a `mkdir` that cannot name a task directory (`mkdir -p "$D/build"`) is not examined further. The whole command is judged, not the `mkdir` line, so a path assigned on one line and created on the next is refused too; the cost is that a multi-line command that merely mentions `mkdir` and a task directory on different lines (prose in a heredoc) is also refused — write such text from a file.
 
 `/playbook:init` additionally writes a **deny-list** into the project's `.claude/settings.json` blocking `TodoWrite`, `Task`, and `EnterPlanMode` — those would compete with task.md as the source of truth. If those tools suddenly error in a playbook project, that's why.
 
@@ -153,11 +153,16 @@ Three rules define the boundary:
   composed on the bytes just read and written once, so the pair can never
   half-land. The expensive work (verify, judges) happens outside the lock.
 * **A commit re-checks what earned it.** `core.compose_close` refuses — leaving
-  task.md byte-identical — when a `## Blocked` appeared or the status moved
+  task.md byte-identical — when a `## Blocked` appeared, the status moved, or
+  the newest panel round changed (its header *or* its findings, since task 085)
   while the close was running, and the close also compare-and-swaps the tree
   fingerprint its freshness decision was made on. Routing alone would not have
   been enough: with the lock neutered the first regression still passed, because
   each writer now reads late; what closes the window is the refusal.
+  The other transitions check their source the same way (task 085): blocking
+  or handing off refuses a task that is already done, and resuming refuses a
+  task that is not `blocked` — so a close that commits first is never
+  overwritten by a block or resume that was waiting behind it.
 
 Two-file protocols (`stack_judge_round`'s archive-then-judge.md, `tasks compact`'s
 archive-then-task.md) keep their own rollback and hold the lock across the whole

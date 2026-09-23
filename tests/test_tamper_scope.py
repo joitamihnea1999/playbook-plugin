@@ -1029,5 +1029,49 @@ class Round2Fixes(unittest.TestCase):
         self.assertFalse(any("judge.log" in m and "evil" not in m for m in full["mutations"]), full)
 
 
+class RoundStampPreSpawn(unittest.TestCase):
+    """Task 085 R2 (083 W10, sol-high #2): on a contained host a concurrent commit
+    during a review is only a CAUTION, and the panel then fingerprinted the
+    POST-review tree and stamped it as reviewed — the close read FRESH for code the
+    judges never saw. The stamp must be the tree as it was when the judges were
+    spawned; if it moved, the round records the pre-spawn value (so the close reads
+    STALE) and carries no tail-cert descriptor."""
+
+    def _proj(self):
+        d = _repo()
+        (d / "a.py").write_text("a = 1\n", encoding="utf-8")
+        _git("add", "-A", cwd=d)
+        _git("commit", "-qm", "seed", cwd=d)
+        return d
+
+    def test_a_commit_during_the_review_is_not_stamped_as_reviewed(self):
+        from tasks.core import tree_state_fingerprint
+        d = self._proj()
+        before = tree_state_fingerprint(d)                 # judges spawned here
+        (d / "a.py").write_text("a = 2  # landed while the judges ran\n", encoding="utf-8")
+        _git("commit", "-qam", "concurrent commit", cwd=d)
+        stamp, moved = R._round_tree_stamp(d, before)
+        self.assertTrue(moved, "the concurrent commit was not noticed")
+        self.assertEqual(stamp, before, "the post-review tree was stamped as reviewed")
+        self.assertNotEqual(stamp, tree_state_fingerprint(d))
+
+    def test_an_unchanged_tree_is_stamped_as_before(self):
+        from tasks.core import tree_state_fingerprint
+        d = self._proj()
+        before = tree_state_fingerprint(d)
+        stamp, moved = R._round_tree_stamp(d, before)
+        self.assertFalse(moved)
+        self.assertEqual(stamp, before)
+
+    def test_the_panel_fingerprints_before_spawning_and_uses_it(self):
+        import inspect
+        src = inspect.getsource(R.cmd_panel_review)
+        self.assertIn("_fp_before = tree_state_fingerprint(project_path)", src)
+        self.assertLess(src.index("_fp_before = tree_state_fingerprint(project_path)"),
+                        src.index("executor.submit(run_judge"),
+                        "the pre-spawn fingerprint must be taken before the judges run")
+        self.assertIn("_round_tree_stamp(project_path, _fp_before)", src)
+
+
 if __name__ == "__main__":
     unittest.main()

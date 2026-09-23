@@ -444,8 +444,20 @@ def cmd_work(cmd_args):
                         }
                     elif _now_fp:
                         _stale = _now_fp != _impl["tree_state"]
+                        # Task 085 T: a STALE read explained entirely by commits
+                        # that touch only fingerprint-excluded paths (the task's
+                        # own record) is FRESH — checked exactly, else unchanged.
+                        _records_only = False
+                        if _stale:
+                            from tasks.core import records_only_delta
+                            _records_only = records_only_delta(
+                                Path(project_path), _impl.get("snapshot"),
+                                _impl["tree_state"])
+                            if _records_only:
+                                _stale = False
                         _freshness = {
                             "verdict": "STALE" if _stale else "FRESH",
+                            "records_only": _records_only,
                             "round_fp": _impl["tree_state"],
                             "now_fp": _now_fp,
                             "accepted_reason": (
@@ -522,6 +534,7 @@ def cmd_work(cmd_args):
                     git_available=_git_here,
                     exclude_covers=_excl_hits,
                     tamper_degraded=_tamper_degraded,
+                    records_only=bool(_freshness and _freshness.get("records_only")),
                 )
                 # TAIL CERTIFICATION (task 036, owner decision A). When the panel
                 # is STALE and would block, but the ONLY post-panel delta is in

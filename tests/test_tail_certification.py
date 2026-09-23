@@ -1214,5 +1214,46 @@ class RunTailCertJudgeGuards(unittest.TestCase):
         self.assertIsNone(v)                    # tree mutated during cert → block
 
 
+class RecordsOnlyDelta(unittest.TestCase):
+    """Task 085 T (083's close): committing the task's own record (`.agent/`,
+    fingerprint-excluded) after the panel moved the outer HEAD, so the tree read
+    STALE with an EMPTY attributable delta — tail certification refuses that by
+    design (finding A), and a close with nothing reviewable demanded a fresh panel.
+    A STALE verdict whose ONLY difference is outer-HEAD commits that touch nothing
+    but fingerprint-excluded paths now reads FRESH; anything else still does not."""
+
+    # borrow the harness, not its tests (subclassing re-ran all of them)
+    _setup = ClosePathTailCert._setup
+    _close = ClosePathTailCert._close
+    _receipt = ClosePathTailCert._receipt
+
+    def _commit_records(self, d, *extra):
+        _git(d, "add", "-A", ".agent", *extra)
+        _git(d, "commit", "-qm", "record")
+
+    def test_a_records_only_commit_reads_fresh(self):
+        d, td, env = self._setup()
+        self._commit_records(d)
+        r = self._close(d, env)
+        self.assertIn("Task 001 done.", r.stdout, r.stdout + r.stderr)
+        self.assertIn("records-only", self._receipt(td))
+
+    def test_a_commit_that_also_touches_code_still_blocks(self):
+        d, td, env = self._setup()
+        (d / "code.py").write_text("x = 2\n", encoding="utf-8")
+        self._commit_records(d, "code.py")
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        self.assertIn("pending", self._receipt(td))
+
+    def test_a_records_only_commit_with_an_uncommitted_code_edit_still_blocks(self):
+        d, td, env = self._setup()
+        self._commit_records(d)
+        (d / "code.py").write_text("x = 3  # not reviewed\n", encoding="utf-8")
+        r = self._close(d, env)
+        self.assertNotIn("Task 001 done.", r.stdout)
+        self.assertIn("pending", self._receipt(td))
+
+
 if __name__ == "__main__":
     unittest.main()

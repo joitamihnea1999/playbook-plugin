@@ -1236,6 +1236,65 @@ class BlockedEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"a CR after `blocked` must not defeat the release: {r.stderr}")
 
 
+class TransitionsCheckTheSourceStatus(unittest.TestCase):
+    """Task 085 R3 (083 W10, sol-medium #1): `set_task_blocked` and
+    `resume_blocked_task` spliced whatever status they found. Interleaving: a close
+    commits first (it won the task lock), then a delayed `tasks blocked` / handoff /
+    resume runs its transform — it turned `done` back into `blocked`, or flipped a
+    task that was no longer blocked. Each transform now checks its source status
+    inside the lock and refuses, writing nothing."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tf = Path(self._tmp.name) / "task.md"
+        self.tf.write_text(TASK.format(n="012").replace("pending", "in_progress"), encoding="utf-8")
+
+    def _close_lands_first(self):
+        from tasks.core import compose_close
+        done = compose_close(self.tf.read_text(encoding="utf-8"),
+                             receipt_heading="Verification Receipt", receipt="### c\n",
+                             expect_status="in_progress")
+        self.tf.write_text(done, encoding="utf-8")
+        self.assertTrue(_extract_status(self.tf).startswith("done"))
+        return self.tf.read_bytes()
+
+    def test_a_block_that_lands_after_the_close_refuses(self):
+        before = self._close_lands_first()
+        with self.assertRaises(ValueError):
+            set_task_blocked(self.tf, "late pause")
+        self.assertEqual(self.tf.read_bytes(), before, "a done task was reopened as blocked")
+
+    def test_a_handoff_that_lands_after_the_close_refuses(self):
+        from tasks.core import write_handoff_and_block
+        before = self._close_lands_first()
+        with self.assertRaises(ValueError):
+            write_handoff_and_block(self.tf, "## Handoff\nstate\n", "handoff")
+        self.assertEqual(self.tf.read_bytes(), before)
+
+    def test_a_resume_of_a_task_that_is_no_longer_blocked_refuses(self):
+        before = self._close_lands_first()               # the task was closed meanwhile
+        with self.assertRaises(ValueError):
+            resume_blocked_task(self.tf)
+        self.assertEqual(self.tf.read_bytes(), before, "a done task was flipped to in_progress")
+        # and an already-resumed (in_progress) task is not blocked either
+        self.tf.write_text(TASK.format(n="012").replace("pending", "in_progress"), encoding="utf-8")
+        before = self.tf.read_bytes()
+        with self.assertRaises(ValueError):
+            resume_blocked_task(self.tf)
+        self.assertEqual(self.tf.read_bytes(), before)
+
+    def test_ordinary_transitions_still_work(self):
+        # controls: pending → blocked (a freshly activated task is `pending`, task
+        # 080 was blocked from pending), in_progress → blocked, blocked → in_progress
+        for start in ("pending", "in_progress"):
+            self.tf.write_text(TASK.format(n="012").replace("pending", start), encoding="utf-8")
+            set_task_blocked(self.tf, "owner decision")
+            self.assertEqual(_extract_status(self.tf), "blocked", start)
+            resume_blocked_task(self.tf)
+            self.assertEqual(_extract_status(self.tf), "in_progress", start)
+
+
 class EditGateWhileBlocked(unittest.TestCase):
     """PLAN S1a (task 079 finding P1-03): the CLI treats a blocked task as not
     active (`_find_active_task` skips it) but the edit gate refused only a

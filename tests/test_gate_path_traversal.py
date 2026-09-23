@@ -235,6 +235,36 @@ class ManualTaskDirGuard(unittest.TestCase):
             r = self._run(cmd)
             self.assertEqual(r.returncode, 2, f"a non-simple command was judged: {cmd!r}")
 
+    def test_quoted_escaped_and_globbed_spellings_are_still_blocked(self):
+        # Task 085 G2 (083 W10, sol-medium #2): the trigger was a raw-text regex,
+        # so a shell spelling of `.agent/tasks` never reached the helper — the
+        # shell dequotes / unescapes / globs it back into the real path.
+        mk = self.MK
+        for cmd in (f"{mk} -p .ag'ent/tasks'/999-x", f"{mk} -p .ag\\ent/tasks/999-x",
+                    f'{mk} -p ".agent"/tasks/999-x', f'{mk} -p {self.project}/.ag"ent"/tasks/999-x',
+                    f"{mk} -p .ag$'e'nt/tasks/999-x", f"{mk} -p .ag?nt/tasks/999-x",
+                    f"{mk} -p .agent/ta''sks/999-x"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 2, f"shell spelling of a task dir allowed: {cmd!r}")
+
+    def test_a_task_dir_named_on_an_earlier_line_is_blocked(self):
+        # Task 085 G2, measured after the fix: the old per-line trigger never saw a
+        # path assigned on one line and created on the next (allowed by 1.5.45).
+        # The accepted cost of judging the whole command: prose that merely
+        # mentions both words on different lines is refused too.
+        r = self._run(f'D=.agent/tasks/999-x\n{self.MK} -p "$D"')
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_ordinary_mkdirs_are_not_blocked(self):
+        # the widened trigger (any mkdir) must not turn ordinary directory
+        # creation into a refusal: only a spelling that names `.agent…tasks` is judged
+        mk = self.MK
+        for cmd in (f"{mk} -p build", f'{mk} -p "$D/build"', f"cd /tmp && {mk} y",
+                    f"{mk} -p {self.outside}/logs", f"{mk} -p $(mktemp -d)/y",
+                    f"{mk} -p docs/tasks", f"{mk} -p .agentx/notes"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 0, f"ordinary mkdir refused: {cmd!r}: {r.stderr}")
+
     def test_project_agent_tasks_is_still_blocked(self):
         mk = self.MK
         for cmd in (f"{mk} -p {self.project}/.agent/tasks/001-x",

@@ -925,6 +925,29 @@ class Round2Fixes(unittest.TestCase):
                           task_file=tf)
         self.assertIn("panel", str(cm.exception).lower())
 
+    def test_a_same_header_round_with_a_different_body_refuses_the_close(self):
+        # Task 085 R1 (083 W10, sol-high #1): judge_digest hashed only mode, verdict
+        # and tree-state, so a NEWER round with the same header — same verdict,
+        # same stamp — but different findings or a degraded tamper guard landed
+        # invisibly between the close's entry and its commit.
+        from tasks.core import CloseRaceRefused, compose_close, judge_digest
+        d = _tmp()
+        tf = d / "task.md"
+        tf.write_text(self.BASE, encoding="utf-8")
+        jm = d / "judge.md"
+        head = "# Panel Impl Review — t\n\n**PANEL VERDICT: PASS** — 5/5\n\n**Tree-state:** abc123\n"
+        jm.write_text(head + "**Tamper guard:** clean\n\nno findings\n", encoding="utf-8")
+        entry = judge_digest(tf)
+        # the concurrent panel: same verdict, same stamp, different body
+        jm.write_text(head + "**Tamper guard:** degraded — git status unreadable\n\n"
+                      "Important: the close path loses a write\n", encoding="utf-8")
+        with self.assertRaises(CloseRaceRefused) as cm:
+            compose_close(tf.read_text(encoding="utf-8"),
+                          receipt_heading="Verification Receipt", receipt="### c\n",
+                          expect_status="in_progress", expect_judge=entry,
+                          task_file=tf)
+        self.assertIn("panel", str(cm.exception).lower())
+
     def test_an_unchanged_panel_verdict_commits(self):
         from tasks.core import compose_close, judge_digest
         d = _tmp()

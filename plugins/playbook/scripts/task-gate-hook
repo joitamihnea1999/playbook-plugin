@@ -474,7 +474,10 @@ MSG
     # The trigger is deliberately loose (round 2: `.agent/x/../tasks/` and
     # `.agent//tasks//` slipped past `\.agent(/[^/]+)?/tasks/`) — a wider
     # trigger can only block more; the helper does the narrowing.
-    if echo "$CMD" | grep -qE 'mkdir.*\.agent/.*tasks' \
+    # Task 085 G2: any `mkdir` word triggers the check now — a shell spelling of
+    # the path (`.ag'ent/tasks'`, `.ag\ent`, `.ag?nt`) never matched a raw-text
+    # regex. The helper decides whether a task dir is named at all.
+    if echo "$CMD" | grep -qE '(^|[^[:alnum:]_])mkdir([^[:alnum:]_]|$)' \
        && ! printf '%s' "$CMD" | PB_PROJECT="$PROJECT_DIR" python3 "$HOOK_DIR/task-dir-target.py" 2>/dev/null; then
         cat >&2 <<'MSG'
 BLOCKED: Don't create task directories manually.

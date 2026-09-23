@@ -195,7 +195,7 @@
     {
       "id": "PB-TASK-BLOCKED",
       "category": "task-lifecycle",
-      "statement": "tasks blocked refuses an empty reason, records the reason without touching gates or minting a heading, locates the `## Blocked` section fence-aware so a fenced `## Blocked`/`## Handoff` example in task.md cannot delete or mis-splice the `## Blocked`/`## Handoff` section, reads and writes `## Status` fence-aware through the ONE shared reader (`_live_status_index`: LAST live heading, strict ATX, fail closed on an unclosed fence) so a fenced `## Status`/blocked example is never read as, or clobbered as, the status, refuses (writing nothing) when the blocked status cannot land live, and tasks work on the blocked task restores in_progress. The stop-hook reads the status through the same Python reader (`scripts/task-status.py`) so the enforcing hook and the CLI cannot disagree about the same file. task-gate-hook's F3 done-check reads the resolved task's `## Status` through the same script (task 055), so the three `## Status` consumers on the enforcing path — CLI, stop-hook, task-gate-hook — are one reader. `tasks handoff` takes no arguments: any argument other than -h/--help is refused before anything is read or written (usage on stderr, exit 1, task.md byte-identical).",
+      "statement": "tasks blocked refuses an empty reason, records the reason without touching gates or minting a heading, locates the `## Blocked` section fence-aware so a fenced `## Blocked`/`## Handoff` example in task.md cannot delete or mis-splice the `## Blocked`/`## Handoff` section, reads and writes `## Status` fence-aware through the ONE shared reader (`_live_status_index`: LAST live heading, strict ATX, fail closed on an unclosed fence) so a fenced `## Status`/blocked example is never read as, or clobbered as, the status, refuses (writing nothing) when the blocked status cannot land live, and tasks work on the blocked task restores in_progress. Both transitions check their SOURCE status inside the locked transform (task 085): blocking (and handoff) refuses a task that is already done, and resume refuses anything that is not exactly `blocked`, so a close that commits first is never overwritten by a delayed block or resume (task.md byte-identical on the refusal). The stop-hook reads the status through the same Python reader (`scripts/task-status.py`) so the enforcing hook and the CLI cannot disagree about the same file. task-gate-hook's F3 done-check reads the resolved task's `## Status` through the same script (task 055), so the three `## Status` consumers on the enforcing path — CLI, stop-hook, task-gate-hook — are one reader. `tasks handoff` takes no arguments: any argument other than -h/--help is refused before anything is read or written (usage on stderr, exit 1, task.md byte-identical).",
       "owner": [
         {
           "path": "plugins/playbook/tasks/lifecycle.py",
@@ -631,6 +631,45 @@
           "negative_control": null,
           "limitations": [
             "A dead session dir is planted so the session GC would delete it if it still ran before the refusal; the test's own control runs `tasks status` and asserts GC removed it."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_blocked_state.py",
+          "reference": "TransitionsCheckTheSourceStatus.test_a_block_that_lands_after_the_close_refuses",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_blocked_state.py",
+            "reference": "TransitionsCheckTheSourceStatus.test_ordinary_transitions_still_work"
+          },
+          "limitations": [
+            "Task 085 R3: a real `compose_close` commits first, then the delayed transition runs in the same process — the interleaving is sequenced, not two racing processes; the lock itself is PB-TASK-TXN's proof."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_blocked_state.py",
+          "reference": "TransitionsCheckTheSourceStatus.test_a_handoff_that_lands_after_the_close_refuses",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_blocked_state.py",
+            "reference": "TransitionsCheckTheSourceStatus.test_ordinary_transitions_still_work"
+          },
+          "limitations": [
+            "Task 085 R3: a real `compose_close` commits first, then the delayed transition runs in the same process — the interleaving is sequenced, not two racing processes; the lock itself is PB-TASK-TXN's proof."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_blocked_state.py",
+          "reference": "TransitionsCheckTheSourceStatus.test_a_resume_of_a_task_that_is_no_longer_blocked_refuses",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_blocked_state.py",
+            "reference": "TransitionsCheckTheSourceStatus.test_ordinary_transitions_still_work"
+          },
+          "limitations": [
+            "Task 085 R3: a real `compose_close` commits first, then the delayed transition runs in the same process — the interleaving is sequenced, not two racing processes; the lock itself is PB-TASK-TXN's proof."
           ]
         }
       ],
@@ -2582,6 +2621,19 @@
           "limitations": [
             "`trap '<cmd>' SIGNAL` stores a command the shell runs later; `watch` and `parallel` delegate like the other wrappers; a `f() { … }` definition header is not a command name. Found by my own sweep after the round-4 panel."
           ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_command_guard.py",
+          "reference": "PrivilegeWrapperShellAndLoginOptions.test_shell_login_and_whitelist_options_are_walked",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_command_guard.py",
+            "reference": "PrivilegeWrapperShellAndLoginOptions.test_their_benign_twins"
+          },
+          "limitations": [
+            "Task 085 G1: `su`/`runuser` `-s/--shell` and `-w/--whitelist-environment` take a value, a bare `-` is the login flag, and `parallel`'s quoted template is split; 9 of the 11 vectors were allowed by the 1.5.45 guard."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -2609,7 +2661,8 @@
         "Task 077 impl panel round 4 produced 22 more defects (16 under-blocks, 6 over-blocks), all confirmed by execution and all fixed. STOPPING RULE, stated rather than assumed: rounds 1-3 each invalidated an ARCHITECTURAL assumption (the command position was unlexed; the rules were unlexed; the separators were unlexed). Round 4 found one architectural regression of mine (the argv early-return) and otherwise INSTANCES - one more wrapper's arity, one more escape form. The task stops when a round returns only instances, with the residual surface disclosed here rather than implied to be empty: this is a heuristic interlock over shell text, not a shell parser, and the OS sandbox remains the only deterministic layer.",
         "Task 077 ARCHITECTURAL BOUND, pinned by `TheArchitecturalBound.test_a_computed_command_name_is_not_resolvable`: a command NAME that only exists after the shell evaluates something is out of reach for a static classifier — `alias x='<cmd>'; x`, `${X:-rm} …`, `$(echo rm) …`. These need the alias table, the variable environment, or the result of running an inner command. No amount of further parsing closes them; the OS sandbox is the layer that does.",
         "Task 077 SCOPE BOUND, pinned by `TheArchitecturalBound.test_a_different_RULE_FAMILY_is_out_of_scope_not_covered`: the interlock answers 'where is the command and is it one of the enumerated dangerous forms', not 'is this act destructive'. Measured as ALLOWED and disclosed rather than implied: an interpreter running a destructive command inside its own language (`perl -e 'system(…)'`, `python3 -c 'os.system(…)'`), a remote command (`ssh host …`), a container bind mount, and other deletion tools (`find -delete`, `rsync --delete`, `shred`). Each would be a NEW rule family with its own false-positive profile, and adding one is a scope decision for the owner, not a bug fix.",
-        "Task 077 impl panel round 5 produced 14 defects, all confirmed and fixed. The signal CHANGED in this round and that is what ended the task: rounds 1-3 each showed the DESIGN was wrong; rounds 4 and 5 found regressions introduced by my own earlier fixes (the argv early-return, the echo mask, the computed-target rule) plus instances. That is an argument for fewer edits to this module, not for more review rounds — each further round of edits to the masking engine and the target rule has itself produced a regression. The residual surface is disclosed in the bounds above rather than implied to be empty."
+        "Task 077 impl panel round 5 produced 14 defects, all confirmed and fixed. The signal CHANGED in this round and that is what ended the task: rounds 1-3 each showed the DESIGN was wrong; rounds 4 and 5 found regressions introduced by my own earlier fixes (the argv early-return, the echo mask, the computed-target rule) plus instances. That is an argument for fewer edits to this module, not for more review rounds — each further round of edits to the masking engine and the target rule has itself produced a regression. The residual surface is disclosed in the bounds above rather than implied to be empty.",
+        "Task 085 (measured): a target that only arrives at run time is not seen — on stdin to `xargs` (`echo / | xargs rm -rf`) or through `:::` into a quoted `parallel` template (`parallel 'rm -rf {}' ::: /`). The classifier judges the command, not the data it will be fed; the OS sandbox is the layer for that."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
@@ -3777,7 +3830,7 @@
     {
       "id": "PB-PANEL-FRESHNESS",
       "category": "judges-and-reviews",
-      "statement": "Panel evidence is stamped to the reviewed tree; when panel evidence is required by policy (panel_required_for), a close held to the high-consequence bar (assertive, irreversible, or an unset/unclassified risk) blocks on stale evidence while a reversible close stays advisory, the override is refused without a reason and records the reason when given, and a fresh stamp closes cleanly. As of task 036 (owner decision A, 2026-08-27) a STALE close whose only post-panel delta is in non-behavioral file classes (a *.md under docs/ or named README*/CHANGELOG*/MIND_MAP*, a *.json under docs/, the repo-root CLAUDE.md, and anything under tests/; root .agent/ task records are instead excluded from the freshness fingerprint entirely, so an .agent/ edit never stales a panel and never enters the certified delta) may instead satisfy freshness via a single-judge TAIL CERTIFICATION that re-reviews the F0-anchored close delta (the changed-path set and the current closing content; an original uncommitted at F0 is not persisted, so that path is reviewed current-vs-HEAD) and emits a structured TAIL-CERT: PASS/FAIL; any behavioral (code) delta — including a code comment, a config.json, a non-doc top-level file, or the source endpoint of a rename into docs/ — still forces a fresh full panel, and the mechanism fails closed on a missing/mismatched descriptor, a changed code_roots scope set or fingerprint_exclude set (the exclude pathspecs are hashed into the fingerprint since task 051, so a post-panel exclude reads STALE instead of FRESH and is then rejected), a git error, a stale tree with no attributable delta, a non-PASS verdict, a tree that mutates during the judge call (a TOCTOU compare-and-swap), a `code_roots` scope whose RESOLVED identity (real path relative to the project) differs from the descriptor's, or an owner `fingerprint_exclude` that covers source. Task 060: an ABSENT fingerprint is no longer fail-open — in a git repo, a carrying high-consequence close blocks NO-STAMP (the round has no `**Tree-state:**`) and UNREADABLE (git cannot fingerprint the tree at close: every git return code on the outer path is read, a corrupt index / missing HEAD / unresolvable toplevel yields no fingerprint instead of a clean-looking one), with the same two exits as STALE and a receipt line on the override path; a non-git project keeps the advisory NO-STAMP. EXCLUDE-COVERS-CODE: an owner `fingerprint_exclude` pathspec that covers a source path (behavioral by file class and not bookkeeping-shaped `.md/.rst/.log`) makes every fingerprint blind to that code, so the close blocks it regardless of FRESH/STALE, the panel stamp warns and emits no descriptor, and tail certification refuses. The fingerprint resolves untracked content against the repo toplevel (a project in a SUBDIRECTORY of a larger repo hashes real content, not a doubled-prefix miss), decodes every git text read with `surrogateescape` and hashes the material with it (a `core.quotePath=false` non-UTF-8 name neither crashes the close nor collides with a sibling), tokens an untracked symlink by its link text, and binds each `code_roots` scope's resolved identity into the material and the descriptor.",
+      "statement": "Panel evidence is stamped to the reviewed tree — the tree fingerprinted BEFORE the judges spawn; when the tree moves during the review the round keeps that pre-review stamp, says so in its header, and carries no tail-certification descriptor (task 085); when panel evidence is required by policy (panel_required_for), a close held to the high-consequence bar (assertive, irreversible, or an unset/unclassified risk) blocks on stale evidence while a reversible close stays advisory, the override is refused without a reason and records the reason when given, and a fresh stamp closes cleanly. As of task 036 (owner decision A, 2026-08-27) a STALE close whose only post-panel delta is in non-behavioral file classes (a *.md under docs/ or named README*/CHANGELOG*/MIND_MAP*, a *.json under docs/, the repo-root CLAUDE.md, and anything under tests/; root .agent/ task records are instead excluded from the freshness fingerprint entirely, so an .agent/ edit never stales a panel and never enters the certified delta) may instead satisfy freshness via a single-judge TAIL CERTIFICATION that re-reviews the F0-anchored close delta (the changed-path set and the current closing content; an original uncommitted at F0 is not persisted, so that path is reviewed current-vs-HEAD) and emits a structured TAIL-CERT: PASS/FAIL; any behavioral (code) delta — including a code comment, a config.json, a non-doc top-level file, or the source endpoint of a rename into docs/ — still forces a fresh full panel, and the mechanism fails closed on a missing/mismatched descriptor, a changed code_roots scope set or fingerprint_exclude set (the exclude pathspecs are hashed into the fingerprint since task 051, so a post-panel exclude reads STALE instead of FRESH and is then rejected), a git error, a stale tree with no attributable delta, a non-PASS verdict, a tree that mutates during the judge call (a TOCTOU compare-and-swap), a `code_roots` scope whose RESOLVED identity (real path relative to the project) differs from the descriptor's, or an owner `fingerprint_exclude` that covers source. Task 060: an ABSENT fingerprint is no longer fail-open — in a git repo, a carrying high-consequence close blocks NO-STAMP (the round has no `**Tree-state:**`) and UNREADABLE (git cannot fingerprint the tree at close: every git return code on the outer path is read, a corrupt index / missing HEAD / unresolvable toplevel yields no fingerprint instead of a clean-looking one), with the same two exits as STALE and a receipt line on the override path; a non-git project keeps the advisory NO-STAMP. EXCLUDE-COVERS-CODE: an owner `fingerprint_exclude` pathspec that covers a source path (behavioral by file class and not bookkeeping-shaped `.md/.rst/.log`) makes every fingerprint blind to that code, so the close blocks it regardless of FRESH/STALE, the panel stamp warns and emits no descriptor, and tail certification refuses. The fingerprint resolves untracked content against the repo toplevel (a project in a SUBDIRECTORY of a larger repo hashes real content, not a doubled-prefix miss), decodes every git text read with `surrogateescape` and hashes the material with it (a `core.quotePath=false` non-UTF-8 name neither crashes the close nor collides with a sibling), tokens an untracked symlink by its link text, and binds each `code_roots` scope's resolved identity into the material and the descriptor. A STALE read explained ENTIRELY by outer-HEAD commits that touch only fingerprint-excluded paths (typically committing the task's own `.agent/` record after its panel) reads FRESH and the receipt says `records-only delta`: the round's descriptor must authenticate to its stamp, the exclude set must be unchanged, `git diff F0 HEAD` outside the excluded pathspecs must be empty, and the fingerprint recomputed with the outer HEAD set back to the round's F0 commit must equal the stamp; any doubt or git error keeps it STALE (task 085).",
       "owner": [
         {
           "path": "plugins/playbook/tasks/core.py",
@@ -4220,6 +4273,32 @@
           },
           "limitations": [
             "Task 060 item 6: each `code_roots` scope's resolved identity is bound into the material and the tail-cert descriptor (root + clones gitignored so only identity can catch the repoint); symlink fixtures skip where os.symlink is unavailable/unprivileged."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_tail_certification.py",
+          "reference": "RecordsOnlyDelta.test_a_records_only_commit_reads_fresh",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_tail_certification.py",
+            "reference": "RecordsOnlyDelta.test_a_commit_that_also_touches_code_still_blocks"
+          },
+          "limitations": [
+            "Task 085 T. Sibling control: RecordsOnlyDelta.test_a_records_only_commit_with_an_uncommitted_code_edit_still_blocks. Only the OUTER HEAD is re-pointed: a commit in a `code_roots` nested repo still reads STALE (the conservative direction)."
+          ]
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_tamper_scope.py",
+          "reference": "RoundStampPreSpawn.test_a_commit_during_the_review_is_not_stamped_as_reviewed",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_tamper_scope.py",
+            "reference": "RoundStampPreSpawn.test_an_unchanged_tree_is_stamped_as_before"
+          },
+          "limitations": [
+            "Task 085 R2: drives `_round_tree_stamp` on a real git repo with a concurrent commit; that `cmd_panel_review` fingerprints before `executor.submit(run_judge` is pinned by a SOURCE-ORDER check (RoundStampPreSpawn.test_the_panel_fingerprints_before_spawning_and_uses_it) — `run_judge` wraps the real judge CLIs, so there is no end-to-end panel harness."
           ]
         }
       ],
@@ -11609,7 +11688,7 @@
     {
       "id": "PB-TASK-TXN",
       "category": "task-lifecycle",
-      "statement": "Every read-modify-write of a task's records (task.md, judge.md) is one TRANSACTION, not just an atomic write: `atomic.rewrite` holds a per-task advisory lock (fcntl → msvcrt → a loud unlocked degrade) across read → transform → write, a transform may decline (write nothing) or raise (file byte-identical), and the lock is re-entrant so a caller composes several writes as one. Multi-part VERBS land together or not at all — the close writes receipt AND status in one transform that REFUSES when a `## Blocked` appeared or the status moved while it ran, handoff writes section AND blocked, resume writes status AND its stamp — and the close also compare-and-swaps the tree fingerprint its freshness decision was made on. Two-file protocols (judge archive, compact) keep their own rollback under the same held lock. Readers (status, the gate and state-echo hooks, the destructive-command guard) take NO lock, so a minutes-long close never stalls a session.",
+      "statement": "Every read-modify-write of a task's records (task.md, judge.md) is one TRANSACTION, not just an atomic write: `atomic.rewrite` holds a per-task advisory lock (fcntl → msvcrt → a loud unlocked degrade) across read → transform → write, a transform may decline (write nothing) or raise (file byte-identical), and the lock is re-entrant so a caller composes several writes as one. Multi-part VERBS land together or not at all — the close writes receipt AND status in one transform that REFUSES when a `## Blocked` appeared, the status moved, or the newest panel round changed (its header OR its body — task 085) while it ran, handoff writes section AND blocked, resume writes status AND its stamp — and the close also compare-and-swaps the tree fingerprint its freshness decision was made on. Two-file protocols (judge archive, compact) keep their own rollback under the same held lock. Readers (status, the gate and state-echo hooks, the destructive-command guard) take NO lock, so a minutes-long close never stalls a session.",
       "owner": [
         {
           "path": "plugins/playbook/tasks/filelock.py",
@@ -11848,6 +11927,19 @@
             "reference": "Round2Fixes.test_a_second_close_of_an_already_done_task_refuses"
           },
           "limitations": []
+        },
+        {
+          "type": "executable unit",
+          "path": "tests/test_task_lock.py",
+          "reference": "Round2Fixes.test_a_same_header_round_with_a_different_body_refuses_the_close",
+          "boundary": "unit",
+          "negative_control": {
+            "path": "tests/test_task_lock.py",
+            "reference": "Round2Fixes.test_an_unchanged_panel_verdict_commits"
+          },
+          "limitations": [
+            "Task 085 R1: a round replaced by one with the same mode/verdict/tree-state but different findings used to hash the same and commit; the digest now covers the round body."
+          ]
         }
       ],
       "missing_evidence_or_limitation": [

@@ -203,8 +203,11 @@ def _split_segments(text, ops=_SEP_OPS):
 
 def _wspec(val_short="", val_long=(), terminal=(), operands=0,
            split_short="", split_long=(), operand_satisfied_by=(),
-           split_positional=False):
+           split_positional=False, bare_dash=False):
     return {
+        # `su -` / `runuser -`: a lone `-` is the LOGIN flag, not an operand
+        # (task 085 G1 — reading it as the user moved the command position).
+        "bare_dash": bare_dash,
         "sat": set(operand_satisfied_by),
         "split_positional": split_positional,
         "val_short": set(val_short),
@@ -268,10 +271,13 @@ _WRAPPERS = {
     "watch": _wspec(val_short="n", val_long=("--interval",),
                     terminal=("--help", "--version"),
                     split_positional=True),
+    # GNU parallel's first positional is a command TEMPLATE, like `watch '<cmd>'`
+    # (task 085 G1: `parallel 'rm -rf /' ::: 1` was allowed).
     "parallel": _wspec(val_short="jPN", val_long=("--jobs", "--delay", "--timeout",
                                                  "--retries", "--sshlogin",
                                                  "--max-args", "--max-procs"),
-                       terminal=("--help", "--version")),
+                       terminal=("--help", "--version"),
+                       split_positional=True),
     # `trap '<command>' SIGNAL` stores a command string that runs on the signal.
     "trap": _wspec(split_short="", split_long=(), operands=0),
     # `eval` delegates to a STRING, so its remainder is classified, not walked.
@@ -296,13 +302,20 @@ _WRAPPERS = {
     "pkexec": _wspec(val_long=("--user",), terminal=("--version", "--help")),
     # `-c`/`--command` is a COMMAND STRING, not a consumed value, and the user
     # may be a positional operand: `su root -c '…'` (impl panel round 4).
-    "runuser": _wspec(val_short="ugG", val_long=("--user", "--group"),
+    # Task 085 G1: `-s/--shell` and `-w/--whitelist-environment` take a value,
+    # and a lone `-` is the login flag — each used to be read as the user
+    # operand, moving the command position onto the user name.
+    "runuser": _wspec(val_short="ugGsw", val_long=("--user", "--group", "--shell",
+                                                   "--whitelist-environment"),
                       terminal=("--version", "--help"), operands=1,
                       operand_satisfied_by=("u", "--user"),
-                      split_short="c", split_long=("--command", "--session-command")),
-    "su": _wspec(val_short="gG", val_long=("--group",),
+                      split_short="c", split_long=("--command", "--session-command"),
+                      bare_dash=True),
+    "su": _wspec(val_short="gGsw", val_long=("--group", "--shell",
+                                             "--whitelist-environment"),
                  terminal=("--version", "--help"), operands=1,
-                 split_short="c", split_long=("--command", "--session-command")),
+                 split_short="c", split_long=("--command", "--session-command"),
+                 bare_dash=True),
 }
 
 # ── lexing and naming (impl panel round 1) ────────────────────────────────────
@@ -520,6 +533,9 @@ def _walk_prefix(seg):
             if not end_of_opts and t == "--":
                 end_of_opts = True                     # ends OPTIONS, not operands
                 i += 1
+                continue
+            if not end_of_opts and t == "-" and spec["bare_dash"]:
+                i += 1                                 # `su -` login flag (task 085)
                 continue
             if not end_of_opts and t.startswith("--") and len(t) > 2:
                 base = t.split("=", 1)[0]

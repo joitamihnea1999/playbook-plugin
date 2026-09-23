@@ -1521,7 +1521,8 @@ def _owner_exclude_specs(cfg: dict) -> "list[str]":
 
 
 def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
-                               strict: bool = False) -> "str | None":
+                               strict: bool = False,
+                               head_override: "str | None" = None) -> "str | None":
     """The fingerprint MATERIAL for a single git repo: HEAD + porcelain + working
     diff + a digest of every untracked file's CONTENT. Returns None when
     `repo_path` has no HEAD, isn't a git repo, or git errors — the caller decides
@@ -1556,6 +1557,8 @@ def _repo_fingerprint_material(repo_path: Path, exclude: "list[str]", *,
         head = head_r.stdout.strip()
         if not head or head_r.returncode != 0:
             return None
+        if head_override:                     # task 085 T: `records_only_delta` only
+            head = head_override
         # The repo TOPLEVEL, as BYTES: porcelain paths are toplevel-relative even
         # when the project is a SUBDIRECTORY of a larger repo (T023 #1 — the
         # untracked content used to be resolved against `repo_path`, doubling the
@@ -1811,7 +1814,7 @@ def owner_exclude_covers_behavioral(project_path: Path,
     return (bool(hits), sorted(hits))
 
 
-def tree_state_fingerprint(project_path: Path) -> str:
+def tree_state_fingerprint(project_path: Path, *, outer_head_override: "str | None" = None) -> str:
     """Content fingerprint of the CODE STATE: sha256 over HEAD + porcelain status
     + working diff, 12 hex chars. Names *what state* a panel reviewed or a close
     certified — deterministic, unlike mtimes, and sensitive to uncommitted work
@@ -1844,7 +1847,8 @@ def tree_state_fingerprint(project_path: Path) -> str:
     # Outer-tree material. NOTE: hashing untracked CONTENT changed fingerprint
     # values across the 1.5.5→1.5.6 upgrade; a stamp from an older round reads
     # STALE once and self-heals at the next panel.
-    base = _repo_fingerprint_material(Path(project_path), exclude)
+    base = _repo_fingerprint_material(Path(project_path), exclude,
+                                      head_override=outer_head_override)
     if base is None:
         return ""            # git absent — no fingerprint beats a fabricated one
     material = base
@@ -2403,6 +2407,44 @@ def tail_cert_delta(project_path: Path, snapshot: "dict | None",
     return (True, sorted(all_behavioral), sorted(all_non))
 
 
+def records_only_delta(project_path: Path, snapshot: "dict | None",
+                       round_tree_fp: str) -> bool:
+    """True when a STALE verdict is explained ENTIRELY by outer-HEAD commits that
+    touch nothing but fingerprint-excluded paths (task 085 T — committing the
+    task's own `.agent/` record after its panel). Checked exactly, not guessed:
+    the round's F0 descriptor must authenticate to the stamp; the exclude set must
+    be unchanged since F0; `git diff F0 HEAD` outside the excluded pathspecs must be
+    empty; and the fingerprint recomputed with the outer HEAD set back to F0 must
+    EQUAL the round's stamp — so the working tree, the untracked content and every
+    `code_roots` scope are byte-for-byte what the panel reviewed. Any doubt, git
+    error or missing piece → False (the close falls through to the unchanged
+    STALE / tail-cert path, whose finding A still fails closed)."""
+    try:
+        if not isinstance(snapshot, dict) or not round_tree_fp:
+            return False
+        if snapshot.get("tree_fp") != round_tree_fp:
+            return False
+        outer = (snapshot.get("scopes") or {}).get("")
+        f0 = outer.get("commit") if isinstance(outer, dict) else None
+        if not isinstance(f0, str) or not re.fullmatch(r"[0-9a-f]{40}", f0):
+            return False
+        cfg = load_config(Path(project_path))
+        exclude = _fingerprint_exclude_pathspecs(cfg)
+        if sorted(exclude) != (snapshot.get("exclude") or []):
+            return False
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project_path,
+                              capture_output=True, text=True, timeout=30)
+        if head.returncode != 0 or head.stdout.strip() == f0:
+            return False
+        diff = subprocess.run(["git", "diff", "--quiet", f0, "HEAD", "--", ".", *exclude],
+                              cwd=project_path, capture_output=True, timeout=60)
+        if diff.returncode != 0:          # 1 = a non-excluded path changed; >1 = error
+            return False
+        return tree_state_fingerprint(Path(project_path), outer_head_override=f0) == round_tree_fp
+    except Exception:
+        return False
+
+
 def tail_cert_gate_decision(*, can_certify: bool, behavioral_nonempty: bool,
                             cert_verdict: "str | None",
                             non_behavioral: "list[str]") -> "tuple[bool, str]":
@@ -2931,7 +2973,8 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
                             stale_reason: "str | None",
                             git_available: bool = True,
                             exclude_covers: "list[str] | None" = None,
-                            tamper_degraded: bool = False
+                            tamper_degraded: bool = False,
+                            records_only: bool = False
                             ) -> "tuple[bool, str]":
     """F18 (design-1.5.6.md, blind-judge conditional-PASS, conditions built);
     extended by T1 (owner decision 2026-08-23) to every risk held to the
@@ -3042,7 +3085,9 @@ def freshness_gate_decision(*, risk: str, panel_required: bool,
             "  Repair the repository (`git status` shows the error), then retry;\n"
             "  or record the acceptance:  tasks work done --stale-panel-ok "
             '--reason "..."')
-    if round_fp == now_fp:
+    # Task 085 T: `records_only` = `records_only_delta` proved the whole
+    # difference is commits touching only fingerprint-excluded paths.
+    if round_fp == now_fp or (records_only and round_fp and now_fp):
         return True, ""
     if stale_ok:
         if stale_reason and stale_reason.strip():
@@ -3148,6 +3193,9 @@ def format_verify_receipt(entries, head_sha, risk, *, reason=None, timestamp=Non
         elif v in ("FRESH", "STALE"):
             line = (f"- **Panel tree-state:** {freshness.get('round_fp', '?')} "
                     f"vs close {freshness.get('now_fp', '?')} — {v}")
+            if v == "FRESH" and freshness.get("records_only"):
+                line += (" (records-only delta since the panel: commits touching only "
+                         "fingerprint-excluded paths)")
             if v == "STALE":
                 line += " (code changed after newest impl panel)"
                 ar = freshness.get("accepted_reason")
@@ -3827,7 +3875,11 @@ def judge_digest(task_file) -> "str | None":
     if not rounds:
         return None
     newest = rounds[0]
-    material = f"{newest.get('mode')}|{newest.get('verdict')}|{newest.get('tree_state')}"
+    # Task 085 (083 W10, sol-high #1): the WHOLE newest round, not just its header
+    # fields. Mode/verdict/tree-state alone let a newer round with the same header
+    # but different findings or a `Tamper guard: degraded` receipt land unseen.
+    material = (f"{newest.get('mode')}|{newest.get('verdict')}|{newest.get('tree_state')}|"
+                f"{newest.get('body', '')}")
     return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
 
 
@@ -3960,6 +4012,15 @@ def _compose_blocked(text: str, clean_reason: str, ts: str) -> str:
             "hidden inside a code fence, or directly followed by another section) "
             "— refusing to record a blocked state whose status could not be "
             "written; fix the heading/fence first, nothing was changed")
+    # Task 085 R3: the source status is checked INSIDE the locked transform. A
+    # delayed `tasks blocked` / handoff that acquires the lock after a close
+    # committed must not turn `done` back into `blocked`. (`pending` stays a legal
+    # source: a freshly activated task is `pending`.)
+    _src = lines[pair[1]].strip()
+    if _src.startswith("done"):
+        raise ValueError(
+            f"the task is already `{_src}` — refusing to mark a closed task blocked "
+            "(a close committed first); nothing was changed")
     out = list(lines)
     _splice_status_value(out, pair, "blocked")
     while True:
@@ -4012,6 +4073,14 @@ def resume_blocked_task(task_file: Path) -> None:
                 "task.md has no live `## Status` heading with a value line — refusing "
                 "to resume a blocked task whose status could not be written; fix the "
                 "heading/fence first, nothing was changed")
+        # Task 085 R3: only a task that is still `blocked` can be resumed — a
+        # resume whose transform runs after a close (or another resume) must not
+        # flip `done`/`in_progress` under the new owner of the lock.
+        _src = lines[pair[1]].strip()
+        if _src != "blocked":
+            raise ValueError(
+                f"the task is `{_src}`, not `blocked` — nothing to resume (another "
+                "writer changed it first); nothing was changed")
         _splice_status_value(lines, pair, "in_progress")
         out = _physical_lines("".join(lines))
         # Fence-aware (P1): stamp only the LIVE ## Blocked section, never a fenced

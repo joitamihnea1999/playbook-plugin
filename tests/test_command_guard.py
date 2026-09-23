@@ -1311,6 +1311,30 @@ class MoreDelegatingForms(unittest.TestCase):
             self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
 
 
+class PrivilegeWrapperShellAndLoginOptions(unittest.TestCase):
+    """Task 085 G1 (083 W10, sol-high #3 / sol-medium #3): `su`/`runuser` did not
+    know `-s/--shell` or `-w/--whitelist-environment` take a value, and read a
+    bare `-` (login shell) as the user operand — both moved the command position
+    onto the user name, so the `-c` payload was never classified. GNU parallel's
+    first positional is a command TEMPLATE, like `watch '<cmd>'`."""
+    D = "rm -rf /"
+
+    def test_shell_login_and_whitelist_options_are_walked(self):
+        for cmd in (f'su -s /bin/sh root -c "{self.D}"', f'su --shell=/bin/sh root -c "{self.D}"',
+                    f'su --shell /bin/sh root -c "{self.D}"', f'su - root -c "{self.D}"',
+                    f'su -l root -c "{self.D}"', f'su -w PATH root -c "{self.D}"',
+                    f'runuser -s /bin/sh -w PATH root -c "{self.D}"',
+                    f'runuser -s /bin/sh root -c "{self.D}"', f'runuser - root -c "{self.D}"',
+                    f"parallel '{self.D}' ::: 1", f'parallel -j2 "{self.D}" ::: a b'):
+            self.assertEqual(cg.classify_command(cmd)[0], "block", cmd)
+
+    def test_their_benign_twins(self):
+        for cmd in ("su -s /bin/sh root -c 'ls -la'", "su - root -c 'whoami'",
+                    "runuser -s /bin/sh -u root -- -c 'id'", "su -",
+                    "parallel 'gzip {}' ::: a.log b.log", "parallel -j4 make ::: a b"):
+            self.assertEqual(cg.classify_command(cmd)[0], "allow", cmd)
+
+
 class TheArchitecturalBound(unittest.TestCase):
     """What a STATIC classifier cannot do, pinned so the limit is visible instead
     of implied. Each of these needs the shell's runtime state, not more parsing:

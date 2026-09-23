@@ -109,7 +109,19 @@ def _collapsed(token: str) -> str:
     return posixpath.normpath(token.replace("\\", "/"))
 
 
+def names_a_task_dir(command: str) -> bool:
+    """Could this command, once the shell dequotes/unescapes it, name a task
+    directory at all? (task 085 G2). Quotes, backslashes and `$` are removed
+    first, so `.ag'ent/tasks'`, `.ag\\ent`, `.ag$'e'nt` and `ta''sks` all read as
+    what the shell creates; a glob (`.ag?nt`) keeps its `.ag` prefix. Loose on
+    purpose: a match only sends the command to the strict path below."""
+    loose = re.sub(r"[\"'\\\\$]", "", command)
+    return ".ag" in loose and "tasks" in loose
+
+
 def may_be_inside(command: str, project: str) -> bool:
+    if not names_a_task_dir(command):
+        return False                              # an ordinary mkdir (task 085 G2)
     # Only a SIMPLE command is ever judged (task 080 round 2). The judgment reads
     # the filesystem BEFORE the command runs, so any earlier step — `ln -s …;`,
     # `cd … &&`, a `$(…)` — could repoint the path it judged. Expansion anywhere,
