@@ -1127,7 +1127,10 @@ class PanelStampEndToEnd(unittest.TestCase):
             p.start()
         os.chdir(self.d)
         try:
-            with open(os.devnull, "w") as sink, contextlib.suppress(SystemExit), \
+            # utf-8 sink: the CLI reconfigures its streams to utf-8, and this
+            # in-process call bypasses the CLI — a cp1252 default (Windows lane)
+            # raised on the round's `⚠` warnings (CI run 35881113729).
+            with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.suppress(SystemExit), \
                  contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
                 R.cmd_panel_review(["042", "--mode", "impl",
                                     "--models", "claude:opus,claude:sonnet"])
