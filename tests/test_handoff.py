@@ -173,11 +173,16 @@ class HandoffArguments(_Base):
     def test_unknown_argument_leaves_the_whole_agent_tree_unchanged(self):
         # Round 1 (sol-high #4): session GC ran BEFORE the handoff saw its
         # arguments, so "Nothing changed" was false. A dead session dir is
-        # planted so GC WOULD delete something if it still ran first.
+        # planted so GC WOULD delete something if it still ran first. A legacy
+        # (non-pid) name with a >24h-old pointer: the one GC rule that holds on
+        # every OS (Windows cannot probe a `pid-*` session's liveness, so keeps it).
+        import time
         d, td = self._project()
-        dead = d / ".agent" / "sessions" / "pid-999999999"
+        dead = d / ".agent" / "sessions" / "legacy-0000-dead"
         dead.mkdir(parents=True)
         (dead / "current_state").write_text("001\n", encoding="utf-8")
+        old = time.time() - 3 * 86400
+        os.utime(dead / "current_state", (old, old))
 
         def snapshot():
             return sorted((str(p.relative_to(d)), p.read_bytes() if p.is_file() else b"")

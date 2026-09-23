@@ -11,9 +11,13 @@ Exit 0   every `.agent[/<lane>]/tasks/` token is an absolute path outside the pr
 Exit 1   some token is, or may be, inside it — the hook blocks
 Other    (a crash) — the hook blocks too; this script can only NARROW the guard
 
-Only a literal absolute path is ever judged "outside". A relative path, `~`, a
-`$VAR`, a backtick, a glob or brace the shell would expand, or a command shlex
-cannot split all count as "may be inside" — the guard's old answer. On Windows,
+Only a SIMPLE command is judged at all: its first word is `mkdir`, it has no
+shell operator (`; && || | & ( ) < >`), and it contains no `$`, backtick, glob,
+brace or newline anywhere — the filesystem is read BEFORE the command runs, so an
+earlier step (`ln -s …;`, `cd … &&`, `$(…)`) could repoint what was judged.
+Within it, only a literal absolute path is ever judged "outside"; a relative
+path, `~`, or a command shlex cannot split all count as "may be inside" — the
+guard's old answer. Tokens are matched after collapsing `..` and `//`. On Windows,
 only a drive-letter or Git-Bash `/c/…` spelling can be judged: any other
 leading-`/` path is an MSYS mount (`/tmp`) that Python cannot resolve.
 
@@ -32,10 +36,11 @@ import re
 import shlex
 import sys
 
-_TASK_DIR = re.compile(r"\.agent(/[^/]+)?/tasks/")
+_TASK_DIR = re.compile(r"\.agent(/[^/]+)?/tasks(/|$)")
 _MSYS_DRIVE = re.compile(r"^/([A-Za-z])(/|$)")
 _WIN_DRIVE = re.compile(r"^[A-Za-z]:/")
 _SHELL_EXPANDS = set("$`*?[{")
+_OPERATORS = set(";&|()<>")
 
 
 def _canon(path: str) -> str:
@@ -99,20 +104,35 @@ def _physically_inside(path: str, project: str) -> bool:
     return False
 
 
+def _collapsed(token: str) -> str:
+    """`..` and `//` collapsed, so `.agent/x/../tasks` and `.agent//tasks` are seen."""
+    return posixpath.normpath(token.replace("\\", "/"))
+
+
 def may_be_inside(command: str, project: str) -> bool:
+    # Only a SIMPLE command is ever judged (task 080 round 2). The judgment reads
+    # the filesystem BEFORE the command runs, so any earlier step — `ln -s …;`,
+    # `cd … &&`, a `$(…)` — could repoint the path it judged. Expansion anywhere,
+    # or a newline, likewise means shlex does not see what the shell will run.
+    if "\n" in command or "\r" in command or _SHELL_EXPANDS & set(command):
+        return True
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
         return True
-    targets = [t for t in tokens if _TASK_DIR.search(t.replace("\\", "/"))]
+    if not tokens or posixpath.basename(tokens[0].replace("\\", "/")) != "mkdir":
+        return True
+    if any(set(t) <= _OPERATORS for t in tokens):
+        return True
+    targets = [t for t in tokens if _TASK_DIR.search(_collapsed(t))]
     if not targets:
         # The hook's trigger matched text shlex does not return as one token
         # (e.g. spread across quoting) — cannot judge, keep the guard.
         return True
     for t in targets:
-        if _SHELL_EXPANDS & set(t) or t.startswith("~") or not _is_absolute(t):
+        if t.startswith("~") or not _is_absolute(t):
             return True
         if _lexically_inside(t, project) or _physically_inside(t, project):
             return True

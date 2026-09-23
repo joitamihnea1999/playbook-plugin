@@ -27,7 +27,10 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     (a symlink into any project subdirectory, `/var`→`/private/var`, case-insensitive disks); a
     relative path, `~`, a variable, a glob or brace the shell would expand, a drive letter on
     Linux/macOS (a relative path there), an MSYS path such as `/tmp` on Windows, or anything it
-    cannot parse is still refused, as is any error in the helper. The guard also moved ahead of
+    cannot parse is still refused, as is any error in the helper. Only a single, simple `mkdir` is
+    ever judged: a compound command (`cd /tmp && mkdir …`, `ln -s …; mkdir …`) is refused, because an
+    earlier step could repoint the path after the check. The trigger also catches spellings it used
+    to miss (`.agent/x/../tasks/`, `.agent//tasks//`). The guard also moved ahead of
     the session-id injection, which used to let `tasks status; mkdir -p .agent/tasks/9-x` through.
   Ledger: `PB-TASK-ACTIVATE`, `PB-TASK-BLOCKED` and `PB-CLI-RETRO` gain the new proofs and
   statement clauses; no status moved.

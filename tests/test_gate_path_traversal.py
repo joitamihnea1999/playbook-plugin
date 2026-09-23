@@ -212,9 +212,28 @@ class ManualTaskDirGuard(unittest.TestCase):
                     f"{self.MK} -p {self.outside}/.agent/tasks",
                     f"{self.MK} -p {self.outside}/.agent/alice/tasks/001-x",
                     f"{self.MK} -p '{self.outside}/.agent/tasks/001-x'",
-                    f"cd /tmp && {self.MK} -p {self.outside}/.agent/tasks/001-x/sub"):
+                    f"{self.MK} -m 755 -p {self.outside}/.agent/tasks/001-x/sub",
+                    f"/bin/{self.MK} -p {self.outside}/.agent/tasks/001-x"):
             r = self._run(cmd)
             self.assertEqual(r.returncode, 0, f"temp fixture refused: {cmd!r}: {r.stderr}")
+
+    def test_only_a_simple_mkdir_is_ever_allowed(self):
+        # Round 2 (2 seats): the helper judges the filesystem BEFORE the command
+        # runs, so an earlier step of a compound command can repoint the path
+        # (`ln -s <proj> <tmp>/late; mkdir -p <tmp>/late/...`). Only a single,
+        # simple mkdir with no expansion anywhere is judged; the rest is refused.
+        late = f"{self.base.as_posix()}/late"
+        tail = f"{self.MK} -p {self.outside}/.agent/tasks/001-x"
+        for cmd in (f"ln -s {self.project} {late}; {self.MK} -p {late}/.agent/tasks/999-x",
+                    f"cd /tmp && {tail}",
+                    f"{tail} | cat",
+                    f"{tail} &",
+                    f"({tail})",
+                    f"echo $(ln -s {self.project} {late}) {tail}",
+                    f"true\n{tail}",
+                    f"X=1 {tail}"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 2, f"a non-simple command was judged: {cmd!r}")
 
     def test_project_agent_tasks_is_still_blocked(self):
         mk = self.MK
@@ -227,7 +246,10 @@ class ManualTaskDirGuard(unittest.TestCase):
                     f"{mk} -p \"$PWD\"/.agent/tasks/001-x",
                     f"{mk} -p {self.outside}/../proj/.agent/tasks/001-x",
                     f"{mk} -p {self.outside}/.agent/tasks/001-x && {mk} -p .agent/tasks/002-y",
-                    f"{mk} -p {self.outside}/.agent/tasks/001-x {self.project}/.agent/tasks/002-y"):
+                    f"{mk} -p {self.outside}/.agent/tasks/001-x {self.project}/.agent/tasks/002-y",
+                    # Round 2 (grok): spellings the old trigger never matched.
+                    f"{mk} -p {self.project}/.agent/foo/../tasks/001-x",
+                    f"{mk} -p {self.project}//.agent//tasks//001-x"):
             r = self._run(cmd)
             self.assertEqual(r.returncode, 2, f"in-project task dir allowed: {cmd!r}")
             self.assertIn("task directories manually", r.stderr)
