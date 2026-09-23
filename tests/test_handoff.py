@@ -170,6 +170,26 @@ class HandoffArguments(_Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self._status(td), "blocked")
 
+    def test_unknown_argument_leaves_the_whole_agent_tree_unchanged(self):
+        # Round 1 (sol-high #4): session GC ran BEFORE the handoff saw its
+        # arguments, so "Nothing changed" was false. A dead session dir is
+        # planted so GC WOULD delete something if it still ran first.
+        d, td = self._project()
+        dead = d / ".agent" / "sessions" / "pid-999999999"
+        dead.mkdir(parents=True)
+        (dead / "current_state").write_text("001\n", encoding="utf-8")
+
+        def snapshot():
+            return sorted((str(p.relative_to(d)), p.read_bytes() if p.is_file() else b"")
+                          for p in (d / ".agent").rglob("*"))
+        before = snapshot()
+        r = _cli(d, "handoff", "--bogus")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(snapshot(), before, "a refused handoff changed the .agent tree")
+        # Control: a real command still runs GC and removes the dead session.
+        _cli(d, "status")
+        self.assertFalse(dead.exists(), "control: GC did not remove the planted dead session")
+
     def test_help_is_dry(self):
         d, td = self._project()
         before = (td / "task.md").read_bytes()

@@ -228,6 +228,10 @@
         {
           "path": "plugins/playbook/tasks/lifecycle.py",
           "reference": "symbol:cmd_handoff"
+        },
+        {
+          "path": "plugins/playbook/tasks/cli.py",
+          "reference": "symbol:main"
         }
       ],
       "failure_consequence": "Medium",
@@ -617,6 +621,16 @@
           },
           "limitations": [
             "Three refused shapes (`--bogus`, a bare word, `--since 3`); the bare verb is re-run on the same task inside the test as the positive control."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_handoff.py",
+          "reference": "HandoffArguments.test_unknown_argument_leaves_the_whole_agent_tree_unchanged",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": [
+            "A dead session dir is planted so the session GC would delete it if it still ran before the refusal; the test's own control runs `tasks status` and asserts GC removed it."
           ]
         }
       ],

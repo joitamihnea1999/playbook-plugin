@@ -90,6 +90,15 @@ def _main():
     cmd = args[0]
     cmd_args = args[1:]
 
+    # `handoff` takes no arguments (task 080, S1b). Refuse BEFORE the session GC
+    # below, which unlinks files — a refused command must change nothing at all
+    # (round-1 panel). cmd_handoff keeps the same check as defense in depth.
+    if cmd == "handoff" and cmd_args:
+        print(f"Error: tasks handoff takes no arguments (got: {' '.join(cmd_args)}). "
+              "Nothing changed.", file=sys.stderr)
+        print("Usage: tasks handoff", file=sys.stderr)
+        sys.exit(1)
+
     # `dashboard` is read-only END TO END (task 053, plan-panel codex#1): the
     # session GC every other command runs first unlinks legacy flat files and
     # dead session dirs — a read-only screen must not have that side effect.

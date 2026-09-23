@@ -24,8 +24,11 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     was refused (it refused task 079's and task 080's own scratch fixtures). A new helper
     (`scripts/task-dir-target.py`) lets the command through only when every such target is a
     literal absolute path outside the project, judged by path and through the filesystem
-    (symlinks, case-insensitive disks); a relative path, `~`, a variable, or anything it cannot
-    parse is still refused, as is any error in the helper.
+    (a symlink into any project subdirectory, `/var`→`/private/var`, case-insensitive disks); a
+    relative path, `~`, a variable, a glob or brace the shell would expand, a drive letter on
+    Linux/macOS (a relative path there), an MSYS path such as `/tmp` on Windows, or anything it
+    cannot parse is still refused, as is any error in the helper. The guard also moved ahead of
+    the session-id injection, which used to let `tasks status; mkdir -p .agent/tasks/9-x` through.
   Ledger: `PB-TASK-ACTIVATE`, `PB-TASK-BLOCKED` and `PB-CLI-RETRO` gain the new proofs and
   statement clauses; no status moved.
 

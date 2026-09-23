@@ -246,6 +246,87 @@ class ManualTaskDirGuard(unittest.TestCase):
         r = self._run(f"{self.MK} -p {self.outside}/.agent/tasks/001-x")
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def _link_or_skip(self, target, link):
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable (unprivileged Windows)")
+
+    def test_symlink_into_project_subdirectory_is_still_blocked(self):
+        # Round 1 (4 seats): samefile against the ROOT missed a link into a subdir.
+        (self.base / "proj" / "src").mkdir()
+        link = self.base / "sublink"
+        self._link_or_skip(self.base / "proj" / "src", link)
+        r = self._run(f"{self.MK} -p {link.as_posix()}/.agent/tasks/001-x")
+        self.assertEqual(r.returncode, 2, f"subdir symlink into the project allowed: {r.stderr}")
+
+    def test_symlinked_alias_with_dotdot_through_missing_dir_is_blocked(self):
+        # CI macOS (/var -> /private/var): the project is reached through its
+        # physical path, the token through an alias plus `missing/..`.
+        alias = self.base / "alias"
+        self._link_or_skip(self.base, alias)
+        r = self._run(f"{self.MK} -p {alias.as_posix()}/missing/../proj/.agent/tasks/001-x")
+        self.assertEqual(r.returncode, 2, f"alias + missing/.. allowed: {r.stderr}")
+
+    def test_shell_expansion_is_not_judged_literally(self):
+        # Round 1: the shell expands these; a literal reading judged them outside.
+        (self.base / "fixture").mkdir()
+        b = self.base.as_posix()
+        for cmd in (f"{self.MK} -p {b}/{{fixture,proj}}/.agent/tasks/001-x",
+                    f"{self.MK} -p {b}/*/.agent/tasks/001-x",
+                    f"{self.MK} -p {b}/pro?/.agent/tasks/001-x",
+                    f"{self.MK} -p {b}/[p]roj/.agent/tasks/001-x"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 2, f"shell expansion judged literally: {cmd!r}")
+
+    @unittest.skipIf(os.name == "nt", "a drive letter IS absolute on Windows")
+    def test_drive_letter_is_relative_on_posix(self):
+        # Round 1: `C:/x` is a RELATIVE path on POSIX — it lands under the cwd.
+        r = self._run(f"{self.MK} -p C:/tmp/.agent/tasks/001-x")
+        self.assertEqual(r.returncode, 2, f"POSIX-relative C:/ path allowed: {r.stderr}")
+
+    def test_guard_runs_before_session_injection(self):
+        # Round 1: `tasks status; …` hit the session-injection early allow first.
+        for cmd in (f"tasks status; {self.MK} -p {self.project}/.agent/tasks/999-x",
+                    f".claude/bin/tasks work 3 && {self.MK} -p .agent/tasks/999-x"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 2, f"guard bypassed via injection: {cmd!r}")
+        # Control: the injection itself still works for a plain tasks call.
+        r = self._run("tasks status")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("PLAYBOOK_SESSION_ID", r.stdout)
+
+
+class ManualTaskDirHelperPortability(unittest.TestCase):
+    """task-dir-target.py's Windows spelling rules, exercised on any host by
+    simulating `os.name == "nt"` (the real Windows lane runs the hook tests)."""
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "task_dir_target", HOOK.parent / "task-dir-target.py")
+        assert spec is not None and spec.loader is not None
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_nt_dotdot_is_collapsed_before_drive_conversion(self):
+        # Round 1 (grok): converting `/c/` before collapsing `..` let
+        # `/tmp/../c/proj/...` escape the project comparison.
+        from unittest import mock
+        m = self._mod()
+        with mock.patch.object(m.os, "name", "nt"):
+            self.assertTrue(m._lexically_inside("/tmp/../c/proj/.agent/tasks/1", "/c/proj"))
+            self.assertTrue(m._lexically_inside("C:/Proj/.agent/tasks/1", "/c/proj"))
+            self.assertFalse(m._lexically_inside("D:/fixture/.agent/tasks/1", "/c/proj"))
+
+    def test_nt_msys_rooted_token_may_be_inside(self):
+        # `/tmp/...` under Git Bash is an MSYS mount Python cannot resolve.
+        from unittest import mock
+        m = self._mod()
+        with mock.patch.object(m.os, "name", "nt"):
+            self.assertTrue(m.may_be_inside("mk" "dir -p /tmp/x/.agent/tasks/1", "/c/proj"))
+
 
 if __name__ == "__main__":
     unittest.main()

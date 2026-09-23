@@ -464,21 +464,13 @@ MSG
         exit 2
     fi
 
-    # Inject PLAYBOOK_SESSION_ID into tasks CLI commands via updatedInput
-    if [ -n "$SESSION_ID" ] && echo "$CMD" | grep -qE '(^|[;&|] *)(([^ ]*/)?)tasks (work|status|bootstrap|freehand|retro|new)'; then
-        UPDATED_CMD="export PLAYBOOK_SESSION_ID=$SESSION_ID; $CMD"
-        JSON_CMD=$(echo "$UPDATED_CMD" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().rstrip()))" 2>/dev/null)
-        cat <<EOFX
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":${JSON_CMD}}}}
-EOFX
-        exit 0
-    fi
-
     # S1d (task 080, flag C15): the trigger matches the whole command text, so
     # a fixture in a temp dir (`<tmp>/.agent/tasks/001-x`) was refused. When it
     # fires, task-dir-target.py narrows it: exit 0 = every such target is a
     # literal absolute path outside the project → allow. Exit 1, a crash, or a
     # missing python3 → block, exactly as before (it can only narrow).
+    # MUST run BEFORE the injection early-exit below (task 080 round 1): with
+    # the old order `tasks status; mkdir -p .agent/tasks/9-x` was allowed there.
     if echo "$CMD" | grep -qE 'mkdir.*\.agent(/[^/]+)?/tasks/' \
        && ! PB_CMD="$CMD" PB_PROJECT="$PROJECT_DIR" python3 "$HOOK_DIR/task-dir-target.py" 2>/dev/null; then
         cat >&2 <<'MSG'
@@ -489,6 +481,16 @@ Use `.claude/bin/tasks new <type> <name>` to create tasks. The CLI enforces temp
 Types: audit, bugfix, build, cleanup, eval, feature, light, ops, quick, refactor, research (run `tasks new` to see the current set)
 MSG
         exit 2
+    fi
+
+    # Inject PLAYBOOK_SESSION_ID into tasks CLI commands via updatedInput
+    if [ -n "$SESSION_ID" ] && echo "$CMD" | grep -qE '(^|[;&|] *)(([^ ]*/)?)tasks (work|status|bootstrap|freehand|retro|new)'; then
+        UPDATED_CMD="export PLAYBOOK_SESSION_ID=$SESSION_ID; $CMD"
+        JSON_CMD=$(echo "$UPDATED_CMD" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().rstrip()))" 2>/dev/null)
+        cat <<EOFX
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":${JSON_CMD}}}}
+EOFX
+        exit 0
     fi
 fi
 
