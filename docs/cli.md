@@ -50,7 +50,7 @@ The **hostile-sequence** lens walks every state-changing flow the change touches
 
 ## Analysis & retro
 
-**`tasks retro [--since N]`** — project retrospective across completed tasks: what got built, what patterns recur, where the workflow fought you. Input for pruning the mind map and improving future plans.
+**`tasks retro [--since N]`** — project retrospective across completed tasks: what got built, what patterns recur, where the workflow fought you. Input for pruning the mind map and improving future plans. It creates the next retro as a task whose `## Risk` starts `unclassified`, so its close is held to the strict bar until you classify it.
 
 
 **`tasks intent <N>`** — vertical retro of one finished task: several blind extractions infer the task's intent from its different layers (chat, plan, code, tests), the disagreements get reconciled with you, and the distilled result is written to `INTENT.md`. Surfaces the gap between what you asked for and what the trace says happened.

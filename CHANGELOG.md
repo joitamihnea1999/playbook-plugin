@@ -2,7 +2,15 @@
 
 Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepachangelog.com/) loosely; maintained by the README audit skill (entries before 1.4.2 are reconstructed from git history and the project mind map).
 
-## [Unreleased]
+## [1.5.45] — 2026-09-23
+
+Five tasks from the 1.5.45 candidate branch (`fix/1.5.45-batch`, tasks 058/059/076/077/080):
+task records written in transactions, the judge tamper guard's scope and advisory posture, CI
+failure evidence for the Windows fixture flake, the destructive-command interlock following
+commands through wrappers, quoting and shell syntax, and four live-enforcement holes (the edit
+gate and blocked tasks, `tasks handoff` arguments, the retro scaffold's `## Risk`, the scope of
+the manual task-directory guard). No new commands, skills, hooks or providers. `scripts/verify`
+unittest count 2389 → 2677.
 
 ### Fixed
 
@@ -70,9 +78,10 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     the task once for status AND risk (it used to read the file twice) and re-reads the session
     pointer, so a task switch mid-check cannot let a stale irreversible task acknowledge — and
     every error path still keeps the command BLOCKED.
-  New ledger guarantee `PB-TASK-TXN` with ten proof/negative-control pairs and four honest bounds
-  (advisory only; one directory on one filesystem; the whole-tree freshness TOCTOU stays
-  detection-only; the session pointer is a separate resource).
+  New ledger guarantee `PB-TASK-TXN` with nineteen proof/negative-control pairs and eight
+  recorded limitations, among them four bounds (advisory only; one directory on one filesystem;
+  the whole-tree freshness TOCTOU stays detection-only; the session pointer is a separate
+  resource).
 
 - **The judge tamper guard sees what it could not, and no longer discards a paid review over a
   guard that merely could not run** (task 059; parked T004/T008/T009/T019/T036/T040/T045 plus
@@ -157,8 +166,52 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
     UNREADABLE silently dropped the degraded-guard condition the operator had actually accepted.
     Round 3 also predicted, correctly, that two round-1 regressions would invert on the Windows
     lane (which has no containment) — they now pin containment explicitly.
-  Ledger `PB-JUDGE-TAMPER` restated with the new statement, owners, twenty-one proof/negative-control
-  pairs and four honest bounds. `scripts/verify` unittest count 2389 → 2498 (measured).
+  Ledger `PB-JUDGE-TAMPER` restated with the new statement, owners, thirty-eight
+  proof/negative-control pairs and twelve recorded limitations. `scripts/verify` unittest count
+  2389 → 2498 when task 059 closed (the release total is in the headline above).
+
+- **Windows CI failures of the wrapper fixture now keep their evidence** (task 076). Two Windows
+  S7 failures (runs 34381991629 and 35570688583, attempt 1) had left zero bytes of the wrapper's
+  output: `scripts/verify` and `tests/test_shell_fixtures.py` dropped everything but the FAIL line.
+  Both reporters now keep the fixture's diagnostic block within announced budgets — every FAIL
+  line kept, block budgets shared evenly so earlier chatty blocks cannot evict S7's — and on
+  failure only, S7 prints the wrapper's stdout and stderr, its exit code, run directory, temp
+  roots, resolved binaries, `find_project_root`'s answer and every ancestor's `.agent` presence.
+  A passing run prints none of it (asserted). `verify.yml` gains `workflow_dispatch`, so the
+  flake rate can be measured with manual runs. The flake's root cause is still unknown: this
+  release arms the capture, it does not fix S7. Maintainer-facing (CI and `scripts/verify`); no
+  shipped plugin file changed.
+
+- **The destructive-command interlock finds the command behind wrappers, quoting and shell
+  syntax** (task 077). Measured first: 54 of 56 wrapper-shaped vectors went through the shipped
+  guard. Now:
+  - *Wrappers are followed with their real option arity* — `sudo`, `doas`, `env`, `nice`,
+    `ionice`, `chrt`, `stdbuf`, `timeout`, `setsid`, `nohup`, `time`, `xargs`, `command`,
+    `builtin`, `exec`, `watch`, `parallel`, and the privilege wrappers `su -c`, `pkexec`,
+    `runuser` — so `sudo -u root rm -rf /` or `timeout 5 rm -rf /` is classified like its bare
+    form, while a wrapper's query mode (`sudo --version`, `command -v`) runs nothing and stays
+    allowed.
+  - *One quote- and escape-aware lexer* decides the command position and reads the flags and
+    targets, and resolves the command NAME through quotes, a leading backslash, a directory,
+    `~/` and `$VAR/`. Quoting decides what expands: `rm -rf "$HOME"` blocks, `rm -rf 'build*'`
+    is a literal name and passes. Separators count outside quotes only; a command substitution
+    body is classified as a command; `&`, `|&` and grouped shells are seen; line continuations,
+    ANSI-C quoting (decoded), brace expansion, herestrings, process substitution and `git`'s
+    global options and short-option clusters are read; nesting past the limit refuses instead
+    of allowing. Echoing dangerous text is data; an unquoted pipe into a shell still blocks.
+  - *Two bounds are pinned by tests rather than implied*: a command name that exists only after
+    the shell evaluates something (an alias, `${X:-rm}`, `$(echo rm)`) is out of reach for a
+    static classifier — the OS sandbox covers it; and the guard answers "where is the command
+    and is it an enumerated dangerous form", not "is this act destructive" (`perl -e 'system(…)'`,
+    remote `ssh`, container bind mounts, `find -delete`, `rsync --delete`, `shred` are allowed).
+  - *Published decision*: a generic pipe into a shell (`cat evil.sh | sh`) stays allowed; only a
+    downloader piped into an interpreter blocks. A project can opt into the stricter rule with
+    one `dangerous_commands` pattern (documented, verified against four forms).
+  Five impl-panel rounds; the last found regressions of the task's own fixes, which is where it
+  stopped. Ledger `PB-COMMAND-DANGEROUS` restated (47 proofs, 43 with a negative control; 16
+  recorded limitations); `PB-COMMAND-FAILURE-POLICY` gains proofs. Guard corpus
+  (`tests/test_command_guard.py`) 17 → 118 tests, both measured (the first in a worktree at the
+  1.5.44 release).
 
 ## [1.5.44] — 2026-09-21
 
