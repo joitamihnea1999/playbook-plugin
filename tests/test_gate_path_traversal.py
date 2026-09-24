@@ -292,6 +292,13 @@ class ManualTaskDirGuard(unittest.TestCase):
             r = self._run(cmd)
             self.assertEqual(r.returncode, 0, f"ordinary command refused: {cmd!r}: {r.stderr}")
 
+    def test_a_large_unrelated_brace_expansion_is_allowed(self):
+        # Round 3 regression (impl panel round 3, opus): the `{` trigger plus a
+        # fail-closed expansion cap refused any command with a big brace list.
+        for cmd in ("touch f{1..1000}", f"{self.MK} -p logs/{{1..1000}}"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 0, f"ordinary command refused: {cmd!r}: {r.stderr}")
+
     def test_the_bound_a_globbed_command_name(self):
         # U8, a documented bound (same class as command_guard's
         # TheArchitecturalBound): a glob in the command NAME only resolves

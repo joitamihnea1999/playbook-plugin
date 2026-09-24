@@ -220,7 +220,13 @@ def _spellings(command: str) -> "list[str] | None":
     decoded = _decode_ansi_c(command)
     if decoded is None:
         return None
-    return _brace_expand(re.sub(r"[\"'\\\\$]", "", decoded))
+    stripped = re.sub(r"[\"'\\\\$]", "", decoded)
+    # Too many spellings to enumerate: judge the text as written rather than
+    # refuse it (post-cap fix, impl panel round 3 — failing closed here refused
+    # `touch f{1..1000}` once any `{` reached the helper). The bound: a task
+    # dir hidden inside a brace list that large is not seen.
+    expanded = _brace_expand(stripped)
+    return expanded if expanded is not None else [stripped]
 
 
 def runs_mkdir(command: str) -> bool:
