@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -43,9 +44,14 @@ def manifest_version(copy: "Path | str") -> "str | None":
 
 
 def _git(cwd: "Path | str", *args: str) -> "subprocess.CompletedProcess | None":
+    # a stray GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE in the caller's environment
+    # would point every read at another repository (impl panel round 3)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR")}
     try:
         return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                              timeout=60)
+                              env=env, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -115,7 +121,12 @@ def _installed_entries(home: Path) -> "list[tuple[str, dict]]":
         if not isinstance(key, str) or key.split("@")[0] != "playbook" or not isinstance(entries, list):
             continue
         for e in entries:
-            if isinstance(e, dict) and e.get("installPath"):
+            # every consumed field must have its type, or the entry is skipped
+            # (impl panel round 3: `"installPath": 7` / `"gitCommitSha": 123` crashed)
+            if (isinstance(e, dict) and isinstance(e.get("installPath"), str) and e["installPath"]
+                    and isinstance(e.get("version", ""), str)
+                    and isinstance(e.get("gitCommitSha", ""), str)
+                    and isinstance(e.get("projectPath", "") or "", str)):
                 out.append((key, e))
     return out
 
@@ -257,19 +268,35 @@ def _scan_installed(root: Path) -> "tuple[dict[str, tuple[str, int | str]], list
 
 
 _CHUNK = 1 << 20
+_FULL_OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _NORMALISE_MAX = 16 << 20        # CRLF re-check only for files up to 16 MiB
 
 
 def _stream_sha(path: Path, size: int) -> str:
-    """Git blob sha of a regular file, streamed (the header needs only its size)."""
-    h = hashlib.sha1(b"blob %d\0" % size)
-    with open(path, "rb") as fh:
-        while True:
-            chunk = fh.read(_CHUNK)
+    """Git blob sha of a regular file, streamed. ONE descriptor opened non-blocking
+    and without following links, then re-checked with `fstat`: a file swapped for
+    a FIFO or a symlink after the scan can neither hang the doctor nor redirect
+    the read (impl panel round 3; the approach of core._safe_hash_regular).
+    Raises OSError when the object is no longer a plain regular file."""
+    import stat as _stat
+    flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            raise OSError(f"{path} is no longer a regular file")
+        h = hashlib.sha1(b"blob %d\0" % st.st_size)
+        left = st.st_size
+        while left > 0:
+            chunk = os.read(fd, min(_CHUNK, left))
             if not chunk:
                 break
             h.update(chunk)
-    return h.hexdigest()
+            left -= len(chunk)
+        return h.hexdigest()
+    finally:
+        os.close(fd)
 
 
 def _release_attrs(repo: str, sha: str, paths: "list[str]") -> "dict[str, dict[str, str]] | None":
@@ -377,8 +404,13 @@ def _git_state(copy: str) -> "tuple[str | None, bool | None]":
     head = _git(copy, "rev-parse", "HEAD")
     if head is None or head.returncode != 0:
         return None, None
-    status = _git(copy, "status", "--porcelain", "--", ".")
-    clean = None if status is None or status.returncode != 0 else not status.stdout.strip()
+    status = _git(copy, "-c", "status.showUntrackedFiles=all", "status", "--porcelain", "-z", "--", ".")
+    if status is None or status.returncode != 0:
+        return head.stdout.decode().strip(), None
+    # runtime artifacts (`__pycache__/`, `*.pyc`) are not code changes — the same
+    # rule as the content comparison; running the plugin from its checkout makes them
+    recs = [r for r in status.stdout.decode("utf-8", "surrogateescape").split("\0") if len(r) > 3]
+    clean = not [r for r in recs if not _is_runtime_artifact(r[3:])]
     return head.stdout.decode().strip(), clean
 
 
@@ -409,6 +441,8 @@ def report(project: Path, *, home: "Path | None" = None,
         wstate = "custom"
     elif wtext != wrapper_template(doctor_root, "tasks"):
         wstate = "stale"
+    elif os.name != "nt" and not os.access(wrapper, os.X_OK):
+        wstate = "not executable"                 # it cannot run at all (impl panel round 3)
     else:
         wstate = "current"
     chosen_by = ("" if wstate == "current" else
@@ -423,6 +457,10 @@ def report(project: Path, *, home: "Path | None" = None,
         key, entry = sel
         hook, hproblem = hook_copy_path(home, key, entry)
         sha = entry.get("gitCommitSha") or ""
+        if sha and not _FULL_OID.fullmatch(sha):
+            # a symbolic (`HEAD`) or abbreviated id would verify a MOVING target
+            diffs.append(f"installed entry's gitCommitSha {sha!r} is not a full commit id — content unverified")
+            sha = ""
         iv = entry.get("version") or "?"
         if hook is None:
             lines.append(("WARN", f"plugin: hook copy — unknown ({hproblem})"))
@@ -451,7 +489,7 @@ def report(project: Path, *, home: "Path | None" = None,
                 diffs.append(f"could not verify the installed content — {rproblem}")
             else:
                 diffs.extend(content_differences(repo, prefix, entry["installPath"], sha))
-        else:
+        elif not entry.get("gitCommitSha"):
             diffs.append("installed entry has no gitCommitSha — content unverified")
 
     # launcher (read, never executed)
@@ -465,6 +503,9 @@ def report(project: Path, *, home: "Path | None" = None,
     elif wstate == "stale":
         lines.append(("WARN", f"plugin: launcher copy — stale launcher — target unknown, not executed ({wrapper})"))
         diffs.append("stale launcher")
+    elif wstate == "not executable":
+        lines.append(("WARN", f"plugin: launcher copy — not executable ({wrapper})"))
+        diffs.append("the project launcher is not executable")
     elif not script:
         lines.append(("WARN", "plugin: launcher copy — unknown (the resolver selected no copy)"))
         diffs.append("launcher resolves to nothing")

@@ -12284,6 +12284,19 @@
           "limitations": [
             "Task 086 implementation review round 1."
           ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopiesDegraded.test_the_real_doctor_prints_the_four_lines_and_the_verdict",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_warns_when_the_hook_copy_is_dirty"
+          },
+          "limitations": [
+            "Runs `python -m tasks.cli doctor` against the fixture HOME: proves the diagnostics.py §5b wiring."
+          ]
         }
       ],
       "applicable_platforms": [
@@ -12296,12 +12309,13 @@
       ],
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
-        "Hermetic tests (fake HOME, temp git repos, the real create_wrapper); the real-machine check is PLAN S3's Done block, run on one Linux machine. The registry field set is pinned by a test built from a sample captured on 2026-09-24 (PluginCopiesDegraded.test_parses_a_registry_in_the_captured_real_shape) — a Claude Code format change fails that test, not silently.",
+        "Hermetic tests (fake HOME, temp git repos, the real create_wrapper) plus one test that runs the real `tasks doctor` subprocess; the real-machine check is PLAN S3's Done block, run on one Linux machine. The registry field set is DOCUMENTED by a test built from a sample captured on 2026-09-24 (PluginCopiesDegraded.test_parses_a_registry_in_the_captured_real_shape) — it pins the shape this code reads; it cannot detect a later Claude Code format change (the Done block on a real install is what would).",
         "The execute-bit comparison runs on POSIX only (Windows has no POSIX execute bit); its test is skipped there.",
         "The launcher target is what the doctor copy's resolver answers; a Windows projectPath spelled differently from Git Bash's `pwd -P` is the resolver's own disclosed limitation (wrapper-multiuser fixture), shared by the doctor by construction.",
         "A github (non-directory) marketplace is verified against the marketplace clone at `installLocation`; that topology is proven only by a hermetic fixture (this machine is a directory marketplace) — a real github install is S11 gauntlet work. If the clone does not hold the release commit the verdict says 'could not verify', never PASS.",
-        "The cleanliness check (`git status --porcelain -- <hook copy>`, as PLAN S3 specifies) runs in the hook checkout and may run that repository's own configured clean filters, exactly as the user's own `git status` would; the content comparison executes nothing but `git ls-tree`/`check-attr`/`config`.",
-        "A git older than 2.40 has no `check-attr --source`: CRLF-only differences are then reported as differences (WARN)."
+        "The cleanliness check (`git status --porcelain -- <hook copy>`, as PLAN S3 specifies) runs in the hook checkout: it trusts that repository's index flags (a path marked assume-unchanged/skip-worktree reads clean) and may run its configured clean filters or fsmonitor, exactly as the user's own `git status` would; untracked files are always listed and `__pycache__`/`*.pyc` ignored. The content comparison executes nothing but `git ls-tree`/`check-attr`/`config`.",
+        "A git older than 2.40 has no `check-attr --source`: CRLF-only differences are then reported as differences (WARN).",
+        "A directory marketplace without its own `.git` inside another repository takes that repository's HEAD and cleanliness — consistent with where Claude Code itself reads `gitCommitSha`, but not verified against a real install of that shape."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],

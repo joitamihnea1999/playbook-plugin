@@ -597,6 +597,64 @@ class PluginCopiesDegraded(_CopiesFixture):
         self.assertIn("not in the release: tasks/planted.bin", verdict[0])
         self.assertNotIn("planted.bin", hashed, "an extra file was read")
 
+    def test_the_real_doctor_prints_the_four_lines_and_the_verdict(self):
+        # impl panel round 3 (opus 1, sonnet 1, grok 3): every other test calls
+        # report() in-process — this one runs `tasks doctor` itself, from the
+        # fixture's hook copy, so the §5b wiring in diagnostics.py is proven
+        tasks_pkg = self.hook / "tasks"
+        shutil.rmtree(tasks_pkg)
+        shutil.copytree(PLUGIN / "tasks", tasks_pkg, ignore=shutil.ignore_patterns("__pycache__"))
+        (tasks_pkg / "core.py").write_text(
+            (PLUGIN / "tasks" / "core.py").read_text(encoding="utf-8").replace(
+                f'VERSION = "{json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]}"',
+                f'VERSION = "{self.VERSION}"'), encoding="utf-8")
+        self.sha = self._recommit("the real package")
+        shutil.rmtree(self.installed)
+        shutil.copytree(self.hook, self.installed)
+        self.entries["playbook@mk"][0]["gitCommitSha"] = self.sha
+        self._save_registry()
+        env = dict(os.environ, PYTHONPATH=str(self.hook), HOME=str(self.home), USERPROFILE=str(self.home))
+        env.pop("CLAUDE_PLUGIN_ROOT", None)
+        r = subprocess.run([sys.executable, "-m", "tasks.cli", "doctor"], cwd=self.project, env=env,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        out = r.stdout + r.stderr
+        for label in ("hook", "launcher", "installed", "doctor"):
+            self.assertIn(f"] plugin: {label} copy — ", out, out[-3000:])
+        self.assertIn("[PASS] plugin: copies agree", out, out[-3000:])
+        self.assertNotIn("plugin: copies — could not be determined", out)
+
+    def test_a_stray_git_dir_or_hidden_untracked_files_cannot_hide_a_dirty_hook(self):
+        from unittest import mock
+        _git_ok(self.market, "config", "status.showUntrackedFiles", "no")
+        self._write(self.hook / "tasks" / "untracked.py", "x = 1\n")
+        decoy = self.root / "decoy-repo"
+        decoy.mkdir()
+        _git_ok(decoy, "init", "-q")
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)}):
+            verdict = self._verdict(self._report())
+        self.assertIn("uncommitted changes", verdict[0])
+
+    @unittest.skipIf(os.name == "nt", "no POSIX execute bit on Windows")
+    def test_a_non_executable_launcher_warns(self):
+        (self.project / ".claude" / "bin" / "tasks").chmod(0o644)
+        out = self._report()
+        self.assertIn("] plugin: launcher copy — not executable", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[WARN]"), out)
+
+    def test_wrong_field_types_and_a_symbolic_sha_degrade_to_warn(self):
+        for field, value in (("installPath", 7), ("gitCommitSha", 123), ("version", ["9"]),
+                             ("gitCommitSha", "HEAD"), ("gitCommitSha", self.sha[:12])):
+            with self.subTest(field=field, value=value):
+                entry = dict(self.entries["playbook@mk"][0])
+                entry[field] = value
+                self._write(self.plugins / "installed_plugins.json",
+                            json.dumps({"version": 2, "plugins": {"playbook@mk": [entry]}}))
+                out = self._report()
+                for label in ("hook", "launcher", "installed", "doctor"):
+                    self.assertIn(f"] plugin: {label} copy — ", out)
+                self.assertTrue(self._verdict(out)[0].startswith("[WARN]"), out)
+                self.assertNotIn("(sha HEAD", out)
+
     def test_the_resolver_source_is_piped_as_utf8_bytes(self):
         # Windows CI (run 35970907673): piped as text, the resolver was encoded in
         # the locale code page (cp1252 turned its em dash into 0x97) while
