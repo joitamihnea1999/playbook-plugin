@@ -3,13 +3,25 @@
 # user's lane: .agent/bash_history, or .agent/<user>/bash_history.
 # Purpose: forensic post-mortem record ("what did the agent actually run?")
 
+# PLAN S5b (task 088): a shell that asks not to be logged installs no trap at
+# all. The Claude Code statusline is the reason (~710 renders a day, ~40 simple
+# commands each). This file is sourced BEFORE a script's first line, so the knob
+# must be in the environment the shell starts with (e.g. a statusLine command of
+# `PLAYBOOK_NO_BASHLOG=1 bash ~/.claude/statusline.sh`); exporting it inside a
+# script covers only the shells that script starts. A script NAMED statusline is
+# skipped in the callback below either way. "" and "0" mean "log".
+case "${PLAYBOOK_NO_BASHLOG:-}" in
+    ""|0) ;;
+    *) return 0 ;;
+esac
+
 _cpb_log_cmd() {
     # Hook shells are implementation machinery, not user/agent Bash tool calls.
     # BASH_ENV is sourced before bash assigns the script name to $0, so this
     # check must live in the DEBUG callback (where $0 is final), not at source
     # time.  It avoids both history noise and the expensive walk/date fork for
     # every hook-internal command. Real Bash tool shells keep $0 as bash/sh.
-    case "${0##*/}" in *-hook) return 0 ;; esac
+    case "${0##*/}" in *-hook|statusline|statusline.sh|statusline-*) return 0 ;; esac
 
     # Filter shell internals and CC infrastructure noise.
     #
@@ -25,6 +37,17 @@ _cpb_log_cmd() {
         "[ -d "*|"[ -f "*|"[ -n "*|"[ -z "*|"[ ! "*) return 0 ;;
         HIST*=*|PATH=*|"set -o"*|"shopt "*|"trap "*|"export PATH"*) return 0 ;;
         source*|.) return 0 ;;
+    esac
+
+    # PLAN S5b: each distinct command text is logged ONCE per shell process.
+    # A DEBUG trap fires for every simple command, so a 5-iteration loop wrote
+    # its header and body five times each (11 lines for `for …; do …; done; …`;
+    # 195,168 × 3 rows on 2026-09-21). The text is the unexpanded source, so a
+    # loop body is the same string every iteration. Bash 3.2 has no associative
+    # arrays: a \x1f-delimited string, reset past 64 KiB.
+    local _key=$'\x1f'"$BASH_COMMAND"$'\x1f'
+    case "${_CPB_SEEN:-}" in
+        *"$_key"*) return 0 ;;
     esac
 
     # Walk up from $PWD looking for .agent/ directory
@@ -104,7 +127,25 @@ _cpb_log_cmd() {
             # unguarded form prints "Is a directory" once for EVERY command in
             # every hook shell — and hook stderr/stdout is fed back to the
             # agent. Redirecting the group suppresses it properly.
+            # PLAN S5b: a history past 50 MB is rotated once per process, before
+            # the first write (the 2026-09-21 file had reached 136 MB).
+            if [[ -z "${_CPB_ROTATE_CHECKED:-}" ]]; then
+                _CPB_ROTATE_CHECKED=1
+                local _sz=0
+                if [[ -f "$_lane/bash_history" ]]; then
+                    _sz=$(wc -c < "$_lane/bash_history" 2>/dev/null) || _sz=0
+                    _sz="${_sz//[!0-9]/}"
+                fi
+                if [[ "${_sz:-0}" -gt 52428800 ]]; then
+                    mv -f "$_lane/bash_history" \
+                        "$_lane/bash_history.archived-$(date '+%Y%m%d-%H%M%S')-$$" 2>/dev/null || true
+                fi
+            fi
             { echo "$(date '+%Y-%m-%d %H:%M:%S') | AGENT | $_cmd" >> "$_lane/bash_history"; } 2>/dev/null || return 0
+            _CPB_SEEN="${_CPB_SEEN:-}$_key"
+            if [[ ${#_CPB_SEEN} -gt 65536 ]]; then
+                _CPB_SEEN="$_key"
+            fi
             break
         fi
         _dir="${_dir%/*}"

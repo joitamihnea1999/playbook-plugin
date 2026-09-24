@@ -1,7 +1,7 @@
 {
   "$schema": "guarantee-ledger.schema.json",
   "schema_version": 1,
-  "ledger_version": "2026-09-23",
+  "ledger_version": "2026-09-24",
   "guarantees": [
     {
       "id": "PB-TASK-ACTIVATE",
@@ -3163,7 +3163,7 @@
     {
       "id": "PB-CHAT-LOG",
       "category": "sessions-and-attribution",
-      "statement": "User messages append in sequence to the lane chat log with a provider attribution suffix that is not leaked into the message text, and legacy unsuffixed entries still parse.",
+      "statement": "User messages append in sequence to the lane chat log with a provider attribution suffix that is not leaked into the message text, and legacy unsuffixed entries still parse; a prompt whose body BEGINS (after leading whitespace) with a harness marker — `<task-notification>`, `<local-command-caveat>`, `<command-name>` or `[SYSTEM NOTIFICATION` — is a harness event, not the user's words, and is not logged, while a prompt that merely mentions a marker is (task 088, PLAN S5a).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/chat-log-hook",
@@ -3216,6 +3216,30 @@
           "reference": "TasksLogTest.test_mixed_log_both_parse",
           "boundary": "unit",
           "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_chat_log_writer.py",
+          "reference": "HarnessPromptsAreNotUserWords.test_task_notification_prompt_is_not_logged",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_chat_log_writer.py",
+            "reference": "HarnessPromptsAreNotUserWords.test_a_user_prompt_that_merely_mentions_a_marker_is_logged"
+          },
+          "limitations": [
+            "Synthetic payloads shaped like the harness events seen in this repo's chat_log on 2026-09-23; a new harness marker is logged until it is added to the list."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_chat_log_writer.py",
+          "reference": "HarnessPromptsAreNotUserWords.test_every_harness_marker_is_skipped",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_chat_log_writer.py",
+            "reference": "HarnessPromptsAreNotUserWords.test_plain_prompt_is_still_logged"
+          },
           "limitations": []
         }
       ],
@@ -3321,7 +3345,7 @@
     {
       "id": "PB-SHELL-ATTRIBUTION",
       "category": "sessions-and-attribution",
-      "statement": "The Bash shell-command logger records agent shell commands with a timestamp and an AGENT tag, and suppresses hook-internal shells so implementation machinery does not enter the command history.",
+      "statement": "The Bash shell-command logger records agent shell commands with a timestamp and an AGENT tag, and suppresses hook-internal shells so implementation machinery does not enter the command history; it writes each distinct command text once per shell process (a loop body is one line, not one per iteration), installs no trap in a shell started with PLAYBOOK_NO_BASHLOG set to anything but \"\" or \"0\", logs nothing from a script named statusline, and rotates a history past 50 MB to bash_history.archived-<date>-<pid> before its next write (task 088, PLAN S5b).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/bash-log.sh",
@@ -3345,6 +3369,52 @@
             "Bash logger only; the zsh variant is not executed by this test.",
             "Exercised in a single-lane project; lane selection is PB-LANE-RESOLUTION's guarantee, not this one."
           ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_a_loop_logs_each_command_text_once",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_bash_log_scope.py",
+            "reference": "BashLogScope.test_distinct_commands_are_all_logged"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_a_shell_that_opts_out_logs_nothing",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_a_script_named_statusline_is_not_logged",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_a_history_past_50_mb_is_rotated",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_bash_log_scope.py",
+            "reference": "BashLogScope.test_a_small_history_is_not_rotated"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_a_set_e_shell_survives_the_trap",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": []
         }
       ],
       "applicable_platforms": [
@@ -3358,7 +3428,8 @@
       "status": "partially_evidenced",
       "missing_evidence_or_limitation": [
         "Lane selection is deliberately NOT claimed here. The confirmed fresh-clone root-lane violation is recorded once, authoritatively, on PB-LANE-RESOLUTION; this entry must not be read as evidence that shell commands reach the resolved lane.",
-        "The hook-suppression guard exists only in the bundled logger: the copy installed at ~/.claude/bash-log.sh on this host lacks it (sha256 7488c02c... on this host, against the bundled copy at plugins/playbook/scripts/bash-log.sh), so deployed behavior can differ from the release artifact until /playbook:init is re-run.",
+        "The copy installed at ~/.claude/bash-log.sh is deployed by /playbook:init and is not updated by a plugin refresh. Measured on this host 2026-09-24: it is byte-identical to the bundled logger BEFORE task 088 (sha256 fe1f6f01...; the earlier 7488c02c... note is superseded — that copy now has the hook guard), so until /playbook:init is re-run it lacks the task-088 dedupe, opt-out, statusline skip and rotation.",
+        "Deliberate trade-off (task 088): an identical command text repeated within ONE shell process is logged once, so `make test; make test` in one Bash tool call leaves one line. Measured on the 276-case wrapper fixture run under BASH_ENV: 1086 lines with the old logger, 436 with the new; one ~/.claude/statusline.sh render 38 -> 0. The zsh logger is unchanged (one line per `zsh -c`).",
         "zsh and Windows/Git Bash logger behavior lack live platform evidence.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
         "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."

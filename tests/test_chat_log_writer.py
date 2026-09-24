@@ -19,7 +19,7 @@ HOOK = REPO_ROOT / "plugins" / "playbook" / "scripts" / "chat-log-hook"
 SID = "pid-clw"
 
 
-class ChatLogWriter(unittest.TestCase):
+class _ChatLogFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -37,6 +37,8 @@ class ChatLogWriter(unittest.TestCase):
             [bash_or_skip(), str(HOOK)], cwd=self.project, env=env, text=True,
             input=json.dumps({"prompt": prompt}), capture_output=True)
 
+
+class ChatLogWriter(_ChatLogFixture):
     def test_entry_format_and_sequence(self):
         self._run("first message")
         self._run("second message")
@@ -54,6 +56,37 @@ class ChatLogWriter(unittest.TestCase):
         self._run("hi", provider="codex")
         text = self.log.read_text(encoding="utf-8")
         self.assertRegex(text, r"`HOST` \(codex/pid-clw\)")
+
+
+class HarnessPromptsAreNotUserWords(_ChatLogFixture):
+    """PLAN S5a (task 088): a UserPromptSubmit payload that BEGINS with a harness
+    marker is a harness event (a background-task notification, a slash-command
+    echo), not the user's words — on 2026-09-23, 498 of 833 chat_log entries began
+    with `<task-notification>`, and attribution/intent/retro read them as the user."""
+
+    def _logged(self):
+        return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+
+    def test_task_notification_prompt_is_not_logged(self):
+        r = self._run("<task-notification> <task-id>b1</task-id> probe-harness-1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("probe-harness-1", self._logged())
+
+    def test_plain_prompt_is_still_logged(self):
+        self._run("plain probe-user-1")
+        self.assertIn("plain probe-user-1", self._logged())
+        self.assertIn("**[M001]**", self._logged())
+
+    def test_every_harness_marker_is_skipped(self):
+        for n, marker in enumerate(("<local-command-caveat>", "<command-name>", "[SYSTEM NOTIFICATION - NOT USER INPUT]",
+                                    "  <task-notification>"), start=2):
+            with self.subTest(marker=marker):
+                self._run(f"{marker} probe-harness-{n}")
+                self.assertNotIn(f"probe-harness-{n}", self._logged())
+
+    def test_a_user_prompt_that_merely_mentions_a_marker_is_logged(self):
+        self._run("why do I see <task-notification> lines? probe-user-2")
+        self.assertIn("probe-user-2", self._logged())
 
 
 if __name__ == "__main__":

@@ -5,8 +5,8 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 ## [Unreleased]
 
 Branch `fix/1.5.46-batch`. Task 085: the six defects parked by the 1.5.45 release panel (task 083)
-plus the tool defect found at its close. Task 086: PLAN S3. Each fix was written against a test that
-failed first.
+plus the tool defect found at its close. Task 086: PLAN S3. Task 087: PLAN S4. Task 088: PLAN S5. Each fix
+was written against a test that failed first.
 
 ### Added
 
@@ -28,6 +28,19 @@ failed first.
 
 ### Fixed
 
+- **The chat log no longer records harness events as the user's words** (task 088, PLAN S5a). A prompt that
+  begins with `<task-notification>`, `<local-command-caveat>`, `<command-name>` or `[SYSTEM NOTIFICATION` is
+  not logged; on 2026-09-23, 498 of 833 entries in this repo's chat log were background-task notifications,
+  and task attribution, `tasks intent` and the retro read them as the user. A prompt that only mentions a
+  marker is still logged.
+- **`bash_history` records what ran, not every iteration** (task 088, PLAN S5b). The `BASH_ENV` logger now
+  writes each distinct command text once per shell process, skips a script named `statusline` and any shell
+  started with the new `PLAYBOOK_NO_BASHLOG=1`, and rotates a history past 50 MB to
+  `bash_history.archived-<date>-<pid>` (the file had reached 136 MB). Measured: the wrapper fixture run under
+  the logger writes 436 lines instead of 1086; one statusline render writes 0 instead of 38; a 5-iteration loop
+  writes 3 (header, body, the next command) instead of 11. The line format is unchanged. An identical
+  command repeated in one shell is now logged once. The copy at `~/.claude/bash-log.sh` gets this only when
+  `/playbook:init` is re-run. The explicit UTC stamp (S5c) is parked for the owner (decision D4).
 - **Three races on the close path** (task 085).
   - *A replaced panel round with the same header no longer slips past the close.* The close
     compared only the newest round's mode, verdict and tree stamp, so a round replaced by one with
