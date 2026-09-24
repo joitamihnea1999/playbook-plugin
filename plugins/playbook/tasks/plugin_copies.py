@@ -88,11 +88,15 @@ def resolve_launcher_script(doctor_root: Path, project: Path, home: Path) -> "st
     code = code.replace("WRAPPER_NAME", "tasks")
     env = dict(os.environ, HOME=str(home))
     try:
+        # BYTES, UTF-8: `python -` decodes its source as UTF-8, while a text pipe
+        # would encode it in the locale code page (cp1252 on Windows turned the
+        # resolver's em dash into 0x97 → SyntaxError → nothing resolved; CI
+        # run 35970907673). The wrapper passes the file's own bytes the same way.
         r = subprocess.run([sys.executable, "-", os.path.realpath(str(project))],
-                           input=code, capture_output=True, text=True, env=env, timeout=60)
+                           input=code.encode("utf-8"), capture_output=True, env=env, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
-    out = r.stdout.strip()
+    out = r.stdout.decode("utf-8", "surrogateescape").strip()
     return out or None
 
 
@@ -155,10 +159,21 @@ def _is_runtime_artifact(rel: str) -> bool:
     return "__pycache__" in parts or rel.endswith(".pyc")
 
 
-def _blob_sha(path: Path) -> str:
-    data = os.readlink(path).encode("utf-8", "surrogateescape") if path.is_symlink() \
-        else path.read_bytes()
+def _sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _blob_shas(path: Path, autocrlf: bool) -> "set[str]":
+    """The blob sha(s) git would accept for this file: its raw bytes, plus — when
+    the hook repo converts line endings (`core.autocrlf` true/input) and the file
+    is text — the LF-normalised bytes, exactly what git's clean step stores."""
+    if path.is_symlink():
+        return {_sha(os.readlink(path).encode("utf-8", "surrogateescape"))}
+    data = path.read_bytes()
+    shas = {_sha(data)}
+    if autocrlf and b"\r\n" in data and b"\0" not in data:
+        shas.add(_sha(data.replace(b"\r\n", b"\n")))
+    return shas
 
 
 def content_differences(hook: str, install_path: str, sha: str) -> "list[str]":
@@ -181,7 +196,10 @@ def content_differences(hook: str, install_path: str, sha: str) -> "list[str]":
         fields = meta.split()
         if len(fields) == 3 and fields[1] == "blob" and not _is_runtime_artifact(rel):
             release[rel], modes[rel] = fields[2], fields[0]
-    installed = {}
+    cfg = _git(hook, "config", "--get", "core.autocrlf")
+    autocrlf = bool(cfg and cfg.returncode == 0
+                    and cfg.stdout.strip().lower() in (b"true", b"input"))
+    installed: "dict[str, set[str]]" = {}
     root = Path(install_path)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
@@ -191,13 +209,13 @@ def content_differences(hook: str, install_path: str, sha: str) -> "list[str]":
             if _is_runtime_artifact(rel):
                 continue
             try:
-                installed[rel] = _blob_sha(full)
+                installed[rel] = _blob_shas(full, autocrlf)
             except OSError:
-                installed[rel] = "<unreadable>"
+                installed[rel] = {"<unreadable>"}
     diffs = []
     missing = sorted(set(release) - set(installed))
     extra = sorted(set(installed) - set(release))
-    changed = sorted(r for r in set(release) & set(installed) if release[r] != installed[r])
+    changed = sorted(r for r in set(release) & set(installed) if release[r] not in installed[r])
     # the execute bit decides which copy a wrapper selects (`os.access(…, X_OK)`);
     # Windows has no POSIX execute bit to compare
     moded = []
@@ -263,13 +281,13 @@ def report(project: Path, *, home: "Path | None" = None,
             if clean is not True:
                 diffs.append("the hook copy has uncommitted changes")
             if sha and head != sha:
-                diffs.append(f"hook copy HEAD {head[:7]} ≠ installed sha {sha[:7]}")
+                diffs.append(f"hook copy HEAD {head[:7]} != installed sha {sha[:7]}")
         elif hv != iv:
-            diffs.append(f"hook copy v{hv} ≠ installed v{iv}")
+            diffs.append(f"hook copy v{hv} != installed v{iv}")
         ivm = manifest_version(entry["installPath"])
         for label, v in (("hook", hv), ("installed", ivm)):
             if v != iv:
-                diffs.append(f"{label} copy manifest v{v} ≠ installed entry v{iv}")
+                diffs.append(f"{label} copy manifest v{v} != installed entry v{iv}")
         if sha:
             diffs.extend(content_differences(hook, entry["installPath"], sha))
         else:
@@ -300,9 +318,9 @@ def report(project: Path, *, home: "Path | None" = None,
         lines.append(("INFO", f"plugin: launcher copy — {launcher} v{lv or '?'}"))
         if sel is not None:
             if lv != (sel[1].get("version") or "?"):
-                diffs.append(f"launcher copy manifest v{lv} ≠ installed entry v{sel[1].get('version')}")
+                diffs.append(f"launcher copy manifest v{lv} != installed entry v{sel[1].get('version')}")
             if not _same_path(launcher, sel[1]["installPath"]):
-                diffs.append("launcher path ≠ installPath")
+                diffs.append("launcher path != installPath")
 
     # doctor
     dv = manifest_version(doctor_root)

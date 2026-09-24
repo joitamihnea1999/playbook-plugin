@@ -278,7 +278,7 @@ class PluginCopies(_CopiesFixture):
         _git_ok(self.market, "commit", "-qm", "later")
         verdict = self._verdict(self._report())
         self.assertTrue(verdict[0].startswith("[WARN]"), verdict)
-        self.assertIn(f"≠ installed sha {self.sha[:7]}", verdict[0])
+        self.assertIn(f"!= installed sha {self.sha[:7]}", verdict[0])
 
     def test_warns_when_the_hook_copy_is_dirty(self):
         (self.hook / "tasks" / "core.py").write_text('VERSION = "edited"\n', encoding="utf-8")
@@ -337,7 +337,7 @@ class PluginCopies(_CopiesFixture):
         self._save_registry()
         verdict = self._verdict(self._report())
         self.assertTrue(verdict[0].startswith("[WARN]"), verdict)
-        self.assertIn("≠ installed entry v9.9.0", verdict[0])
+        self.assertIn("!= installed entry v9.9.0", verdict[0])
 
     def test_warns_when_doctor_runs_from_a_fourth_copy(self):
         fourth = self.root / "fourth" / "playbook"
@@ -362,7 +362,9 @@ class PluginCopies(_CopiesFixture):
         for seed in (1, 2, 3):
             random.Random(seed).shuffle(self.entries["playbook@mk"])
             self._save_registry(shuffle_seed=seed)
-            ran = subprocess.run([str(self.project / ".claude" / "bin" / "tasks")],
+            from tests._bashcheck import bash_or_skip
+            # through bash: Windows cannot exec a bash script directly (WinError 193)
+            ran = subprocess.run([bash_or_skip(), str(self.project / ".claude" / "bin" / "tasks")],
                                  capture_output=True, text=True,
                                  env=dict(os.environ, HOME=str(self.home))).stdout.strip()
             self.assertEqual(os.path.dirname(os.path.dirname(ran)), str(pinned), ran)
@@ -442,6 +444,38 @@ class PluginCopiesDegraded(_CopiesFixture):
         out = "\n".join(f"[{t}] {x}" for t, x in lines)
         self.assertIn(f"] plugin: installed copy — {self.installed} v{self.VERSION}", out)
         self.assertTrue(self._verdict(out)[0].startswith("[PASS]"), out)
+
+    def test_autocrlf_line_endings_are_not_a_difference(self):
+        # Git for Windows usually runs with core.autocrlf=true: working files carry
+        # CRLF while the blobs hold LF. Git itself calls those identical, so the
+        # report must too — but only line endings: a real edit still WARNs.
+        _git_ok(self.market, "config", "core.autocrlf", "true")
+        target = self.installed / "tasks" / "core.py"
+        target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        self.assertTrue(self._verdict(self._report())[0].startswith("[PASS]"))
+        target.write_bytes(target.read_bytes().replace(b"9", b"8", 1))
+        verdict = self._verdict(self._report())
+        self.assertIn("differs from the release: tasks/core.py", verdict[0])
+
+    def test_the_resolver_source_is_piped_as_utf8_bytes(self):
+        # Windows CI (run 35970907673): piped as text, the resolver was encoded in
+        # the locale code page (cp1252 turned its em dash into 0x97) while
+        # `python -` decodes source as UTF-8 — a SyntaxError, so no copy resolved.
+        from unittest import mock
+        seen = {}
+        real_run = subprocess.run
+
+        def spy(cmd, *a, **kw):
+            if cmd[1:2] == ["-"]:
+                seen["input"], seen["text"] = kw.get("input"), kw.get("text")
+            return real_run(cmd, *a, **kw)
+
+        with mock.patch.object(plugin_copies.subprocess, "run", spy):
+            plugin_copies.resolve_launcher_script(self.hook, self.project, self.home)
+        self.assertIsInstance(seen.get("input"), bytes, seen)
+        self.assertFalse(seen.get("text"))
+        body = (self.hook / "scripts" / "wrapper_resolver.py").read_text(encoding="utf-8")
+        self.assertEqual(seen["input"].decode("utf-8"), body.replace("WRAPPER_NAME", "tasks"))
 
     def test_parses_a_registry_in_the_captured_real_shape(self):
         # field set captured from a real Claude Code install on 2026-09-24:
