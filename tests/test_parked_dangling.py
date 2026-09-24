@@ -128,6 +128,35 @@ class StrictGrammar(_Fixture):
         self.assertEqual(items.get(r"live \`x [promoted → 062]"), "dangling")
 
 
+class PostCapGrammar(_Fixture):
+    """Impl panel round 3 (sol-high, sol-medium) — fixed after the round cap."""
+
+    def _status(self, item):
+        d = self.tasks / "001-t"
+        if d.exists():
+            for f in d.iterdir():
+                f.unlink()
+            d.rmdir()
+        self._task(1, [item])
+        return set(self._items(open_only=False).values())
+
+    def test_a_malformed_dismissal_or_unclosed_strike_stays_open(self):
+        for bad in ("x [dismissed typo]", "x [dismissed:]", "x [dismissed:  ]", "~~unfinished strike"):
+            with self.subTest(item=bad):
+                self.assertEqual(self._status(bad), {"open"})
+        self.assertEqual(self._status("x [dismissed: a reason]"), {"dismissed"})
+        self.assertEqual(self._status("~~done and closed~~"), {"dismissed"})
+
+    def test_backslash_parity_follows_commonmark(self):
+        # `\\` (even run) leaves the backtick live, so this span hides the marker
+        self.assertEqual(self._status(r"a \\`[promoted → PLAN S7]` b"), {"open"})
+        # `\` (odd run) escapes it: no span opens, the marker is live
+        self.assertEqual(self._status(r"a \`[promoted → PLAN S7] b"), {"promoted"})
+
+    def test_a_huge_number_does_not_crash(self):
+        self.assertEqual(self._status("x [promoted → " + "9" * 5000 + "]"), {"open"})
+
+
 class DatedDeferral(_Fixture):
     def test_a_dated_owner_deferral_is_not_open(self):
         self._task(1, ["bench isolation [deferred: owner decision 2026-09-09 — until the Gemini seat exam]"])

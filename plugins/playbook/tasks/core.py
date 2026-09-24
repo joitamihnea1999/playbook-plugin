@@ -3264,7 +3264,12 @@ PARKED_PLACEHOLDER = (
 #   [promoted → NNN]  / [promoted → NNN — reason]      numeric task target
 #   [promoted → PLAN S7] / [promoted → PLAN.md S6 D4 — …] a named plan step
 #   … → task NNN  /  -> task NNN                       the legacy prose form
-_PROMOTED_TO_TASK = re.compile(r"\[promoted\s*(?:→|->)\s*(\d+)\b[^\]]*\]|(?:→|->)\s*task\s+(\d+)\b", re.IGNORECASE)
+# task numbers are bounded (1-6 digits): a 4,300-digit "number" made int() raise
+# and crashed `tasks parked` (impl panel r3); a longer run simply does not match
+_PROMOTED_TO_TASK = re.compile(r"\[promoted\s*(?:→|->)\s*(\d{1,6})(?!\d)\b[^\]]*\]|(?:→|->)\s*task\s+(\d{1,6})(?!\d)\b", re.IGNORECASE)
+# a dismissal needs a closed `[dismissed: <reason>]`; a strikethrough must close
+_DISMISSED = re.compile(r"\[dismissed:\s*[^\]\s][^\]]*\]", re.IGNORECASE)
+_STRUCK = re.compile(r"^~~.*\S.*~~")
 _PROMOTED_TO_PLAN = re.compile(r"\[promoted\s*(?:→|->)\s*PLAN(?:\.md)?\s+S\d+\b[^\]]*\]", re.IGNORECASE)
 _DEFERRAL_DATE = re.compile(r"\[deferred:[^\]]*?\b(20\d{2}-\d{2}-\d{2})\b[^\]]*\]", re.IGNORECASE)
 
@@ -3277,9 +3282,18 @@ def _strip_code_spans(text: str) -> str:
     out, i, n = [], 0, len(text)
     while i < n:
         c = text[i]
-        if c == "\\" and i + 1 < n and text[i + 1] == "`":
-            out.append(text[i:i + 2])
-            i += 2
+        if c == "\\":
+            # CommonMark: a backslash run of ODD length escapes the next character;
+            # an even run is literal backslashes and leaves a backtick active
+            j = i
+            while j < n and text[j] == "\\":
+                j += 1
+            if (j - i) % 2 == 1 and j < n and text[j] == "`":
+                out.append(text[i:j + 1])
+                i = j + 1
+            else:
+                out.append(text[i:j])
+                i = j
             continue
         if c != "`":
             out.append(c)
@@ -3340,7 +3354,7 @@ def _parked_item_status(item: str, existing: "set[int] | None" = None) -> str:
     # a T079 finding that quoted `[promoted → 06N]` read as resolved)
     live = _strip_code_spans(stripped)
     low = live.lower()
-    if stripped.startswith("~~") or "[dismissed" in low:
+    if _STRUCK.match(stripped) or _DISMISSED.search(live):
         return "dismissed"
     if _valid_deferral(live):                 # a real calendar date (impl panel r2)
         return "deferred"
