@@ -21,7 +21,11 @@ _cpb_log_cmd() {
     # check must live in the DEBUG callback (where $0 is final), not at source
     # time.  It avoids both history noise and the expensive walk/date fork for
     # every hook-internal command. Real Bash tool shells keep $0 as bash/sh.
-    case "${0##*/}" in *-hook|statusline|statusline.sh|statusline-*) return 0 ;; esac
+    # The `*\\…` arms: under Git Bash `bash C:\…\statusline.sh` leaves a
+    # backslash path in $0, which `${0##*/}` does not strip (Windows lane, CI
+    # 36000444073). Keep this a single line with the -hook arm first: the
+    # wrapper fixture's S17 control finds and deletes it by its prefix.
+    case "${0##*/}" in *-hook|statusline|statusline.sh|statusline-*|*\\statusline|*\\statusline.sh|*\\statusline-*) return 0 ;; esac
 
     # Filter shell internals and CC infrastructure noise.
     #

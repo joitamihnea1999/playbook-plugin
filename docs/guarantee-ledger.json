@@ -3400,6 +3400,16 @@
         {
           "type": "executable integration",
           "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_a_statusline_named_by_a_backslash_path_is_not_logged",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": [
+            "On POSIX the backslash path is a file NAME containing a backslash; the real Git Bash case runs on the Windows CI lane."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
           "reference": "BashLogScope.test_a_history_past_50_mb_is_rotated",
           "boundary": "subprocess",
           "negative_control": {

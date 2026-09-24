@@ -67,6 +67,21 @@ class BashLogScope(unittest.TestCase):
         self._bash("", argv=[bash_or_skip(), str(script)])
         self.assertNotIn("by-name", "\n".join(self._lines()))
 
+    def test_a_statusline_named_by_a_backslash_path_is_not_logged(self):
+        # Windows lane, CI 36000444073: `bash C:\...\statusline.sh` leaves a
+        # backslash path in $0, which `${0##*/}` does not strip. The same string
+        # reaches the logger here as a file NAME containing a backslash (legal on
+        # POSIX); on Windows it is a real subdirectory.
+        rel = "sub\\statusline.sh"
+        if os.name == "nt":
+            (self.proj / "sub").mkdir()
+            script = self.proj / "sub" / "statusline.sh"
+        else:
+            script = self.proj / rel
+        script.write_bytes(b"#!/bin/bash\necho by-backslash-path >/dev/null\n")
+        self._bash("", argv=[bash_or_skip(), rel])
+        self.assertNotIn("by-backslash-path", "\n".join(self._lines()))
+
     def test_a_history_past_50_mb_is_rotated(self):
         with open(self.hist, "wb") as fh:
             fh.truncate(51 * 1024 * 1024)
