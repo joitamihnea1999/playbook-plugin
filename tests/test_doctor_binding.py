@@ -429,7 +429,7 @@ class PluginCopiesDegraded(_CopiesFixture):
         (self.plugins / "installed_plugins.json").write_text("{not json", encoding="utf-8")
         (self.plugins / "known_marketplaces.json").unlink()
         out = self._report()
-        for label in ("launcher", "installed", "doctor"):
+        for label in ("hook", "launcher", "installed", "doctor"):
             self.assertIn(f"] plugin: {label} copy — ", out)
         self.assertTrue(self._verdict(out)[0].startswith("[WARN]"), out)
 
@@ -457,6 +457,67 @@ class PluginCopiesDegraded(_CopiesFixture):
         verdict = self._verdict(self._report())
         self.assertIn("differs from the release: tasks/core.py", verdict[0])
 
+    def test_a_standard_marketplace_install_can_pass(self):
+        # impl panel (opus): a github marketplace runs its hooks from the installed
+        # cache (not a git checkout); the release is read from the marketplace clone
+        self._write(self.plugins / "known_marketplaces.json", json.dumps({
+            "mk": {"source": {"source": "github", "repo": "o/r"},
+                   "installLocation": str(self.market)}}))
+        # on a standard install the doctor itself runs from the installed copy
+        out = self._report(doctor_root=self.installed)
+        self.assertIn(f"] plugin: hook copy — {self.installed} v{self.VERSION}", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[PASS]"), out)
+        (self.installed / "tasks" / "core.py").write_text("tampered\n", encoding="utf-8")
+        verdict = self._verdict(self._report(doctor_root=self.installed))
+        self.assertIn("differs from the release: tasks/core.py", verdict[0])
+
+    def test_missing_marketplace_metadata_makes_the_hook_copy_unknown(self):
+        (self.plugins / "known_marketplaces.json").unlink()
+        out = self._report()
+        self.assertIn("] plugin: hook copy — unknown (known_marketplaces.json is missing or unreadable)", out)
+        self.assertNotIn(f"] plugin: hook copy — {self.installed}", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[WARN]"), out)
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_an_extra_symlinked_directory_is_a_difference(self):
+        os.symlink(str(self.root), str(self.installed / "tasks" / "linked"))
+        verdict = self._verdict(self._report())
+        self.assertIn("not in the release: tasks/linked", verdict[0])
+
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "no FIFOs on this platform")
+    def test_a_fifo_is_reported_without_being_opened(self):
+        os.mkfifo(str(self.installed / "tasks" / "pipe"))
+        verdict = self._verdict(self._report())          # would block forever if opened
+        self.assertIn("not a regular file (never opened): tasks/pipe", verdict[0])
+
+    def test_a_minus_text_file_keeps_its_bytes(self):
+        # impl panel (sol-high, sol-medium): CRLF may only be forgiven where git
+        # itself would normalise — a `-text` path is byte-exact
+        self._write(self.market / ".gitattributes", "*.py -text\n")
+        _git_ok(self.market, "config", "core.autocrlf", "true")
+        _git_ok(self.market, "add", "-A")
+        _git_ok(self.market, "commit", "-qm", "attrs")
+        self.sha = _git_ok(self.market, "rev-parse", "HEAD")
+        self.entries["playbook@mk"][0]["gitCommitSha"] = self.sha
+        self._save_registry()
+        target = self.installed / "tasks" / "core.py"
+        target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        self.assertIn("differs from the release: tasks/core.py", self._verdict(self._report())[0])
+
+    def test_a_project_module_cannot_run_inside_the_doctor(self):
+        # impl panel (sol-high): the resolver ran as `python -` from the project, so
+        # a project `glob.py` shadowed the stdlib; `-I` isolates it
+        sentinel = self.root / "SHADOWED"
+        for name in ("glob.py", "json.py"):
+            self._write(self.project / name, f"open({str(sentinel)!r}, 'w').write('x')\n")
+        old = os.getcwd()
+        os.chdir(self.project)
+        try:
+            self._report()
+        finally:
+            os.chdir(old)
+        self.assertFalse(sentinel.exists(), "a project module executed inside the doctor")
+
     def test_the_resolver_source_is_piped_as_utf8_bytes(self):
         # Windows CI (run 35970907673): piped as text, the resolver was encoded in
         # the locale code page (cp1252 turned its em dash into 0x97) while
@@ -466,7 +527,7 @@ class PluginCopiesDegraded(_CopiesFixture):
         real_run = subprocess.run
 
         def spy(cmd, *a, **kw):
-            if cmd[1:2] == ["-"]:
+            if "-" in cmd[1:3]:
                 seen["input"], seen["text"] = kw.get("input"), kw.get("text")
             return real_run(cmd, *a, **kw)
 

@@ -92,8 +92,11 @@ def resolve_launcher_script(doctor_root: Path, project: Path, home: Path) -> "st
         # would encode it in the locale code page (cp1252 on Windows turned the
         # resolver's em dash into 0x97 → SyntaxError → nothing resolved; CI
         # run 35970907673). The wrapper passes the file's own bytes the same way.
-        r = subprocess.run([sys.executable, "-", os.path.realpath(str(project))],
-                           input=code.encode("utf-8"), capture_output=True, env=env, timeout=60)
+        # `-I` (isolated): no cwd on sys.path, no PYTHON* env — a project file
+        # named glob.py or json.py must not run inside the doctor (impl panel).
+        r = subprocess.run([sys.executable, "-I", "-", os.path.realpath(str(project))],
+                           input=code.encode("utf-8"), capture_output=True, env=env,
+                           cwd=str(doctor_root), timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
     out = r.stdout.decode("utf-8", "surrogateescape").strip()
@@ -133,23 +136,47 @@ def selected_entry(home: Path, script: "str | None") -> "tuple[tuple[str, dict] 
     return hits[0], ""
 
 
-def hook_copy_path(home: Path, key: str, entry: dict) -> str:
-    """What Claude Code's hooks execute for this entry: a `directory` marketplace
-    runs its checkout (`installLocation` + the plugin's `source`), anything else
-    the entry's `installPath`."""
+def _marketplace(home: Path, key: str) -> "tuple[dict | None, str]":
+    """(marketplace entry, problem) for an installed key `playbook@<market>`."""
     market = key.split("@", 1)[1] if "@" in key else ""
     mk = _load_json(home / ".claude" / "plugins" / "known_marketplaces.json")
-    m = mk.get(market) if isinstance(mk, dict) else None
+    if not isinstance(mk, dict):
+        return None, "known_marketplaces.json is missing or unreadable"
+    m = mk.get(market)
     if not isinstance(m, dict):
-        return entry["installPath"]
-    src = m.get("source") or {}
-    loc = m.get("installLocation")
-    if isinstance(src, dict) and src.get("source") == "directory" and isinstance(loc, str) and loc:
-        mp = _load_json(Path(loc) / ".claude-plugin" / "marketplace.json")
-        for p in (mp or {}).get("plugins") or []:
-            if isinstance(p, dict) and p.get("name") == "playbook" and isinstance(p.get("source"), str):
-                return os.path.normpath(os.path.join(loc, p["source"]))
-    return entry["installPath"]
+        return None, f"marketplace {market!r} is not in known_marketplaces.json"
+    return m, ""
+
+
+def _plugin_source(loc: str) -> "str | None":
+    """The playbook plugin's `source` inside a marketplace checkout, or None."""
+    mp = _load_json(Path(loc) / ".claude-plugin" / "marketplace.json")
+    for p in (mp or {}).get("plugins") or []:
+        if isinstance(p, dict) and p.get("name") == "playbook" and isinstance(p.get("source"), str):
+            return p["source"]
+    return None
+
+
+def hook_copy_path(home: Path, key: str, entry: dict) -> "tuple[str | None, str]":
+    """(path, problem) — what Claude Code's hooks execute for this entry: a
+    `directory` marketplace runs its checkout (`installLocation` + the plugin's
+    `source`); any other marketplace runs the entry's `installPath`. Missing or
+    unreadable marketplace metadata makes the hook copy UNKNOWN (None), never a
+    guess — the hooks of a directory marketplace do not run the installPath."""
+    m, problem = _marketplace(home, key)
+    if m is None:
+        return None, problem
+    src, loc = m.get("source"), m.get("installLocation")
+    if not isinstance(src, dict) or not src.get("source"):
+        return None, "the marketplace entry has no source kind"
+    if src.get("source") != "directory":
+        return entry["installPath"], ""
+    if not (isinstance(loc, str) and loc):
+        return None, "the directory marketplace has no installLocation"
+    rel = _plugin_source(loc)
+    if rel is None:
+        return None, f"no playbook plugin in {loc}/.claude-plugin/marketplace.json"
+    return os.path.normpath(os.path.join(loc, rel)), ""
 
 
 # ── content: the installed copy against the release commit ───────────────────
@@ -163,73 +190,124 @@ def _sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
-def _blob_shas(path: Path, autocrlf: bool) -> "set[str]":
-    """The blob sha(s) git would accept for this file: its raw bytes, plus — when
-    the hook repo converts line endings (`core.autocrlf` true/input) and the file
-    is text — the LF-normalised bytes, exactly what git's clean step stores."""
-    if path.is_symlink():
-        return {_sha(os.readlink(path).encode("utf-8", "surrogateescape"))}
-    data = path.read_bytes()
-    shas = {_sha(data)}
-    if autocrlf and b"\r\n" in data and b"\0" not in data:
-        shas.add(_sha(data.replace(b"\r\n", b"\n")))
-    return shas
+def _release_repo(hook: "str | None", home: Path, key: str) -> "tuple[str | None, str, str]":
+    """(repo dir, path prefix of the plugin inside it, problem): where the release
+    commit's objects are read. The hook copy when it is a git checkout (a directory
+    marketplace); otherwise the marketplace's own clone (`installLocation`, which
+    Claude Code keeps as a git repository) at the plugin's `source`."""
+    if hook:
+        pre = _git(hook, "rev-parse", "--show-prefix")
+        if pre is not None and pre.returncode == 0:
+            return hook, pre.stdout.decode("utf-8", "surrogateescape").strip(), ""
+    m, problem = _marketplace(home, key)
+    loc = m.get("installLocation") if m else None
+    if isinstance(loc, str) and loc:
+        top = _git(loc, "rev-parse", "--show-prefix")
+        rel = _plugin_source(loc)
+        if top is not None and top.returncode == 0 and rel is not None:
+            base = top.stdout.decode("utf-8", "surrogateescape").strip()
+            sub = posix_rel(rel)
+            return loc, (base + sub + "/") if sub else base, ""
+    return None, "", ("the hook copy is not a git checkout and no marketplace clone holds the release"
+                      + (f" ({problem})" if problem else ""))
 
 
-def content_differences(hook: str, install_path: str, sha: str) -> "list[str]":
-    """The installed files against `<sha>:<hook's path in its repo>`, both ways, blob by
-    blob, objects read from the hook copy's repository. `__pycache__/` and `*.pyc`
-    are runtime artifacts and ignored."""
-    prefix = _git(hook, "rev-parse", "--show-prefix")
-    if prefix is None or prefix.returncode != 0:
-        return ["installed content unverified — the hook copy is not a git checkout"]
-    pre = prefix.stdout.decode("utf-8", "surrogateescape").strip()
-    tree = _git(hook, "ls-tree", "-r", "-z", "--full-tree", sha, "--", pre or ".")
+def posix_rel(rel: str) -> str:
+    """`./plugins/playbook` → `plugins/playbook`; `.` → ``."""
+    r = rel.replace("\\", "/").strip("/")
+    while r.startswith("./"):
+        r = r[2:]
+    return "" if r in (".", "") else r
+
+
+def _scan_installed(root: Path) -> "tuple[dict[str, tuple[str, str]], list[str]]":
+    """{rel: (kind, value)} for every entry under `root` without following symlinks
+    or opening anything but regular files: ("file", <raw blob sha>), ("link",
+    <blob sha of the target text>); special files (FIFO, socket, device) are listed
+    by name and NEVER opened — a FIFO would block the doctor forever."""
+    out: "dict[str, tuple[str, str]]" = {}
+    special: "list[str]" = []
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            rel = Path(e.path).relative_to(root).as_posix()
+            if _is_runtime_artifact(rel):
+                continue
+            try:
+                if e.is_symlink():
+                    out[rel] = ("link", _sha(os.readlink(e.path).encode("utf-8", "surrogateescape")))
+                elif e.is_dir(follow_symlinks=False):
+                    stack.append(Path(e.path))
+                elif e.is_file(follow_symlinks=False):
+                    with open(e.path, "rb") as fh:
+                        out[rel] = ("file", _sha(fh.read()))
+                else:
+                    special.append(rel)
+            except OSError:
+                out[rel] = ("file", "<unreadable>")
+    return out, special
+
+
+def _git_hash_as(repo: str, path_in_repo: str, file: Path) -> "str | None":
+    """The blob git would store for `file` at `path_in_repo` in `repo` — its own
+    clean rules (core.autocrlf, `.gitattributes` text/-text/eol, clean filters)."""
+    try:
+        data = file.read_bytes()
+        r = subprocess.run(["git", "hash-object", "--stdin", f"--path={path_in_repo}"], cwd=repo,
+                           input=data, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.decode().strip() if r.returncode == 0 else None
+
+
+def content_differences(repo: str, prefix: str, install_path: str, sha: str) -> "list[str]":
+    """The installed entries against `<sha>:<prefix>` in `repo`, both ways, blob by
+    blob. A regular file whose raw bytes differ is re-hashed by git AS IF at its
+    release path, so git's own normalisation decides line endings (a `-text` file
+    stays byte-exact). `__pycache__/` and `*.pyc` are runtime artifacts."""
+    tree = _git(repo, "ls-tree", "-r", "-z", "--full-tree", sha, "--", prefix or ".")
     if tree is None or tree.returncode != 0:
-        return [f"installed content unverified — release commit {sha[:7]} not in the hook copy's repo"]
-    release, modes = {}, {}
+        return [f"installed content unverified — release commit {sha[:7]} not in {repo}"]
+    release: "dict[str, tuple[str, str]]" = {}
     for rec in tree.stdout.decode("utf-8", "surrogateescape").split("\0"):
         if not rec:
             continue
         meta, _, path = rec.partition("\t")
-        rel = path[len(pre):] if pre and path.startswith(pre) else path
         fields = meta.split()
+        rel = path[len(prefix):] if prefix and path.startswith(prefix) else path
         if len(fields) == 3 and fields[1] == "blob" and not _is_runtime_artifact(rel):
-            release[rel], modes[rel] = fields[2], fields[0]
-    cfg = _git(hook, "config", "--get", "core.autocrlf")
-    autocrlf = bool(cfg and cfg.returncode == 0
-                    and cfg.stdout.strip().lower() in (b"true", b"input"))
-    installed: "dict[str, set[str]]" = {}
+            release[rel] = (fields[0], fields[2])
     root = Path(install_path)
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
-        for fn in filenames:
-            full = Path(dirpath) / fn
-            rel = full.relative_to(root).as_posix()
-            if _is_runtime_artifact(rel):
-                continue
-            try:
-                installed[rel] = _blob_shas(full, autocrlf)
-            except OSError:
-                installed[rel] = {"<unreadable>"}
-    diffs = []
+    installed, special = _scan_installed(root)
     missing = sorted(set(release) - set(installed))
     extra = sorted(set(installed) - set(release))
-    changed = sorted(r for r in set(release) & set(installed) if release[r] not in installed[r])
-    # the execute bit decides which copy a wrapper selects (`os.access(…, X_OK)`);
-    # Windows has no POSIX execute bit to compare
-    moded = []
-    if os.name != "nt":
-        for r in sorted(set(release) & set(installed)):
-            if modes[r] in ("100644", "100755"):
-                try:
-                    x = bool((root / r).stat().st_mode & 0o111)
-                except OSError:
-                    continue
-                if x != (modes[r] == "100755"):
-                    moded.append(r)
+    changed, moded = [], []
+    for rel in sorted(set(release) & set(installed)):
+        mode, blob = release[rel]
+        kind, got = installed[rel]
+        if (kind == "link") != (mode == "120000"):
+            changed.append(rel)
+            continue
+        if got != blob and not (kind == "file" and _git_hash_as(repo, prefix + rel, root / rel) == blob):
+            changed.append(rel)
+            continue
+        # the execute bit decides which copy a wrapper selects; Windows has none
+        if kind == "file" and os.name != "nt" and mode in ("100644", "100755"):
+            try:
+                x = bool(os.lstat(root / rel).st_mode & 0o111)
+            except OSError:
+                continue
+            if x != (mode == "100755"):
+                moded.append(rel)
+    diffs = []
     for label, items in (("missing from the install", missing), ("not in the release", extra),
-                         ("differs from the release", changed), ("mode differs from the release", moded)):
+                         ("differs from the release", changed), ("mode differs from the release", moded),
+                         ("not a regular file (never opened)", sorted(special))):
         if items:
             shown = ", ".join(items[:3]) + (f" (+{len(items) - 3} more)" if len(items) > 3 else "")
             diffs.append(f"{len(items)} file(s) {label}: {shown}")
@@ -250,8 +328,9 @@ def _git_state(copy: str) -> "tuple[str | None, bool | None]":
 
 def report(project: Path, *, home: "Path | None" = None,
            doctor_root: "Path | None" = None) -> "list[tuple[str, str]]":
-    """[(tag, text)] — four `plugin: <label> copy — <path> v<version>` lines, then the
-    `plugin: copies agree` verdict (PASS or WARN, never FAIL: a disagreement is a
+    """[(tag, text)] — always four `plugin: <label> copy — …` lines (hook, installed,
+    launcher, doctor; an undeterminable copy is a WARN naming why), then the
+    `plugin: copies agree` verdict: PASS or WARN, never FAIL (a disagreement is a
     state to see, not a broken install)."""
     home = Path(home) if home is not None else Path(os.environ.get("HOME") or Path.home())
     doctor_root = Path(doctor_root) if doctor_root is not None else Path(__file__).resolve().parent.parent
@@ -261,35 +340,45 @@ def report(project: Path, *, home: "Path | None" = None,
     script = resolve_launcher_script(doctor_root, project, home)
     sel, problem = selected_entry(home, script)
 
-    # hook + installed (both hang on the selected entry)
     hook = None
     if sel is None:
+        lines.append(("WARN", f"plugin: hook copy — unknown ({problem})"))
         lines.append(("WARN", f"plugin: installed copy — {problem}"))
         diffs.append(problem)
     else:
         key, entry = sel
-        hook = hook_copy_path(home, key, entry)
-        hv = manifest_version(hook)
-        head, clean = _git_state(hook)
-        tail = f" (HEAD {head[:7]}{'' if clean else ', dirty'})" if head else ""
-        lines.append(("INFO", f"plugin: hook copy — {hook} v{hv or '?'}{tail}"))
+        hook, hproblem = hook_copy_path(home, key, entry)
         sha = entry.get("gitCommitSha") or ""
         iv = entry.get("version") or "?"
+        if hook is None:
+            lines.append(("WARN", f"plugin: hook copy — unknown ({hproblem})"))
+            diffs.append(f"hook copy unknown: {hproblem}")
+            hv = None
+        else:
+            hv = manifest_version(hook)
+            head, clean = _git_state(hook)
+            tail = f" (HEAD {head[:7]}{'' if clean else ', dirty'})" if head else ""
+            lines.append(("INFO", f"plugin: hook copy — {hook} v{hv or '?'}{tail}"))
+            if head:
+                if clean is not True:
+                    diffs.append("the hook copy has uncommitted changes")
+                if sha and head != sha:
+                    diffs.append(f"hook copy HEAD {head[:7]} != installed sha {sha[:7]}")
+            elif hv != iv:
+                diffs.append(f"hook copy v{hv} != installed v{iv}")
+            if hv != iv:
+                diffs.append(f"hook copy manifest v{hv} != installed entry v{iv}")
         lines.append(("INFO", f"plugin: installed copy — {entry['installPath']} v{iv}"
                               + (f" (sha {sha[:7]})" if sha else "")))
-        if head:
-            if clean is not True:
-                diffs.append("the hook copy has uncommitted changes")
-            if sha and head != sha:
-                diffs.append(f"hook copy HEAD {head[:7]} != installed sha {sha[:7]}")
-        elif hv != iv:
-            diffs.append(f"hook copy v{hv} != installed v{iv}")
         ivm = manifest_version(entry["installPath"])
-        for label, v in (("hook", hv), ("installed", ivm)):
-            if v != iv:
-                diffs.append(f"{label} copy manifest v{v} != installed entry v{iv}")
+        if ivm != iv:
+            diffs.append(f"installed copy manifest v{ivm} != installed entry v{iv}")
         if sha:
-            diffs.extend(content_differences(hook, entry["installPath"], sha))
+            repo, prefix, rproblem = _release_repo(hook, home, key)
+            if repo is None:
+                diffs.append(f"installed content unverified — {rproblem}")
+            else:
+                diffs.extend(content_differences(repo, prefix, entry["installPath"], sha))
         else:
             diffs.append("installed entry has no gitCommitSha — content unverified")
 
@@ -301,7 +390,7 @@ def report(project: Path, *, home: "Path | None" = None,
     except OSError:
         wtext = None
     if wtext is None:
-        lines.append(("WARN", f"plugin: launcher copy — no {wrapper}"))
+        lines.append(("WARN", f"plugin: launcher copy — none ({wrapper} is missing)"))
         diffs.append("no project launcher")
     elif "# playbook-managed" not in wtext:
         lines.append(("WARN", f"plugin: launcher copy — custom launcher — not executed, target unknown ({wrapper})"))
@@ -310,7 +399,7 @@ def report(project: Path, *, home: "Path | None" = None,
         lines.append(("WARN", f"plugin: launcher copy — stale launcher — target unknown, not executed ({wrapper})"))
         diffs.append("stale launcher")
     elif not script:
-        lines.append(("WARN", "plugin: launcher copy — the resolver selected no copy"))
+        lines.append(("WARN", "plugin: launcher copy — unknown (the resolver selected no copy)"))
         diffs.append("launcher resolves to nothing")
     else:
         launcher = os.path.dirname(os.path.dirname(script))
@@ -326,7 +415,7 @@ def report(project: Path, *, home: "Path | None" = None,
     dv = manifest_version(doctor_root)
     lines.append(("INFO", f"plugin: doctor copy — {doctor_root} v{dv or '?'}"))
     known = [p for p in (hook, launcher, sel[1]["installPath"] if sel else None) if p]
-    if not any(_same_path(doctor_root, p) for p in known):
+    if known and not any(_same_path(doctor_root, p) for p in known):
         diffs.append("the doctor runs from a fourth copy")
 
     if diffs:

@@ -12042,7 +12042,7 @@
     {
       "id": "PB-PLUGIN-COPY-BINDING",
       "category": "doctor",
-      "statement": "`tasks doctor` names the plugin copies that actually run, each with the path and version read from its own source — the hook copy (a directory marketplace's checkout, else the installed entry's installPath; with its git HEAD and cleanliness), the launcher copy (what the project's managed `.claude/bin/tasks` would exec, computed by running this plugin copy's own `scripts/wrapper_resolver.py` — the text every generated wrapper embeds — never by executing the wrapper; a custom or stale wrapper is reported as target unknown), the installed entry that resolver selects (version + gitCommitSha), and the doctor's own copy — and prints `copies agree` PASS only when the hook copy is clean at the installed sha, the manifests equal the entry's version, the installed files equal the release commit's tree both ways blob by blob (execute bit on POSIX; `__pycache__`/`*.pyc` ignored), the launcher path is the installPath, and the doctor is one of the three; otherwise WARN naming each difference, including any input it cannot read.",
+      "statement": "`tasks doctor` names the plugin copies that actually run, each with the path and version read from its own source — the hook copy (a directory marketplace's checkout, else the installed entry's installPath; with its git HEAD and cleanliness), the launcher copy (what the project's managed `.claude/bin/tasks` would exec, computed by running this plugin copy's own `scripts/wrapper_resolver.py` — the text every generated wrapper embeds — never by executing the wrapper; a custom or stale wrapper is reported as target unknown), the installed entry that resolver selects (version + gitCommitSha), and the doctor's own copy — and prints `copies agree` PASS only when the hook copy is clean at the installed sha, the manifests equal the entry's version, the installed entries equal the release commit's tree both ways blob by blob — objects read from the hook copy's repository or, for a non-directory marketplace, the marketplace clone; a differing file re-hashed by git at its release path so git's own line-ending and attribute rules decide; symlinks compared as links; special files listed, never opened; execute bit on POSIX; `__pycache__`/`*.pyc` ignored, the launcher path is the installPath, and the doctor is one of the three; otherwise WARN naming each difference, including any input it cannot read (an undeterminable copy is named unknown, never guessed); the resolver runs isolated (`python -I`), so no project module executes inside the doctor.",
       "owner": [
         {
           "path": "plugins/playbook/tasks/plugin_copies.py",
@@ -12219,6 +12219,71 @@
             "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
           },
           "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopiesDegraded.test_a_standard_marketplace_install_can_pass",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_warns_when_installed_content_differs_from_the_release"
+          },
+          "limitations": [
+            "Task 086 implementation review round 1."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopiesDegraded.test_a_minus_text_file_keeps_its_bytes",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": [
+            "Task 086 implementation review round 1."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopiesDegraded.test_a_fifo_is_reported_without_being_opened",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": [
+            "Task 086 implementation review round 1."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopiesDegraded.test_a_project_module_cannot_run_inside_the_doctor",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": [
+            "Task 086 implementation review round 1."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopiesDegraded.test_missing_marketplace_metadata_makes_the_hook_copy_unknown",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": [
+            "Task 086 implementation review round 1."
+          ]
         }
       ],
       "applicable_platforms": [
