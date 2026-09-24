@@ -308,6 +308,8 @@ class PluginCopies(_CopiesFixture):
         out = self._report()
         self.assertIn("launcher copy — stale launcher — target unknown, not executed", out)
         self.assertNotIn(f"launcher copy — {other}", out)
+        # impl panel round 2 (sol-high 2): the installed line says who chose it
+        self.assertIn("chosen by this doctor's resolver; the project's launcher is stale", out)
         self.assertTrue(self._verdict(out)[0].startswith("[WARN]"))
 
     def test_warns_when_installed_content_differs_from_the_release(self):
@@ -405,7 +407,7 @@ class PluginCopiesDegraded(_CopiesFixture):
         self.entries["playbook@mk"][0]["gitCommitSha"] = "f" * 40
         self._save_registry()
         verdict = self._verdict(self._report())
-        self.assertTrue(verdict[0].startswith("[WARN]") and "unverified" in verdict[0], verdict)
+        self.assertTrue(verdict[0].startswith("[WARN]") and "could not verify" in verdict[0], verdict)
 
     def test_warns_when_the_hook_copy_is_not_a_git_checkout(self):
         plain = self.root / "plain-market"
@@ -493,6 +495,7 @@ class PluginCopiesDegraded(_CopiesFixture):
     def test_a_minus_text_file_keeps_its_bytes(self):
         # impl panel (sol-high, sol-medium): CRLF may only be forgiven where git
         # itself would normalise — a `-text` path is byte-exact
+        self._lf_release_file()
         self._write(self.market / ".gitattributes", "*.py -text\n")
         _git_ok(self.market, "config", "core.autocrlf", "true")
         _git_ok(self.market, "add", "-A")
@@ -500,8 +503,7 @@ class PluginCopiesDegraded(_CopiesFixture):
         self.sha = _git_ok(self.market, "rev-parse", "HEAD")
         self.entries["playbook@mk"][0]["gitCommitSha"] = self.sha
         self._save_registry()
-        target = self.installed / "tasks" / "core.py"
-        target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        self._crlf_installed()
         self.assertIn("differs from the release: tasks/core.py", self._verdict(self._report())[0])
 
     def test_a_project_module_cannot_run_inside_the_doctor(self):
@@ -517,6 +519,83 @@ class PluginCopiesDegraded(_CopiesFixture):
         finally:
             os.chdir(old)
         self.assertFalse(sentinel.exists(), "a project module executed inside the doctor")
+
+    def _lf_release_file(self, rel="tasks/core.py"):
+        # explicit LF bytes in BOTH copies: `write_text` writes CRLF on Windows, and a
+        # CRLF-committed fixture would make the CRLF mutation below a no-op
+        data = b'VERSION = "9.9.1"\nX = 1\n'
+        (self.hook / rel).write_bytes(data)
+        (self.installed / rel).write_bytes(data)
+
+    def _crlf_installed(self, rel="tasks/core.py"):
+        target = self.installed / rel
+        target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+
+    def _recommit(self, msg):
+        _git_ok(self.market, "add", "-A")
+        _git_ok(self.market, "commit", "-qm", msg)
+        return _git_ok(self.market, "rev-parse", "HEAD")
+
+    def test_a_configured_clean_filter_is_never_executed(self):
+        # impl panel round 2 (sol-high 1, sol-medium 2): `git hash-object --path`
+        # ran configured clean filters — the doctor must execute nothing
+        sentinel = self.root / "FILTER-RAN"
+        self._lf_release_file()
+        _git_ok(self.market, "config", "filter.probe.clean", f"touch '{sentinel}'; cat")
+        self._write(self.market / ".gitattributes", "*.py filter=probe\n")
+        self.sha = self._recommit("filter attr")
+        # age the files and refresh the index, so the spec'd `git status` cleanliness
+        # check has nothing to re-hash: what remains is the CONTENT comparison
+        import time
+        old = time.time() - 60
+        for f in self.hook.rglob("*"):
+            if f.is_file():
+                os.utime(f, (old, old))
+        _git_ok(self.market, "status", "--porcelain")
+        sentinel.unlink(missing_ok=True)
+        self.entries["playbook@mk"][0]["gitCommitSha"] = self.sha
+        self._save_registry()
+        self._crlf_installed()
+        verdict = self._verdict(self._report())
+        self.assertFalse(sentinel.exists(), "the doctor executed a git clean filter")
+        self.assertIn("differs from the release: tasks/core.py", verdict[0])
+
+    def test_attributes_come_from_the_release_commit_not_the_checkout(self):
+        _git_ok(self.market, "config", "core.autocrlf", "true")
+        self._lf_release_file()
+        self._write(self.market / ".gitattributes", "*.py -text\n")
+        release = self._recommit("release: py is -text")
+        self._write(self.market / ".gitattributes", "*.py text\n")
+        self._recommit("later: py is text")
+        self.entries["playbook@mk"][0]["gitCommitSha"] = release
+        self._save_registry()
+        self._crlf_installed()
+        verdict = self._verdict(self._report())
+        self.assertIn("differs from the release: tasks/core.py", verdict[0])
+
+    def test_malformed_registry_shapes_still_give_four_lines(self):
+        for bad in ('{"plugins": [1]}', '{"plugins": {"playbook@mk": {}}}', '[]', '{"plugins": {"playbook@mk": [7]}}'):
+            with self.subTest(registry=bad):
+                (self.plugins / "installed_plugins.json").write_text(bad, encoding="utf-8")
+                out = self._report()
+                for label in ("hook", "launcher", "installed", "doctor"):
+                    self.assertIn(f"] plugin: {label} copy — ", out)
+                self.assertTrue(self._verdict(out)[0].startswith("[WARN]"), out)
+
+    def test_an_extra_file_is_never_read(self):
+        from unittest import mock
+        self._write(self.installed / "tasks" / "planted.bin", "x" * 1000)
+        hashed = []
+        real = plugin_copies._stream_sha
+
+        def spy(path, size):
+            hashed.append(Path(path).name)
+            return real(path, size)
+
+        with mock.patch.object(plugin_copies, "_stream_sha", spy):
+            verdict = self._verdict(self._report())
+        self.assertIn("not in the release: tasks/planted.bin", verdict[0])
+        self.assertNotIn("planted.bin", hashed, "an extra file was read")
 
     def test_the_resolver_source_is_piped_as_utf8_bytes(self):
         # Windows CI (run 35970907673): piped as text, the resolver was encoded in

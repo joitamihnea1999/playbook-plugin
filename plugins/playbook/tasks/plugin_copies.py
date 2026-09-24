@@ -109,10 +109,12 @@ def _installed_entries(home: Path) -> "list[tuple[str, dict]]":
     data = _load_json(home / ".claude" / "plugins" / "installed_plugins.json")
     plugins = data.get("plugins") if isinstance(data, dict) else None
     out = []
-    for key, entries in (plugins or {}).items():
-        if not isinstance(key, str) or key.split("@")[0] != "playbook":
+    if not isinstance(plugins, dict):            # valid JSON of the wrong shape → no entries
+        return out
+    for key, entries in plugins.items():
+        if not isinstance(key, str) or key.split("@")[0] != "playbook" or not isinstance(entries, list):
             continue
-        for e in entries or []:
+        for e in entries:
             if isinstance(e, dict) and e.get("installPath"):
                 out.append((key, e))
     return out
@@ -151,7 +153,8 @@ def _marketplace(home: Path, key: str) -> "tuple[dict | None, str]":
 def _plugin_source(loc: str) -> "str | None":
     """The playbook plugin's `source` inside a marketplace checkout, or None."""
     mp = _load_json(Path(loc) / ".claude-plugin" / "marketplace.json")
-    for p in (mp or {}).get("plugins") or []:
+    plist = mp.get("plugins") if isinstance(mp, dict) else None
+    for p in plist if isinstance(plist, list) else []:
         if isinstance(p, dict) and p.get("name") == "playbook" and isinstance(p.get("source"), str):
             return p["source"]
     return None
@@ -220,12 +223,13 @@ def posix_rel(rel: str) -> str:
     return "" if r in (".", "") else r
 
 
-def _scan_installed(root: Path) -> "tuple[dict[str, tuple[str, str]], list[str]]":
-    """{rel: (kind, value)} for every entry under `root` without following symlinks
-    or opening anything but regular files: ("file", <raw blob sha>), ("link",
-    <blob sha of the target text>); special files (FIFO, socket, device) are listed
-    by name and NEVER opened — a FIFO would block the doctor forever."""
-    out: "dict[str, tuple[str, str]]" = {}
+def _scan_installed(root: Path) -> "tuple[dict[str, tuple[str, int | str]], list[str]]":
+    """{rel: ("file", size) | ("link", <blob sha of the target text>)} for every entry
+    under `root`, without following symlinks and WITHOUT reading any file yet (only
+    paths the release also has are hashed later — a planted huge extra file costs
+    nothing). Special files (FIFO, socket, device) are listed and never opened: a
+    FIFO would block the doctor forever."""
+    out: "dict[str, tuple[str, int | str]]" = {}
     special: "list[str]" = []
     stack = [root]
     while stack:
@@ -244,35 +248,57 @@ def _scan_installed(root: Path) -> "tuple[dict[str, tuple[str, str]], list[str]]
                 elif e.is_dir(follow_symlinks=False):
                     stack.append(Path(e.path))
                 elif e.is_file(follow_symlinks=False):
-                    with open(e.path, "rb") as fh:
-                        out[rel] = ("file", _sha(fh.read()))
+                    out[rel] = ("file", e.stat(follow_symlinks=False).st_size)
                 else:
                     special.append(rel)
             except OSError:
-                out[rel] = ("file", "<unreadable>")
+                out[rel] = ("file", -1)
     return out, special
 
 
-def _git_hash_as(repo: str, path_in_repo: str, file: Path) -> "str | None":
-    """The blob git would store for `file` at `path_in_repo` in `repo` — its own
-    clean rules (core.autocrlf, `.gitattributes` text/-text/eol, clean filters)."""
-    try:
-        data = file.read_bytes()
-        r = subprocess.run(["git", "hash-object", "--stdin", f"--path={path_in_repo}"], cwd=repo,
-                           input=data, capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
+_CHUNK = 1 << 20
+_NORMALISE_MAX = 16 << 20        # CRLF re-check only for files up to 16 MiB
+
+
+def _stream_sha(path: Path, size: int) -> str:
+    """Git blob sha of a regular file, streamed (the header needs only its size)."""
+    h = hashlib.sha1(b"blob %d\0" % size)
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(_CHUNK)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _release_attrs(repo: str, sha: str, paths: "list[str]") -> "dict[str, dict[str, str]] | None":
+    """`text`/`eol`/`filter` of each path AS OF the release commit (`git check-attr
+    --source`), which reads attributes and executes nothing. None when this git
+    cannot (no `--source`, git < 2.40) — the caller then forgives nothing."""
+    if not paths:
+        return {}
+    r = _git(repo, "check-attr", f"--source={sha}", "text", "eol", "filter", "--", *paths)
+    if r is None or r.returncode != 0:
         return None
-    return r.stdout.decode().strip() if r.returncode == 0 else None
+    out: "dict[str, dict[str, str]]" = {}
+    for line in r.stdout.decode("utf-8", "surrogateescape").splitlines():
+        path, _, rest = line.rpartition(": ")
+        path, _, attr = path.rpartition(": ")
+        out.setdefault(path, {})[attr] = rest
+    return out
 
 
 def content_differences(repo: str, prefix: str, install_path: str, sha: str) -> "list[str]":
     """The installed entries against `<sha>:<prefix>` in `repo`, both ways, blob by
-    blob. A regular file whose raw bytes differ is re-hashed by git AS IF at its
-    release path, so git's own normalisation decides line endings (a `-text` file
-    stays byte-exact). `__pycache__/` and `*.pyc` are runtime artifacts."""
+    blob. Nothing is executed but `git ls-tree`/`check-attr`/`config`: a file whose
+    raw bytes differ is forgiven ONLY for CRLF line endings, and only where git
+    itself would normalise it — the release commit's attributes say text (or leave
+    it to `core.autocrlf` true/input) and name no filter. `__pycache__/` and
+    `*.pyc` are runtime artifacts."""
     tree = _git(repo, "ls-tree", "-r", "-z", "--full-tree", sha, "--", prefix or ".")
     if tree is None or tree.returncode != 0:
-        return [f"installed content unverified — release commit {sha[:7]} not in {repo}"]
+        return [f"could not verify the installed content — release commit {sha[:7]} not in {repo}"]
     release: "dict[str, tuple[str, str]]" = {}
     for rec in tree.stdout.decode("utf-8", "surrogateescape").split("\0"):
         if not rec:
@@ -286,27 +312,57 @@ def content_differences(repo: str, prefix: str, install_path: str, sha: str) -> 
     installed, special = _scan_installed(root)
     missing = sorted(set(release) - set(installed))
     extra = sorted(set(installed) - set(release))
-    changed, moded = [], []
+    changed, moded, crlf_only = [], [], []
     for rel in sorted(set(release) & set(installed)):
         mode, blob = release[rel]
-        kind, got = installed[rel]
+        kind, val = installed[rel]
         if (kind == "link") != (mode == "120000"):
             changed.append(rel)
             continue
-        if got != blob and not (kind == "file" and _git_hash_as(repo, prefix + rel, root / rel) == blob):
+        if kind == "link":
+            if val != blob:
+                changed.append(rel)
+            continue
+        try:
+            got = _stream_sha(root / rel, int(val))
+        except (OSError, ValueError):
             changed.append(rel)
             continue
+        if got != blob:
+            data = None
+            if 0 <= int(val) <= _NORMALISE_MAX:
+                try:
+                    data = (root / rel).read_bytes()
+                except OSError:
+                    data = None
+            if data is not None and b"\r\n" in data and b"\0" not in data \
+                    and _sha(data.replace(b"\r\n", b"\n")) == blob:
+                crlf_only.append(rel)          # decided below against the release's attributes
+            else:
+                changed.append(rel)
+            continue
         # the execute bit decides which copy a wrapper selects; Windows has none
-        if kind == "file" and os.name != "nt" and mode in ("100644", "100755"):
+        if os.name != "nt" and mode in ("100644", "100755"):
             try:
                 x = bool(os.lstat(root / rel).st_mode & 0o111)
             except OSError:
                 continue
             if x != (mode == "100755"):
                 moded.append(rel)
+    if crlf_only:
+        attrs = _release_attrs(repo, sha, [prefix + r for r in crlf_only])
+        cfg = _git(repo, "config", "--get", "core.autocrlf")
+        autocrlf = bool(cfg and cfg.returncode == 0 and cfg.stdout.strip().lower() in (b"true", b"input"))
+        for rel in crlf_only:
+            a = (attrs or {}).get(prefix + rel, {}) if attrs is not None else None
+            ok = a is not None and a.get("filter", "unspecified") == "unspecified" and (
+                a.get("text") == "set" or a.get("eol") in ("lf", "crlf")
+                or (a.get("text") in ("auto", "unspecified") and autocrlf))
+            if not ok:
+                changed.append(rel)
     diffs = []
     for label, items in (("missing from the install", missing), ("not in the release", extra),
-                         ("differs from the release", changed), ("mode differs from the release", moded),
+                         ("differs from the release", sorted(changed)), ("mode differs from the release", moded),
                          ("not a regular file (never opened)", sorted(special))):
         if items:
             shown = ", ".join(items[:3]) + (f" (+{len(items) - 3} more)" if len(items) > 3 else "")
@@ -340,6 +396,24 @@ def report(project: Path, *, home: "Path | None" = None,
     script = resolve_launcher_script(doctor_root, project, home)
     sel, problem = selected_entry(home, script)
 
+    # the project launcher's state first: when it is custom, stale or missing, the
+    # installed/hook lines come from THIS copy's resolver, and must say so
+    wrapper = project / ".claude" / "bin" / "tasks"
+    try:
+        wtext = wrapper.read_text(encoding="utf-8")
+    except OSError:
+        wtext = None
+    if wtext is None:
+        wstate = "missing"
+    elif "# playbook-managed" not in wtext:
+        wstate = "custom"
+    elif wtext != wrapper_template(doctor_root, "tasks"):
+        wstate = "stale"
+    else:
+        wstate = "current"
+    chosen_by = ("" if wstate == "current" else
+                 f" — chosen by this doctor's resolver; the project's launcher is {wstate}")
+
     hook = None
     if sel is None:
         lines.append(("WARN", f"plugin: hook copy — unknown ({problem})"))
@@ -364,38 +438,31 @@ def report(project: Path, *, home: "Path | None" = None,
                     diffs.append("the hook copy has uncommitted changes")
                 if sha and head != sha:
                     diffs.append(f"hook copy HEAD {head[:7]} != installed sha {sha[:7]}")
-            elif hv != iv:
-                diffs.append(f"hook copy v{hv} != installed v{iv}")
             if hv != iv:
                 diffs.append(f"hook copy manifest v{hv} != installed entry v{iv}")
         lines.append(("INFO", f"plugin: installed copy — {entry['installPath']} v{iv}"
-                              + (f" (sha {sha[:7]})" if sha else "")))
+                              + (f" (sha {sha[:7]})" if sha else "") + chosen_by))
         ivm = manifest_version(entry["installPath"])
         if ivm != iv:
             diffs.append(f"installed copy manifest v{ivm} != installed entry v{iv}")
         if sha:
             repo, prefix, rproblem = _release_repo(hook, home, key)
             if repo is None:
-                diffs.append(f"installed content unverified — {rproblem}")
+                diffs.append(f"could not verify the installed content — {rproblem}")
             else:
                 diffs.extend(content_differences(repo, prefix, entry["installPath"], sha))
         else:
             diffs.append("installed entry has no gitCommitSha — content unverified")
 
     # launcher (read, never executed)
-    wrapper = project / ".claude" / "bin" / "tasks"
     launcher = None
-    try:
-        wtext = wrapper.read_text(encoding="utf-8")
-    except OSError:
-        wtext = None
-    if wtext is None:
+    if wstate == "missing":
         lines.append(("WARN", f"plugin: launcher copy — none ({wrapper} is missing)"))
         diffs.append("no project launcher")
-    elif "# playbook-managed" not in wtext:
+    elif wstate == "custom":
         lines.append(("WARN", f"plugin: launcher copy — custom launcher — not executed, target unknown ({wrapper})"))
         diffs.append("custom launcher")
-    elif wtext != wrapper_template(doctor_root, "tasks"):
+    elif wstate == "stale":
         lines.append(("WARN", f"plugin: launcher copy — stale launcher — target unknown, not executed ({wrapper})"))
         diffs.append("stale launcher")
     elif not script:
