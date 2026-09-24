@@ -111,6 +111,64 @@ class BashLogScope(unittest.TestCase):
         work = [ln.split(" | AGENT | ", 1)[1] for ln in self._lines() if " | AGENT | tasks work" in ln]
         self.assertEqual(work, ["tasks work 7", "tasks work 8", "tasks work 7"])
 
+    def test_a_quoted_tasks_path_is_never_deduped(self):
+        # Panel r2 (sol-high, grok): the exemption matched only a bare `tasks `
+        # or `/tasks `, so `"$B/tasks" work 7; … 8; … 7` lost the second 7. Any
+        # command text containing `tasks` is now exempt (logging more is the
+        # safe direction).
+        bindir = self.proj / "b i n"
+        bindir.mkdir()
+        stub = bindir / "tasks"
+        stub.write_bytes(b"#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        self._bash('"$B/tasks" work 7; "$B/tasks" work 8; "$B/tasks" work 7', {"B": str(bindir)})
+        work = [ln.split(" | AGENT | ", 1)[1] for ln in self._lines() if '/tasks" work' in ln]
+        self.assertEqual(work, ['"$B/tasks" work 7', '"$B/tasks" work 8', '"$B/tasks" work 7'])
+
+    def _second_project(self):
+        other = self.proj.parent / "other"
+        (other / ".agent" / "tasks").mkdir(parents=True)
+        return other
+
+    def test_the_same_command_in_two_projects_is_logged_in_both(self):
+        # Panel r2 (sonnet, sol-high): the seen-set was global to the shell, so
+        # one shell that ran the same text in two projects logged it only in the
+        # first. The key now includes the working directory.
+        other = self._second_project()
+        self._bash('echo same >/dev/null; cd "$O"; echo same >/dev/null', {"O": str(other)})
+        self.assertIn("echo same", "\n".join(self._lines()))
+        other_hist = other / ".agent" / "bash_history"
+        self.assertIn("echo same", other_hist.read_text(encoding="utf-8") if other_hist.exists() else "")
+
+    def test_rotation_is_checked_for_each_project(self):
+        # Panel r2 (sonnet, sol-high): the once-per-process rotation flag was set
+        # by the FIRST project, so a second project's oversized history was never
+        # rotated by that shell.
+        other = self._second_project()
+        other_hist = other / ".agent" / "bash_history"
+        with open(other_hist, "wb") as fh:
+            fh.truncate(51 * 1024 * 1024)
+        self._bash('echo here >/dev/null; cd "$O"; echo there >/dev/null', {"O": str(other)})
+        self.assertTrue([p for p in other_hist.parent.iterdir() if p.name.startswith("bash_history.archived-")])
+        self.assertLess(other_hist.stat().st_size, 1024 * 1024)
+
+    def test_rotation_carries_the_task_activations_forward(self):
+        # Panel r2 (sol-high, sol-medium): retro builds each task's window from
+        # its EARLIEST `tasks work N` line and reads only the live file, so a
+        # rotation that archived the active task's activation made its window
+        # vanish. The `tasks work|new` lines are copied into the fresh file.
+        with open(self.hist, "wb") as fh:
+            fh.write(b"2026-09-20 10:00:00 | AGENT | tasks new bugfix x\n"
+                     b"2026-09-20 10:00:01 | AGENT | .claude/bin/tasks work 7\n"
+                     b"2026-09-20 10:00:02 | AGENT | echo unrelated\n")
+            fh.truncate(51 * 1024 * 1024)
+        self._bash("echo after-rotation >/dev/null")
+        live = self.hist.read_text(encoding="utf-8", errors="replace").splitlines()
+        self.assertEqual(live[:2], ["2026-09-20 10:00:00 | AGENT | tasks new bugfix x",
+                                    "2026-09-20 10:00:01 | AGENT | .claude/bin/tasks work 7"])
+        self.assertTrue(live[2].endswith(" | AGENT | echo after-rotation > /dev/null"), live)
+        self.assertEqual(len(live), 3, live)
+
     def test_rotation_under_errexit_keeps_the_shell_alive(self):
         # Panel r1 P3: the rotation branch (wc/mv/date) ran in no errexit test.
         with open(self.hist, "wb") as fh:

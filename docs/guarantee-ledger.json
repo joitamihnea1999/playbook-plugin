@@ -3355,7 +3355,7 @@
     {
       "id": "PB-SHELL-ATTRIBUTION",
       "category": "sessions-and-attribution",
-      "statement": "The Bash shell-command logger records agent shell commands with a timestamp and an AGENT tag, and suppresses hook-internal shells so implementation machinery does not enter the command history; it writes each distinct command text once per shell process (a loop body is one line, not one per iteration) except a `tasks …` command, which is written every time, installs no trap in a shell started with PLAYBOOK_NO_BASHLOG set to anything but \"\" or \"0\", logs nothing from a script whose own file name is statusline (a directory of that name does not count), and rotates a history past 50 MB to bash_history.archived-<date>-<pid> before its next write (task 088, PLAN S5b).",
+      "statement": "The Bash shell-command logger records agent shell commands with a timestamp and an AGENT tag, and suppresses hook-internal shells so implementation machinery does not enter the command history; it writes each distinct command text once per shell process and working directory (a loop body is one line, not one per iteration) except a command whose text mentions `tasks`, which is written every time, installs no trap in a shell started with PLAYBOOK_NO_BASHLOG set to anything but \"\" or \"0\", logs nothing from a script whose own file name is statusline (a directory of that name does not count), and rotates a history found past 50 MB to bash_history.archived-<date>-<pid> before the first write each shell makes to that lane — copying its `tasks work`/`tasks new` lines into the fresh file so task windows survive — so a history can overshoot 50 MB by what one shell writes (task 088, PLAN S5b).",
       "owner": [
         {
           "path": "plugins/playbook/scripts/bash-log.sh",
@@ -3400,6 +3400,38 @@
           "limitations": [
             "A stub `tasks` on PATH; the real CLI is not run."
           ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_a_quoted_tasks_path_is_never_deduped",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_the_same_command_in_two_projects_is_logged_in_both",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_rotation_is_checked_for_each_project",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_bash_log_scope.py",
+          "reference": "BashLogScope.test_rotation_carries_the_task_activations_forward",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": []
         },
         {
           "type": "executable integration",
@@ -3470,7 +3502,7 @@
       "missing_evidence_or_limitation": [
         "Lane selection is deliberately NOT claimed here. The confirmed fresh-clone root-lane violation is recorded once, authoritatively, on PB-LANE-RESOLUTION; this entry must not be read as evidence that shell commands reach the resolved lane.",
         "The copy installed at ~/.claude/bash-log.sh is deployed by /playbook:init and is not updated by a plugin refresh. Measured on this host 2026-09-24: it is byte-identical to the bundled logger BEFORE task 088 (sha256 fe1f6f01...; the earlier 7488c02c... note is superseded — that copy now has the hook guard), so until /playbook:init is re-run it lacks the task-088 dedupe, opt-out, statusline skip and rotation.",
-        "Deliberate trade-off (task 088): an identical command text repeated within ONE shell process (one Bash tool call — measured: consecutive calls run in different processes) is logged once, so `make test; make test` in one call leaves one line; a `tasks …` command is exempt. Measured on the 277-case wrapper fixture run under BASH_ENV: 1087 lines with the old logger, 437 with the new; one ~/.claude/statusline.sh render 38 -> 0. The zsh logger is unchanged (one line per `zsh -c`).",
+        "Deliberate trade-off (task 088): an identical command text repeated in the same directory within ONE shell process (one Bash tool call — measured: consecutive calls run in different processes) is logged once, so `make test; make test` in one call leaves one line; a command mentioning `tasks` is exempt. Measured on the 278-case wrapper fixture run under BASH_ENV: 1088 lines with the old logger, 469 with the new; one ~/.claude/statusline.sh render 38 -> 0. The zsh logger is unchanged (one line per `zsh -c`).",
         "Rotation is not locked: two shells that cross 50 MB at the same instant can both rotate, and the second archive then holds the few lines written between the two moves — archived, not lost, but no longer in the bash_history that retro/timeline read. The size check is a single `find -size` stat to keep that window small.",
         "zsh and Windows/Git Bash logger behavior lack live platform evidence.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",

@@ -35,11 +35,12 @@ was written against a test that failed first.
   marker is still logged. On a host without `jq` the prompt is now parsed with python3 — the old fallback read
   only compact JSON and logged the raw payload of an ordinary one.
 - **`bash_history` records what ran, not every iteration** (task 088, PLAN S5b). The `BASH_ENV` logger now
-  writes each distinct command text once per shell process (a `tasks …` command every time — task windows are
-  built from those lines), skips a script named `statusline` and any shell started with the new
-  `PLAYBOOK_NO_BASHLOG=1`, and rotates a history past 50 MB to `bash_history.archived-<date>-<pid>` (the file
-  had reached 136 MB). Measured: the 277-case wrapper fixture run under the logger writes 437 lines instead of
-  1087; one statusline render writes 0 instead of 38; a 5-iteration loop
+  writes each distinct command text once per shell process and directory (any command mentioning `tasks`
+  every time — task windows are built from those lines), skips a script named `statusline` and any shell
+  started with the new `PLAYBOOK_NO_BASHLOG=1`, and rotates a history past 50 MB to
+  `bash_history.archived-<date>-<pid>` (the file had reached 136 MB), copying the `tasks work`/`tasks new`
+  lines into the fresh file so task windows survive. Measured: the 278-case wrapper fixture run under the
+  logger writes 469 lines instead of 1088; one statusline render writes 0 instead of 38; a 5-iteration loop
   writes 3 (header, body, the next command) instead of 11. The line format is unchanged. An identical
   command repeated in one shell is now logged once. The copy at `~/.claude/bash-log.sh` gets this only when
   `/playbook:init` is re-run. The explicit UTC stamp (S5c) is parked for the owner (decision D4).

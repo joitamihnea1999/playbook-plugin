@@ -51,12 +51,15 @@ _cpb_log_cmd() {
     # 195,168 × 3 rows on 2026-09-21). The text is the unexpanded source, so a
     # loop body is the same string every iteration. Bash 3.2 has no associative
     # arrays: a \x1f-delimited string, reset past 64 KiB.
-    # A `tasks …` command is never deduped (panel r1): retro and timeline build
-    # task windows from these lines, so `tasks work 7; tasks work 8; tasks work
-    # 7` must keep the second activation.
-    local _key=$'\x1f'"$BASH_COMMAND"$'\x1f'
+    # The key holds the working directory too (panel r2): the destination lane
+    # follows $PWD, so one shell running the same text in two projects logs it
+    # in both. Any text containing `tasks` is never deduped (panel r1/r2):
+    # retro and timeline build task windows from those lines, and a quoted or
+    # backslash path (`"$B/tasks" work 7`) must count too — over-logging is the
+    # safe direction.
+    local _key=$'\x1f'"$PWD"$'\x1e'"$BASH_COMMAND"$'\x1f'
     case "$BASH_COMMAND" in
-        "tasks "*|*"/tasks "*) _key="" ;;
+        *tasks*) _key="" ;;
     esac
     if [[ -n "$_key" ]]; then
         case "${_CPB_SEEN:-}" in
@@ -141,10 +144,15 @@ _cpb_log_cmd() {
             # unguarded form prints "Is a directory" once for EVERY command in
             # every hook shell — and hook stderr/stdout is fed back to the
             # agent. Redirecting the group suppresses it properly.
-            # PLAN S5b: a history past 50 MB is rotated once per process, before
-            # the first write (the 2026-09-21 file had reached 136 MB).
-            if [[ -z "${_CPB_ROTATE_CHECKED:-}" ]]; then
-                _CPB_ROTATE_CHECKED=1
+            # PLAN S5b: a history past 50 MB is rotated before the first write a
+            # shell makes to it (the 2026-09-21 file had reached 136 MB). Checked
+            # once per process PER LANE (panel r2: a process-wide flag skipped a
+            # second project), so one shell can overshoot by what it writes.
+            local _rk=$'\x1f'"$_lane"$'\x1f'
+            case "${_CPB_ROTATE_CHECKED:-}" in
+                *"$_rk"*) ;;
+                *)
+                _CPB_ROTATE_CHECKED="${_CPB_ROTATE_CHECKED:-}$_rk"
                 # `find -size +Nc` is one stat on every platform (a `wc -c`
                 # may read the whole file), so the check-to-move window stays
                 # small. Two shells crossing 50 MB at the same instant can
@@ -155,10 +163,19 @@ _cpb_log_cmd() {
                     _big=$(find "$_lane/bash_history" -prune -size +52428800c 2>/dev/null) || _big=""
                 fi
                 if [[ -n "$_big" ]]; then
-                    mv -f "$_lane/bash_history" \
-                        "$_lane/bash_history.archived-$(date '+%Y%m%d-%H%M%S')-$$" 2>/dev/null || true
+                    local _arch
+                    _arch="$_lane/bash_history.archived-$(date '+%Y%m%d-%H%M%S')-$$" || _arch="$_lane/bash_history.archived-$$"
+                    # The `tasks work|new` lines are carried into the fresh file
+                    # (panel r2): retro opens each task's window at its EARLIEST
+                    # activation and reads only the live file, so archiving the
+                    # active task's activation made its window vanish. `-a`: a
+                    # history can hold stray binary bytes.
+                    if mv -f "$_lane/bash_history" "$_arch" 2>/dev/null; then
+                        { grep -a -E ' [|] [A-Za-z0-9_]+ [|] .*tasks[[:space:]]+(work|new)' "$_arch" >> "$_lane/bash_history"; } 2>/dev/null || true
+                    fi
                 fi
-            fi
+                ;;
+            esac
             { echo "$(date '+%Y-%m-%d %H:%M:%S') | AGENT | $_cmd" >> "$_lane/bash_history"; } 2>/dev/null || return 0
             if [[ -n "$_key" ]]; then
                 _CPB_SEEN="${_CPB_SEEN:-}$_key"

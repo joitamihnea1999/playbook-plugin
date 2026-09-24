@@ -898,7 +898,12 @@ source /dev/null'
     # '|'-delimited s/// early (BSD sed: "bad flag in substitute command").
     sed 's#{ echo \(.*\); } 2>/dev/null || return 0#echo \1 2>/dev/null || return 0#' \
         "$BASH_LOG" > "$d/bash-log-mutant-inline.sh"
-    assert_eq "$(grep -c 'bash_history"; }' "$d/bash-log-mutant-inline.sh")" "0" \
+    # Aimed at the APPEND line (`{ echo …`): task 088's rotation carry-forward
+    # is another brace group ending in `bash_history"; }`, and counting that
+    # made this assertion fail on a correct mutant. The logger must hold one.
+    assert_eq "$(grep -c '{ echo .*bash_history"; }' "$BASH_LOG")" "1" \
+        "S17 negative control (inline): the logger has one braced append"
+    assert_eq "$(grep -c '{ echo .*bash_history"; }' "$d/bash-log-mutant-inline.sh")" "0" \
         "S17 negative control (inline): mutant actually removed the brace group"
     set +e
     out="$(run_victim "$d/bash-log-mutant-inline.sh" "echo hello")"; rc=$?
