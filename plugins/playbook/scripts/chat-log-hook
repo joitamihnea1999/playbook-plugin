@@ -160,9 +160,17 @@ fi
 # words; on 2026-09-23, 498 of 833 entries began with <task-notification>, and
 # attribution / intent / retro read them as the user. Skipped (no consumer needs
 # them). Only the START counts: a user prompt that merely mentions one is logged.
+# The skip is about the LOG only: the counter reset every prompt performs (read
+# by the stop hook's conversational bypass) still happens.
+reset_session_counters() {
+    local session_dir="$AGENT_DIR/sessions/${SESSION_ID:-$(resolve_session_id)}"
+    mkdir -p "$session_dir"
+    reset_counters "$session_dir/counters"
+}
 _lead="${USER_MESSAGE#"${USER_MESSAGE%%[![:space:]]*}"}"
 case "$_lead" in
     "<task-notification>"*|"<local-command-caveat>"*|"<command-name>"*|"[SYSTEM NOTIFICATION"*)
+        reset_session_counters
         exit 0 ;;
 esac
 
@@ -209,9 +217,8 @@ fi
 # Get next message ID
 MSG_ID=$(get_next_id "$COUNTER_FILE")
 
-# Session ID (needed for PID tag in chat log and counter reset)
+# Session ID (the PID tag in the chat log; reset_session_counters reuses it)
 SESSION_ID="$(resolve_session_id)"
-SESSION_DIR="$AGENT_DIR/sessions/$SESSION_ID"
 PROVIDER="${PLAYBOOK_PROVIDER:-claude}"
 
 # Append to local chat log with message ID and PID tag.
@@ -241,5 +248,4 @@ else
 fi
 
 # Reset tool/write counters for this session (new user prompt = fresh count)
-mkdir -p "$SESSION_DIR"
-reset_counters "$SESSION_DIR/counters"
+reset_session_counters

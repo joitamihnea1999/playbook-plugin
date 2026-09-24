@@ -84,6 +84,21 @@ class HarnessPromptsAreNotUserWords(_ChatLogFixture):
                 self._run(f"{marker} probe-harness-{n}")
                 self.assertNotIn(f"probe-harness-{n}", self._logged())
 
+    def test_a_skipped_harness_prompt_still_resets_the_session_counters(self):
+        # The skip is about the LOG only. Every prompt resets the session's
+        # tools/writes counters, which the stop hook's conversational bypass
+        # reads; exiting before that reset would change stop-hook behaviour.
+        counters = self.project / ".agent" / "sessions" / SID / "counters"
+        counters.parent.mkdir(parents=True)
+        counters.write_bytes(b"tools=7\nwrites=3\ngate_x=1\n")
+        r = self._run("<task-notification> probe-harness-reset")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("probe-harness-reset", self._logged())
+        text = counters.read_text(encoding="utf-8")
+        self.assertIn("tools=0", text)
+        self.assertIn("writes=0", text)
+        self.assertIn("gate_x=1", text)
+
     def test_a_user_prompt_that_merely_mentions_a_marker_is_logged(self):
         self._run("why do I see <task-notification> lines? probe-user-2")
         self.assertIn("probe-user-2", self._logged())
