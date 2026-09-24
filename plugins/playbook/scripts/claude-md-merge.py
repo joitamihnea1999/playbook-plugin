@@ -23,8 +23,11 @@ the template sections):
                         further down (task 093) — is preserved byte-for-
                         byte. Project-specific content belongs in its own
                         sections, exactly as the template header instructs.
-                        Headings are ATX lines outside fenced code blocks;
-                        Setext and indented headings are not recognised.
+                        Headings are ATX lines outside closed fenced code
+                        blocks and `<!-- -->` comments; Setext and indented
+                        headings are not recognised. A template heading
+                        that occurs twice is refreshed at its first
+                        occurrence only; the later one is project text.
   * second run        → byte-identical (idempotent).
 
 .gitignore contract: append (create if absent) one marker-guarded block of
@@ -99,40 +102,53 @@ def template_body(template_text: str, project_name: str) -> str:
     return body.replace(PLACEHOLDER_TITLE, f"# {project_name}", 1)
 
 
-# A fence opener/closer: up to three spaces, then three or more backticks or tildes.
-FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# A fence line: up to three spaces, three or more backticks or tildes, then its info string.
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\n]*)")
+# The start of an HTML comment block.
+COMMENT_RE = re.compile(r"^ {0,3}<!--")
 # A level-1 ATX heading (`# Title`, or a bare `#`); `##` and deeper are not.
 H1_RE = re.compile(r"^#(?:[ \t]|\r?\n|$)")
 # A thematic break (`---`, `***`, `___`, spaces allowed between the marks).
 BREAK_RE = re.compile(r"^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*\r?\n?$")
 
 
-def _fenced_lines(lines: "list[str]") -> "set[int]":
-    """Indices of the lines inside (and including) CLOSED fenced code blocks.
+def _masked_lines(lines: "list[str]") -> "set[int]":
+    """Indices of the lines that are text whatever they look like: inside (and
+    including) a CLOSED fenced code block or a CLOSED `<!-- … -->` comment.
 
-    A closer is the opener's mark, at least as long, with nothing after it. An
-    opener that is never closed fences nothing: CommonMark would run it to the end
+    A fence closer is the opener's mark, at least as long, with nothing after it; a
+    backtick opener whose info string holds a backtick is not a fence (CommonMark).
+    An opener that is never closed masks nothing: CommonMark would run it to the end
     of the file, which here would turn every later heading into text and let a
     refreshed template section swallow the project's sections below it — the very
     loss this module exists to prevent. Unclosed, it is ordinary text (the
-    behaviour before task 093)."""
+    behaviour before task 093). Other HTML blocks (`<div>` …) are not tracked."""
     out: "set[int]" = set()
     i = 0
     while i < len(lines):
-        m = FENCE_RE.match(lines[i])
-        if not m:
-            i += 1
+        line = lines[i]
+        m = FENCE_RE.match(line)
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            mark = m.group(1)
+            for j in range(i + 1, len(lines)):
+                c = FENCE_RE.match(lines[j])
+                if c and c.group(1)[0] == mark[0] and len(c.group(1)) >= len(mark) \
+                        and not c.group(2).strip():
+                    out.update(range(i, j + 1))
+                    i = j + 1
+                    break
+            else:
+                i += 1                 # never closed: not a fence
             continue
-        mark = m.group(1)
-        for j in range(i + 1, len(lines)):
-            c = FENCE_RE.match(lines[j])
-            if c and c.group(1)[0] == mark[0] and len(c.group(1)) >= len(mark) \
-                    and not lines[j][c.end():].strip():
-                out.update(range(i, j + 1))
-                i = j + 1
-                break
-        else:
-            i += 1                     # never closed: not a fence
+        c = COMMENT_RE.match(line)
+        if c:
+            ends = [j for j in range(i, len(lines))
+                    if "-->" in (lines[j][c.end():] if j == i else lines[j])]
+            if ends:
+                out.update(range(i, ends[0] + 1))
+                i = ends[0] + 1
+                continue
+        i += 1
     return out
 
 
@@ -144,18 +160,18 @@ def split_sections(text: str) -> "tuple[str, list[tuple[str | None, str]]]":
     untouched. A LEVEL-1 heading below the first `##` opens a new top-level part
     that belongs to the project (task 093): it ends the section above it and
     becomes a chunk with heading None — never a template key — whose text starts
-    with the thematic break (`---`) right above the heading, if any, so
-    refreshing the template section above cannot swallow it. Lines inside a
-    closed fenced code block are text, not headings: a `# comment` in a bash
-    fence splits nothing, and neither does a `## ` line (`_fenced_lines`).
+    with the thematic break (`---`) right above the heading, if a blank line
+    precedes that break (`text` + `---` is a Setext underline and stays put), so
+    refreshing the template section above cannot swallow it. Masked lines
+    (`_masked_lines`: closed fences and comments) are text, never headings.
     """
     lines = text.splitlines(keepends=True)
-    fenced = _fenced_lines(lines)
+    masked = _masked_lines(lines)
     preamble: list[str] = []
     sections: "list[tuple[str | None, str]]" = []
     current: "tuple[str | None, list[str]] | None" = None
     for i, line in enumerate(lines):
-        if i in fenced:
+        if i in masked:
             pass
         elif line.startswith("## "):
             if current is not None:
@@ -166,6 +182,9 @@ def split_sections(text: str) -> "tuple[str, list[tuple[str | None, str]]]":
             body = current[1]
             carried: list[str] = []
             while body and (not body[-1].strip() or BREAK_RE.match(body[-1])):
+                b = BREAK_RE.match(body[-1])
+                if b and b.group(1) == "-" and len(body) > 1 and body[-2].strip():
+                    break              # `text` + `---` is a Setext underline, not a break
                 carried.insert(0, body.pop())
             while carried and not carried[0].strip():
                 carried.pop(0)         # the joiner puts back exactly one blank line
@@ -187,19 +206,35 @@ def merge_claude_md(template_text: str, existing: "str | None",
     fresh = template_body(template_text, project_name)
     if existing is None or not existing.strip():
         return fresh
+    # A file whose every line ends in CRLF is merged in LF and written back in CRLF,
+    # so refreshed template text and the joiner's blank lines match it (task 093 r1);
+    # a mixed or LF file is left as it was.
+    crlf = "\r\n" in existing and existing.count("\n") == existing.count("\r\n")
+    if crlf:
+        existing = existing.replace("\r\n", "\n")
 
     _, tmpl_sections = split_sections(fresh)
-    tmpl_map = {h.strip().lower(): (h, b) for h, b in tmpl_sections}
+    tmpl_map = {h.strip().lower(): (h, b) for h, b in tmpl_sections if h is not None}
 
     preamble, existing_sections = split_sections(existing)
+    # One owner per template heading: its FIRST occurrence. A later same-named section
+    # — a project's own `## CLI` under its `#` part — is project text (task 093 r1: it
+    # was overwritten and the template section emitted twice). Template sections an
+    # older merge appended below a project part are still owned there: they are the
+    # first occurrence, so a re-run refreshes them in place instead of appending again.
+    owner: "dict[str, int]" = {}
+    for idx, (heading, _) in enumerate(existing_sections):
+        key = heading.strip().lower() if heading is not None else None
+        if key in tmpl_map and key not in owner:
+            owner[key] = idx
     out: list[str] = [preamble]
     seen: set[str] = set()
-    for heading, body in existing_sections:
+    for idx, (heading, body) in enumerate(existing_sections):
         if heading is None:            # a project-owned `#` part, kept verbatim
             out.append(body)
             continue
         key = heading.strip().lower()
-        if key in tmpl_map:
+        if owner.get(key) == idx:
             th, tb = tmpl_map[key]
             out.append(th + "\n" + tb)
             seen.add(key)
@@ -207,7 +242,7 @@ def merge_claude_md(template_text: str, existing: "str | None",
             out.append(heading + "\n" + body)
 
     for heading, body in tmpl_sections:
-        if heading.strip().lower() not in seen:
+        if heading is not None and heading.strip().lower() not in seen:
             out.append(heading + "\n" + body)
 
     merged = ""
@@ -215,7 +250,8 @@ def merge_claude_md(template_text: str, existing: "str | None",
         if merged and not merged.endswith("\n\n"):
             merged = merged.rstrip("\n") + "\n\n"
         merged += part
-    return merged.rstrip("\n") + "\n"
+    merged = merged.rstrip("\n") + "\n"
+    return merged.replace("\n", "\r\n") if crlf else merged
 
 
 def merge_gitignore(existing: "str | None") -> "str | None":

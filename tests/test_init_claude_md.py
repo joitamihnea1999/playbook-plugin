@@ -159,6 +159,58 @@ class ProjectPartAfterTemplateSections(unittest.TestCase):
         out = cmm.merge_claude_md(TEMPLATE, x, "P")
         self.assertIn("## My Rules\n\nkeep my rules\n", out)
 
+    # --- panel round 1 (task 093) -------------------------------------------------
+
+    def test_template_named_section_inside_the_project_part_is_kept(self):
+        # V1: a project's own `## CLI` under its `#` part is not the template's
+        x = "# P\n\n## CLI\n\nOLD\n\n---\n\n# Mine\n\n## CLI\n\ncustom cli notes\n"
+        out = cmm.merge_claude_md(TEMPLATE, x, "P")
+        self.assertIn("# Mine\n\n## CLI\n\ncustom cli notes\n", out)
+        self.assertNotIn("OLD", out)
+        self.assertEqual(out.count("## CLI"), 2)          # the template's once + the project's
+        self.assertEqual(cmm.merge_claude_md(TEMPLATE, out, "P"), out)
+
+    def test_template_section_appended_below_a_project_part_is_idempotent(self):
+        # V1's other half: sections the file lacks are appended at the END, i.e. below a
+        # trailing project part; the next merge must own them there, not append again
+        x = "# P\n\n## Don't\n\n- x\n\n---\n\n# Mine\n\nmine\n"
+        once = cmm.merge_claude_md(TEMPLATE, x, "P")
+        self.assertEqual(once.count("## Correctness Contract"), 1)
+        self.assertEqual(cmm.merge_claude_md(TEMPLATE, once, "P"), once)
+
+    def test_crlf_file_stays_crlf_when_a_template_section_refreshes(self):
+        # V2: the joiner and the refreshed template text used to be LF
+        crlf = "# P\r\n\r\n## Don't\r\n\r\n- stale\r\n\r\n---\r\n\r\n# Mine\r\n\r\nkeep crlf\r\n"
+        out = cmm.merge_claude_md(TEMPLATE, crlf, "P")
+        self.assertNotIn("- stale", out)
+        self.assertEqual(out.count("\n"), out.count("\r\n"), "a lone LF in a CRLF file")
+        self.assertEqual(cmm.merge_claude_md(TEMPLATE, out, "P"), out)
+
+    def test_setext_underline_above_a_project_part_is_not_moved(self):
+        # V3: `text\n---` is a Setext heading, not a thematic break to carry
+        x = "# P\n\n## My Notes\n\nProject notes\n---\n\n# Part\n\nx\n"
+        out = cmm.merge_claude_md(TEMPLATE, x, "P")
+        self.assertIn("Project notes\n---\n\n# Part\n", out)
+
+    def test_hash_line_inside_an_html_comment_does_not_split_a_template_section(self):
+        # V4: a closed `<!-- -->` comment is text, like a closed fence
+        x = "# P\n\n## CLI\n\nSTALE ONE\n<!--\n# Example\n-->\nSTALE TWO\n"
+        out = cmm.merge_claude_md(TEMPLATE, x, "P")
+        self.assertNotIn("STALE", out)
+        self.assertNotIn("# Example", out)
+
+    def test_backtick_in_the_info_string_is_not_a_fence(self):
+        # V5: CommonMark — a backtick fence's info string cannot contain a backtick
+        x = "# P\n\n## CLI\n\n```foo`bar\n\n## My Rules\n\nkeep my rules\n\n```\n"
+        out = cmm.merge_claude_md(TEMPLATE, x, "P")
+        self.assertIn("## My Rules\n\nkeep my rules\n", out)
+
+    def test_a_template_with_a_level1_line_does_not_crash(self):
+        # V6: defensive — the shipped template has no `#` below its first `##`
+        tmpl = TEMPLATE.rstrip("\n") + "\n\n# Appendix\n\ntext\n"
+        out = cmm.merge_claude_md(tmpl, SEEDED, "StrataDB")
+        self.assertIn("## Dev Tooling", out)
+
     def test_hash_without_space_is_not_a_heading(self):
         stale = "# P\n\n## CLI\n\nold\n#nospace belongs to CLI\n"
         out = cmm.merge_claude_md(TEMPLATE, stale, "P")

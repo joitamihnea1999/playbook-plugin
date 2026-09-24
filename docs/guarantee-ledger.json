@@ -5612,7 +5612,7 @@
           "boundary": "subprocess",
           "negative_control": null,
           "limitations": [
-            "Headings are ATX lines outside CLOSED fenced code blocks; Setext headings, headings indented by 1-3 spaces and a heading inside an HTML block are not recognised (task 093)."
+            "Headings are ATX lines outside CLOSED fenced code blocks and CLOSED <!-- --> comments; Setext headings and headings indented by 1-3 spaces are not recognised (a Setext or indented `#` part below a template section is still deleted), and other HTML blocks (<div> ...) are not tracked, so a `#`/`##` line inside one counts as a heading. A template heading that occurs twice is refreshed at its first occurrence only (task 093)."
           ]
         },
         {

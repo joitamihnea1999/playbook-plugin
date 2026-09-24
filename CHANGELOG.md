@@ -33,10 +33,15 @@ was written against a test that failed first.
   `---` above it and everything up to the next `## ` — counted as that section's body, and refreshing the
   section deleted it while init printed "project content preserved". It happened to the plugin's own dev
   workspace (`# Project: …` and its intro paragraph, 2026-09-24). A `#` heading there now starts a part the
-  merge keeps byte for byte, with the `---` above it. Headings inside a closed fenced code block are now text,
-  which also stops a `## CLI` line in a custom section's code block from being replaced by the template's
-  `## CLI`; a fence that is never closed fences nothing. Setext and indented headings are still not
-  recognised. Ledger `PB-INIT-IDEMPOTENT` gains two proofs and the correction note.
+  merge keeps byte for byte, with the `---` above it (a `---` right under a text line is that line's Setext
+  underline and stays put). The project's own `## CLI` (or any template-named section) inside that part is its
+  own text; only the first occurrence of a template heading is refreshed — before, both were overwritten and
+  the template section appeared twice. Headings inside a closed fenced code block or a closed `<!-- -->`
+  comment are now text, which also stops a `## CLI` line in a custom section's code block from being replaced
+  by the template's; a fence that is never closed, or a backtick fence whose info string holds a backtick,
+  fences nothing. A file whose every line ends in CRLF stays CRLF (refreshed sections and blank lines were
+  written LF). Setext and indented `#` headings are still not recognised. Ledger `PB-INIT-IDEMPOTENT` gains
+  two proofs and the correction note.
 - **The chat log no longer records harness events as the user's words** (task 088, PLAN S5a). A prompt that
   begins with `<task-notification>`, `<local-command-caveat>`, `<command-name>` or `[SYSTEM NOTIFICATION` is
   not logged; on 2026-09-23, 498 of 833 entries in this repo's chat log were background-task notifications,
