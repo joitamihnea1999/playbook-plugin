@@ -108,5 +108,30 @@ class TestVersionParity(unittest.TestCase):
         )
 
 
+class TestVersionParityNegativeControl(unittest.TestCase):
+    """PB-VERSION-PARITY's negative control (PLAN S3, task 086 — it was the one
+    verified ledger row without any): the real parity test, pointed at a copy of
+    core.py whose VERSION drifted, must FAIL."""
+
+    def test_a_drifted_core_version_fails_the_parity_test(self):
+        import sys
+        import tempfile
+        from unittest import mock
+        mod = sys.modules[__name__]
+        with tempfile.TemporaryDirectory() as d:
+            drifted = Path(d) / "core.py"
+            drifted.write_text(VERSION_ASSIGN.sub('VERSION = "0.0.0"', CORE.read_text(encoding="utf-8"), 1),
+                               encoding="utf-8")
+            self.assertEqual(core_version(drifted), "0.0.0")
+            manifest = Path(d) / "plugin.json"             # the real manifest, copied
+            manifest.write_text(MANIFEST.read_text(encoding="utf-8"), encoding="utf-8")
+            # the test's message renders paths relative to REPO_ROOT, so all three move
+            with mock.patch.object(mod, "CORE", drifted), \
+                 mock.patch.object(mod, "MANIFEST", manifest), \
+                 mock.patch.object(mod, "REPO_ROOT", Path(d)):
+                with self.assertRaises(AssertionError):
+                    TestVersionParity("test_manifest_and_cli_agree").test_manifest_and_cli_agree()
+
+
 if __name__ == "__main__":
     unittest.main()

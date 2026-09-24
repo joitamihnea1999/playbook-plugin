@@ -155,5 +155,310 @@ class AuthoritativePathResolution(unittest.TestCase):
         self.assertEqual(p.resolve(), (PLUGIN / "hooks" / "hooks.json").resolve())
 
 
+# ── PLAN S3 (task 086): the doctor names the plugin copies ───────────────────
+import random  # noqa: E402
+import shutil  # noqa: E402
+
+from tasks import plugin_copies  # noqa: E402
+
+
+def _git_ok(cwd, *args):
+    return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                          cwd=str(cwd), capture_output=True, text=True, check=True).stdout.strip()
+
+
+class _CopiesFixture(unittest.TestCase):
+    """PLAN S3 (task 086): `tasks doctor` compared a copy with itself and said PASS
+    from every copy, while on a directory-marketplace machine the hooks run the
+    checkout, the launcher runs the installed cache, and the doctor runs from
+    wherever it was invoked. The report names each copy (path + version) and
+    PASSes only when they are one release. Hermetic: a fake HOME, a real git repo
+    as the directory marketplace, an installed copy, a project wrapper generated
+    by the real `create_wrapper`."""
+
+    VERSION = "9.9.1"
+    BASE = "copies"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._rebuild(self.BASE)
+
+    def _rebuild(self, base):
+        self.root = Path(self._tmp.name) / base
+        self.home = self.root / "home"
+        self.plugins = self.home / ".claude" / "plugins"
+        self.market = self.root / "market"
+        self.hook = self.market / "plugins" / "playbook"
+        self.project = self.root / "proj"
+        self._build()
+
+    # fixture ---------------------------------------------------------------
+    def _write(self, path: Path, text: str, mode=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        if mode:
+            path.chmod(mode)
+
+    def _plugin_tree(self, dest: Path, version: str):
+        self._write(dest / ".claude-plugin" / "plugin.json", json.dumps({"name": "playbook", "version": version}))
+        self._write(dest / "scripts" / "tasks", '#!/bin/sh\necho "$0"\n', 0o755)
+        self._write(dest / "scripts" / "sandbox", "#!/bin/sh\nexit 0\n", 0o755)
+        for name in ("gate-echo-lib.sh", "wrapper_resolver.py"):
+            shutil.copy2(PLUGIN / "scripts" / name, dest / "scripts" / name)
+        self._write(dest / "tasks" / "core.py", f'VERSION = "{version}"\n')
+
+    def _build(self):
+        self._write(self.market / ".claude-plugin" / "marketplace.json",
+                    json.dumps({"plugins": [{"name": "playbook", "source": "./plugins/playbook"}]}))
+        self._plugin_tree(self.hook, self.VERSION)
+        _git_ok(self.market, "init", "-q")
+        _git_ok(self.market, "add", "-A")
+        _git_ok(self.market, "commit", "-qm", "release")
+        self.sha = _git_ok(self.market, "rev-parse", "HEAD")
+        self.installed = self.plugins / "cache" / "mk" / "playbook" / self.VERSION
+        shutil.copytree(self.hook, self.installed)
+        self.entries = {
+            "playbook@mk": [{"scope": "user", "installPath": str(self.installed),
+                             "version": self.VERSION, "gitCommitSha": self.sha,
+                             "lastUpdated": "2026-09-24T00:00:00Z"}],
+        }
+        self._save_registry()
+        self._write(self.plugins / "known_marketplaces.json", json.dumps({
+            "mk": {"source": {"source": "directory", "path": str(self.market)},
+                   "installLocation": str(self.market)}}))
+        self.project.mkdir(parents=True)
+        (self.project / ".agent" / "tasks").mkdir(parents=True)
+        self._generate_wrapper(self.hook)
+
+    def _save_registry(self, shuffle_seed=None):
+        items = list(self.entries.items())
+        if shuffle_seed is not None:
+            random.Random(shuffle_seed).shuffle(items)
+        self._write(self.plugins / "installed_plugins.json",
+                    json.dumps({"version": 2, "plugins": dict(items)}))
+
+    def _generate_wrapper(self, plugin_root: Path):
+        from tests._bashcheck import bash_or_skip
+        lib = plugin_root / "scripts" / "gate-echo-lib.sh"
+        r = subprocess.run([bash_or_skip(), "-c", 'source "$1"; create_wrapper "$2" tasks', "_",
+                            str(lib), str(self.project)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def _report(self, doctor_root=None):
+        lines = plugin_copies.report(self.project, home=self.home,
+                                     doctor_root=doctor_root or self.hook)
+        return "\n".join(f"[{tag}] {text}" for tag, text in lines)
+
+    def _verdict(self, out):
+        v = [ln for ln in out.splitlines() if "plugin: copies agree" in ln]
+        self.assertEqual(len(v), 1, f"expected exactly one verdict line in:\n{out}")
+        return v
+
+
+class PluginCopies(_CopiesFixture):
+    """The 13 tests PLAN S3's Done names."""
+
+    def test_names_hook_launcher_and_installed_copies_with_paths_and_versions(self):
+        out = self._report()
+        v, sha = self.VERSION, self.sha[:7]
+        self.assertIn(f"] plugin: hook copy — {self.hook} v{v} (HEAD {sha})", out)
+        self.assertIn(f"] plugin: launcher copy — {self.installed} v{v}", out)
+        self.assertIn(f"] plugin: installed copy — {self.installed} v{v} (sha {sha})", out)
+        self.assertIn(f"] plugin: doctor copy — {self.hook} v{v}", out)
+
+    def test_passes_only_when_all_three_copies_agree(self):
+        verdict = self._verdict(self._report())
+        self.assertEqual(len(verdict), 1, verdict)
+        self.assertTrue(verdict[0].startswith("[PASS]"), verdict)
+
+    def test_warns_when_the_hook_copy_differs_from_the_installed_commit(self):
+        self._write(self.hook / "tasks" / "later.py", "x = 1\n")
+        _git_ok(self.market, "add", "-A")
+        _git_ok(self.market, "commit", "-qm", "later")
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]"), verdict)
+        self.assertIn(f"≠ installed sha {self.sha[:7]}", verdict[0])
+
+    def test_warns_when_the_hook_copy_is_dirty(self):
+        (self.hook / "tasks" / "core.py").write_text('VERSION = "edited"\n', encoding="utf-8")
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]") and "uncommitted" in verdict[0], verdict)
+        _git_ok(self.market, "checkout", "--", ".")
+        self._write(self.hook / "untracked.txt", "new\n")
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]") and "uncommitted" in verdict[0], verdict)
+
+    def test_custom_launcher_is_read_never_executed(self):
+        sentinel = self.root / "SENTINEL"
+        self._write(self.project / ".claude" / "bin" / "tasks",
+                    f'#!/bin/sh\ntouch "{sentinel}"\n', 0o755)
+        out = self._report()
+        self.assertIn("launcher copy — custom launcher — not executed, target unknown", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[WARN]"))
+        self.assertFalse(sentinel.exists(), "the doctor executed the project's launcher")
+
+    def test_stale_managed_launcher_target_is_unknown(self):
+        # an older managed wrapper whose embedded resolver would pick another copy
+        other = self.plugins / "cache" / "mk" / "playbook" / "0.0.1"
+        self._plugin_tree(other, "0.0.1")
+        wrapper = self.project / ".claude" / "bin" / "tasks"
+        wrapper.write_text("#!/bin/bash\n# playbook-managed — do not edit\n"
+                           f'exec "{other}/scripts/tasks" "$@"\n', encoding="utf-8")
+        out = self._report()
+        self.assertIn("launcher copy — stale launcher — target unknown, not executed", out)
+        self.assertNotIn(f"launcher copy — {other}", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[WARN]"))
+
+    def test_warns_when_installed_content_differs_from_the_release(self):
+        target = self.installed / "tasks" / "core.py"
+        st = target.stat()
+        data = target.read_bytes()
+        target.write_bytes(data.replace(b"9", b"8", 1))          # same size
+        os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))    # same mtime
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]"), verdict)
+        self.assertIn("differs from the release: tasks/core.py", verdict[0])
+
+    def test_warns_when_an_installed_file_is_missing(self):
+        (self.installed / "tasks" / "core.py").unlink()
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]"), verdict)
+        self.assertIn("missing from the install: tasks/core.py", verdict[0])
+
+    def test_runtime_pycache_does_not_break_agreement(self):
+        self._write(self.installed / "tasks" / "__pycache__" / "core.cpython-310.pyc", "\0bytecode")
+        self._write(self.installed / "scripts" / "stray.pyc", "\0bytecode")
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[PASS]"), verdict)
+
+    def test_warns_when_manifest_and_entry_versions_differ(self):
+        self.entries["playbook@mk"][0]["version"] = "9.9.0"
+        self._save_registry()
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]"), verdict)
+        self.assertIn("≠ installed entry v9.9.0", verdict[0])
+
+    def test_warns_when_doctor_runs_from_a_fourth_copy(self):
+        fourth = self.root / "fourth" / "playbook"
+        shutil.copytree(self.hook, fourth)
+        out = self._report(doctor_root=fourth)
+        self.assertIn(f"] plugin: doctor copy — {fourth} v{self.VERSION}", out)
+        verdict = self._verdict(out)
+        self.assertTrue(verdict[0].startswith("[WARN]") and "fourth copy" in verdict[0], verdict)
+
+    def test_selection_matches_the_embedded_resolver(self):
+        # a project-scoped entry for THIS project outranks the newer user entry;
+        # decoys: another project's entry, another plugin, another marketplace
+        pinned = self.plugins / "cache" / "mk" / "playbook" / "9.0.0"
+        self._plugin_tree(pinned, "9.0.0")
+        elsewhere = self.plugins / "cache" / "mk" / "playbook" / "9.9.9"
+        self._plugin_tree(elsewhere, "9.9.9")
+        self.entries["playbook@mk"].append({"scope": "project", "installPath": str(pinned),
+                                            "version": "9.0.0", "projectPath": str(self.project)})
+        self.entries["playbook@mk"].append({"scope": "project", "installPath": str(elsewhere),
+                                            "version": "9.9.9", "projectPath": str(self.root / "other")})
+        self.entries["other@mk"] = [{"scope": "user", "installPath": str(elsewhere), "version": "1.0"}]
+        for seed in (1, 2, 3):
+            random.Random(seed).shuffle(self.entries["playbook@mk"])
+            self._save_registry(shuffle_seed=seed)
+            ran = subprocess.run([str(self.project / ".claude" / "bin" / "tasks")],
+                                 capture_output=True, text=True,
+                                 env=dict(os.environ, HOME=str(self.home))).stdout.strip()
+            self.assertEqual(os.path.dirname(os.path.dirname(ran)), str(pinned), ran)
+            self.assertIn(f"] plugin: installed copy — {pinned} v9.0.0", self._report())
+
+
+    def test_paths_with_spaces(self):
+        self._rebuild("dir with spaces")
+        self.assertIn(" ", str(self.hook))
+        out = self._report()
+        self.assertIn(f"] plugin: hook copy — {self.hook} v{self.VERSION}", out)
+        self.assertIn(f"] plugin: launcher copy — {self.installed} v{self.VERSION}", out)
+        self.assertIn(f"] plugin: installed copy — {self.installed} v{self.VERSION}", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[PASS]"), out)
+
+
+class PluginCopiesDegraded(_CopiesFixture):
+    """The plan panel's additions (task 086 triage P3/P4/P7-P10/P13): disagreements
+    the 13 named tests do not stage, and inputs that are missing or malformed —
+    each must end in a WARN, never a traceback and never a PASS."""
+
+    def test_warns_when_an_installed_file_is_extra(self):
+        self._write(self.installed / "tasks" / "planted.py", "x = 1\n")
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]"), verdict)
+        self.assertIn("not in the release: tasks/planted.py", verdict[0])
+
+    @unittest.skipIf(os.name == "nt", "no POSIX execute bit on Windows")
+    def test_warns_when_an_installed_execute_bit_differs(self):
+        # `scripts/sandbox`, not `scripts/tasks`: without its execute bit the
+        # resolver would skip the copy altogether (a different WARN)
+        (self.installed / "scripts" / "sandbox").chmod(0o644)
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]"), verdict)
+        self.assertIn("mode differs from the release: scripts/sandbox", verdict[0])
+
+    def test_warns_when_the_release_commit_is_not_in_the_hook_repo(self):
+        self.entries["playbook@mk"][0]["gitCommitSha"] = "f" * 40
+        self._save_registry()
+        verdict = self._verdict(self._report())
+        self.assertTrue(verdict[0].startswith("[WARN]") and "unverified" in verdict[0], verdict)
+
+    def test_warns_when_the_hook_copy_is_not_a_git_checkout(self):
+        plain = self.root / "plain-market"
+        shutil.copytree(self.market, plain, ignore=shutil.ignore_patterns(".git"))
+        self._write(self.plugins / "known_marketplaces.json", json.dumps({
+            "mk": {"source": {"source": "directory", "path": str(plain)},
+                   "installLocation": str(plain)}}))
+        out = self._report()
+        self.assertIn(f"] plugin: hook copy — {plain / 'plugins' / 'playbook'} v{self.VERSION}", out)
+        verdict = self._verdict(out)
+        self.assertTrue(verdict[0].startswith("[WARN]") and "not a git checkout" in verdict[0], verdict)
+
+    def test_warns_when_two_marketplace_keys_share_the_install(self):
+        self.entries["playbook@mk2"] = [dict(self.entries["playbook@mk"][0])]
+        self._save_registry()
+        out = self._report()
+        verdict = self._verdict(out)
+        self.assertTrue(verdict[0].startswith("[WARN]") and "ambiguous" in verdict[0], out)
+
+    def test_degraded_registry_inputs_warn_without_a_traceback(self):
+        (self.plugins / "installed_plugins.json").write_text("{not json", encoding="utf-8")
+        (self.plugins / "known_marketplaces.json").unlink()
+        out = self._report()
+        for label in ("launcher", "installed", "doctor"):
+            self.assertIn(f"] plugin: {label} copy — ", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[WARN]"), out)
+
+    def test_home_wins_over_a_decoy_userprofile(self):
+        from unittest import mock
+        decoy = self.root / "decoy"
+        (decoy / ".claude" / "plugins").mkdir(parents=True)
+        (decoy / ".claude" / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {}}), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(decoy)}):
+            lines = plugin_copies.report(self.project, doctor_root=self.hook)
+        out = "\n".join(f"[{t}] {x}" for t, x in lines)
+        self.assertIn(f"] plugin: installed copy — {self.installed} v{self.VERSION}", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[PASS]"), out)
+
+    def test_parses_a_registry_in_the_captured_real_shape(self):
+        # field set captured from a real Claude Code install on 2026-09-24:
+        # top {plugins, version=2}; entry {gitCommitSha, installPath, installedAt,
+        # lastUpdated, scope, version}; marketplace {installLocation, lastUpdated,
+        # source{path, source}}
+        self._write(self.plugins / "installed_plugins.json", json.dumps({"version": 2, "plugins": {
+            "playbook@mk": [{"scope": "user", "installPath": str(self.installed), "version": self.VERSION,
+                             "installedAt": "2026-08-21T14:47:25.000Z", "lastUpdated": "2026-09-23T12:00:00.000Z",
+                             "gitCommitSha": self.sha}]}}))
+        self._write(self.plugins / "known_marketplaces.json", json.dumps({"mk": {
+            "source": {"source": "directory", "path": str(self.market)},
+            "installLocation": str(self.market), "lastUpdated": "2026-08-21T14:47:24.988Z"}}))
+        out = self._report()
+        self.assertIn(f"] plugin: hook copy — {self.hook} v{self.VERSION} (HEAD {self.sha[:7]})", out)
+        self.assertTrue(self._verdict(out)[0].startswith("[PASS]"), out)
+
+
 if __name__ == "__main__":
     unittest.main()

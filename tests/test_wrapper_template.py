@@ -293,5 +293,54 @@ class TestGeneratedWrapperIsComplete(unittest.TestCase):
             self.assertGreater(len(content.splitlines()), 50)
 
 
+class TestResolverSplice(unittest.TestCase):
+    """PLAN S3 (task 086): the resolver moved out of the inline heredoc into
+    `scripts/wrapper_resolver.py`, which `create_wrapper` splices back in (so
+    `tasks doctor` can run the very code every wrapper embeds). The generated
+    wrapper must not change, and a missing resolver file must never produce a
+    broken wrapper nor fail the `set -e` hooks that call `create_wrapper`."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _create(self, lib: Path, project: Path, name="tasks"):
+        return subprocess.run([bash_or_skip(), "-c", 'source "$1"; create_wrapper "$2" "$3"', "_",
+                               str(lib), str(project), name],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    def test_the_shipped_scripts_hold_the_resolver_and_the_placeholder(self):
+        resolver = GATE_ECHO_LIB.parent / "wrapper_resolver.py"
+        self.assertTrue(resolver.is_file(), "wrapper_resolver.py must ship beside gate-echo-lib.sh")
+        self.assertIn("\n@@PLAYBOOK_WRAPPER_RESOLVER@@\n", GATE_ECHO_LIB.read_text(encoding="utf-8"))
+        self.assertIn("import glob, json, os, sys", resolver.read_text(encoding="utf-8"))
+
+    def test_the_resolver_file_is_embedded_verbatim(self):
+        project = self.tmp / "p"
+        self.assertEqual(self._create(GATE_ECHO_LIB, project).returncode, 0)
+        wrapper = (project / ".claude" / "bin" / "tasks").read_text(encoding="utf-8")
+        body = (GATE_ECHO_LIB.parent / "wrapper_resolver.py").read_text(encoding="utf-8")
+        self.assertIn("<<'PYRESOLVE'\n" + body.replace("WRAPPER_NAME", "tasks") + "PYRESOLVE\n", wrapper)
+        self.assertNotIn("@@PLAYBOOK_WRAPPER_RESOLVER@@", wrapper)
+
+    def test_missing_resolver_writes_nothing_and_does_not_fail(self):
+        lib_dir = self.tmp / "lib"
+        lib_dir.mkdir()
+        lib = lib_dir / "gate-echo-lib.sh"
+        shutil.copy2(GATE_ECHO_LIB, lib)                      # no wrapper_resolver.py beside it
+        fresh = self.tmp / "fresh"
+        r = self._create(lib, fresh)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("wrapper_resolver.py is missing", r.stderr)
+        self.assertFalse((fresh / ".claude" / "bin" / "tasks").exists(), "a broken wrapper was written")
+        kept = self.tmp / "kept"
+        (kept / ".claude" / "bin").mkdir(parents=True)
+        old = "#!/bin/bash\n# playbook-managed — an older wrapper\nexec true\n"
+        (kept / ".claude" / "bin" / "tasks").write_text(old, encoding="utf-8")
+        self.assertEqual(self._create(lib, kept).returncode, 0)
+        self.assertEqual((kept / ".claude" / "bin" / "tasks").read_text(encoding="utf-8"), old,
+                         "an existing wrapper was overwritten without a resolver")
+
+
 if __name__ == "__main__":
     unittest.main()

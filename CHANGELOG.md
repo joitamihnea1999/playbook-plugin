@@ -4,8 +4,22 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
-Task 085 (branch `fix/1.5.46-batch`): the six defects parked by the 1.5.45 release panel (task 083)
-plus the tool defect found at its close. Each fix was written against a test that failed first.
+Branch `fix/1.5.46-batch`. Task 085: the six defects parked by the 1.5.45 release panel (task 083)
+plus the tool defect found at its close. Task 086: PLAN S3. Each fix was written against a test that
+failed first.
+
+### Added
+
+- **`tasks doctor` names the plugin copies that run** (task 086, PLAN S3). The old version check compared a copy
+  with itself and said PASS from every copy, while on a directory-marketplace machine the hooks run the
+  marketplace checkout and `.claude/bin/tasks` runs the installed cache. The doctor now prints one line each
+  for the hook copy, the launcher copy, the installed entry and its own copy (path, version, commit), and a
+  `copies agree` verdict: PASS only when they are one release (clean checkout at the installed commit, the same
+  version everywhere, installed files identical to that commit's, the launcher on the installed path);
+  otherwise WARN naming each difference. It never runs the project's wrapper. The launcher resolver moved into
+  `scripts/wrapper_resolver.py`, which `create_wrapper` embeds — generated wrappers are byte-identical to
+  before; if the file is missing, no wrapper is written and the hook does not fail. New ledger row
+  `PB-PLUGIN-COPY-BINDING`; `PB-VERSION-PARITY` gets its negative control.
 
 ### Fixed
 

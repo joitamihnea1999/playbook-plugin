@@ -7247,9 +7247,12 @@
           "path": "tests/test_version_parity.py",
           "reference": "TestVersionParity.test_manifest_and_cli_agree",
           "boundary": "unit",
-          "negative_control": null,
+          "negative_control": {
+            "path": "tests/test_version_parity.py",
+            "reference": "TestVersionParityNegativeControl.test_a_drifted_core_version_fails_the_parity_test"
+          },
           "limitations": [
-            "Direct equality across four surfaces; no adverse mutant control exists for this check."
+            "Direct equality across the manifest and core.VERSION; the negative control (task 086) runs this same test against a drifted core.py copy and requires it to fail."
           ]
         },
         {
@@ -12035,6 +12038,207 @@
       "violation_reproduction": null,
       "follow_up_phases": [],
       "required_live_evidence": []
+    },
+    {
+      "id": "PB-PLUGIN-COPY-BINDING",
+      "category": "doctor",
+      "statement": "`tasks doctor` names the plugin copies that actually run, each with the path and version read from its own source — the hook copy (a directory marketplace's checkout, else the installed entry's installPath; with its git HEAD and cleanliness), the launcher copy (what the project's managed `.claude/bin/tasks` would exec, computed by running this plugin copy's own `scripts/wrapper_resolver.py` — the text every generated wrapper embeds — never by executing the wrapper; a custom or stale wrapper is reported as target unknown), the installed entry that resolver selects (version + gitCommitSha), and the doctor's own copy — and prints `copies agree` PASS only when the hook copy is clean at the installed sha, the manifests equal the entry's version, the installed files equal the release commit's tree both ways blob by blob (execute bit on POSIX; `__pycache__`/`*.pyc` ignored), the launcher path is the installPath, and the doctor is one of the three; otherwise WARN naming each difference, including any input it cannot read.",
+      "owner": [
+        {
+          "path": "plugins/playbook/tasks/plugin_copies.py",
+          "reference": "symbol:report"
+        },
+        {
+          "path": "plugins/playbook/tasks/plugin_copies.py",
+          "reference": "symbol:content_differences"
+        },
+        {
+          "path": "plugins/playbook/tasks/diagnostics.py",
+          "reference": "symbol:cmd_doctor"
+        }
+      ],
+      "failure_consequence": "Medium",
+      "claim_kind": "mechanical",
+      "proofs": [
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_names_hook_launcher_and_installed_copies_with_paths_and_versions",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_stale_managed_launcher_target_is_unknown"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_warns_when_the_hook_copy_differs_from_the_installed_commit"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_warns_when_the_hook_copy_differs_from_the_installed_commit",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_warns_when_the_hook_copy_is_dirty",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_custom_launcher_is_read_never_executed",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": [
+            "A sentinel-writing custom wrapper is read and reported; the sentinel must not appear."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_warns_when_installed_content_differs_from_the_release",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": [
+            "Same size and mtime; only the blob differs."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_warns_when_an_installed_file_is_missing",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_runtime_pycache_does_not_break_agreement",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_warns_when_installed_content_differs_from_the_release"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_warns_when_manifest_and_entry_versions_differ",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_warns_when_doctor_runs_from_a_fourth_copy",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_selection_matches_the_embedded_resolver",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": [
+            "Runs the REAL generated wrapper over shuffled registry entries and compares its exec target with the report."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopies.test_paths_with_spaces",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_warns_when_an_installed_file_is_missing"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopiesDegraded.test_warns_when_the_release_commit_is_not_in_the_hook_repo",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_doctor_binding.py",
+          "reference": "PluginCopiesDegraded.test_degraded_registry_inputs_warn_without_a_traceback",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_doctor_binding.py",
+            "reference": "PluginCopies.test_passes_only_when_all_three_copies_agree"
+          },
+          "limitations": []
+        }
+      ],
+      "applicable_platforms": [
+        "linux",
+        "macos",
+        "windows-git-bash"
+      ],
+      "applicable_providers": [
+        "claude"
+      ],
+      "status": "verified_by_current_executable_evidence",
+      "missing_evidence_or_limitation": [
+        "Hermetic tests (fake HOME, temp git repos, the real create_wrapper); the real-machine check is PLAN S3's Done block, run on one Linux machine. The registry field set is pinned by a test built from a sample captured on 2026-09-24 (PluginCopiesDegraded.test_parses_a_registry_in_the_captured_real_shape) — a Claude Code format change fails that test, not silently.",
+        "The execute-bit comparison runs on POSIX only (Windows has no POSIX execute bit); its test is skipped there.",
+        "The launcher target is what the doctor copy's resolver answers; a Windows projectPath spelled differently from Git Bash's `pwd -P` is the resolver's own disclosed limitation (wrapper-multiuser fixture), shared by the doctor by construction."
+      ],
+      "follow_up_phases": [],
+      "required_live_evidence": [],
+      "semantic_protocol": null,
+      "violation_reproduction": null
     }
   ]
 }

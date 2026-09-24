@@ -449,10 +449,30 @@ def cmd_doctor(cmd_args):
             installed_version = "unreadable"
     if installed_version:
         version_ok = installed_version == code_version
-        check("plugin: version matches code", version_ok,
-              f"installed={installed_version}, code={code_version}" + ("" if version_ok else " — run /upgrade"))
+        # Relabelled by PLAN S3 (task 086): this compares ONE copy's manifest with
+        # ITS OWN code — it says nothing about which copy the hooks or the
+        # launcher run; the `plugin: … copy` lines below do.
+        check("plugin: this copy's manifest matches its code", version_ok,
+              f"manifest={installed_version}, code={code_version}" + ("" if version_ok else " — run /upgrade"))
     else:
         check("plugin: installed", False, "no plugin found")
+
+    # 5b. Which plugin copies run (PLAN S3, task 086): the hook copy, the launcher
+    # copy, the installed entry and this doctor's copy — path + version each, then
+    # `copies agree` (PASS/WARN — a disagreement is a state to see, not a failure).
+    # Reads only; never executes the project's `.claude/bin/tasks`.
+    try:
+        from tasks.plugin_copies import report as _copies_report
+        for _tag, _text in _copies_report(project_path):
+            _name, _, _detail = _text.partition(" — ")
+            if _tag == "PASS":
+                check(_name, True, _detail)
+            elif _tag == "WARN":
+                warn(_name, _detail)
+            else:
+                print(f"  [{_tag}] {_text}")
+    except Exception as _e:  # noqa: BLE001 — a doctor section must not abort the doctor
+        warn("plugin: copies", f"could not be determined ({type(_e).__name__}: {_e})")
 
     # 6. Python version
     import platform
