@@ -5,7 +5,7 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 ## [Unreleased]
 
 Branch `fix/1.5.46-batch`. Task 085: the six defects parked by the 1.5.45 release panel (task 083)
-plus the tool defect found at its close. Task 086: PLAN S3. Task 087: PLAN S4. Task 088: PLAN S5. Each fix
+plus the tool defect found at its close. Task 086: PLAN S3. Task 087: PLAN S4. Task 088: PLAN S5. Task 093: PLAN S7b. Each fix
 was written against a test that failed first.
 
 ### Added
@@ -28,6 +28,15 @@ was written against a test that failed first.
 
 ### Fixed
 
+- **Re-running init no longer deletes a project's own `#` part from CLAUDE.md** (task 093, PLAN S7b). The
+  merge split CLAUDE.md only at `## ` headings, so a level-1 `#` heading below a template section — and the
+  `---` above it and everything up to the next `## ` — counted as that section's body, and refreshing the
+  section deleted it while init printed "project content preserved". It happened to the plugin's own dev
+  workspace (`# Project: …` and its intro paragraph, 2026-09-24). A `#` heading there now starts a part the
+  merge keeps byte for byte, with the `---` above it. Headings inside a closed fenced code block are now text,
+  which also stops a `## CLI` line in a custom section's code block from being replaced by the template's
+  `## CLI`; a fence that is never closed fences nothing. Setext and indented headings are still not
+  recognised. Ledger `PB-INIT-IDEMPOTENT` gains two proofs and the correction note.
 - **The chat log no longer records harness events as the user's words** (task 088, PLAN S5a). A prompt that
   begins with `<task-notification>`, `<local-command-caveat>`, `<command-name>` or `[SYSTEM NOTIFICATION` is
   not logged; on 2026-09-23, 498 of 833 entries in this repo's chat log were background-task notifications,

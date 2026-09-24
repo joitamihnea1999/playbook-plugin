@@ -93,6 +93,78 @@ class MergeClaudeMd(unittest.TestCase):
         self.assertIn("## Ops\n\nrestart with systemctl", out)
 
 
+WORKSPACE_FIXTURE = _HERE / "fixtures" / "playbook-plugin-dev_be73740_CLAUDE.md"
+
+
+def _project_part(text: str) -> str:
+    """Everything from the thematic break above `# Project:` to the end."""
+    return text[text.index("---\n\n# Project:"):]
+
+
+class ProjectPartAfterTemplateSections(unittest.TestCase):
+    """Task 093 (PLAN S7b): a level-1 `#` heading below a template section opens the
+    project's own part — in the plugin's own dev workspace: `---`, `# Project:
+    playbook-plugin-dev`, its paragraph, then custom `##` sections. `split_sections`
+    split only on `## `, so that part rode inside the `## Don't` body and a template
+    refresh of `## Don't` deleted it, while init printed "project content preserved".
+    The fixture is that workspace's CLAUDE.md as committed (outer be73740)."""
+
+    def setUp(self):
+        self.fixture = WORKSPACE_FIXTURE.read_text(encoding="utf-8")
+
+    def test_workspace_project_part_survives_merge(self):
+        out = cmm.merge_claude_md(TEMPLATE, self.fixture, "playbook-plugin-dev")
+        # the whole part, byte for byte: the break, the `#` heading, its paragraph and
+        # every section below it
+        self.assertIn(_project_part(self.fixture), out)
+        self.assertLess(out.index("## Don't"), out.index("# Project: playbook-plugin-dev"))
+
+    def test_workspace_merge_is_idempotent(self):
+        once = cmm.merge_claude_md(TEMPLATE, self.fixture, "playbook-plugin-dev")
+        self.assertEqual(cmm.merge_claude_md(TEMPLATE, once, "playbook-plugin-dev"), once)
+
+    def test_level1_part_without_a_break_survives_and_the_section_above_still_refreshes(self):
+        stale = "# P\n\n## CLI\n\nOLD CLI WORDING\n# Second part\nkeep this line\n"
+        out = cmm.merge_claude_md(TEMPLATE, stale, "P")
+        self.assertIn("# Second part\nkeep this line\n", out)
+        self.assertNotIn("OLD CLI WORDING", out)
+
+    def test_crlf_project_part_survives(self):
+        crlf = ("# P\r\n\r\n## Don't\r\n\r\n- old\r\n\r\n---\r\n\r\n# Mine\r\n\r\n"
+                "keep crlf\r\n\r\n## Mine too\r\n\r\nstill here\r\n")
+        out = cmm.merge_claude_md(TEMPLATE, crlf, "P")
+        self.assertIn("---\r\n\r\n# Mine\r\n\r\nkeep crlf\r\n", out)
+        self.assertIn("## Mine too\r\n\r\nstill here\r\n", out)
+
+    def test_fenced_level2_line_in_a_custom_section_is_text(self):
+        # a `## CLI` line inside a fence used to start a "section" named like the
+        # template's, whose fenced text the template then replaced
+        custom = "# P\n\n## My Rules\n\n```md\n## CLI\nfake cli text\n```\n"
+        out = cmm.merge_claude_md(TEMPLATE, custom, "P")
+        self.assertIn("## My Rules\n\n```md\n## CLI\nfake cli text\n```\n", out)
+
+    def test_fenced_hash_comment_in_a_template_section_does_not_split_it(self):
+        # control for the fix: a `# comment` in a bash fence is not a level-1 heading,
+        # so the stale template section is still refreshed WHOLE (no fence half left)
+        stale = "# P\n\n## Don't\n\n```bash\n# stale comment\necho x\n```\n"
+        out = cmm.merge_claude_md(TEMPLATE, stale, "P")
+        self.assertNotIn("stale comment", out)
+        self.assertEqual(out.count("```") % 2, 0, "unbalanced fence left behind")
+        self.assertEqual(cmm.merge_claude_md(TEMPLATE, out, "P"), out)
+
+    def test_unclosed_fence_fences_nothing(self):
+        # a fence that never closes must not turn the headings below it into text:
+        # the refreshed template section would then swallow the project's sections
+        x = "# P\n\n## CLI\n\n```bash\nnever closed\n\n## My Rules\n\nkeep my rules\n"
+        out = cmm.merge_claude_md(TEMPLATE, x, "P")
+        self.assertIn("## My Rules\n\nkeep my rules\n", out)
+
+    def test_hash_without_space_is_not_a_heading(self):
+        stale = "# P\n\n## CLI\n\nold\n#nospace belongs to CLI\n"
+        out = cmm.merge_claude_md(TEMPLATE, stale, "P")
+        self.assertNotIn("#nospace", out)
+
+
 class MergeGitignore(unittest.TestCase):
     def test_created_when_absent(self):
         out = cmm.merge_gitignore(None)
@@ -196,6 +268,20 @@ class InitWritesBothFiles(unittest.TestCase):
         self._run_init(proj)
         self.assertEqual((proj / "CLAUDE.md").read_text(encoding="utf-8"), before)
         self.assertEqual((proj / ".gitignore").read_text(encoding="utf-8"), gi)
+
+    def test_project_part_survives_reinit(self):
+        # task 093: the real init on the dev workspace's CLAUDE.md keeps its `#` part,
+        # which is what init's "project content preserved" line promises
+        proj = self._project()
+        fixture = WORKSPACE_FIXTURE.read_text(encoding="utf-8")
+        (proj / "CLAUDE.md").write_text(fixture, encoding="utf-8")
+        self._run_init(proj)
+        text = (proj / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn(_project_part(fixture), text)
+        self.assertIn("## Correctness Contract", text)
+        before = text
+        self._run_init(proj)
+        self.assertEqual((proj / "CLAUDE.md").read_text(encoding="utf-8"), before)
 
 
 if __name__ == "__main__":

@@ -19,9 +19,12 @@ the template sections):
                         template sections the file lacks are appended at the
                         end in template order; EVERYTHING else — preamble
                         above the first template heading, the project's own
-                        `#` title, custom sections — is preserved byte-for-
+                        `#` title, custom sections, and a level-1 `#` part
+                        further down (task 093) — is preserved byte-for-
                         byte. Project-specific content belongs in its own
                         sections, exactly as the template header instructs.
+                        Headings are ATX lines outside fenced code blocks;
+                        Setext and indented headings are not recognised.
   * second run        → byte-identical (idempotent).
 
 .gitignore contract: append (create if absent) one marker-guarded block of
@@ -96,23 +99,80 @@ def template_body(template_text: str, project_name: str) -> str:
     return body.replace(PLACEHOLDER_TITLE, f"# {project_name}", 1)
 
 
-def split_sections(text: str) -> "tuple[str, list[tuple[str, str]]]":
+# A fence opener/closer: up to three spaces, then three or more backticks or tildes.
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# A level-1 ATX heading (`# Title`, or a bare `#`); `##` and deeper are not.
+H1_RE = re.compile(r"^#(?:[ \t]|\r?\n|$)")
+# A thematic break (`---`, `***`, `___`, spaces allowed between the marks).
+BREAK_RE = re.compile(r"^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*\r?\n?$")
+
+
+def _fenced_lines(lines: "list[str]") -> "set[int]":
+    """Indices of the lines inside (and including) CLOSED fenced code blocks.
+
+    A closer is the opener's mark, at least as long, with nothing after it. An
+    opener that is never closed fences nothing: CommonMark would run it to the end
+    of the file, which here would turn every later heading into text and let a
+    refreshed template section swallow the project's sections below it — the very
+    loss this module exists to prevent. Unclosed, it is ordinary text (the
+    behaviour before task 093)."""
+    out: "set[int]" = set()
+    i = 0
+    while i < len(lines):
+        m = FENCE_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        mark = m.group(1)
+        for j in range(i + 1, len(lines)):
+            c = FENCE_RE.match(lines[j])
+            if c and c.group(1)[0] == mark[0] and len(c.group(1)) >= len(mark) \
+                    and not lines[j][c.end():].strip():
+                out.update(range(i, j + 1))
+                i = j + 1
+                break
+        else:
+            i += 1                     # never closed: not a fence
+    return out
+
+
+def split_sections(text: str) -> "tuple[str, list[tuple[str | None, str]]]":
     """(preamble, [(heading_line, body)]) split on level-2 headings.
 
-    Level-2 only — `###` subsections travel inside their parent's body, and
-    the `#` title (plus anything the project keeps above its first `##`)
-    stays in the preamble untouched.
+    `###` subsections travel inside their parent's body, and the `#` title (plus
+    anything the project keeps above its first `##`) stays in the preamble
+    untouched. A LEVEL-1 heading below the first `##` opens a new top-level part
+    that belongs to the project (task 093): it ends the section above it and
+    becomes a chunk with heading None — never a template key — whose text starts
+    with the thematic break (`---`) right above the heading, if any, so
+    refreshing the template section above cannot swallow it. Lines inside a
+    closed fenced code block are text, not headings: a `# comment` in a bash
+    fence splits nothing, and neither does a `## ` line (`_fenced_lines`).
     """
     lines = text.splitlines(keepends=True)
+    fenced = _fenced_lines(lines)
     preamble: list[str] = []
-    sections: "list[tuple[str, str]]" = []
-    current: "tuple[str, list[str]] | None" = None
-    for line in lines:
-        if line.startswith("## "):
+    sections: "list[tuple[str | None, str]]" = []
+    current: "tuple[str | None, list[str]] | None" = None
+    for i, line in enumerate(lines):
+        if i in fenced:
+            pass
+        elif line.startswith("## "):
             if current is not None:
                 sections.append((current[0], "".join(current[1])))
             current = (line.rstrip("\n"), [])
-        elif current is not None:
+            continue
+        elif current is not None and H1_RE.match(line):
+            body = current[1]
+            carried: list[str] = []
+            while body and (not body[-1].strip() or BREAK_RE.match(body[-1])):
+                carried.insert(0, body.pop())
+            while carried and not carried[0].strip():
+                carried.pop(0)         # the joiner puts back exactly one blank line
+            sections.append((current[0], "".join(body)))
+            current = (None, carried + [line])
+            continue
+        if current is not None:
             current[1].append(line)
         else:
             preamble.append(line)
@@ -135,6 +195,9 @@ def merge_claude_md(template_text: str, existing: "str | None",
     out: list[str] = [preamble]
     seen: set[str] = set()
     for heading, body in existing_sections:
+        if heading is None:            # a project-owned `#` part, kept verbatim
+            out.append(body)
+            continue
         key = heading.strip().lower()
         if key in tmpl_map:
             th, tb = tmpl_map[key]

@@ -5608,6 +5608,24 @@
         {
           "type": "executable integration",
           "path": "tests/test_init_claude_md.py",
+          "reference": "ProjectPartAfterTemplateSections.test_workspace_project_part_survives_merge",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": [
+            "Headings are ATX lines outside CLOSED fenced code blocks; Setext headings, headings indented by 1-3 spaces and a heading inside an HTML block are not recognised (task 093)."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_init_claude_md.py",
+          "reference": "InitWritesBothFiles.test_project_part_survives_reinit",
+          "boundary": "subprocess",
+          "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_init_claude_md.py",
           "reference": "MergeClaudeMd.test_idempotent",
           "boundary": "subprocess",
           "negative_control": null,
@@ -5642,7 +5660,8 @@
       ],
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
-        "Owner decision 2026-08-21: antigravity and pi are experimental everywhere (adapter code retained, no support claim, no live evidence) and are removed from applicable_providers here; supported providers are Claude (agent+judge) and grok/codex (judge-seat, live-verified 2026-08-22)."
+        "Owner decision 2026-08-21: antigravity and pi are experimental everywhere (adapter code retained, no support claim, no live evidence) and are removed from applicable_providers here; supported providers are Claude (agent+judge) and grok/codex (judge-seat, live-verified 2026-08-22).",
+        "Corrected 2026-09-25 (task 093, PLAN S7b): until then this row read verified while the claim was false for a level-1 `#` part below a template section — the plugin's own dev workspace lost `---`, `# Project: playbook-plugin-dev` and its paragraph on the 2026-09-24 re-init, and init printed \"project content preserved\". A `## ` line inside a fenced block of a custom section could also be replaced by template text. Both reproduced red on the pre-fix code by the new tests; the fixture is that workspace's CLAUDE.md (tests/fixtures/playbook-plugin-dev_be73740_CLAUDE.md)."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
