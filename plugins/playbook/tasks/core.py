@@ -3258,15 +3258,71 @@ PARKED_PLACEHOLDER = (
 )
 
 
-# ONE grammar for a numeric promotion target (impl panel r1): the bracketed
-# `[promoted → NNN]` and the legacy `→ task NNN` / `-> task NNN`.
-_PROMOTED_TO_TASK = re.compile(r"\[promoted\s*(?:→|->)\s*(\d+)\]|(?:→|->)\s*task\s+(\d+)", re.IGNORECASE)
-_INLINE_CODE = re.compile(r"`[^`]*`")
+# ONE marker grammar (impl panel rounds 1-2). A promotion is recognised only in a
+# valid shape — anything else (`[promoted typo]`, `[promoted → abc]`) leaves the item
+# OPEN: a malformed marker must not silently resolve debt.
+#   [promoted → NNN]  / [promoted → NNN — reason]      numeric task target
+#   [promoted → PLAN S7] / [promoted → PLAN.md S6 D4 — …] a named plan step
+#   … → task NNN  /  -> task NNN                       the legacy prose form
+_PROMOTED_TO_TASK = re.compile(r"\[promoted\s*(?:→|->)\s*(\d+)\b[^\]]*\]|(?:→|->)\s*task\s+(\d+)\b", re.IGNORECASE)
+_PROMOTED_TO_PLAN = re.compile(r"\[promoted\s*(?:→|->)\s*PLAN(?:\.md)?\s+S\d+\b[^\]]*\]", re.IGNORECASE)
+_DEFERRAL_DATE = re.compile(r"\[deferred:[^\]]*?\b(20\d{2}-\d{2}-\d{2})\b[^\]]*\]", re.IGNORECASE)
+
+
+def _strip_code_spans(text: str) -> str:
+    """Remove Markdown inline code spans the CommonMark way: a run of N backticks
+    opens a span that closes at the next run of EXACTLY N backticks; a backslash-
+    escaped backtick outside a span is literal; an unmatched run stays literal.
+    A marker quoted inside a span is prose, not a disposition (impl panel r1-r2)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n and text[i + 1] == "`":
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if c != "`":
+            out.append(c)
+            i += 1
+            continue
+        j = i
+        while j < n and text[j] == "`":
+            j += 1
+        run = j - i
+        k = j
+        close = -1
+        while k < n:
+            if text[k] == "`":
+                m = k
+                while m < n and text[m] == "`":
+                    m += 1
+                if m - k == run:
+                    close = k
+                    break
+                k = m
+            else:
+                k += 1
+        if close < 0:
+            out.append(text[i:j])            # unmatched run: literal backticks
+            i = j
+        else:
+            i = close + run                   # drop the whole span
+    return "".join(out)
 
 
 def _promotion_targets(item: str) -> "list[int]":
-    return [int(a or b) for a, b in _PROMOTED_TO_TASK.findall(_INLINE_CODE.sub("", item))]
-_DATED_DEFERRAL = re.compile(r"\[deferred:[^\]]*\b20\d{2}-\d{2}-\d{2}\b[^\]]*\]", re.IGNORECASE)
+    return [int(a or b) for a, b in _PROMOTED_TO_TASK.findall(_strip_code_spans(item))]
+
+
+def _valid_deferral(live: str) -> bool:
+    import datetime as _dt
+    for d in _DEFERRAL_DATE.findall(live):
+        try:
+            _dt.date.fromisoformat(d)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _parked_item_status(item: str, existing: "set[int] | None" = None) -> str:
@@ -3282,14 +3338,15 @@ def _parked_item_status(item: str, existing: "set[int] | None" = None) -> str:
     stripped = item.strip()
     # a marker QUOTED in inline code is prose, not a disposition (impl panel r1:
     # a T079 finding that quoted `[promoted → 06N]` read as resolved)
-    live = _INLINE_CODE.sub("", stripped)
+    live = _strip_code_spans(stripped)
     low = live.lower()
     if stripped.startswith("~~") or "[dismissed" in low:
         return "dismissed"
-    if _DATED_DEFERRAL.search(live):
+    if _valid_deferral(live):                 # a real calendar date (impl panel r2)
         return "deferred"
-    if "[promoted" in low or "→ task" in low or "-> task" in low:
-        if existing is not None and any(n not in existing for n in _promotion_targets(stripped)):
+    targets = _promotion_targets(stripped)
+    if targets or _PROMOTED_TO_PLAN.search(live):
+        if existing is not None and any(n not in existing for n in targets):
             return "dangling"
         return "promoted"
     return "open"

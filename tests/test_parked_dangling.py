@@ -91,6 +91,43 @@ class OneGrammarAndQuotations(_Fixture):
         self.assertEqual(open_parked_items(text), [])                # no project context: unchanged
 
 
+class StrictGrammar(_Fixture):
+    """Impl panel round 2 (sol-high, sol-medium): only a valid marker resolves an item."""
+
+    def test_malformed_promotions_stay_open(self):
+        for bad in ("x [promoted typo]", "x [promoted → abc]", "x [promoted later]", "x [promoted → PLAN]"):
+            with self.subTest(item=bad):
+                d = self.tasks / "001-t"
+                if d.exists():
+                    for f in d.iterdir():
+                        f.unlink()
+                    d.rmdir()
+                self._task(1, [bad])
+                self.assertEqual(set(self._items().values()), {"open"})
+
+    def test_valid_shapes_with_a_trailing_reason_resolve(self):
+        self._task(1, ["a [promoted → 002 — fixed by the batch]", "b [promoted → PLAN.md S7]",
+                       "c [promoted → PLAN S6 D4 — the owner decides]"])
+        self._task(2, [])
+        self.assertEqual(self._items(), {})
+
+    def test_a_trailing_reason_does_not_hide_a_missing_target(self):
+        self._task(1, ["a [promoted → 062 — fixed by the batch]"])
+        self.assertEqual(set(self._items().values()), {"dangling"})
+
+    def test_an_impossible_date_is_not_a_deferral(self):
+        self._task(1, ["x [deferred: owner decision 2026-99-99]"])
+        self.assertEqual(set(self._items().values()), {"open"})
+
+    def test_code_spans_follow_commonmark(self):
+        # a double-backtick span hides the marker; an escaped backtick opens nothing
+        self._task(1, ["quoted ``[promoted → PLAN S7]`` only",
+                       r"live \`x [promoted → 062]"])
+        items = self._items()
+        self.assertEqual(items.get("quoted ``[promoted → PLAN S7]`` only"), "open")
+        self.assertEqual(items.get(r"live \`x [promoted → 062]"), "dangling")
+
+
 class DatedDeferral(_Fixture):
     def test_a_dated_owner_deferral_is_not_open(self):
         self._task(1, ["bench isolation [deferred: owner decision 2026-09-09 — until the Gemini seat exam]"])
