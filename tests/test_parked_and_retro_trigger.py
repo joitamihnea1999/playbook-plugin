@@ -104,6 +104,9 @@ class ScanParked(unittest.TestCase):
     def test_open_only_filters_resolved(self):
         p = self._proj()
         self._write(p, 3, "t", ["open one", "closed [promoted → 4]"])
+        # the promotion's target must EXIST to count as resolved (PLAN S4, task 087:
+        # a promotion to a missing task dir is `dangling` and stays open)
+        self._write(p, 4, "u", [])
         self.assertEqual([g["item"] for g in scan_parked(p, open_only=True)], ["open one"])
         self.assertEqual(len(scan_parked(p, open_only=False)), 2)
 

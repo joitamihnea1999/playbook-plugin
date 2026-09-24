@@ -3258,17 +3258,37 @@ PARKED_PLACEHOLDER = (
 )
 
 
-def _parked_item_status(item: str) -> str:
-    """Classify a parked bullet as open / promoted / dismissed by its resolution
-    marker. Convention: `[promoted → NNN]` (or `→ task NNN`) = promoted;
-    `[dismissed: reason]` or a `~~struck~~` line = dismissed; otherwise open."""
+_PROMOTED_TO_TASK = re.compile(r"\[promoted\s*(?:→|->)\s*(\d+)\]", re.IGNORECASE)
+_DATED_DEFERRAL = re.compile(r"\[deferred:[^\]]*\b20\d{2}-\d{2}-\d{2}\b[^\]]*\]", re.IGNORECASE)
+
+
+def _parked_item_status(item: str, existing: "set[int] | None" = None) -> str:
+    """Classify a parked bullet by its resolution marker:
+    `[dismissed: reason]` or a `~~struck~~` line = dismissed;
+    `[deferred: … YYYY-MM-DD …]` = deferred (a DATED owner decision — not open, but
+    counted by `tasks parked` so it cannot vanish; an undated deferral stays open);
+    `[promoted → NNN]` (or `→ task NNN`, or `→ PLAN S7`) = promoted — unless
+    `existing` (the project's task numbers) is given and a numeric target is not in
+    it: then `dangling`, which counts as OPEN (PLAN S4: task 071 deleted stub dirs
+    061-069 and 25 markers kept pointing at them, reading as resolved);
+    otherwise open."""
     stripped = item.strip()
     low = stripped.lower()
     if stripped.startswith("~~") or "[dismissed" in low:
         return "dismissed"
+    if _DATED_DEFERRAL.search(stripped):
+        return "deferred"
     if "[promoted" in low or "→ task" in low or "-> task" in low:
+        if existing is not None and any(int(n) not in existing
+                                        for n in _PROMOTED_TO_TASK.findall(stripped)):
+            return "dangling"
         return "promoted"
     return "open"
+
+
+def dangling_targets(item: str, existing: "set[int]") -> "list[int]":
+    """The numeric promotion targets of `item` whose task dir does not exist."""
+    return sorted({int(n) for n in _PROMOTED_TO_TASK.findall(item) if int(n) not in existing})
 
 
 def extract_parked_items(task_md_text: str) -> "list[str]":
@@ -3332,16 +3352,22 @@ def scan_parked(project_path: Path, open_only: bool = True) -> "list[dict]":
     """Every parked item across all tasks: {task, slug, item, status}. Ordered by
     task number (oldest first) — the debt that has waited longest reads first."""
     out: "list[dict]" = []
-    for num, slug, tf in _iter_task_dirs(project_path):
+    dirs = list(_iter_task_dirs(project_path))
+    existing = {num for num, _slug, _tf in dirs}
+    for num, slug, tf in dirs:
         try:
             text = tf.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         for item in extract_parked_items(text):
-            status = _parked_item_status(item)
-            if open_only and status != "open":
+            status = _parked_item_status(item, existing)
+            # a dangling promotion is still debt: it counts as open (PLAN S4)
+            if open_only and status not in ("open", "dangling"):
                 continue
-            out.append({"task": num, "slug": slug, "item": item, "status": status})
+            rec = {"task": num, "slug": slug, "item": item, "status": status}
+            if status == "dangling":
+                rec["missing"] = dangling_targets(item, existing)
+            out.append(rec)
     return out
 
 

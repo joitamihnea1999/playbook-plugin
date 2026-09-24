@@ -1322,8 +1322,19 @@ def cmd_parked(cmd_args):
             if it["task"] != cur:
                 cur = it["task"]
                 print(f"\n  T{it['task']:03d} — {it['slug'].replace('-', ' ')}")
-            tag = "" if it["status"] == "open" else f"  [{it['status']}]"
+            if it["status"] == "open":
+                tag = ""
+            elif it["status"] == "dangling":
+                missing = ", ".join(f"{n:03d}" for n in it.get("missing", []))
+                tag = f"  [dangling — task {missing} does not exist]"
+            else:
+                tag = f"  [{it['status']}]"
             print(f"    - {it['item']}{tag}")
+    if not show_all:
+        # a dated owner deferral is not open, but it must not vanish (PLAN S4)
+        deferred = [it for it in scan_parked(project_path, open_only=False) if it["status"] == "deferred"]
+        if deferred:
+            print(f"\n({len(deferred)} deferred by a dated owner decision — `tasks parked --all` lists them.)")
         print("\nResolve each: promote (`tasks new …` then mark the bullet "
               "`[promoted → NNN]`), dismiss (`[dismissed: reason]`), or leave "
               "open deliberately.")

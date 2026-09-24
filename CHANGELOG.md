@@ -20,6 +20,11 @@ failed first.
   `scripts/wrapper_resolver.py`, which `create_wrapper` embeds — generated wrappers are byte-identical to
   before; if the file is missing, no wrapper is written and the hook does not fail. New ledger row
   `PB-PLUGIN-COPY-BINDING`; `PB-VERSION-PARITY` gets its negative control.
+- **`tasks parked` sees promotions whose task no longer exists** (task 087, PLAN S4). A `[promoted → NNN]`
+  whose task directory is missing is now listed as open with a `[dangling — task NNN does not exist]` tag;
+  before, every promotion read as resolved, so 25 findings pointing at deleted stub tasks were invisible.
+  A dated `[deferred: … YYYY-MM-DD …]` records an owner decision: it is not open, but the listing ends with
+  how many there are.
 
 ### Fixed
 
