@@ -148,8 +148,18 @@ if command -v jq &> /dev/null; then
         USER_MESSAGE="$INPUT"
     fi
 else
-    # Fallback: try simple grep extraction if jq not available
-    USER_MESSAGE=$(echo "$INPUT" | grep -o '"prompt":"[^"]*"' | sed 's/"prompt":"//' | sed 's/"$//' 2>/dev/null)
+    # No jq: parse with python3 (the normalizer above already needs it). The old
+    # grep matched only compact `"prompt":"..."` JSON, so an ordinary spaced
+    # payload fell back to the raw JSON and the harness filter below saw `{`
+    # (task 088, panel r1). Bytes in and out as UTF-8: Windows would otherwise
+    # decode and encode with the console code page.
+    USER_MESSAGE=$(printf '%s' "$INPUT" | python3 -c 'import json, sys
+try:
+    v = json.loads(sys.stdin.buffer.read().decode("utf-8")).get("prompt")
+except Exception:
+    v = None
+if isinstance(v, str):
+    sys.stdout.buffer.write(v.encode("utf-8"))' 2>/dev/null || true)
     if [ -z "$USER_MESSAGE" ]; then
         USER_MESSAGE="$INPUT"
     fi
@@ -160,8 +170,9 @@ fi
 # words; on 2026-09-23, 498 of 833 entries began with <task-notification>, and
 # attribution / intent / retro read them as the user. Skipped (no consumer needs
 # them). Only the START counts: a user prompt that merely mentions one is logged.
-# The skip is about the LOG only: the counter reset every prompt performs (read
-# by the stop hook's conversational bypass) still happens.
+# The skip is about the LOG only: it performs the same counter reset a logged
+# prompt does (read by the stop hook's conversational bypass). The two older
+# exits below (empty after filtering, same-second duplicate) predate task 088.
 reset_session_counters() {
     local session_dir="$AGENT_DIR/sessions/${SESSION_ID:-$(resolve_session_id)}"
     mkdir -p "$session_dir"

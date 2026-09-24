@@ -45,8 +45,9 @@ class BashLogScope(unittest.TestCase):
     def test_a_loop_logs_each_command_text_once(self):
         self._bash("for i in 1 2 3 4 5; do echo $i >/dev/null; done; echo done >/dev/null")
         cmds = [ln.split(" | AGENT | ", 1)[1] for ln in self._lines()]
-        self.assertLessEqual(len(cmds), 3, cmds)
-        self.assertIn("echo done > /dev/null", cmds)
+        # Exactly the header, the body ONCE, and the next command (panel r1 P9:
+        # `<= 3` + one assertIn also passed with the loop body dropped).
+        self.assertEqual(cmds, ["for i in 1 2 3 4 5", "echo $i > /dev/null", "echo done > /dev/null"])
 
     def test_distinct_commands_are_all_logged(self):
         self._bash("echo one >/dev/null; echo two >/dev/null; echo three >/dev/null")
@@ -82,12 +83,51 @@ class BashLogScope(unittest.TestCase):
         self._bash("", argv=[bash_or_skip(), rel])
         self.assertNotIn("by-backslash-path", "\n".join(self._lines()))
 
+    def test_a_directory_named_statusline_does_not_hide_its_scripts(self):
+        # Panel r1 P8: `*\\statusline-*` also matched a DIRECTORY component
+        # (`w\statusline-tests\run.sh`), silently dropping every command run
+        # from that tree. Only the script's own name counts.
+        rel = "w\\statusline-tests\\run.sh"
+        if os.name == "nt":
+            (self.proj / "w" / "statusline-tests").mkdir(parents=True)
+            script = self.proj / "w" / "statusline-tests" / "run.sh"
+        else:
+            script = self.proj / rel
+        script.write_bytes(b"echo in-a-statusline-dir >/dev/null\n")
+        self._bash("", argv=[bash_or_skip(), rel])
+        self.assertIn("in-a-statusline-dir", "\n".join(self._lines()))
+
+    def test_a_repeated_lifecycle_command_is_logged_each_time(self):
+        # Panel r1 P5: `tasks work 7; tasks work 8; tasks work 7` in one shell
+        # lost the second activation to the dedupe, and retro/timeline windows
+        # are built from these lines. `tasks …` commands are never deduped.
+        bindir = self.proj / "bin"
+        bindir.mkdir()
+        stub = bindir / "tasks"
+        stub.write_bytes(b"#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        path = str(bindir) + os.pathsep + os.environ.get("PATH", "")
+        self._bash("tasks work 7; tasks work 8; tasks work 7", {"PATH": path})
+        work = [ln.split(" | AGENT | ", 1)[1] for ln in self._lines() if " | AGENT | tasks work" in ln]
+        self.assertEqual(work, ["tasks work 7", "tasks work 8", "tasks work 7"])
+
+    def test_rotation_under_errexit_keeps_the_shell_alive(self):
+        # Panel r1 P3: the rotation branch (wc/mv/date) ran in no errexit test.
+        with open(self.hist, "wb") as fh:
+            fh.truncate(51 * 1024 * 1024)
+        r = self._bash("set -euo pipefail; echo rotate-errexit >/dev/null; echo still-alive")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("still-alive", r.stdout)
+        self.assertTrue([p for p in self.hist.parent.iterdir() if p.name.startswith("bash_history.archived-")])
+
     def test_a_history_past_50_mb_is_rotated(self):
         with open(self.hist, "wb") as fh:
             fh.truncate(51 * 1024 * 1024)
         self._bash("echo rotate >/dev/null")
         archived = [p.name for p in self.hist.parent.iterdir() if p.name.startswith("bash_history.archived-")]
         self.assertEqual(len(archived), 1, archived)
+        # The archive IS the old history (panel r1 P9), not an empty stand-in.
+        self.assertEqual((self.hist.parent / archived[0]).stat().st_size, 51 * 1024 * 1024)
         self.assertLess(self.hist.stat().st_size, 1024 * 1024)
         self.assertIn("echo rotate", self.hist.read_text(encoding="utf-8", errors="replace"))
 

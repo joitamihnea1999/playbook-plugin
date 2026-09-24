@@ -27,12 +27,13 @@ class _ChatLogFixture(unittest.TestCase):
         (self.project / ".agent" / "tasks").mkdir(parents=True)
         self.log = self.project / ".agent" / "chat_log.md"
 
-    def _run(self, prompt, provider=None):
+    def _run(self, prompt, provider=None, extra_env=None):
         env = dict(os.environ)
         env["PLAYBOOK_SESSION_ID"] = SID
         env.pop("BASH_ENV", None)
         if provider:
             env["PLAYBOOK_PROVIDER"] = provider
+        env.update(extra_env or {})
         return subprocess.run(
             [bash_or_skip(), str(HOOK)], cwd=self.project, env=env, text=True,
             input=json.dumps({"prompt": prompt}), capture_output=True)
@@ -84,10 +85,37 @@ class HarnessPromptsAreNotUserWords(_ChatLogFixture):
                 self._run(f"{marker} probe-harness-{n}")
                 self.assertNotIn(f"probe-harness-{n}", self._logged())
 
+    @unittest.skipIf(os.name == "nt", "builds a PATH out of symlinks")
+    def test_a_host_without_jq_still_skips_a_spaced_harness_payload(self):
+        # Panel r1 (sol-high, sol-medium): without jq the hook's fallback only
+        # recognised compact `"prompt":"..."` JSON; `json.dumps` output is
+        # spaced, so the raw JSON was logged and the harness filter saw `{`.
+        nojq = Path(self._tmp.name) / "nojq-bin"
+        nojq.mkdir()
+        seen = set()
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            if not d or not os.path.isdir(d):
+                continue
+            for name in sorted(os.listdir(d)):
+                src = os.path.join(d, name)
+                if name == "jq" or name in seen or not (os.path.isfile(src) and os.access(src, os.X_OK)):
+                    continue
+                seen.add(name)
+                os.symlink(src, nojq / name)
+        env = {"PATH": str(nojq)}
+        r = self._run("<task-notification> probe-nojq-harness", extra_env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self._run("plain probe-nojq-user \u00e9", extra_env=env)
+        text = self._logged()
+        self.assertNotIn("probe-nojq-harness", text)
+        self.assertIn("\nplain probe-nojq-user \u00e9\n", text)
+        self.assertNotIn('{"prompt"', text)
+
     def test_a_skipped_harness_prompt_still_resets_the_session_counters(self):
-        # The skip is about the LOG only. Every prompt resets the session's
-        # tools/writes counters, which the stop hook's conversational bypass
-        # reads; exiting before that reset would change stop-hook behaviour.
+        # The skip is about the LOG only: it performs the same counter reset a
+        # logged prompt does (read by the stop hook's conversational bypass).
+        # The hook's two older exits — empty after filtering, and the same-second
+        # duplicate guard — predate task 088 and are not changed by it.
         counters = self.project / ".agent" / "sessions" / SID / "counters"
         counters.parent.mkdir(parents=True)
         counters.write_bytes(b"tools=7\nwrites=3\ngate_x=1\n")

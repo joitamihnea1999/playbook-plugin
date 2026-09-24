@@ -21,11 +21,13 @@ _cpb_log_cmd() {
     # check must live in the DEBUG callback (where $0 is final), not at source
     # time.  It avoids both history noise and the expensive walk/date fork for
     # every hook-internal command. Real Bash tool shells keep $0 as bash/sh.
-    # The `*\\…` arms: under Git Bash `bash C:\…\statusline.sh` leaves a
-    # backslash path in $0, which `${0##*/}` does not strip (Windows lane, CI
-    # 36000444073). Keep this a single line with the -hook arm first: the
-    # wrapper fixture's S17 control finds and deletes it by its prefix.
-    case "${0##*/}" in *-hook|statusline|statusline.sh|statusline-*|*\\statusline|*\\statusline.sh|*\\statusline-*) return 0 ;; esac
+    # The script's own NAME only: `${0##*/}` then `##*\\` also strips a Git Bash
+    # backslash path (`bash C:\…\statusline.sh`, Windows lane CI 36000444073)
+    # without matching a directory such as `…\statusline-tests\run.sh` (panel
+    # r1). ONE line, ending in the S17 marker: the wrapper fixture's negative
+    # control deletes the marked line, and any statement left before the
+    # `$BASH_COMMAND` case would reset the stale status that control needs.
+    local _me="${0##*/}"; case "${_me##*\\}" in *-hook|statusline|statusline.sh|statusline-*) return 0 ;; esac  # PB-S17-FAST-PATH
 
     # Filter shell internals and CC infrastructure noise.
     #
@@ -49,10 +51,18 @@ _cpb_log_cmd() {
     # 195,168 × 3 rows on 2026-09-21). The text is the unexpanded source, so a
     # loop body is the same string every iteration. Bash 3.2 has no associative
     # arrays: a \x1f-delimited string, reset past 64 KiB.
+    # A `tasks …` command is never deduped (panel r1): retro and timeline build
+    # task windows from these lines, so `tasks work 7; tasks work 8; tasks work
+    # 7` must keep the second activation.
     local _key=$'\x1f'"$BASH_COMMAND"$'\x1f'
-    case "${_CPB_SEEN:-}" in
-        *"$_key"*) return 0 ;;
+    case "$BASH_COMMAND" in
+        "tasks "*|*"/tasks "*) _key="" ;;
     esac
+    if [[ -n "$_key" ]]; then
+        case "${_CPB_SEEN:-}" in
+            *"$_key"*) return 0 ;;
+        esac
+    fi
 
     # Walk up from $PWD looking for .agent/ directory
     local _dir="$PWD"
@@ -135,20 +145,26 @@ _cpb_log_cmd() {
             # the first write (the 2026-09-21 file had reached 136 MB).
             if [[ -z "${_CPB_ROTATE_CHECKED:-}" ]]; then
                 _CPB_ROTATE_CHECKED=1
-                local _sz=0
+                # `find -size +Nc` is one stat on every platform (a `wc -c`
+                # may read the whole file), so the check-to-move window stays
+                # small. Two shells crossing 50 MB at the same instant can
+                # still both rotate; the second archive then holds the few
+                # lines written in between — archived, not lost (disclosed).
+                local _big=""
                 if [[ -f "$_lane/bash_history" ]]; then
-                    _sz=$(wc -c < "$_lane/bash_history" 2>/dev/null) || _sz=0
-                    _sz="${_sz//[!0-9]/}"
+                    _big=$(find "$_lane/bash_history" -prune -size +52428800c 2>/dev/null) || _big=""
                 fi
-                if [[ "${_sz:-0}" -gt 52428800 ]]; then
+                if [[ -n "$_big" ]]; then
                     mv -f "$_lane/bash_history" \
                         "$_lane/bash_history.archived-$(date '+%Y%m%d-%H%M%S')-$$" 2>/dev/null || true
                 fi
             fi
             { echo "$(date '+%Y-%m-%d %H:%M:%S') | AGENT | $_cmd" >> "$_lane/bash_history"; } 2>/dev/null || return 0
-            _CPB_SEEN="${_CPB_SEEN:-}$_key"
-            if [[ ${#_CPB_SEEN} -gt 65536 ]]; then
-                _CPB_SEEN="$_key"
+            if [[ -n "$_key" ]]; then
+                _CPB_SEEN="${_CPB_SEEN:-}$_key"
+                if [[ ${#_CPB_SEEN} -gt 65536 ]]; then
+                    _CPB_SEEN="$_key"
+                fi
             fi
             break
         fi

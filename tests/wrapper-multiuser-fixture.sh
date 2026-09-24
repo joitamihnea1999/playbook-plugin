@@ -828,20 +828,22 @@ source /dev/null'
     # filter arms the moment a marker enters the scenario.
     # Remove the hook-process fast path too: even when it does not match, its
     # successful `case` resets the stale status that this historical mutant is
-    # meant to expose. Matched by its START, not its full text: task 088 added
-    # statusline arms to that line, the exact-text pattern stopped matching, and
-    # all four controls went vacuous. The count below proves the deletion ran.
-    sed -e '/case "${0##\*\/}" in \*-hook/d' \
+    # meant to expose. Found by its end-of-line marker, not its text: task 088
+    # changed that line twice, the exact-text pattern stopped matching, and all
+    # four controls went vacuous. The counts below prove the deletion ran.
+    sed -e '/# PB-S17-FAST-PATH$/d' \
         -e '/case "\$BASH_COMMAND" in/,/esac/ s|) return 0 ;;|) return ;;|' \
         "$BASH_LOG" > "$d/bash-log-mutant-arms.sh"
     assert_eq "$(grep -c ') return ;;' "$d/bash-log-mutant-arms.sh")" "4" \
         "S17 negative control (arms): mutant reverted exactly the 4 filter arms"
-    # -F, and the unmutated logger must count 1: a BRE spelling of this text
-    # counts 0 against both files, which would make the assertion vacuous.
-    assert_eq "$(grep -cF 'case "${0##*/}" in' "$BASH_LOG")" "1" \
-        "S17 negative control (arms): the logger has one hook fast path"
-    assert_eq "$(grep -cF 'case "${0##*/}" in' "$d/bash-log-mutant-arms.sh" || true)" "0" \
+    # The unmutated logger must count exactly 1 marked line, the mutant 0, and
+    # the mutant must hold no other `$0` check that could reset the status.
+    assert_eq "$(grep -c '# PB-S17-FAST-PATH$' "$BASH_LOG")" "1" \
+        "S17 negative control (arms): the logger has one marked hook fast path"
+    assert_eq "$(grep -c '# PB-S17-FAST-PATH$' "$d/bash-log-mutant-arms.sh" || true)" "0" \
         "S17 negative control (arms): mutant removed the hook fast path"
+    assert_eq "$(grep -v '^[[:space:]]*#' "$d/bash-log-mutant-arms.sh" | grep -cF '${0##' || true)" "0" \
+        "S17 negative control (arms): mutant keeps no other \$0 check (comments aside)"
     while IFS= read -r arm; do
         set +e
         out="$(run_victim "$d/bash-log-mutant-arms.sh" "$arm")"; rc=$?
