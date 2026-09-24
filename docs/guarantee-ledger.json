@@ -3519,7 +3519,8 @@
         "Rotation is not locked or atomic: two shells that cross 50 MB at the same instant can both rotate, and the second archive then holds the few lines written between the two moves; a process killed between the move and the activation copy leaves those activations only in the archive; the copied activation lines are not size-bounded. Lines are archived, never deleted, but retro/timeline read only bash_history. The size check is a single `find -size` stat to keep the window small.",
         "zsh and Windows/Git Bash logger behavior lack live platform evidence.",
         "Owner decision 2026-08-21: agent-mode (hook enforcement) is a supported capability on Claude ONLY, so applicable_providers is narrowed to claude here.",
-        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21)."
+        "grok and codex enforcement paths are retained in code but EXPERIMENTAL (no support claim, no live evidence); antigravity and pi are experimental everywhere (owner decision 2026-08-21).",
+        "Owner decision D4 (PLAN S6), 2026-09-24 — accepted, not fixed (S5c stays parked): the stamp is local wall-clock time with no zone offset (`date '+%Y-%m-%d %H:%M:%S'` in bash-log.sh and bash-log.zsh), and readers convert it with the zone in force when they read (tasks/retro.py `bash_history_ts_to_utc`). So in the hour repeated when daylight saving time ends two moments carry the same stamp (measured, TZ=Europe/Bucharest: 2026-10-25 00:30 UTC and 01:30 UTC both write `2026-10-25 03:30:00`, and both read back as 00:30 UTC), and after the machine's time zone changes, older lines are converted with the new zone."
       ],
       "follow_up_phases": [
         8
