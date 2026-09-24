@@ -66,6 +66,11 @@ GITIGNORE_ENTRIES = (
     ".agent/backups/",
     ".agent/bash_history",
     ".agent/*/bash_history",
+    # Task 088: bash-log.sh rotates a history past 50 MB to this name; unignored,
+    # an archive is a ~50 MB untracked file in `git status` and in the close's
+    # tree fingerprint.
+    ".agent/bash_history.archived-*",
+    ".agent/*/bash_history.archived-*",
     ".agent/chat_log.md",
     ".agent/*/chat_log.md",
     ".agent/chat_log_counter*",

@@ -111,6 +111,14 @@ class BashLogScope(unittest.TestCase):
         work = [ln.split(" | AGENT | ", 1)[1] for ln in self._lines() if " | AGENT | tasks work" in ln]
         self.assertEqual(work, ["tasks work 7", "tasks work 8", "tasks work 7"])
 
+    def test_a_loop_that_only_mentions_the_task_dir_is_still_deduped(self):
+        # Panel r3 (grok): the r2 exemption (`*tasks*`) also exempted any loop
+        # whose body names `.agent/tasks`, writing every iteration. Only
+        # activation-shaped text (`tasks … work` / `tasks … new`) is exempt.
+        self._bash("for i in 1 2 3; do echo .agent/tasks/x >/dev/null; done")
+        body = [ln for ln in self._lines() if ln.endswith("| AGENT | echo .agent/tasks/x > /dev/null")]
+        self.assertEqual(len(body), 1, self._lines())
+
     def test_a_quoted_tasks_path_is_never_deduped(self):
         # Panel r2 (sol-high, grok): the exemption matched only a bare `tasks `
         # or `/tasks `, so `"$B/tasks" work 7; … 8; … 7` lost the second 7. Any
@@ -199,6 +207,31 @@ class BashLogScope(unittest.TestCase):
         r = self._bash("set -e; [ -d /nonexistent ] || true; false || true; echo still-alive")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("still-alive", r.stdout)
+
+
+class RotationArchiveIsIgnored(unittest.TestCase):
+    """Panel r3 (opus): rotation mints `bash_history.archived-<date>-<pid>`, but the
+    ignore block init seeds listed only `bash_history`, so an archive was an
+    untracked ~50 MB file in `git status` — and in the close's tree fingerprint."""
+
+    def test_the_seeded_ignore_block_covers_both_archive_names(self):
+        import importlib.util
+        import shutil
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git not on PATH")
+        merge = Path(__file__).resolve().parent.parent / "plugins" / "playbook" / "scripts" / "claude-md-merge.py"
+        spec = importlib.util.spec_from_file_location("claude_md_merge", merge)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run([git, "init", "-q", str(repo)], check=True)
+            (repo / ".gitignore").write_bytes(("\n".join(mod.GITIGNORE_ENTRIES) + "\n").encode())
+            for rel in (".agent/bash_history.archived-20260924-101010-42",
+                        ".agent/alice/bash_history.archived-20260924-101010-42"):
+                r = subprocess.run([git, "-C", str(repo), "check-ignore", "-q", rel])
+                self.assertEqual(r.returncode, 0, f"{rel} is not ignored")
 
 
 if __name__ == "__main__":

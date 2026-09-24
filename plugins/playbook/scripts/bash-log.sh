@@ -53,13 +53,14 @@ _cpb_log_cmd() {
     # arrays: a \x1f-delimited string, reset past 64 KiB.
     # The key holds the working directory too (panel r2): the destination lane
     # follows $PWD, so one shell running the same text in two projects logs it
-    # in both. Any text containing `tasks` is never deduped (panel r1/r2):
-    # retro and timeline build task windows from those lines, and a quoted or
-    # backslash path (`"$B/tasks" work 7`) must count too — over-logging is the
-    # safe direction.
+    # in both. Activation-shaped text — `tasks` followed later by ` work` or
+    # ` new` — is never deduped (panels r1-r3): retro and timeline build task
+    # windows from those lines, and a quoted or backslash path (`"$B/tasks"
+    # work 7`) must count too, while a loop that merely names `.agent/tasks`
+    # is still deduped.
     local _key=$'\x1f'"$PWD"$'\x1e'"$BASH_COMMAND"$'\x1f'
     case "$BASH_COMMAND" in
-        *tasks*) _key="" ;;
+        *tasks*" work"*|*tasks*" new"*) _key="" ;;
     esac
     if [[ -n "$_key" ]]; then
         case "${_CPB_SEEN:-}" in
