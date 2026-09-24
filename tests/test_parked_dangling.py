@@ -72,6 +72,25 @@ class DanglingPromotion(_Fixture):
         self.assertEqual(self._items(open_only=False), {"handed on [promoted → PLAN S7]": "promoted"})
 
 
+class OneGrammarAndQuotations(_Fixture):
+    """Impl panel round 1 (opus, sol-high, sol-medium, grok)."""
+
+    def test_the_legacy_arrow_task_form_is_checked_too(self):
+        self._task(1, ["moved on → task 062"])                      # 062 missing
+        self.assertEqual(set(self._items().values()), {"dangling"})
+
+    def test_a_marker_quoted_in_inline_code_is_not_a_disposition(self):
+        self._task(1, ["the raw `[promoted → 06N]` count differs from the dangling one"])
+        self.assertEqual(set(self._items().values()), {"open"})
+
+    def test_the_close_and_activation_helper_counts_dangling(self):
+        from tasks.core import existing_task_numbers, open_parked_items
+        self._task(1, ["lost [promoted → 062]", "kept [promoted → 001]"])
+        text = (self.tasks / "001-t" / "task.md").read_text(encoding="utf-8")
+        self.assertEqual(open_parked_items(text, existing_task_numbers(self.root)), ["lost [promoted → 062]"])
+        self.assertEqual(open_parked_items(text), [])                # no project context: unchanged
+
+
 class DatedDeferral(_Fixture):
     def test_a_dated_owner_deferral_is_not_open(self):
         self._task(1, ["bench isolation [deferred: owner decision 2026-09-09 — until the Gemini seat exam]"])

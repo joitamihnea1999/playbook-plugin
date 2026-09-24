@@ -3258,7 +3258,14 @@ PARKED_PLACEHOLDER = (
 )
 
 
-_PROMOTED_TO_TASK = re.compile(r"\[promoted\s*(?:→|->)\s*(\d+)\]", re.IGNORECASE)
+# ONE grammar for a numeric promotion target (impl panel r1): the bracketed
+# `[promoted → NNN]` and the legacy `→ task NNN` / `-> task NNN`.
+_PROMOTED_TO_TASK = re.compile(r"\[promoted\s*(?:→|->)\s*(\d+)\]|(?:→|->)\s*task\s+(\d+)", re.IGNORECASE)
+_INLINE_CODE = re.compile(r"`[^`]*`")
+
+
+def _promotion_targets(item: str) -> "list[int]":
+    return [int(a or b) for a, b in _PROMOTED_TO_TASK.findall(_INLINE_CODE.sub("", item))]
 _DATED_DEFERRAL = re.compile(r"\[deferred:[^\]]*\b20\d{2}-\d{2}-\d{2}\b[^\]]*\]", re.IGNORECASE)
 
 
@@ -3273,14 +3280,16 @@ def _parked_item_status(item: str, existing: "set[int] | None" = None) -> str:
     061-069 and 25 markers kept pointing at them, reading as resolved);
     otherwise open."""
     stripped = item.strip()
-    low = stripped.lower()
+    # a marker QUOTED in inline code is prose, not a disposition (impl panel r1:
+    # a T079 finding that quoted `[promoted → 06N]` read as resolved)
+    live = _INLINE_CODE.sub("", stripped)
+    low = live.lower()
     if stripped.startswith("~~") or "[dismissed" in low:
         return "dismissed"
-    if _DATED_DEFERRAL.search(stripped):
+    if _DATED_DEFERRAL.search(live):
         return "deferred"
     if "[promoted" in low or "→ task" in low or "-> task" in low:
-        if existing is not None and any(int(n) not in existing
-                                        for n in _PROMOTED_TO_TASK.findall(stripped)):
+        if existing is not None and any(n not in existing for n in _promotion_targets(stripped)):
             return "dangling"
         return "promoted"
     return "open"
@@ -3288,7 +3297,7 @@ def _parked_item_status(item: str, existing: "set[int] | None" = None) -> str:
 
 def dangling_targets(item: str, existing: "set[int]") -> "list[int]":
     """The numeric promotion targets of `item` whose task dir does not exist."""
-    return sorted({int(n) for n in _PROMOTED_TO_TASK.findall(item) if int(n) not in existing})
+    return sorted({n for n in _promotion_targets(item) if n not in existing})
 
 
 def extract_parked_items(task_md_text: str) -> "list[str]":
@@ -3326,10 +3335,15 @@ def extract_parked_items(task_md_text: str) -> "list[str]":
     return items
 
 
-def open_parked_items(task_md_text: str) -> "list[str]":
-    """Parked bullets still awaiting resolution (open, not promoted/dismissed)."""
+def open_parked_items(task_md_text: str, existing: "set[int] | None" = None) -> "list[str]":
+    """Parked bullets still awaiting resolution. With `existing` (the project's task
+    numbers) a promotion to a missing task counts too (`dangling` — PLAN S4)."""
     return [i for i in extract_parked_items(task_md_text)
-            if _parked_item_status(i) == "open"]
+            if _parked_item_status(i, existing) in ("open", "dangling")]
+
+
+def existing_task_numbers(project_path: Path) -> "set[int]":
+    return {num for num, _slug, _tf in _iter_task_dirs(project_path)}
 
 
 def _iter_task_dirs(project_path: Path):

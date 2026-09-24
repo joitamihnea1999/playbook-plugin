@@ -819,9 +819,11 @@ def cmd_work(cmd_args):
             # not swallowed. Advisory (does not block) — resolve each by
             # promoting (`tasks new` then mark `[promoted → NNN]`), dismissing
             # (`[dismissed: reason]`), or leaving open deliberately.
-            from tasks.core import open_parked_items, retro_proposal
+            from tasks.core import existing_task_numbers, open_parked_items, retro_proposal
             try:
-                _still_open = open_parked_items(task_file.read_text(encoding="utf-8", errors="replace"))
+                # dangling promotions count here too (PLAN S4, impl panel r1)
+                _still_open = open_parked_items(task_file.read_text(encoding="utf-8", errors="replace"),
+                                                existing_task_numbers(Path(project_path)))
             except OSError:
                 _still_open = []
             if _still_open:
@@ -1093,12 +1095,14 @@ def cmd_work(cmd_args):
     # 010's parked guard and 010's entry still reads open. One line, at
     # activation, only when parked debt exists.
     from tasks.core import open_parked_items as _opi
+    from tasks.core import existing_task_numbers as _etn
     _parked_elsewhere = 0
     try:
+        _existing = _etn(project_path)          # dangling promotions count (PLAN S4)
         for _tf in sorted((agent_dir / "tasks").glob("*/task.md")):
             if _tf == task_file:
                 continue
-            _parked_elsewhere += len(_opi(_tf.read_text(encoding="utf-8", errors="replace")))
+            _parked_elsewhere += len(_opi(_tf.read_text(encoding="utf-8", errors="replace"), _existing))
     except OSError:
         pass
     if _parked_elsewhere:
@@ -1311,7 +1315,8 @@ def cmd_parked(cmd_args):
     project_path = find_project_root()
     show_all = "--all" in cmd_args
     from tasks.core import scan_parked
-    items = scan_parked(project_path, open_only=not show_all)
+    everything = scan_parked(project_path, open_only=False)     # one read of every record
+    items = everything if show_all else [it for it in everything if it["status"] in ("open", "dangling")]
     if not items:
         print("No parked items." if show_all else "No open parked items.")
     else:
@@ -1332,7 +1337,7 @@ def cmd_parked(cmd_args):
             print(f"    - {it['item']}{tag}")
     if not show_all:
         # a dated owner deferral is not open, but it must not vanish (PLAN S4)
-        deferred = [it for it in scan_parked(project_path, open_only=False) if it["status"] == "deferred"]
+        deferred = [it for it in everything if it["status"] == "deferred"]
         if deferred:
             print(f"\n({len(deferred)} deferred by a dated owner decision — `tasks parked --all` lists them.)")
         print("\nResolve each: promote (`tasks new …` then mark the bullet "

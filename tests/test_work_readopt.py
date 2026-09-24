@@ -502,9 +502,10 @@ class TestParkedAndRetro(WorkReadoptBase):
 
     def test_parked_all_shows_resolved(self):
         self._parked_task("091", ["gone [promoted → 092]"])
+        self._parked_task("092", [])      # the target must exist to be resolved (PLAN S4, task 087)
         r = self.run_tasks("parked", "--all")
         self.assertIn("gone", r.stdout)
-        self.assertIn("promoted", r.stdout)
+        self.assertIn("gone [promoted → 092]  [promoted]", r.stdout)
 
     def test_close_surfaces_open_parked_items(self):
         self._parked_task("092", ["label vs DOM donut collision"], status="pending")
