@@ -188,9 +188,13 @@ class ProjectPartAfterTemplateSections(unittest.TestCase):
 
     def test_setext_underline_above_a_project_part_is_not_moved(self):
         # V3: `text\n---` is a Setext heading, not a thematic break to carry
+        # (the template sections this file lacks are inserted above `# Part`, so the
+        # check is that the underline stays glued to its text, not what follows it)
         x = "# P\n\n## My Notes\n\nProject notes\n---\n\n# Part\n\nx\n"
         out = cmm.merge_claude_md(TEMPLATE, x, "P")
-        self.assertIn("Project notes\n---\n\n# Part\n", out)
+        self.assertIn("## My Notes\n\nProject notes\n---\n\n", out)
+        self.assertNotIn("Project notes\n\n---", out)
+        self.assertIn("# Part\n\nx\n", out)
 
     def test_hash_line_inside_an_html_comment_does_not_split_a_template_section(self):
         # V4: a closed `<!-- -->` comment is text, like a closed fence
@@ -210,6 +214,26 @@ class ProjectPartAfterTemplateSections(unittest.TestCase):
         tmpl = TEMPLATE.rstrip("\n") + "\n\n# Appendix\n\ntext\n"
         out = cmm.merge_claude_md(tmpl, SEEDED, "StrataDB")
         self.assertIn("## Dev Tooling", out)
+
+    # --- panel round 2 (task 093) -------------------------------------------------
+
+    def test_template_named_section_only_inside_the_project_part_is_kept(self):
+        # X1: no earlier template `## CLI` — the project's own is still its text, and the
+        # missing template section is inserted ABOVE the part, not inside it
+        x = "# P\n\n## Don't\n\n- x\n\n---\n\n# Mine\n\n## CLI\n\nPRIVATE CLI\n"
+        out = cmm.merge_claude_md(TEMPLATE, x, "P")
+        self.assertIn("# Mine\n\n## CLI\n\nPRIVATE CLI\n", out)
+        self.assertEqual(out.count("## CLI"), 2)
+        self.assertLess(out.index("## Correctness Contract"), out.index("# Mine"))
+        self.assertEqual(cmm.merge_claude_md(TEMPLATE, out, "P"), out)
+
+    def test_spaced_dash_break_is_carried_not_taken_for_a_setext_underline(self):
+        # X3: `- - -` under a text line is a thematic break; inside a refreshed template
+        # section it would be deleted with the section if it stayed there
+        x = "# P\n\n## Don't\n\n- stale\n- - -\n\n# Mine\n\nkeep\n"
+        out = cmm.merge_claude_md(TEMPLATE, x, "P")
+        self.assertIn("- - -\n\n# Mine\n\nkeep\n", out)
+        self.assertNotIn("- stale", out)
 
     def test_hash_without_space_is_not_a_heading(self):
         stale = "# P\n\n## CLI\n\nold\n#nospace belongs to CLI\n"
@@ -267,6 +291,30 @@ class MergeGitignore(unittest.TestCase):
         self.assertNotIn("\n\n", out.replace("\r\n", "\n").replace("\n\n", "\n\n"))   # no stray blank lines
         self.assertEqual(out.count("\r\n"), out.count("\n"), "mixed line endings")
         self.assertIsNone(cmm.merge_gitignore(out))
+
+
+class MainKeepsLineEndings(unittest.TestCase):
+    """X2 (task 093 r2): the CLI read with `read_text` (universal newlines) and wrote
+    with newline translation, so the merge never saw a CRLF file as CRLF."""
+
+    def _merge(self, raw: bytes) -> bytes:
+        root = Path(tempfile.mkdtemp())
+        (root / "CLAUDE.md").write_bytes(raw)
+        r = subprocess.run([sys.executable, str(SCRIPTS / "claude-md-merge.py"),
+                            str(SCRIPTS / "CLAUDE.md.template"), str(root), "P"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return (root / "CLAUDE.md").read_bytes()
+
+    def test_crlf_file_stays_crlf_through_main(self):
+        out = self._merge(b"# P\r\n\r\n## Don't\r\n\r\n- stale\r\n\r\n---\r\n\r\n# Mine\r\n\r\nkeep\r\n")
+        self.assertNotIn(b"- stale", out)
+        self.assertIn(b"# Mine\r\n\r\nkeep\r\n", out)
+        self.assertEqual(out.count(b"\n"), out.count(b"\r\n"), "a lone LF in a CRLF file")
+
+    def test_lf_file_stays_lf_through_main(self):
+        out = self._merge(b"# P\n\n## Don't\n\n- stale\n")
+        self.assertNotIn(b"\r", out)
 
 
 class InitWritesBothFiles(unittest.TestCase):

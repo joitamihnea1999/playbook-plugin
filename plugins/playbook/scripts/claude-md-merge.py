@@ -16,8 +16,9 @@ the template sections):
                         substituted) written as-is;
   * present           → template-owned `## ` sections are updated IN PLACE to
                         the current template text (heading position kept);
-                        template sections the file lacks are appended at the
-                        end in template order; EVERYTHING else — preamble
+                        template sections the file lacks are appended in
+                        template order at the end — above the first project
+                        `#` part, if there is one; EVERYTHING else — preamble
                         above the first template heading, the project's own
                         `#` title, custom sections, and a level-1 `#` part
                         further down (task 093) — is preserved byte-for-
@@ -25,9 +26,10 @@ the template sections):
                         sections, exactly as the template header instructs.
                         Headings are ATX lines outside closed fenced code
                         blocks and `<!-- -->` comments; Setext and indented
-                        headings are not recognised. A template heading
-                        that occurs twice is refreshed at its first
-                        occurrence only; the later one is project text.
+                        headings are not recognised. A template heading is
+                        refreshed at its first occurrence outside the
+                        project's `#` parts only; every other same-named
+                        section is project text.
   * second run        → byte-identical (idempotent).
 
 .gitignore contract: append (create if absent) one marker-guarded block of
@@ -110,6 +112,9 @@ COMMENT_RE = re.compile(r"^ {0,3}<!--")
 H1_RE = re.compile(r"^#(?:[ \t]|\r?\n|$)")
 # A thematic break (`---`, `***`, `___`, spaces allowed between the marks).
 BREAK_RE = re.compile(r"^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*\r?\n?$")
+# A Setext level-2 underline: a pure run of `-` (no inner spaces) — right under a
+# text line it underlines that line; `- - -` there is still a thematic break.
+SETEXT_RE = re.compile(r"^ {0,3}-+[ \t]*\r?\n?$")
 
 
 def _masked_lines(lines: "list[str]") -> "set[int]":
@@ -152,8 +157,8 @@ def _masked_lines(lines: "list[str]") -> "set[int]":
     return out
 
 
-def split_sections(text: str) -> "tuple[str, list[tuple[str | None, str]]]":
-    """(preamble, [(heading_line, body)]) split on level-2 headings.
+def split_sections(text: str) -> "tuple[str, list[tuple[str | None, str, bool]]]":
+    """(preamble, [(heading_line, body, in_project_part)]) split on level-2 headings.
 
     `###` subsections travel inside their parent's body, and the `#` title (plus
     anything the project keeps above its first `##`) stays in the preamble
@@ -162,33 +167,37 @@ def split_sections(text: str) -> "tuple[str, list[tuple[str | None, str]]]":
     becomes a chunk with heading None — never a template key — whose text starts
     with the thematic break (`---`) right above the heading, if a blank line
     precedes that break (`text` + `---` is a Setext underline and stays put), so
-    refreshing the template section above cannot swallow it. Masked lines
-    (`_masked_lines`: closed fences and comments) are text, never headings.
+    refreshing the template section above cannot swallow it. Every section after
+    such a part is flagged `in_project_part`: it belongs to the project, whatever
+    its heading (task 093 r2). Masked lines (`_masked_lines`: closed fences and
+    comments) are text, never headings. A `#` line ABOVE the first `##` is the
+    title area and stays in the preamble.
     """
     lines = text.splitlines(keepends=True)
     masked = _masked_lines(lines)
     preamble: list[str] = []
-    sections: "list[tuple[str | None, str]]" = []
+    sections: "list[tuple[str | None, str, bool]]" = []
     current: "tuple[str | None, list[str]] | None" = None
+    in_part = False
     for i, line in enumerate(lines):
         if i in masked:
             pass
         elif line.startswith("## "):
             if current is not None:
-                sections.append((current[0], "".join(current[1])))
+                sections.append((current[0], "".join(current[1]), in_part))
             current = (line.rstrip("\n"), [])
             continue
         elif current is not None and H1_RE.match(line):
             body = current[1]
             carried: list[str] = []
             while body and (not body[-1].strip() or BREAK_RE.match(body[-1])):
-                b = BREAK_RE.match(body[-1])
-                if b and b.group(1) == "-" and len(body) > 1 and body[-2].strip():
+                if SETEXT_RE.match(body[-1]) and len(body) > 1 and body[-2].strip():
                     break              # `text` + `---` is a Setext underline, not a break
                 carried.insert(0, body.pop())
             while carried and not carried[0].strip():
                 carried.pop(0)         # the joiner puts back exactly one blank line
-            sections.append((current[0], "".join(body)))
+            sections.append((current[0], "".join(body), in_part))
+            in_part = True
             current = (None, carried + [line])
             continue
         if current is not None:
@@ -196,7 +205,7 @@ def split_sections(text: str) -> "tuple[str, list[tuple[str | None, str]]]":
         else:
             preamble.append(line)
     if current is not None:
-        sections.append((current[0], "".join(current[1])))
+        sections.append((current[0], "".join(current[1]), in_part))
     return "".join(preamble), sections
 
 
@@ -214,36 +223,36 @@ def merge_claude_md(template_text: str, existing: "str | None",
         existing = existing.replace("\r\n", "\n")
 
     _, tmpl_sections = split_sections(fresh)
-    tmpl_map = {h.strip().lower(): (h, b) for h, b in tmpl_sections if h is not None}
+    tmpl_map = {h.strip().lower(): (h, b) for h, b, _ in tmpl_sections if h is not None}
 
     preamble, existing_sections = split_sections(existing)
-    # One owner per template heading: its FIRST occurrence. A later same-named section
-    # — a project's own `## CLI` under its `#` part — is project text (task 093 r1: it
-    # was overwritten and the template section emitted twice). Template sections an
-    # older merge appended below a project part are still owned there: they are the
-    # first occurrence, so a re-run refreshes them in place instead of appending again.
+    # One owner per template heading: its first occurrence OUTSIDE the project's `#`
+    # parts. A section inside a part is project text whatever its heading — a
+    # project's own `## CLI` there was overwritten (task 093 r1, r2). A later
+    # same-named section outside the parts is kept as written too.
     owner: "dict[str, int]" = {}
-    for idx, (heading, _) in enumerate(existing_sections):
+    for idx, (heading, _, in_part) in enumerate(existing_sections):
         key = heading.strip().lower() if heading is not None else None
-        if key in tmpl_map and key not in owner:
+        if key in tmpl_map and not in_part and key not in owner:
             owner[key] = idx
+    missing = [heading + "\n" + body for heading, body, _ in tmpl_sections
+               if heading is not None and heading.strip().lower() not in owner]
     out: list[str] = [preamble]
-    seen: set[str] = set()
-    for idx, (heading, body) in enumerate(existing_sections):
+    for idx, (heading, body, _) in enumerate(existing_sections):
         if heading is None:            # a project-owned `#` part, kept verbatim
+            # template sections the file lacks go right above its first project
+            # part, so they never land inside one (where they would be project text)
+            out.extend(missing)
+            missing = []
             out.append(body)
             continue
         key = heading.strip().lower()
         if owner.get(key) == idx:
             th, tb = tmpl_map[key]
             out.append(th + "\n" + tb)
-            seen.add(key)
         else:
             out.append(heading + "\n" + body)
-
-    for heading, body in tmpl_sections:
-        if heading is not None and heading.strip().lower() not in seen:
-            out.append(heading + "\n" + body)
+    out.extend(missing)
 
     merged = ""
     for part in out:
@@ -290,13 +299,17 @@ def main(argv: "list[str]") -> int:
 
     claude_md = root / "CLAUDE.md"
     try:
-        existing = claude_md.read_text(encoding="utf-8", errors="replace") if claude_md.exists() else None
+        # raw bytes in, `newline=""` out: universal-newline reading and os.linesep
+        # writing used to rewrite a CRLF file (and, on Windows, an LF one) before the
+        # merge could see its endings (task 093 r2)
+        existing = (claude_md.read_bytes().decode("utf-8", errors="replace")
+                    if claude_md.exists() else None)
         merged = merge_claude_md(template_text, existing, name)
         if existing is None:
-            atomic_write(claude_md, merged)
+            atomic_write(claude_md, merged, newline="")
             print("CLAUDE.md:CREATED")
         elif merged != existing:
-            atomic_write(claude_md, merged)
+            atomic_write(claude_md, merged, newline="")
             print("CLAUDE.md:MERGED")
         else:
             print("CLAUDE.md:UNCHANGED")

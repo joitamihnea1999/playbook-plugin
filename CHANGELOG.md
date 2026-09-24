@@ -34,14 +34,17 @@ was written against a test that failed first.
   section deleted it while init printed "project content preserved". It happened to the plugin's own dev
   workspace (`# Project: …` and its intro paragraph, 2026-09-24). A `#` heading there now starts a part the
   merge keeps byte for byte, with the `---` above it (a `---` right under a text line is that line's Setext
-  underline and stays put). The project's own `## CLI` (or any template-named section) inside that part is its
-  own text; only the first occurrence of a template heading is refreshed — before, both were overwritten and
-  the template section appeared twice. Headings inside a closed fenced code block or a closed `<!-- -->`
-  comment are now text, which also stops a `## CLI` line in a custom section's code block from being replaced
-  by the template's; a fence that is never closed, or a backtick fence whose info string holds a backtick,
-  fences nothing. A file whose every line ends in CRLF stays CRLF (refreshed sections and blank lines were
-  written LF). Setext and indented `#` headings are still not recognised. Ledger `PB-INIT-IDEMPOTENT` gains
-  two proofs and the correction note.
+  underline and stays put). Every section inside that part is the project's own text, even one named like a
+  template section (`## CLI`) — before, it was overwritten and the template section could appear twice; a
+  template section the file lacks is now inserted above the first such part instead of at the very end. (A
+  file an older merge already gave a template section below its part gets it once more above the part, then
+  stays stable.) Headings inside a closed fenced code block or a closed `<!-- -->` comment are now text,
+  which also stops a `## CLI` line in a custom section's code block from being replaced by the template's; a
+  fence that is never closed, or a backtick fence whose info string holds a backtick, fences nothing. The
+  merge reads the file's raw bytes and writes them back without newline translation, so a CRLF file stays
+  CRLF and, on Windows, an LF file stays LF (both used to be rewritten). Setext and indented `#` headings are
+  still not recognised. Ledger `PB-INIT-IDEMPOTENT` gains two proofs, a narrowed statement and the correction
+  note.
 - **The chat log no longer records harness events as the user's words** (task 088, PLAN S5a). A prompt that
   begins with `<task-notification>`, `<local-command-caveat>`, `<command-name>` or `[SYSTEM NOTIFICATION` is
   not logged; on 2026-09-23, 498 of 833 entries in this repo's chat log were background-task notifications,

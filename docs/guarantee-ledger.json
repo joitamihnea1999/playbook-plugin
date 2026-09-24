@@ -5570,7 +5570,7 @@
     {
       "id": "PB-INIT-IDEMPOTENT",
       "category": "installation-and-upgrade",
-      "statement": "Re-running initialization refreshes template-owned CLAUDE.md sections in place, preserves unrelated project content and a seeded pointer, and appends the gitignore block exactly once.",
+      "statement": "Re-running initialization refreshes template-owned CLAUDE.md sections in place, preserves unrelated project content (within the heading-recognition limitations listed on its proofs) and a seeded pointer, and appends the gitignore block exactly once.",
       "owner": [
         {
           "path": "plugins/playbook/scripts/claude-md-merge.py",
@@ -5612,7 +5612,7 @@
           "boundary": "subprocess",
           "negative_control": null,
           "limitations": [
-            "Headings are ATX lines outside CLOSED fenced code blocks and CLOSED <!-- --> comments; Setext headings and headings indented by 1-3 spaces are not recognised (a Setext or indented `#` part below a template section is still deleted), and other HTML blocks (<div> ...) are not tracked, so a `#`/`##` line inside one counts as a heading. A template heading that occurs twice is refreshed at its first occurrence only (task 093)."
+            "Headings are ATX lines outside CLOSED fenced code blocks and CLOSED <!-- --> comments; Setext headings and headings indented by 1-3 spaces are not recognised (a Setext or indented `#` part below a template section is still deleted), and other HTML blocks (<div> ...) are not tracked, so a `#`/`##` line inside one counts as a heading. A template heading is refreshed only at its first occurrence outside the project's `#` parts; a template section the file lacks is inserted above the first such part, so a file an older merge gave a template section BELOW its part gets that section once more above it (duplicate template text once, then stable) (task 093)."
           ]
         },
         {
