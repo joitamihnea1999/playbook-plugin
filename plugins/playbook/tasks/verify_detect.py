@@ -15,6 +15,7 @@ config files, never executes anything.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -56,8 +57,38 @@ _TEST_CLASS = re.compile(r"^\s*class\s+Test\w*\s*(?:\(([^)]*)\))?\s*:", re.M)
 # D6-amended single-judge review of 096, grok: discover skipped its tests, exit 0).
 _TESTCASE_BASES = frozenset({"TestCase", "unittest.TestCase",
                              "IsolatedAsyncioTestCase", "unittest.IsolatedAsyncioTestCase"})
-# a package `load_tests()` replaces discovery below that package (task 098)
-_LOAD_TESTS = re.compile(r"^\s*def\s+load_tests\s*\(", re.M)
+# a package `load_tests` hook replaces discovery below that package (task 098).
+# ANY mention of the name counts — `def`, an assignment or an import all bind it
+# (pass 2 of the same judge); a false hit only costs the pytest suggestion.
+_LOAD_TESTS = re.compile(r"\bload_tests\b")
+# Directories the outside-`tests/` walk never enters: hidden (.git, .venv, …)
+# and vendored/installed trees whose tests are not the project's.
+_SKIP_DIRS = frozenset({"node_modules", "venv", "env", "site-packages", "__pycache__",
+                        "build", "dist"})
+_WALK_CAP = 20000   # files; past it the walk gives up → pytest (the safe answer)
+
+
+def _test_file_outside_tests(root: Path) -> bool:
+    """True when a `test_*.py` / `*_test.py` exists anywhere in the project
+    outside `<root>/tests` — `unittest discover -s tests` never reads it (task
+    098, pass 2 of the same judge: `src/foo_test.py`). Unknown (an OS error or
+    more than _WALK_CAP files) counts as True."""
+    tests = os.path.normcase(os.path.abspath(root / "tests"))
+    seen = 0
+    try:
+        for cur, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs
+                       if not d.startswith(".") and d not in _SKIP_DIRS
+                       and os.path.normcase(os.path.abspath(os.path.join(cur, d))) != tests]
+            for f in files:
+                seen += 1
+                if seen > _WALK_CAP:
+                    return True
+                if f.endswith(".py") and (f.startswith("test_") or f.endswith("_test.py")):
+                    return True
+    except OSError:
+        return True
+    return False
 
 
 def _is_testcase_base(bases) -> bool:
@@ -81,20 +112,21 @@ def _unittest_only(root: Path, notes: "Optional[list[str]]" = None) -> bool:
     must be EXACTLY a TestCase name, not merely contain the word; a
     `load_tests()` in any package `__init__.py` under `tests/` means discover
     may skip subdirectories — it is appended to `notes`; and a `*_test.py` or
-    `test_*.py` at the project ROOT (which `discover -s tests` never reads)
-    rules unittest out too."""
+    `test_*.py` anywhere OUTSIDE `tests/` (which `discover -s tests` never
+    reads; hidden and vendored directories are not walked) rules unittest out
+    too."""
     tests = root / "tests"
     if not tests.is_dir() or _has(root, "conftest.py"):
         return False
     try:
         if any(tests.rglob("conftest.py")) or any(tests.rglob("*_test.py")):
             return False
-        if any(root.glob("*_test.py")) or any(root.glob("test_*.py")):
+        if _test_file_outside_tests(root):
             return False
         for init in sorted(tests.rglob("__init__.py")):
             if _LOAD_TESTS.search(_read(init)):
                 if notes is not None:
-                    notes.append(f"`{init.relative_to(root).as_posix()}` defines load_tests() — "
+                    notes.append(f"`{init.relative_to(root).as_posix()}` binds load_tests — "
                                  "unittest discover may skip subdirectories, so pytest is suggested.")
                 return False
         files = sorted(tests.rglob("test_*.py"))

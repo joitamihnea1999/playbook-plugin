@@ -224,6 +224,34 @@ class DetectsThisProjectsShape(unittest.TestCase):
                 d = _mk({"tests/test_a.py": self.TC, **extra})
                 self.assertEqual(detect_verify(d)["command"], "python3 -m pytest")
 
+    # ── task 098, pass 2 of the same judge ──
+    def test_test_files_anywhere_outside_tests_are_seen(self):
+        for extra in ({"src/foo_test.py": "def test_fails():\n    assert False\n"},
+                      {"pkg/test_extra.py": "def test_fails():\n    assert False\n"},
+                      {"src/pkg/test_b.py": "def test_fails():\n    assert False\n"}):
+            with self.subTest(extra=sorted(extra)):
+                d = _mk({"tests/test_a.py": self.TC, **extra})
+                self.assertEqual(detect_verify(d)["command"], "python3 -m pytest")
+
+    def test_vendored_and_hidden_dirs_are_not_walked(self):
+        # control: a virtualenv / node_modules / dot-dir test file is not the project's
+        for extra in ({".venv/lib/site-packages/x/test_x.py": "def test_x(): pass\n"},
+                      {"node_modules/pkg/test_y.py": "def test_y(): pass\n"},
+                      {".git/hooks/test_z.py": "def test_z(): pass\n"}):
+            with self.subTest(extra=sorted(extra)):
+                d = _mk({"tests/test_a.py": self.TC, **extra})
+                self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
+
+    def test_load_tests_bound_by_assignment_or_import_is_detected(self):
+        for init in ("from .support import load_tests\n",
+                     "def _load(loader, tests, pattern):\n    return tests\n\n\nload_tests = _load\n"):
+            with self.subTest(init=init.splitlines()[-1]):
+                d = _mk({"tests/test_a.py": self.TC, "tests/pkg/__init__.py": init,
+                         "tests/pkg/test_b.py": self.TC})
+                r = detect_verify(d)
+                self.assertEqual(r["command"], "python3 -m pytest")
+                self.assertTrue(any("load_tests" in n for n in r["notes"]), r["notes"])
+
     def test_this_workspace_shape_exact(self):
         # outer project: no toolchain of its own, one code_root holding scripts/verify
         d = _mk({".agent/config.json": json.dumps({"code_roots": ["playbook-plugin"]}),

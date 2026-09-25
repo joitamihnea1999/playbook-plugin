@@ -56,8 +56,8 @@ Each fix was written against a test that failed first.
   (task 096). A `scripts/verify` file is suggested alone for its root; `python3 -m unittest discover -s tests`
   replaces the pytest guess only when every `tests/test_*.py` imports unittest (not merely `unittest.mock`),
   defines a TestCase and no bare `def test…` or `class Test…` whose base is not exactly a TestCase name,
-  none imports pytest, every test subdirectory is a package and none defines `load_tests()` (reported as a
-  note), and no `conftest.py` or `*_test.py` exists and no test file sits at the project root (otherwise
+  none imports pytest, every test subdirectory is a package and none binds `load_tests` (reported as a
+  note), and no `conftest.py` or `*_test.py` exists and no test file exists outside `tests/` (otherwise
   pytest, which runs TestCases too; the last three rules from the D6-amended single-judge review, task 098);
   each
   `code_roots` checkout (validated like the freshness fingerprint, symlinks leaving the project skipped) is
