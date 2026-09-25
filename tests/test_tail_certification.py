@@ -568,13 +568,29 @@ class ClosePathTailCert(unittest.TestCase):
     subprocesses."""
 
     def _setup(self, *, risk="assertive", panel_cfg="all", stamp=True,
-               snapshot=True):
+               snapshot=True, code_root=None):
         d = _repo()
         (d / "docs").mkdir()
         (d / ".agent").mkdir(exist_ok=True)
+        cfg = {}
+        if code_root is not None:
+            # a REAL nested checkout, gitignored by the outer repo (the shape
+            # this workspace runs: code_roots=["playbook-plugin"])
+            (d / ".gitignore").write_text(f"{code_root}/\n", encoding="utf-8")
+            _git(d, "add", "-A")
+            _git(d, "commit", "-qm", "ignore nested")
+            sub = d / code_root
+            sub.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=sub, check=True)
+            (sub / "app.py").write_text("y = 1\n", encoding="utf-8")
+            _git(sub, "add", "-A")
+            _git(sub, "commit", "-qm", "seed nested")
+            cfg["code_roots"] = [code_root]
         if panel_cfg is not None:
+            cfg["panel_required_for"] = panel_cfg
+        if cfg:
             (d / ".agent" / "config.json").write_text(
-                json.dumps({"panel_required_for": panel_cfg}), encoding="utf-8")
+                json.dumps(cfg), encoding="utf-8")
         td = d / ".agent" / "tasks" / "001-t"
         td.mkdir(parents=True)
         (td / "task.md").write_text(
@@ -644,7 +660,7 @@ class ClosePathTailCert(unittest.TestCase):
         self.assertIn("tail-certified", err)
         self.assertIn("TAIL-CERTIFIED", self._receipt(td))
 
-    # (a') owner decision H2: a root PLAN.md-only delta certifies end-to-end
+    # (a1) owner decision H2: a root PLAN.md-only delta certifies end-to-end
     def test_root_plan_md_delta_certifies(self):
         d, td, env = self._setup()
         (d / "PLAN.md").write_text("# plan\n- [x] S9\n", encoding="utf-8")
@@ -652,7 +668,7 @@ class ClosePathTailCert(unittest.TestCase):
         self.assertIn("Task 001 done.", out, err)
         self.assertIn("TAIL-CERTIFIED", self._receipt(td))
 
-    # (a'') control for H2: the same delta one directory down still blocks
+    # (a2) control for H2: the same delta one directory down still blocks
     def test_nested_plan_md_delta_blocks(self):
         d, td, env = self._setup()
         (d / "sub").mkdir()
@@ -660,6 +676,24 @@ class ClosePathTailCert(unittest.TestCase):
         out, err = self._close_inproc(d, "PASS")
         self.assertNotIn("Task 001 done.", out)
         self.assertIn("pending", self._receipt(td))
+
+    # (a3) H2 is OUTER-scope only (impl-panel r1 opus): a nested code_roots
+    # checkout's OWN root PLAN.md is behavioral and blocks end-to-end ...
+    def test_nested_code_root_own_root_plan_md_blocks(self):
+        d, td, env = self._setup(code_root="sub")
+        (d / "sub" / "PLAN.md").write_text("# nested plan\n", encoding="utf-8")
+        out, err = self._close_inproc(d, "PASS")
+        self.assertNotIn("Task 001 done.", out)
+        self.assertIn("pending", self._receipt(td))
+
+    # ... while the OUTER root PLAN.md in the same two-scope fixture certifies, so
+    # the block above is the scope rule, not a fixture that blocks everything
+    def test_outer_root_plan_md_certifies_with_a_code_root(self):
+        d, td, env = self._setup(code_root="sub")
+        (d / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+        out, err = self._close_inproc(d, "PASS")
+        self.assertIn("Task 001 done.", out, err)
+        self.assertIn("TAIL-CERTIFIED", self._receipt(td))
 
     # (b) a code (.py) delta blocks BEFORE the judge — even if it would PASS
     def test_code_delta_blocks_even_with_pass_stub(self):

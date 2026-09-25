@@ -40,7 +40,8 @@ Each fix was written against a test that failed first.
   needing a fresh full panel or `--stale-panel-ok`. A `*.md` below the root keeps the old rule (a doc only under
   `docs/` or when named `README*`/`CHANGELOG*`/`MIND_MAP*`), and so does a nested `code_roots` checkout's own
   root `*.md`. Noted in docs/configuration.md and the `PB-PANEL-FRESHNESS` ledger row, which gains an
-  end-to-end proof (root `PLAN.md` certifies; `sub/PLAN.md` blocks).
+  end-to-end proofs (root `PLAN.md` certifies; `sub/PLAN.md` blocks; a nested `code_roots` checkout's own
+  root `PLAN.md` blocks). `docs/cli.md` names the widened class too.
 
 ### Fixed
 
