@@ -231,10 +231,8 @@ class DetectsThisProjectsShape(_NoPytest):
         # codex ×2, grok: a bare [tox] made an uninstalled pytest the suggestion
         r = detect_verify(_mk({"tox.ini": "[tox]\nenvlist = py310\n", "tests/test_a.py": self.TC}))
         self.assertEqual(r["command"], self.UD)
-        for cfg in ("[pytest]\naddopts = -q\n", "[tool:pytest]\n"):
-            with self.subTest(cfg=cfg.splitlines()[0]):
-                r = detect_verify(_mk({"tox.ini": cfg, "tests/test_a.py": self.TC}))
-                self.assertEqual(r["command"], "python3 -m pytest")
+        r = detect_verify(_mk({"tox.ini": "[pytest]\naddopts = -q\n", "tests/test_a.py": self.TC}))
+        self.assertEqual(r["command"], "python3 -m pytest")
 
     def test_a_comment_or_string_naming_load_tests_is_not_a_binding(self):
         # grok: `# do not define load_tests` was reported as a hook
@@ -254,6 +252,53 @@ class DetectsThisProjectsShape(_NoPytest):
         r = subprocess.run([_sys.executable, "-m", "unittest", "discover", "-s", "tests"],
                            cwd=d, capture_output=True, text=True, timeout=120)
         self.assertIn("Ran 0 tests", r.stderr)                    # the skip is real
+
+    # ── task 098 impl panel round 2 (the last D6 round) ──
+    def test_config_markers_count_only_as_real_section_headers(self):
+        # sonnet, codex ×2, grok: a comment or value naming the section made an
+        # uninstalled pytest the suggestion, with no probe
+        not_config = [
+            {"tox.ini": "[tox]\n# [pytest] is not used here\ndescription = no [pytest] here\n"},
+            {"tox.ini": "[tool:pytest]\naddopts = -q\n"},      # pytest does not read this in tox.ini
+            {"pyproject.toml": "[project]\nname = 'x'\n# see [tool.pytest.ini_options] upstream\n"},
+            {"setup.cfg": "[metadata]\ndescription = mentions [tool:pytest]\n"},
+        ]
+        for files in not_config:
+            with self.subTest(files=sorted(files)):
+                r = detect_verify(_mk({**files, "tests/test_a.py": self.TC}))
+                self.assertEqual(r["command"], self.UD)
+        for files in ({"tox.ini": "[tox]\n\n[pytest]\naddopts = -q\n"},
+                      {"pyproject.toml": "[tool.pytest.ini_options]\naddopts = '-q'\n"},
+                      {"setup.cfg": "[tool:pytest]\naddopts = -q\n"},
+                      {"pytest.ini": ""}):
+            with self.subTest(files=sorted(files)):
+                r = detect_verify(_mk({**files, "tests/test_a.py": self.TC}))
+                self.assertEqual(r["command"], "python3 -m pytest")
+
+    def test_load_tests_false_bindings_are_not_reported(self):
+        # grok: an indented def, a line inside a string, an `import … as other`
+        for init in ("class X:\n    def load_tests(self):\n        pass\n",
+                     '"""\nload_tests = something\n"""\n',
+                     "from .support import load_tests as _lt\n"):
+            with self.subTest(init=init.splitlines()[0]):
+                d = _mk({"tests/test_a.py": self.TC, "tests/pkg/__init__.py": init,
+                         "tests/pkg/test_b.py": self.TC})
+                self.assertNotIn("binds load_tests", self._note(detect_verify(d)))
+
+    def test_outside_files_matching_discovers_pattern_are_reported(self):
+        # grok: `test.py`, `src/testfoo.py` match test*.py yet sit outside tests/
+        for extra in ({"test.py": "import unittest\n"}, {"src/testfoo.py": "import unittest\n"}):
+            with self.subTest(extra=sorted(extra)):
+                note = self._note(detect_verify(_mk({"tests/test_a.py": self.TC, **extra})))
+                self.assertIn(f"`{next(iter(extra))}` is a test file outside tests/", note)
+
+    def test_a_walk_that_stops_early_says_so(self):
+        # grok: past the cap the walk returned silently and the note claimed none seen
+        d = _mk({"tests/test_a.py": self.TC, "a.txt": "", "b.txt": "", "src/test_hidden.py": ""})
+        with mock.patch.object(vd, "_WALK_CAP", 2):
+            note = self._note(detect_verify(d))
+        self.assertIn("stopped after 2 files", note)
+        self.assertNotIn("None of these shapes was seen", note)
 
     def test_suggested_unittest_command_runs_every_test_on_a_clean_tree(self):
         import subprocess

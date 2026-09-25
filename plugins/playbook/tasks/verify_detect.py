@@ -57,11 +57,36 @@ _TEST_CLASS = re.compile(r"^\s*class\s+Test\w*\s*(?:\(([^)]*)\))?\s*:", re.M)
 # the base names that make a class a TestCase, compared exactly (task 098)
 _TESTCASE_BASES = frozenset({"TestCase", "unittest.TestCase",
                              "IsolatedAsyncioTestCase", "unittest.IsolatedAsyncioTestCase"})
-# a package `load_tests` hook BOUND by a def, an assignment or an import — a
-# comment or a string naming it is not a binding (impl panel r1, grok)
-_LOAD_TESTS = re.compile(r"^\s*(?:(?:async\s+)?def\s+load_tests\b"
-                         r"|load_tests\s*(?::[^=\n]*)?=(?!=)"
-                         r"|(?:from\s+\S+\s+)?import\s+[^#\n]*\bload_tests\b)", re.M)
+# a package `load_tests` hook BOUND at module level: a column-0 def or
+# assignment, or an import whose bound name is `load_tests` itself — not a
+# comment, a string, an indented def or `import … as other` (impl panel r1+r2, grok)
+_LOAD_TESTS_DEF = re.compile(r"^(?:(?:async\s+)?def\s+load_tests\b|load_tests\s*(?::[^=\n]*)?=(?!=))",
+                             re.M)
+_IMPORT_LINE = re.compile(r"^(?:from\s+\S+\s+)?import\s+(.+)$", re.M)
+_TRIPLE_STR = re.compile(r'(?s)(\"\"\"|\'\'\').*?\1')
+
+
+def _binds_load_tests(text: str) -> bool:
+    text = _TRIPLE_STR.sub("", text)
+    if _LOAD_TESTS_DEF.search(text):
+        return True
+    for m in _IMPORT_LINE.finditer(text):
+        for name in m.group(1).split("#", 1)[0].strip("()\\ ").split(","):
+            parts = name.split()
+            if not parts:
+                continue
+            bound = parts[-1] if len(parts) == 3 and parts[1] == "as" else parts[0].split(".")[-1]
+            if bound == "load_tests":
+                return True
+    return False
+
+
+# pytest configuration, recognised only as a REAL section header — a comment or
+# a value naming it is not config (impl panel r2: sonnet, codex ×2, grok); a
+# `tox.ini` counts only with `[pytest]` (pytest does not read `[tool:pytest]` there)
+_PYPROJECT_PYTEST = re.compile(r"^\s*\[tool\.pytest(?:\.ini_options)?\]\s*$", re.M)
+_TOX_PYTEST = re.compile(r"^\s*\[pytest\]\s*$", re.M)
+_SETUPCFG_PYTEST = re.compile(r"^\s*\[tool:pytest\]\s*$", re.M)
 _STAR_IMPORT = re.compile(r"^\s*from\s+\S+\s+import\s+\*", re.M)
 # a module-level alias named like a test (`test_x = …`, `TestX = …`)
 _TEST_ALIAS = re.compile(r"^(?:test|Test)\w*\s*(?::[^=\n]*)?=(?!=)", re.M)
@@ -95,9 +120,10 @@ def _pytest_available(root: Path) -> bool:
     return r.returncode == 0
 
 
-def _test_files_outside_tests(root: Path) -> "list[str]":
-    """`test_*.py` / `*_test.py` outside `<root>/tests` (hidden and vendored
-    directories not walked, at most _WALK_CAP files read)."""
+def _test_files_outside_tests(root: Path) -> "tuple[list[str], bool]":
+    """(`test*.py` / `*_test.py` outside `<root>/tests`, whether the walk read
+    them ALL). Hidden and vendored directories are not walked; past _WALK_CAP
+    files, or on an OS error, the walk stops and says so (impl panel r2, grok)."""
     tests = os.path.normcase(os.path.abspath(root / "tests"))
     out: "list[str]" = []
     seen = 0
@@ -109,12 +135,12 @@ def _test_files_outside_tests(root: Path) -> "list[str]":
             for f in sorted(files):
                 seen += 1
                 if seen > _WALK_CAP:
-                    return out
-                if f.endswith(".py") and (f.startswith("test_") or f.endswith("_test.py")):
+                    return out, False
+                if f.endswith(".py") and (f.startswith("test") or f.endswith("_test.py")):
                     out.append(Path(os.path.relpath(os.path.join(cur, f), root)).as_posix())
     except OSError:
-        pass
-    return out
+        return out, False
+    return out, True
 
 
 def _discover_observations(root: Path) -> "list[str]":
@@ -128,7 +154,7 @@ def _discover_observations(root: Path) -> "list[str]":
         for init in sorted(tests.rglob("__init__.py")):
             text = _read(init)
             rel = init.relative_to(root).as_posix()
-            if _LOAD_TESTS.search(text):
+            if _binds_load_tests(text):
                 seen.append(f"`{rel}` binds load_tests (discover stops recursing there)")
             elif _STAR_IMPORT.search(text):
                 seen.append(f"`{rel}` has an `import *` (it may bind load_tests)")
@@ -159,7 +185,10 @@ def _discover_observations(root: Path) -> "list[str]":
                             "(indirect or plain)")
     except OSError:
         seen.append("the tests/ tree could not be read in full")
-    seen += [f"`{p}` is a test file outside tests/" for p in _test_files_outside_tests(root)]
+    outside, complete = _test_files_outside_tests(root)
+    seen += [f"`{p}` is a test file outside tests/" for p in outside]
+    if not complete:
+        seen.append(f"the scan outside tests/ stopped after {_WALK_CAP} files (not a full scan)")
     uniq = list(dict.fromkeys(seen))
     if len(uniq) > _SEEN_CAP:
         uniq = uniq[:_SEEN_CAP] + [f"… and {len(uniq) - _SEEN_CAP} more"]
@@ -187,10 +216,10 @@ def _python_components(root: Path, notes: "Optional[list[str]]" = None) -> list[
     # stated (owner decision, task 098). Never a pytest that is not installed.
     # `tox.ini` counts only with a pytest section — a bare `[tox]` made an
     # uninstalled pytest the suggestion (impl panel r1, codex ×2 + grok)
-    _tox = _read(root / "tox.ini")
-    pytest_cfg = (_pyproject_has(root, "[tool.pytest") or _has(root, "pytest.ini")
-                  or "[pytest]" in _tox or "[tool:pytest]" in _tox
-                  or "[tool:pytest]" in _read(root / "setup.cfg"))
+    pytest_cfg = (_has(root, "pytest.ini")
+                  or bool(_PYPROJECT_PYTEST.search(_read(root / "pyproject.toml")))
+                  or bool(_TOX_PYTEST.search(_read(root / "tox.ini")))
+                  or bool(_SETUPCFG_PYTEST.search(_read(root / "setup.cfg"))))
     if pytest_cfg:
         out.append(_component("pytest", "python3 -m pytest", "pytest config"))
     elif (root / "tests").is_dir():
