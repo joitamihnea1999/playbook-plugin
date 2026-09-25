@@ -262,6 +262,11 @@ class DetectsThisProjectsShape(_NoPytest):
             {"tox.ini": "[tool:pytest]\naddopts = -q\n"},      # pytest does not read this in tox.ini
             {"pyproject.toml": "[project]\nname = 'x'\n# see [tool.pytest.ini_options] upstream\n"},
             {"setup.cfg": "[metadata]\ndescription = mentions [tool:pytest]\n"},
+            # D6-amended single judge, pass 1: an indented header is an ini
+            # continuation line, and a header-shaped line inside a string is not a table
+            {"tox.ini": "[tox]\nenvlist = py310\n  [pytest]\n"},
+            {"setup.cfg": "[metadata]\n  [tool:pytest]\n"},
+            {"pyproject.toml": '[project]\ndescription = """\n[tool.pytest.ini_options]\n"""\n'},
         ]
         for files in not_config:
             with self.subTest(files=sorted(files)):
@@ -279,11 +284,22 @@ class DetectsThisProjectsShape(_NoPytest):
         # grok: an indented def, a line inside a string, an `import … as other`
         for init in ("class X:\n    def load_tests(self):\n        pass\n",
                      '"""\nload_tests = something\n"""\n',
-                     "from .support import load_tests as _lt\n"):
+                     "from .support import load_tests as _lt\n",
+                     # D6-amended single judge, pass 1: a plain import binds its FIRST name
+                     "import tests.pkg.sub.load_tests\n",
+                     "import os, sys.load_tests\n"):
             with self.subTest(init=init.splitlines()[0]):
                 d = _mk({"tests/test_a.py": self.TC, "tests/pkg/__init__.py": init,
                          "tests/pkg/test_b.py": self.TC})
                 self.assertNotIn("binds load_tests", self._note(detect_verify(d)))
+
+    def test_real_load_tests_imports_still_count(self):
+        for init in ("from .support import load_tests\n", "import helpers as load_tests\n",
+                     "from .support import (\n    load_tests,\n)\n"):
+            with self.subTest(init=init.splitlines()[0]):
+                d = _mk({"tests/test_a.py": self.TC, "tests/pkg/__init__.py": init,
+                         "tests/pkg/test_b.py": self.TC})
+                self.assertIn("binds load_tests", self._note(detect_verify(d)))
 
     def test_outside_files_matching_discovers_pattern_are_reported(self):
         # grok: `test.py`, `src/testfoo.py` match test*.py yet sit outside tests/
