@@ -57,7 +57,7 @@ Each fix was written against a test that failed first.
   when the project has it (a pytest config, or `python3 -m pytest --version` succeeds in that root — its only execution; pytest
   runs unittest TestCases too), otherwise `python3 -m unittest discover -s tests` with a note stating what
   discover can skip without failing (`load_tests` hooks, module-level aliases, test files outside `tests/`,
-  indirect-base classes, bare functions, non-package test dirs) and which of those a text scan saw — an
+  indirect-base classes, bare functions, non-package test dirs) and which of those a scan of the parsed code saw — an
   observation to confirm at init, not a completeness claim (owner decision after three single-judge passes kept
   finding new skip shapes, task 098). It never suggests an uninstalled pytest. Each `code_roots` checkout is
   inspected too; this workspace now gets `cd playbook-plugin && python3 scripts/verify` — exactly its declared

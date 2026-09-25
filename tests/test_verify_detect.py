@@ -182,7 +182,7 @@ class DetectsThisProjectsShape(_NoPytest):
         for shape in ("load_tests", "module-level aliases", "outside `tests/`",
                       "indirect base", "STARTING POINT", "Ran N tests"):
             self.assertIn(shape, note)
-        self.assertIn("None of these shapes was seen by a text scan", note)
+        self.assertIn("None of these shapes was seen by a scan", note)
 
     def test_the_probe_is_the_one_execution(self):
         # `python3 -m pytest --version`, output discarded; a failure means False
@@ -267,6 +267,8 @@ class DetectsThisProjectsShape(_NoPytest):
             {"tox.ini": "[tox]\nenvlist = py310\n  [pytest]\n"},
             {"setup.cfg": "[metadata]\n  [tool:pytest]\n"},
             {"pyproject.toml": '[project]\ndescription = """\n[tool.pytest.ini_options]\n"""\n'},
+            # single judge, pass 2: an empty `[tool.pytest]` table is no pytest config
+            {"pyproject.toml": "[tool.pytest]\n# nothing here\n"},
         ]
         for files in not_config:
             with self.subTest(files=sorted(files)):
@@ -287,11 +289,28 @@ class DetectsThisProjectsShape(_NoPytest):
                      "from .support import load_tests as _lt\n",
                      # D6-amended single judge, pass 1: a plain import binds its FIRST name
                      "import tests.pkg.sub.load_tests\n",
-                     "import os, sys.load_tests\n"):
+                     "import os, sys.load_tests\n",
+                     # single judge, pass 2: a backslash-continued string literal
+                     'x = "\\\nload_tests = 1"\n'):
             with self.subTest(init=init.splitlines()[0]):
                 d = _mk({"tests/test_a.py": self.TC, "tests/pkg/__init__.py": init,
                          "tests/pkg/test_b.py": self.TC})
                 self.assertNotIn("binds load_tests", self._note(detect_verify(d)))
+
+    def test_shapes_inside_a_docstring_are_not_reported(self):
+        # single judge, pass 2: the scan must see code, not text (now via ast)
+        doc = '"""Example:\n\nfrom helper import *\ndef test_x(): pass\ntest_y = 1\nclass TestZ: pass\n"""\n'
+        d = _mk({"tests/test_a.py": doc + self.TC, "tests/pkg/__init__.py": doc,
+                 "tests/pkg/test_b.py": self.TC})
+        note = self._note(detect_verify(d))
+        for shape in ("has an `import *`", "has a module-level `def test", "has a module-level test alias",
+                      "whose base is not exactly", "binds load_tests"):
+            self.assertNotIn(shape, note)
+
+    def test_an_unparseable_test_file_is_reported(self):
+        note = self._note(detect_verify(_mk({"tests/test_a.py": self.TC,
+                                             "tests/test_bad.py": "def (:\n"})))
+        self.assertIn("`tests/test_bad.py` could not be parsed", note)
 
     def test_real_load_tests_imports_still_count(self):
         for init in ("from .support import load_tests\n", "import helpers as load_tests\n",
