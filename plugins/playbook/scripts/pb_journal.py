@@ -195,7 +195,10 @@ def _fit_error(rec: dict, error) -> str:
     s = "".join(ch for ch in s if ch >= " " and ch != "\x7f")
     s = s.replace('"', "'").replace("\\", "/")
     s = _TOKENISH.sub("<redacted>", s)
-    base = len((json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+    # "\r\n", not "\n": `_write_record` opens without O_BINARY, so on Windows the
+    # text-mode fd writes the newline as CRLF — one byte more than on POSIX
+    # (caught by the Windows CI lane, run 36107317940: 513 bytes).
+    base = len((json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\r\n").encode("utf-8"))
     budget = _LINE_FLOOR - base - len(',"error":""'.encode("utf-8"))
     if budget < 8:
         return ""

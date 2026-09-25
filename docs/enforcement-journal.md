@@ -115,7 +115,9 @@ the output's first line (a spawn error such as `(error: claude CLI not found)`).
 It comes from a CLI's stderr, so it is sanitized: control characters are dropped,
 `"` becomes `'` and `\` becomes `/`, and token-shaped runs (an `sk-`/`xai-`/`ghp_`
 style key, or 32+ key characters in a row) become `<redacted>`. It is then cut to
-the bytes the rest of the record leaves under the 512-byte atomic-append floor, and
+the bytes the rest of the record leaves under the 512-byte atomic-append floor
+(counting the newline as two bytes: on Windows the journal's text-mode write
+emits CRLF), and
 left out when fewer than 8 bytes remain — the field can shorten, never lengthen a
 line past the floor.
 
