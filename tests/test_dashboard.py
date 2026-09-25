@@ -251,7 +251,7 @@ class PanelResolution(unittest.TestCase):
         by = {s["spec"]: s for s in panel["seats"]}
         self.assertEqual(by["opus"]["provider"], "claude")
         self.assertEqual(by["opus"]["effort"], "high")
-        self.assertEqual(by["opus"]["label"], "claude:claude-opus-4-8[1m]:high")
+        self.assertEqual(by["opus"]["label"], "claude:claude-opus-5-5[1m]:high")
         self.assertEqual((by["codex:gpt-5.6-sol:high"]["model"], by["codex:gpt-5.6-sol:high"]["effort"]), ("gpt-5.6-sol", "high"))
         self.assertEqual((by["grok:grok-4.6:medium"]["model"], by["grok:grok-4.6:medium"]["effort"]), ("grok-4.6", "medium"))
         self.assertEqual(panel["default_judge"], "codex:gpt-5.6-sol:high")
@@ -1170,7 +1170,7 @@ class BootstrapBlock(unittest.TestCase):
         self.assertIn("panel: opus, codex:gpt-5.6-sol:high, grok:grok-4.6:medium · default judge: codex:gpt-5.6-sol:high", block[1])
         self.assertIn("reviews: 2 judge runs across 2 seat(s) · ok 50% · timeout 50%", block[2])
         self.assertIn("slowest seat: grok:grok-4.6:medium 11m40s", block[3])
-        self.assertIn("no runs: claude:claude-opus-4-8[1m]:high", block[3])
+        self.assertIn("no runs: claude:claude-opus-5-5[1m]:high", block[3])
         self.assertIn("template unchanged since exam testA (2026-09-07)", block[4])
         self.assertEqual(block[5], "full picture + exact commands: tasks dashboard")
 

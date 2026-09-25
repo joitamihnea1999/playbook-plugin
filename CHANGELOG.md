@@ -5,8 +5,8 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 ## [Unreleased]
 
 Branch `fix/1.5.46-batch`. Task 085: the six defects parked by the 1.5.45 release panel (task 083)
-plus the tool defect found at its close. Task 086: PLAN S3. Task 087: PLAN S4. Task 088: PLAN S5. Task 093: PLAN S7b. Each fix
-was written against a test that failed first.
+plus the tool defect found at its close. Task 086: PLAN S3. Task 087: PLAN S4. Task 088: PLAN S5. Task 093: PLAN S7b. Task 094: the `opus` alias moves to Opus 5.5.
+Each fix was written against a test that failed first.
 
 ### Added
 
@@ -25,6 +25,14 @@ was written against a test that failed first.
   before, every promotion read as resolved, so 25 findings pointing at deleted stub tasks were invisible.
   A dated `[deferred: … YYYY-MM-DD …]` records an owner decision: it is not open, but the listing ends with
   how many there are.
+
+### Changed
+
+- **The shipped `opus` alias names Opus 5.5 (1M context)** (task 094). `provider/models.json` maps `opus` to
+  `claude-opus-5-5[1m]` (was `claude-opus-4-8[1m]`), so every panel or default judge that says `opus` now runs
+  Opus 5.5, unless a project's `.agent/models.json` shadows the alias. Opus 4.8 stays reachable by an explicit
+  pin: `claude:claude-opus-4-8[1m]`, or the named variant `claude:opus-4-8-1m`. The Claude adapter gains the
+  named variant `opus-5-5-1m`, and its legacy fan-out uses it. A test pins the shipped mapping and both 4.8 pins.
 
 ### Fixed
 

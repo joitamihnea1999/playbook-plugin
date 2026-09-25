@@ -42,7 +42,8 @@ class ClaudeAdapter(ProviderAdapter):
 
     # Variant label → --model CLI argument
     _MODEL_MAP = {
-        "opus-4-8-1m": "claude-opus-4-8[1m]",
+        "opus-5-5-1m": "claude-opus-5-5[1m]",
+        "opus-4-8-1m": "claude-opus-4-8[1m]",  # explicit pin to the previous Opus
         "sonnet-4-6": "claude-sonnet-4-6",
         "haiku-4-5": "claude-haiku-4-5",
     }
@@ -53,7 +54,7 @@ class ClaudeAdapter(ProviderAdapter):
     # Variants in the default panel fan-out (claude isn't in the shipped panel
     # default anyway — see models.json "panel"; this backs the legacy fan-out
     # fallback and bare-"claude" naming).
-    _DEFAULT_PANEL_VARIANTS = ("opus-4-8-1m", "sonnet-4-6", "haiku-4-5")
+    _DEFAULT_PANEL_VARIANTS = ("opus-5-5-1m", "sonnet-4-6", "haiku-4-5")
 
     def __init__(self, session_id: str, project_root: Path) -> None:
         self._session_id = session_id

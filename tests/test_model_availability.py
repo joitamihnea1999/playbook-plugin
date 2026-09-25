@@ -364,6 +364,34 @@ class CheckPinsTest(unittest.TestCase):
             mc.parse_codex_cache("[1,2,3]")
 
 
+class ShippedOpusAliasTest(unittest.TestCase):
+    """Task 094: the shipped `opus` alias names Opus 5.5 (1M); Opus 4.8 stays
+    reachable by an explicit pin. Reads the shipped file itself, not the
+    import-time MODEL_ALIASES, which a cwd `.agent/models.json` can shadow."""
+
+    _SHIPPED = Path(sandbox.__file__).parent / "models.json"
+
+    def test_shipped_opus_alias_is_opus_5_5_1m(self):
+        aliases = sandbox._parse_models_json(self._SHIPPED)
+        self.assertEqual(aliases["opus"], ("claude", "claude-opus-5-5[1m]", ()))
+        with mock.patch.object(sandbox, "MODEL_ALIASES", aliases):
+            self.assertEqual(sandbox.resolve_judge_spec("opus"), ("claude", "claude-opus-5-5[1m]"))
+
+    def test_opus_4_8_reachable_by_explicit_pin(self):
+        from provider.adapters.claude import ClaudeAdapter
+        adapter = ClaudeAdapter("s", Path("."))
+        for spec in ("claude:claude-opus-4-8[1m]", "claude:opus-4-8-1m"):
+            prov, variant = sandbox.resolve_judge_spec(spec)
+            self.assertEqual(prov, "claude")
+            argv = adapter.headless_argv("p", variant).argv
+            self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-8[1m]", spec)
+
+    def test_named_opus_5_5_variant_maps_to_1m_id(self):
+        from provider.adapters.claude import ClaudeAdapter
+        argv = ClaudeAdapter("s", Path(".")).headless_argv("p", "opus-5-5-1m").argv
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-5-5[1m]")
+
+
 class ProbeArgvTest(unittest.TestCase):
     def test_codex_probe_argv_carries_effort(self):
         # D4/I16: the probe must send the same model_reasoning_effort the
