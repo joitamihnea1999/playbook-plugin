@@ -18,6 +18,20 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "plugins/playbook"))
 from tasks.verify_detect import cli_detect_verify, detect_verify  # noqa: E402
+from tasks import verify_detect as vd  # noqa: E402
+from unittest import mock  # noqa: E402
+
+
+class _NoPytest(unittest.TestCase):
+    """Task 098: the detector probes `python3 -m pytest --version`. Every test
+    pins the answer, so no result depends on what this machine has installed."""
+    PYTEST_INSTALLED = False
+
+    def setUp(self):
+        patcher = mock.patch.object(vd, "_pytest_available",
+                                    return_value=self.PYTEST_INSTALLED)
+        self.probe = patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 def _mk(files: dict) -> Path:
@@ -29,7 +43,7 @@ def _mk(files: dict) -> Path:
     return d
 
 
-class DetectVerify(unittest.TestCase):
+class DetectVerify(_NoPytest):
     def test_python_full_stack(self):
         d = _mk({"pyproject.toml": "[tool.pytest.ini_options]\n[tool.mypy]\n[tool.ruff]\n",
                  "tests/test_x.py": ""})
@@ -122,7 +136,7 @@ class DetectVerify(unittest.TestCase):
             self.assertEqual(cli_detect_verify(["--nope"], Path("/tmp")), 2)
 
 
-class DetectsThisProjectsShape(unittest.TestCase):
+class DetectsThisProjectsShape(_NoPytest):
     """Task 096 (PLAN S10, from 079): `tasks detect-verify` found no toolchain for
     this very workspace — its suite runs through `scripts/verify` inside a
     `code_roots` checkout, and bare stdlib unittest was always read as pytest."""
@@ -141,129 +155,151 @@ class DetectsThisProjectsShape(unittest.TestCase):
         self.assertEqual(detect_verify(d)["command"], "bash scripts/verify")
 
     TC = "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n"
+    UD = "python3 -m unittest discover -s tests"
 
-    def test_bare_unittest_suite_on_positive_evidence(self):
-        d = _mk({"tests/test_a.py": self.TC,
-                 "tests/test_b.py": "from unittest import mock, TestCase\n\n\nclass U(TestCase):\n    pass\n"})
-        self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
+    def _note(self, r):
+        notes = [n for n in r["notes"] if "unittest discover -s tests` is suggested" in n]
+        self.assertEqual(len(notes), 1, r["notes"])
+        return notes[0]
 
-    def test_mixed_or_unproven_suites_stay_pytest(self):
-        for files in (
-            {"tests/test_a.py": "import unittest\n", "tests/test_b.py": "import pytest\n"},
-            {"tests/test_a.py": "import unittest\n", "tests/test_b.py": "def test_x():\n    assert 1\n"},
-            {"tests/test_a.py": "import unittest\n", "tests/conftest.py": ""},
-            {"tests/test_a.py": "import unittest\n", "pytest.ini": ""},
-            # impl r1 (grok Critical): `unittest.mock` is not a unittest suite —
-            # `unittest discover` ran 0 tests on this tree and exited 0
-            {"tests/test_a.py": "from unittest.mock import patch\n\n\ndef test_x():\n    assert patch\n"},
-            # impl r1 (codex ×2): a module-level pytest function beside a TestCase
-            {"tests/test_a.py": self.TC + "\n\ndef test_bare():\n    assert 0\n"},
-            # impl r1 (grok): a conftest.py below tests/ is pytest evidence
-            {"tests/unit/test_a.py": self.TC, "tests/unit/conftest.py": ""},
-            # impl r2 (codex ×2): discover never enters a subdirectory without
-            # __init__.py — the nested test would silently not run
-            {"tests/test_a.py": self.TC, "tests/unit/test_b.py": self.TC},
-            # impl r2 (codex ×2, grok): a plain pytest `class Test…` beside a TestCase
-            {"tests/test_a.py": self.TC + "\n\nclass TestPlain:\n    def test_x(self):\n        assert 0\n"},
-            # impl r2 (grok): pytest's other default file pattern
-            {"tests/test_a.py": self.TC, "tests/widget_test.py": "def test_fails():\n    assert False\n"},
-        ):
-            with self.subTest(files=sorted(files)):
-                self.assertEqual(detect_verify(_mk(files))["command"], "python3 -m pytest")
+    # ── task 098 (owner): pytest where the project has it, else unittest + its limits ──
+    def test_pytest_config_suggests_pytest_without_probing(self):
+        r = detect_verify(_mk({"pytest.ini": "", "tests/test_a.py": self.TC}))
+        self.assertEqual(r["command"], "python3 -m pytest")
+        self.probe.assert_not_called()
 
-    def test_nested_unittest_package_is_still_unittest(self):
-        # control for the r2 rule: a nested dir WITH __init__.py is discoverable
-        d = _mk({"tests/test_a.py": self.TC, "tests/unit/__init__.py": "",
-                 "tests/unit/test_b.py": self.TC})
-        self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
+    def test_installed_pytest_is_suggested_it_runs_testcases_too(self):
+        self.probe.return_value = True
+        r = detect_verify(_mk({"tests/test_a.py": self.TC}))
+        self.assertEqual(r["command"], "python3 -m pytest")
+        self.assertFalse(any("unittest discover" in n for n in r["notes"]))
 
-    def test_suggested_unittest_command_runs_every_detected_test(self):
-        # end to end (impl r2, codex-high): the suggestion must not pass by
-        # running fewer tests than the tree holds
+    def test_no_pytest_means_unittest_never_an_absent_pytest(self):
+        r = detect_verify(_mk({"tests/test_a.py": self.TC}))
+        self.assertEqual(r["command"], self.UD)
+        note = self._note(r)
+        # the limits are stated whatever the tree holds — not a completeness claim
+        for shape in ("load_tests", "module-level aliases", "outside `tests/`",
+                      "indirect base", "STARTING POINT", "Ran N tests"):
+            self.assertIn(shape, note)
+        self.assertIn("None of these shapes was seen by a text scan", note)
+
+    def test_the_probe_is_the_one_execution(self):
+        # `python3 -m pytest --version`, output discarded; a failure means False
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append((argv, kw))
+            return mock.Mock(returncode=1)
+
+        with mock.patch.object(vd.subprocess, "run", side_effect=fake_run):
+            self.assertFalse(_REAL_PROBE())
+        self.assertEqual(calls[0][0][1:], ["-m", "pytest", "--version"])
+        self.assertIs(calls[0][1]["stdout"], vd.subprocess.DEVNULL)
+        with mock.patch.object(vd.subprocess, "run", side_effect=OSError("no python3")):
+            self.assertFalse(_REAL_PROBE())
+
+    def test_suggested_unittest_command_runs_every_test_on_a_clean_tree(self):
         import subprocess
         import sys as _sys
         body = ("import unittest\n\n\nclass T(unittest.TestCase):\n"
                 "    def test_one(self):\n        pass\n\n    def test_two(self):\n        pass\n")
         d = _mk({"tests/test_a.py": body, "tests/unit/__init__.py": "", "tests/unit/test_b.py": body})
-        self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
+        self.assertEqual(detect_verify(d)["command"], self.UD)
         r = subprocess.run([_sys.executable, "-m", "unittest", "discover", "-s", "tests"],
                            cwd=d, capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Ran 4 tests", r.stderr)
 
-    # ── task 098: the D6-amended single-judge review of 096 (grok, pass 1) ──
-    def test_base_named_like_testcase_is_not_a_testcase(self):
-        # (1) a plain `BaseTestCase` only CONTAINS the word; discover skips TestHidden
-        body = self.TC + ("\n\nclass BaseTestCase:\n    pass\n\n\n"
-                          "class TestHidden(BaseTestCase):\n    def test_hidden(self):\n        assert 0\n")
-        self.assertEqual(detect_verify(_mk({"tests/test_a.py": body}))["command"], "python3 -m pytest")
+    # The shapes the 096/098 reviews found discover can skip. They are no longer
+    # a claim of coverage: the detector REPORTS them in the note (owner, task 098).
+    def test_each_skip_shape_is_reported_in_the_note(self):
+        cases = [
+            ("unittest.mock only, a bare pytest function",
+             {"tests/test_a.py": "from unittest.mock import patch\n\n\ndef test_x():\n    assert patch\n"},
+             "module-level `def test"),
+            ("a plain pytest class beside a TestCase",
+             {"tests/test_a.py": self.TC + "\n\nclass TestPlain:\n    def test_x(self):\n        assert 0\n"},
+             "whose base is not exactly TestCase"),
+            ("a base that only CONTAINS the word (pass 1)",
+             {"tests/test_a.py": self.TC + "\n\nclass BaseTestCase:\n    pass\n\n\n"
+                                           "class TestHidden(BaseTestCase):\n    def test_h(self):\n        assert 0\n"},
+             "whose base is not exactly TestCase"),
+            ("load_tests by def (pass 1)",
+             {"tests/test_a.py": self.TC, "tests/pkg/__init__.py": "def load_tests(l, t, p):\n    return t\n",
+              "tests/pkg/test_b.py": self.TC},
+             "`tests/pkg/__init__.py` binds load_tests"),
+            ("load_tests by import (pass 2)",
+             {"tests/test_a.py": self.TC, "tests/pkg/__init__.py": "from .support import load_tests\n",
+              "tests/pkg/test_b.py": self.TC},
+             "`tests/pkg/__init__.py` binds load_tests"),
+            ("load_tests by assignment (pass 2)",
+             {"tests/test_a.py": self.TC, "tests/pkg/__init__.py": "load_tests = _load\n",
+              "tests/pkg/test_b.py": self.TC},
+             "`tests/pkg/__init__.py` binds load_tests"),
+            ("import * in a package (pass 3)",
+             {"tests/test_a.py": self.TC, "tests/pkg/__init__.py": "from .support import *\n",
+              "tests/pkg/test_b.py": self.TC},
+             "`tests/pkg/__init__.py` has an `import *`"),
+            ("module-level aliases (pass 3)",
+             {"tests/test_a.py": self.TC + "\n\ndef _f():\n    assert 0\n\n\ntest_fail = _f\nTestHidden = T\n"},
+             "module-level test alias"),
+            ("a root-level test file (pass 1)",
+             {"tests/test_a.py": self.TC, "widget_test.py": "def test_f():\n    assert 0\n"},
+             "`widget_test.py` is a test file outside tests/"),
+            ("a test file below the root, outside tests/ (pass 2)",
+             {"tests/test_a.py": self.TC, "src/foo_test.py": "def test_f():\n    assert 0\n"},
+             "`src/foo_test.py` is a test file outside tests/"),
+            ("a test subdirectory that is not a package",
+             {"tests/test_a.py": self.TC, "tests/unit/test_b.py": self.TC},
+             "`tests/unit/` is not a package"),
+            ("pytest's own files under tests/",
+             {"tests/test_a.py": self.TC, "tests/unit/conftest.py": "", "tests/widget_test.py": ""},
+             "is a pytest-only file"),
+        ]
+        for label, files, expect in cases:
+            with self.subTest(label):
+                r = detect_verify(_mk(files))
+                self.assertEqual(r["command"], self.UD)          # never an absent pytest
+                self.assertIn(expect, self._note(r))
 
-    def test_exact_testcase_bases_stay_unittest(self):
-        # control for (1): the exact names still count
-        body = ("import unittest\nfrom unittest import TestCase\n\n\n"
-                "class TestA(unittest.TestCase):\n    def test_a(self):\n        pass\n\n\n"
-                "class TestB(TestCase):\n    def test_b(self):\n        pass\n")
-        self.assertEqual(detect_verify(_mk({"tests/test_a.py": body}))["command"],
-                         "python3 -m unittest discover -s tests")
-
-    def test_load_tests_in_a_package_is_detected_and_reported(self):
-        # (2) a package load_tests() stops discover's recursion into it
-        d = _mk({"tests/test_a.py": self.TC,
-                 "tests/pkg/__init__.py": "def load_tests(loader, tests, pattern):\n    return tests\n",
-                 "tests/pkg/test_b.py": self.TC})
-        r = detect_verify(d)
-        self.assertEqual(r["command"], "python3 -m pytest")
-        self.assertTrue(any("discover may skip subdirectories" in n and "tests/pkg/__init__.py" in n
-                            for n in r["notes"]), r["notes"])
-
-    def test_root_level_test_files_are_seen(self):
-        # (3) a pytest file at the project root, beside a real unittest tests/
-        for extra in ({"widget_test.py": "def test_fails():\n    assert False\n"},
-                      {"test_root.py": "def test_fails():\n    assert False\n"}):
-            with self.subTest(extra=sorted(extra)):
-                d = _mk({"tests/test_a.py": self.TC, **extra})
-                self.assertEqual(detect_verify(d)["command"], "python3 -m pytest")
-
-    # ── task 098, pass 2 of the same judge ──
-    def test_test_files_anywhere_outside_tests_are_seen(self):
-        for extra in ({"src/foo_test.py": "def test_fails():\n    assert False\n"},
-                      {"pkg/test_extra.py": "def test_fails():\n    assert False\n"},
-                      {"src/pkg/test_b.py": "def test_fails():\n    assert False\n"}):
-            with self.subTest(extra=sorted(extra)):
-                d = _mk({"tests/test_a.py": self.TC, **extra})
-                self.assertEqual(detect_verify(d)["command"], "python3 -m pytest")
-
-    def test_vendored_and_hidden_dirs_are_not_walked(self):
-        # control: a virtualenv / node_modules / dot-dir test file is not the project's
+    def test_hidden_and_vendored_dirs_are_not_observed(self):
         for extra in ({".venv/lib/site-packages/x/test_x.py": "def test_x(): pass\n"},
                       {"node_modules/pkg/test_y.py": "def test_y(): pass\n"},
                       {".git/hooks/test_z.py": "def test_z(): pass\n"}):
             with self.subTest(extra=sorted(extra)):
-                d = _mk({"tests/test_a.py": self.TC, **extra})
-                self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
+                note = self._note(detect_verify(_mk({"tests/test_a.py": self.TC, **extra})))
+                self.assertIn("None of these shapes was seen", note)
 
-    def test_load_tests_bound_by_assignment_or_import_is_detected(self):
-        for init in ("from .support import load_tests\n",
-                     "def _load(loader, tests, pattern):\n    return tests\n\n\nload_tests = _load\n"):
-            with self.subTest(init=init.splitlines()[-1]):
-                d = _mk({"tests/test_a.py": self.TC, "tests/pkg/__init__.py": init,
-                         "tests/pkg/test_b.py": self.TC})
-                r = detect_verify(d)
-                self.assertEqual(r["command"], "python3 -m pytest")
-                self.assertTrue(any("load_tests" in n for n in r["notes"]), r["notes"])
+    def test_exact_testcase_bases_are_not_reported(self):
+        body = ("import unittest\nfrom unittest import TestCase\n\n\n"
+                "class TestA(unittest.TestCase):\n    def test_a(self):\n        pass\n\n\n"
+                "class TestB(TestCase):\n    def test_b(self):\n        pass\n")
+        note = self._note(detect_verify(_mk({"tests/test_a.py": body, "tests/pkg/__init__.py": "",
+                                             "tests/pkg/test_b.py": self.TC})))
+        self.assertIn("None of these shapes was seen", note)
 
     def test_this_workspace_shape_exact(self):
         # outer project: no toolchain of its own, one code_root holding scripts/verify
         d = _mk({".agent/config.json": json.dumps({"code_roots": ["playbook-plugin"]}),
                  "playbook-plugin/scripts/verify": self.PY,
                  "playbook-plugin/tests/test_x.py": "import unittest\n"})
+        # task 098: one code root and nothing at the outer root → the plain form,
+        # exactly what this workspace declares as its verify contract
         self.assertEqual(detect_verify(d)["command"],
-                         "(cd playbook-plugin && python3 scripts/verify)")
+                         "cd playbook-plugin && python3 scripts/verify")
+
+    def test_several_code_roots_keep_one_subshell_each(self):
+        PY = self.PY
+        d = _mk({".agent/config.json": json.dumps({"code_roots": ["a", "b"]}),
+                 "a/scripts/verify": PY, "b/scripts/verify": PY})
+        self.assertEqual(detect_verify(d)["command"],
+                         "(cd a && python3 scripts/verify) && (cd b && python3 scripts/verify)")
 
     def test_code_root_with_shell_metacharacters_is_quoted(self):
         d = _mk({".agent/config.json": json.dumps({"code_roots": ["a b;x"]}),
                  "a b;x/scripts/verify": self.PY})
-        self.assertEqual(detect_verify(d)["command"], "(cd 'a b;x' && python3 scripts/verify)")
+        self.assertEqual(detect_verify(d)["command"], "cd 'a b;x' && python3 scripts/verify")
 
     def test_traversal_code_root_is_ignored(self):
         outside = _mk({"scripts/verify": self.PY})
@@ -280,6 +316,9 @@ class DetectsThisProjectsShape(unittest.TestCase):
         except (OSError, NotImplementedError):
             self.skipTest("symlinks unavailable (unprivileged Windows)")
         self.assertEqual(detect_verify(d)["command"], "")
+
+
+_REAL_PROBE = vd._pytest_available   # captured at import, before any test patches it
 
 
 if __name__ == "__main__":

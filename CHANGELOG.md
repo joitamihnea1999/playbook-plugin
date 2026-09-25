@@ -53,16 +53,15 @@ Each fix was written against a test that failed first.
   sets it and uploads the same `verify-windows-full.txt` as before. No test, check or lane was removed. The
   log is written as UTF-8 bytes and a failure to write it never changes a verdict.
 - **`tasks detect-verify` finds a `scripts/verify` entrypoint, a bare unittest suite, and `code_roots`**
-  (task 096). A `scripts/verify` file is suggested alone for its root; `python3 -m unittest discover -s tests`
-  replaces the pytest guess only when every `tests/test_*.py` imports unittest (not merely `unittest.mock`),
-  defines a TestCase and no bare `def test…` or `class Test…` whose base is not exactly a TestCase name,
-  none imports pytest, every test subdirectory is a package and none binds `load_tests` (reported as a
-  note), and no `conftest.py` or `*_test.py` exists and no test file exists outside `tests/` (otherwise
-  pytest, which runs TestCases too; the last three rules from the D6-amended single-judge review, task 098);
-  each
-  `code_roots` checkout (validated like the freshness fingerprint, symlinks leaving the project skipped) is
-  inspected too, as `(cd <root> && …)`. For this workspace it now prints `(cd playbook-plugin && python3
-  scripts/verify)`; before, it found nothing.
+  (tasks 096, 098). A `scripts/verify` file is suggested alone for its root. For Python tests it suggests pytest
+  when the project has it (a pytest config, or `python3 -m pytest --version` succeeds — its one execution; pytest
+  runs unittest TestCases too), otherwise `python3 -m unittest discover -s tests` with a note stating what
+  discover can skip without failing (`load_tests` hooks, module-level aliases, test files outside `tests/`,
+  indirect-base classes, bare functions, non-package test dirs) and which of those a text scan saw — an
+  observation to confirm at init, not a completeness claim (owner decision after three single-judge passes kept
+  finding new skip shapes, task 098). It never suggests an uninstalled pytest. Each `code_roots` checkout is
+  inspected too; this workspace now gets `cd playbook-plugin && python3 scripts/verify` — exactly its declared
+  verify; before, it found nothing.
 - **`tasks environment` and `tasks doctor` label the agent CLIs as the support matrix does** (task 096): codex
   and grok are supported judge seats, agy and pi experimental; the "panel vendor" wording is gone.
 - **Review-spend records say why a judge failed** (task 096). A `fail`, `dnf` or `timeout` record carries
