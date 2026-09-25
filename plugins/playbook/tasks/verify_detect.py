@@ -51,9 +51,20 @@ _BARE_TEST_FUNC = re.compile(r"^(?:async\s+)?def\s+test", re.M)
 # a `class Test…` whose bases do not name a TestCase — pytest collects it,
 # unittest discover does not (impl-panel r2, codex ×2 + grok, reproduced)
 _TEST_CLASS = re.compile(r"^\s*class\s+Test\w*\s*(?:\(([^)]*)\))?\s*:", re.M)
+# The base names that make a `class Test…` a real TestCase — compared EXACTLY,
+# never as a substring: a plain `BaseTestCase` only contains the word (task 098,
+# D6-amended single-judge review of 096, grok: discover skipped its tests, exit 0).
+_TESTCASE_BASES = frozenset({"TestCase", "unittest.TestCase",
+                             "IsolatedAsyncioTestCase", "unittest.IsolatedAsyncioTestCase"})
+# a package `load_tests()` replaces discovery below that package (task 098)
+_LOAD_TESTS = re.compile(r"^\s*def\s+load_tests\s*\(", re.M)
 
 
-def _unittest_only(root: Path) -> bool:
+def _is_testcase_base(bases) -> bool:
+    return any(b.strip() in _TESTCASE_BASES for b in (bases or "").split(","))
+
+
+def _unittest_only(root: Path, notes: "Optional[list[str]]" = None) -> bool:
     """Task 096: a bare stdlib-unittest suite (this very project) was read as
     pytest. Unittest only on POSITIVE evidence that `unittest discover` runs
     every test: each `tests/test_*.py` imports unittest (not merely
@@ -64,13 +75,28 @@ def _unittest_only(root: Path) -> bool:
     project root or `tests/`; and every subdirectory holding a test file is a
     package (`__init__.py`), or discover never enters it. A pytest test needs
     no import at all, so "no pytest import" proves nothing — and when in doubt
-    pytest is the safe suggestion: it runs unittest TestCases too."""
+    pytest is the safe suggestion: it runs unittest TestCases too.
+
+    Task 098 (the D6-amended single-judge review of 096): a `class Test…` base
+    must be EXACTLY a TestCase name, not merely contain the word; a
+    `load_tests()` in any package `__init__.py` under `tests/` means discover
+    may skip subdirectories — it is appended to `notes`; and a `*_test.py` or
+    `test_*.py` at the project ROOT (which `discover -s tests` never reads)
+    rules unittest out too."""
     tests = root / "tests"
     if not tests.is_dir() or _has(root, "conftest.py"):
         return False
     try:
         if any(tests.rglob("conftest.py")) or any(tests.rglob("*_test.py")):
             return False
+        if any(root.glob("*_test.py")) or any(root.glob("test_*.py")):
+            return False
+        for init in sorted(tests.rglob("__init__.py")):
+            if _LOAD_TESTS.search(_read(init)):
+                if notes is not None:
+                    notes.append(f"`{init.relative_to(root).as_posix()}` defines load_tests() — "
+                                 "unittest discover may skip subdirectories, so pytest is suggested.")
+                return False
         files = sorted(tests.rglob("test_*.py"))
     except OSError:
         return False
@@ -85,17 +111,17 @@ def _unittest_only(root: Path) -> bool:
         text = _read(f)
         if (_IMPORTS_PYTEST.search(text) or not _IMPORTS_UNITTEST.search(text)
                 or not _TESTCASE_CLASS.search(text) or _BARE_TEST_FUNC.search(text)
-                or any("TestCase" not in (m.group(1) or "") for m in _TEST_CLASS.finditer(text))):
+                or any(not _is_testcase_base(m.group(1)) for m in _TEST_CLASS.finditer(text))):
             return False
     return True
 
 
-def _python_components(root: Path) -> list[dict]:
+def _python_components(root: Path, notes: "Optional[list[str]]" = None) -> list[dict]:
     out: list[dict] = []
     # tests
     pytest_cfg = (_pyproject_has(root, "[tool.pytest") or _has(root, "pytest.ini", "tox.ini")
                   or "[tool:pytest]" in _read(root / "setup.cfg"))
-    if not pytest_cfg and _unittest_only(root):
+    if not pytest_cfg and _unittest_only(root, notes):
         out.append(_component("unittest", "python3 -m unittest discover -s tests",
                               "every tests/test_*.py imports unittest, none pytest"))
     elif pytest_cfg or (root / "tests").is_dir():
@@ -214,12 +240,12 @@ def _entrypoint_component(root: Path) -> Optional[dict]:
     return _component("scripts/verify", cmd, "the project's own verify entrypoint")
 
 
-def _root_components(root: Path) -> list[dict]:
+def _root_components(root: Path, notes: "Optional[list[str]]" = None) -> list[dict]:
     entry = _entrypoint_component(root)
     if entry is not None:
         return [entry]
     components: list[dict] = []
-    components += _python_components(root)
+    components += _python_components(root, notes)
     components += _node_components(root)
     components += _rust_components(root)
     components += _go_components(root)
@@ -272,18 +298,20 @@ def detect_verify(project_root: Optional[Path] = None) -> dict:
     keeps each root's cwd to itself (task 096).
     """
     root = Path(project_root) if project_root is not None else Path.cwd()
-    components = _root_components(root)
+    notes: list[str] = []
+    components = _root_components(root, notes)
     for rel in _code_root_dirs(root):
-        for c in _root_components(root / rel):
+        _root_notes: list[str] = []
+        for c in _root_components(root / rel, _root_notes):
             components.append(_component(f"{rel}:{c['tool']}",
                                          f"(cd {shlex.quote(rel)} && {c['cmd']})",
                                          f"code_roots `{rel}`: {c['reason']}"))
+        notes += [f"code_roots `{rel}`: {n}" for n in _root_notes]
 
     # De-dup by cmd while preserving order.
     seen: set[str] = set()
     unique = [c for c in components if not (c["cmd"] in seen or seen.add(c["cmd"]))]
 
-    notes: list[str] = []
     if not unique:
         notes.append("No known toolchain detected — set `verify` in .agent/config.json "
                      "by hand (a command that typechecks, tests, and lints everything).")

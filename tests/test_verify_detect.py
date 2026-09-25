@@ -191,6 +191,39 @@ class DetectsThisProjectsShape(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Ran 4 tests", r.stderr)
 
+    # ── task 098: the D6-amended single-judge review of 096 (grok, pass 1) ──
+    def test_base_named_like_testcase_is_not_a_testcase(self):
+        # (1) a plain `BaseTestCase` only CONTAINS the word; discover skips TestHidden
+        body = self.TC + ("\n\nclass BaseTestCase:\n    pass\n\n\n"
+                          "class TestHidden(BaseTestCase):\n    def test_hidden(self):\n        assert 0\n")
+        self.assertEqual(detect_verify(_mk({"tests/test_a.py": body}))["command"], "python3 -m pytest")
+
+    def test_exact_testcase_bases_stay_unittest(self):
+        # control for (1): the exact names still count
+        body = ("import unittest\nfrom unittest import TestCase\n\n\n"
+                "class TestA(unittest.TestCase):\n    def test_a(self):\n        pass\n\n\n"
+                "class TestB(TestCase):\n    def test_b(self):\n        pass\n")
+        self.assertEqual(detect_verify(_mk({"tests/test_a.py": body}))["command"],
+                         "python3 -m unittest discover -s tests")
+
+    def test_load_tests_in_a_package_is_detected_and_reported(self):
+        # (2) a package load_tests() stops discover's recursion into it
+        d = _mk({"tests/test_a.py": self.TC,
+                 "tests/pkg/__init__.py": "def load_tests(loader, tests, pattern):\n    return tests\n",
+                 "tests/pkg/test_b.py": self.TC})
+        r = detect_verify(d)
+        self.assertEqual(r["command"], "python3 -m pytest")
+        self.assertTrue(any("discover may skip subdirectories" in n and "tests/pkg/__init__.py" in n
+                            for n in r["notes"]), r["notes"])
+
+    def test_root_level_test_files_are_seen(self):
+        # (3) a pytest file at the project root, beside a real unittest tests/
+        for extra in ({"widget_test.py": "def test_fails():\n    assert False\n"},
+                      {"test_root.py": "def test_fails():\n    assert False\n"}):
+            with self.subTest(extra=sorted(extra)):
+                d = _mk({"tests/test_a.py": self.TC, **extra})
+                self.assertEqual(detect_verify(d)["command"], "python3 -m pytest")
+
     def test_this_workspace_shape_exact(self):
         # outer project: no toolchain of its own, one code_root holding scripts/verify
         d = _mk({".agent/config.json": json.dumps({"code_roots": ["playbook-plugin"]}),
