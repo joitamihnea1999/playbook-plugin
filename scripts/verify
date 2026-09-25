@@ -97,10 +97,38 @@ def decode(raw: bytes) -> str:
     return f"<undecodable output: {len(raw)} bytes, first bytes: {raw[:32].hex(' ')}>"
 
 
+# Task 096 (PLAN S10): when set, every child command's COMPLETE output is appended
+# here — the Windows CI job uploads it, so the evidence of a failure is the failing
+# run itself, uncapped (it replaced a second, 10-13 min re-run of the whole suite
+# whose output was a DIFFERENT invocation). The child env keeps the variable, so
+# tests/test_shell_fixtures.py appends each fixture's full transcript too.
+FULL_LOG_ENV = "PLAYBOOK_VERIFY_FULL_LOG"
+
+
+def full_log(header: str, text: str) -> None:
+    """Append one block to $PLAYBOOK_VERIFY_FULL_LOG. UTF-8 bytes, never raises:
+    the log is evidence, and must never turn a check's verdict."""
+    path = os.environ.get(FULL_LOG_ENV)
+    if not path:
+        return
+    try:
+        with open(path, "ab") as fh:
+            fh.write(f"===== {header} =====\n{text}\n\n".encode("utf-8", "replace"))
+    except Exception:
+        pass
+
+
 def run(cmd: list[str], cwd: Path | str = ROOT, timeout: int = 900):
-    p = subprocess.run(cmd, cwd=str(cwd), env=env(), timeout=timeout,
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return p.returncode, decode(p.stdout)
+    try:
+        p = subprocess.run(cmd, cwd=str(cwd), env=env(), timeout=timeout,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except subprocess.TimeoutExpired as exc:
+        full_log(f"{' '.join(map(str, cmd))} (cwd {cwd}) — TIMED OUT after {timeout}s",
+                 decode(exc.output or b""))
+        raise
+    out = decode(p.stdout)
+    full_log(f"{' '.join(map(str, cmd))} (cwd {cwd}) — rc {p.returncode}", out)
+    return p.returncode, out
 
 
 def tail(text: str, n: int = 2) -> str:
@@ -355,7 +383,9 @@ def _unittest():
     # PYTHONPATH into every subprocess-spawning test and broke the Windows shell
     # fixtures (a false positive, not a real leak). See that test's module
     # docstring.
-    rc, out = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"])
+    # -v when the full log is on: every test id lands in it (task 096)
+    verbosity = "-v" if os.environ.get(FULL_LOG_ENV) else "-q"
+    rc, out = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", verbosity])
     if rc == 0:
         return PASS, ut_tail(out)
     return FAIL, ut_tail(out), ut_fails(out)
@@ -455,7 +485,19 @@ def _diffcheck():
     return FAIL, tail(out), cap([ln.strip() for ln in out.splitlines() if ln.strip()])
 
 
+def utf8_console(stream):
+    """086 W6: a cp1252 Windows console crashed the report on U+2260 and cut the
+    failure list short. Re-encode as UTF-8, replacing what cannot be written."""
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:                    # not a TextIOWrapper, or already detached
+        pass
+    return stream
+
+
 def main() -> int:
+    utf8_console(sys.stdout)
+    utf8_console(sys.stderr)
     ap = argparse.ArgumentParser(description="Run every check in this repo.")
     ap.add_argument("--json", action="store_true", help="machine-readable summary on stdout")
     args = ap.parse_args()

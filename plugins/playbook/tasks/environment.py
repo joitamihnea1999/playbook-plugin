@@ -39,16 +39,20 @@ SEV_RECOMMENDED = "recommended"
 SEV_WARNING = "warning"
 
 # (why it helps, concrete install command or "" when the vendor's docs are the
-# honest answer). These are non-Claude panel vendors — claude is the reference
-# platform you're already running, so it is not listed.
+# honest answer). These are the non-Claude judge seats — claude is the reference
+# platform you're already running, so it is not listed. The labels follow the
+# support matrix in docs/providers.md (task 096): codex and grok are supported
+# judge seats; agy and pi are experimental everywhere.
 _PROVIDER_HINTS: dict[str, tuple[str, str]] = {
-    "codex": ("OpenAI Codex CLI — a strong non-Claude panel vendor",
+    "codex": ("OpenAI Codex CLI — a supported judge seat (non-Claude)",
               "npm install -g @openai/codex"),
-    "agy":   ("Google Antigravity CLI (`agy`, the ex-Gemini agent) — panel vendor",
+    "agy":   ("Google Antigravity CLI (`agy`, the ex-Gemini agent) — experimental "
+              "judge seat (no support claim)",
               ""),
-    "grok":  ("xAI Grok CLI (`grok`) — panel vendor; restart Grok after install",
+    "grok":  ("xAI Grok CLI (`grok`) — a supported judge seat; restart Grok after install",
               ""),
-    "pi":    ("the pi CLI — panel vendor for qwen / deepseek / oss models",
+    "pi":    ("the pi CLI — experimental judge seat for qwen / deepseek / oss models "
+              "(no support claim)",
               ""),
 }
 
@@ -309,7 +313,7 @@ def suggestions(report: dict) -> list[dict]:
 
 _CATEGORY_ORDER = ["provider", "search", "sandbox", "verify", "logging"]
 _CATEGORY_TITLE = {
-    "provider": "Agent CLIs (extra panel vendors)",
+    "provider": "Agent CLIs (extra judge seats)",
     "search": "Search / navigation (faster than grep)",
     "sandbox": "Sandbox containment",
     "verify": "Verify-command tooling",

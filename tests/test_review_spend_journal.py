@@ -838,5 +838,124 @@ class StructuredUsageE2E(_E2EBase):
         self.assertNotIn("item.completed", body)
 
 
+# ── Task 096 (PLAN S10, from 079): a non-ok spend record says WHY ──────────────
+class AppendReviewError(unittest.TestCase):
+    """Five grok `fail` rows in this workspace's journal carried no reason at all.
+    `error` rides on fail/dnf/timeout only, and can never push the line past the
+    512-byte atomic-append floor — it takes only the budget the rest leaves."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.agent = Path(self._tmp.name) / ".agent"
+        (self.agent / "tasks").mkdir(parents=True)
+
+    def _line(self):
+        raw = (self.agent / "journal" / "enforcement.jsonl").read_bytes()
+        lines = raw.splitlines(keepends=True)
+        self.assertEqual(len(lines), 1)
+        return lines[0]
+
+    def test_fail_record_carries_error(self):
+        pbj.append_review(self.agent, seat="grok:grok-4.7:medium", task="096", kind="panel",
+                          status="fail", error="exit 1: HTTP 402 Payment Required")
+        r = _read_journal(self.agent)[0]
+        self.assertEqual(r["error"], "exit 1: HTTP 402 Payment Required")
+
+    def test_ok_record_never_carries_error(self):
+        pbj.append_review(self.agent, seat="claude:opus", task="096", kind="panel",
+                          status="ok", error="should not appear")
+        self.assertNotIn("error", _read_journal(self.agent)[0])
+
+    def test_every_field_at_cap_plus_a_hostile_error_stays_within_512_bytes(self):
+        pbj.append_review(self.agent, session_id="s" * 500, seat="é" * 500,
+                          task="t" * 500, round_no=10 ** 30, kind="k" * 500,
+                          duration_ms=10 ** 30, status="timeout",
+                          usage={"status": "known", "in": 10 ** 30, "out": 10 ** 30},
+                          error='"\\' * 400 + "\x00" * 50 + "é" * 300)
+        line = self._line()
+        self.assertLessEqual(len(line), 512, len(line))
+        json.loads(line)                                  # still one valid record
+
+    def test_realistic_error_survives_intact_and_quotes_are_neutralised(self):
+        pbj.append_review(self.agent, session_id="pid-987997", seat="grok:grok-4.7:medium",
+                          task="096", round_no=1, kind="panel", duration_ms=3400,
+                          status="fail", error='exit 1: "quota" \\ exceeded')
+        r = _read_journal(self.agent)[0]
+        self.assertEqual(r["error"], "exit 1: 'quota' / exceeded")
+
+    def test_token_shaped_strings_are_redacted(self):
+        pbj.append_review(self.agent, seat="codex:x", task="096", kind="single", status="fail",
+                          error="exit 1: invalid key sk-proj-AbCdEf0123456789AbCdEf0123 rejected")
+        err = _read_journal(self.agent)[0]["error"]
+        self.assertNotIn("AbCdEf0123456789", err)
+        self.assertIn("<redacted>", err)
+
+
+class JudgeErrorReason(unittest.TestCase):
+    def test_reasons(self):
+        self.assertEqual(review._judge_error("1. fine", "ok"), "")
+        self.assertEqual(review._judge_error("", "timeout", timeout_label="15m"),
+                         "timed out after 15m")
+        self.assertEqual(review._judge_error("", "timeout"), "timed out")
+        self.assertEqual(review._judge_error("(error: claude CLI not found)", "dnf"),
+                         "(error: claude CLI not found)")
+        self.assertEqual(
+            review._judge_error("(FAILED — exit 2)\n[stderr tail]\nboom: bad flag\nmore", "fail"),
+            "exit 2: boom: bad flag")
+
+
+class SpendErrorE2E(_E2EBase):
+    """Runner level: the live call sites thread the reason (plan panel r1: a
+    direct append_review test would pass while real records stayed bare)."""
+
+    def test_failing_panel_seat_record_has_error(self):
+        from provider.adapters.claude import ClaudeAdapter
+        import unittest.mock as mock
+
+        def _judge(self, **kw):
+            if "sonnet" in repr(kw):
+                return "(FAILED — exit 1)\n[stderr tail]\nHTTP 402 Payment Required\n"
+            return "1. fine\n"
+
+        for p in (mock.patch.object(ClaudeAdapter, "is_available", classmethod(lambda cls: True)),
+                  mock.patch.object(ClaudeAdapter, "run_headless_judge", _judge)):
+            p.start()
+            self.addCleanup(p.stop)
+        with _chdir(self.project):
+            with contextlib.suppress(SystemExit):
+                review.cmd_panel_review(["042", "--models", "claude:opus,claude:sonnet"])
+        recs = {r["seat"]: r for r in _read_journal(self.agent) if r["hook"] == "review"}
+        self.assertEqual(recs["claude:sonnet:high"]["status"], "fail", recs)
+        self.assertEqual(recs["claude:sonnet:high"]["error"], "exit 1: HTTP 402 Payment Required")
+        self.assertNotIn("error", recs["claude:opus:high"])
+
+
+class SingleSpendErrorE2E(_E2EBase):
+    # borrow the timeout driver without re-running every inherited test
+    _run_single_timeout = SingleSpendE2E._run_single_timeout
+
+    def test_timeout_record_says_timed_out(self):
+        recs = self._run_single_timeout()
+        self.assertTrue(recs[0]["error"].startswith("timed out"), recs)
+
+    def test_failed_single_record_has_error(self):
+        import shutil
+        import types
+        import unittest.mock as mock
+        from provider import sandbox
+        for p in (mock.patch.object(sandbox, "run", lambda agent, args, **kw: types.SimpleNamespace(
+                      returncode=1, stdout="", stderr="unknown option --frobnicate")),
+                  mock.patch.object(shutil, "which", lambda name: "/usr/bin/" + name)):
+            p.start()
+            self.addCleanup(p.stop)
+        with _chdir(self.project):
+            with contextlib.suppress(SystemExit):
+                review.cmd_single_review("plan-review", ["042", "--backend", "claude", "--model", "opus"])
+        recs = [r for r in _read_journal(self.agent) if r["hook"] == "review"]
+        self.assertEqual(recs[0]["status"], "fail")
+        self.assertEqual(recs[0]["error"], "exit 1: unknown option --frobnicate")
+
+
 if __name__ == "__main__":
     unittest.main()

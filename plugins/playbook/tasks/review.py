@@ -70,7 +70,8 @@ def _load_pb_journal():
 
 
 def _journal_review_spend(project_path, *, kind, seat, task, round_no,
-                          duration_ms, status, usage=None, session_id=""):
+                          duration_ms, status, usage=None, session_id="",
+                          error=""):
     """Best-effort review-spend record. NEVER raises; a failure is swallowed so a
     review is unaffected. `usage=None` → the explicit `{"status":"unknown"}`
     marker (numbers are never fabricated)."""
@@ -83,7 +84,8 @@ def _journal_review_spend(project_path, *, kind, seat, task, round_no,
         pbj.append_review(
             agent_dir, session_id=sid, seat=seat or "",
             task=(str(task) if task else "-"), round_no=round_no,
-            kind=kind, duration_ms=duration_ms, status=status, usage=usage)
+            kind=kind, duration_ms=duration_ms, status=status, usage=usage,
+            error=error)
     except Exception:
         pass
 
@@ -129,6 +131,40 @@ def _judge_status(output, timed_out=False):
     except Exception:
         pass
     return "ok"
+
+
+def _judge_error(output, status, timeout_label=None):
+    """Task 096: WHY a non-`ok` judge invocation failed, for its spend record —
+    five grok `fail` rows in the owner's journal said nothing. `ok` → "". A
+    timeout → `timed out[ after <label>]`. Otherwise the model-availability
+    verdict when it is specific (MODEL_UNAVAILABLE / CLI_UPGRADE_REQUIRED), else
+    `exit N: <first line of the failure tail>` for a `(FAILED — exit N)` block,
+    else the output's first line (`(error: …)` spawn failures, budget text).
+    pb_journal sanitizes, redacts and fits it to the line budget. Never raises."""
+    try:
+        if status == "ok":
+            return ""
+        if status == "timeout":
+            return f"timed out after {timeout_label}" if timeout_label else "timed out"
+        text = (output or "").strip()
+        try:
+            from tasks.models_check import classify_failure, OTHER
+            verdict = classify_failure(text)
+            if verdict != OTHER:
+                return verdict
+        except Exception:
+            pass
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return ""
+        m = re.match(r"\(FAILED\s*\S\s*exit (-?\d+)\)", lines[0])
+        if m:
+            detail = next((ln for ln in lines[1:]
+                           if not (ln.startswith("[") and ln.endswith("]"))), "")
+            return f"exit {m.group(1)}: {detail}" if detail else f"exit {m.group(1)}"
+        return lines[0]
+    except Exception:
+        return ""
 
 
 def _parse_judge_usage(output_text):
@@ -1690,10 +1726,11 @@ def cmd_panel_review(cmd_args):
             # Seat carries model:effort (not the display `label`, which omits
             # claude's fixed effort) — derived from the judge spec for this future.
             _cls, _var = futures[future]
+            _st_now = _judge_status(output, timed_out=_timed_out)
             _spend_pending.append((_seat_with_effort(_cls.binary_name(), _var),
-                                   _dur_ms,
-                                   _judge_status(output, timed_out=_timed_out),
-                                   _parse_judge_usage(output)))
+                                   _dur_ms, _st_now,
+                                   _parse_judge_usage(output),
+                                   _judge_error(output, _st_now)))
 
     _tamper_full = _detect_tamper_full(project_path, task_file, _tamper_before)
     # On a MUTATION the panel, like the single-judge path, does NOTHING but emit
@@ -1716,11 +1753,11 @@ def cmd_panel_review(cmd_args):
     # Clean tree: NOW emit the per-seat spend records (best-effort — fully
     # swallowed inside the helper, so they never affect the review; and past the
     # tamper banner, so they can never suppress it). One line per seat.
-    for _lbl, _dms, _st, _usg in _spend_pending:
+    for _lbl, _dms, _st, _usg, _err in _spend_pending:
         _journal_review_spend(
             project_path, kind="panel", seat=_lbl,
             task=(task_num if task_file else None), round_no=_spend_round,
-            duration_ms=_dms, status=_st, usage=_usg)
+            duration_ms=_dms, status=_st, usage=_usg, error=_err)
 
     # Classify each judge as succeeded vs failed — a failed judge must NOT
     # read as a clean empty review (T139) or a successful one. Shared
@@ -2263,7 +2300,8 @@ def run_tail_cert_judge(project_path, snapshot, non_behavioral, panel_summary,
         task=(_tail_cert_task_num(task_file) if task_file else None),
         round_no=_next_review_round(project_path, task_file),
         duration_ms=int((time.monotonic() - _tc_t0) * 1000),
-        status=_judge_status(raw), usage=_parse_judge_usage(raw))
+        status=_judge_status(raw), usage=_parse_judge_usage(raw),
+        error=_judge_error(raw, _judge_status(raw)))
     # A FAILED/crashed/errored judge must NEVER certify (impl-panel grok#5):
     # format_judge_output PREFIXES a nonzero exit with "(FAILED \u2026" and a spawn/
     # resolution error with "(error: \u2026" \u2014 both at the START of the output. Match
@@ -2557,7 +2595,8 @@ def _cmd_single_review(cmd, cmd_args):
                 project_path, kind="single", seat=_spend_seat,
                 task=task_num, round_no=_spend_round,
                 duration_ms=int((time.monotonic() - _spend_t0) * 1000),
-                status="timeout", usage=_to_usage)
+                status="timeout", usage=_to_usage,
+                error=_judge_error("", "timeout", timeout_label=review_timeout_label))
         sys.exit(1)
 
     # Judge tamper guard (#1), same contract as the panel path: snapshot the
@@ -2949,7 +2988,9 @@ def _cmd_single_review(cmd, cmd_args):
         task=task_num, round_no=_spend_round,
         duration_ms=int((time.monotonic() - _spend_t0) * 1000),
         status=_judge_status(_sandbox.format_judge_output(result)),
-        usage=_spend_usage if _spend_usage is not None else _parse_judge_usage(output))
+        usage=_spend_usage if _spend_usage is not None else _parse_judge_usage(output),
+        error=_judge_error(_sandbox.format_judge_output(result),
+                           _judge_status(_sandbox.format_judge_output(result))))
     # Budget exhaustion arrives as exit-0 stdout (task 012 L3): detect it
     # BEFORE saving so it never overwrites a prior good review, tell the
     # user how to raise the cap, and exit nonzero — it's not a review.

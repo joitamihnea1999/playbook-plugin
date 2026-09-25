@@ -15,6 +15,8 @@ config files, never executes anything.
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Optional
@@ -39,12 +41,40 @@ def _component(tool: str, cmd: str, reason: str) -> dict:
     return {"tool": tool, "cmd": cmd, "reason": reason}
 
 
+_IMPORTS_PYTEST = re.compile(r"^\s*(import|from)\s+pytest\b", re.M)
+_IMPORTS_UNITTEST = re.compile(r"^\s*(import\s+unittest\b|from\s+unittest\b)", re.M)
+
+
+def _unittest_only(root: Path) -> bool:
+    """Task 096: a bare stdlib-unittest suite (this very project) was read as
+    pytest. Unittest only on POSITIVE evidence — every `tests/test_*.py` imports
+    unittest and none imports pytest, and no `conftest.py`: a pytest test
+    function needs no import at all, so "no pytest import" proves nothing."""
+    tests = root / "tests"
+    if not tests.is_dir() or _has(root, "conftest.py") or (tests / "conftest.py").exists():
+        return False
+    try:
+        files = sorted(tests.rglob("test_*.py"))
+    except OSError:
+        return False
+    if not files:
+        return False
+    for f in files:
+        text = _read(f)
+        if _IMPORTS_PYTEST.search(text) or not _IMPORTS_UNITTEST.search(text):
+            return False
+    return True
+
+
 def _python_components(root: Path) -> list[dict]:
     out: list[dict] = []
     # tests
-    if (_pyproject_has(root, "[tool.pytest") or _has(root, "pytest.ini", "tox.ini")
-            or (root / "tests").is_dir()
-            or "[tool:pytest]" in _read(root / "setup.cfg")):
+    pytest_cfg = (_pyproject_has(root, "[tool.pytest") or _has(root, "pytest.ini", "tox.ini")
+                  or "[tool:pytest]" in _read(root / "setup.cfg"))
+    if not pytest_cfg and _unittest_only(root):
+        out.append(_component("unittest", "python3 -m unittest discover -s tests",
+                              "every tests/test_*.py imports unittest, none pytest"))
+    elif pytest_cfg or (root / "tests").is_dir():
         out.append(_component("pytest", "python3 -m pytest", "pytest config / tests dir"))
     elif _has(root, "pyproject.toml", "setup.py", "setup.cfg") and _has(root, "tests"):
         out.append(_component("pytest", "python3 -m pytest", "python project with tests/"))
@@ -143,19 +173,85 @@ def _make_components(root: Path, already: bool) -> list[dict]:
     return out
 
 
-def detect_verify(project_root: Optional[Path] = None) -> dict:
-    """Return {"command": str, "components": [ {tool, cmd, reason} ], "notes":[]}.
+def _entrypoint_component(root: Path) -> Optional[dict]:
+    """Task 096: a `scripts/verify` file is the project's own declared "run
+    everything" entrypoint, so it is the ONLY component for its root."""
+    path = root / "scripts" / "verify"
+    if not path.is_file():
+        return None
+    lines = _read(path).splitlines()
+    shebang = lines[0] if lines and lines[0].startswith("#!") else ""
+    if "python" in shebang:
+        cmd = "python3 scripts/verify"
+    elif re.search(r"\b(bash|sh)\b", shebang):
+        cmd = "bash scripts/verify"
+    else:
+        cmd = "scripts/verify"
+    return _component("scripts/verify", cmd, "the project's own verify entrypoint")
 
-    `command` is the ` && `-joined assembly of every detected check, or "" when
-    nothing was found. Never raises; an unreadable file is treated as absent.
-    """
-    root = Path(project_root) if project_root is not None else Path.cwd()
+
+def _root_components(root: Path) -> list[dict]:
+    entry = _entrypoint_component(root)
+    if entry is not None:
+        return [entry]
     components: list[dict] = []
     components += _python_components(root)
     components += _node_components(root)
     components += _rust_components(root)
     components += _go_components(root)
     components += _make_components(root, already=bool(components))
+    return components
+
+
+def _code_root_dirs(root: Path) -> list[str]:
+    """The project's `code_roots` (nested checkouts, `.agent/config.json`) that
+    are real directories inside the project. Validation is the fingerprint's:
+    `_code_roots` rejects absolute paths, `..` and junk (loudly), and a root whose
+    RESOLVED path leaves the project (a symlink) is skipped, as core.py does."""
+    try:
+        cfg = json.loads(_read(root / ".agent" / "config.json") or "{}")
+    except ValueError:
+        return []
+    if not isinstance(cfg, dict) or not cfg.get("code_roots"):
+        return []
+    try:
+        from tasks.core import _code_roots
+        rels = _code_roots(cfg)
+    except Exception:
+        return []
+    out: list[str] = []
+    try:
+        proj = root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return []
+    for rel in rels:
+        cand = root / rel
+        try:
+            res = cand.resolve()
+            inside = res != proj and proj in res.parents
+        except (OSError, RuntimeError, ValueError):
+            inside = False
+        if inside and cand.is_dir():
+            out.append(rel)
+    return out
+
+
+def detect_verify(project_root: Optional[Path] = None) -> dict:
+    """Return {"command": str, "components": [ {tool, cmd, reason} ], "notes":[]}.
+
+    `command` is the ` && `-joined assembly of every detected check, or "" when
+    nothing was found. Never raises; an unreadable file is treated as absent.
+    Each `code_roots` checkout is inspected too; its components run as
+    `(cd <root> && <cmd>)` — verify runs in a real bash script, so the subshell
+    keeps each root's cwd to itself (task 096).
+    """
+    root = Path(project_root) if project_root is not None else Path.cwd()
+    components = _root_components(root)
+    for rel in _code_root_dirs(root):
+        for c in _root_components(root / rel):
+            components.append(_component(f"{rel}:{c['tool']}",
+                                         f"(cd {shlex.quote(rel)} && {c['cmd']})",
+                                         f"code_roots `{rel}`: {c['reason']}"))
 
     # De-dup by cmd while preserving order.
     seen: set[str] = set()

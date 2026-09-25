@@ -180,6 +180,12 @@ nothing about a network filesystem or another machine; and the whole-tree
 freshness TOCTOU remains detection-only — a task-directory lock cannot serialize
 edits to arbitrary source files during a judge call.
 
+## CI
+
+`.github/workflows/verify.yml` runs `scripts/verify` on four lanes on every push and pull request: Linux (py3.10 and py3.12), macOS (py3.10, plus the zsh logger and the shell fixtures under bash 3.2) and Windows/Git Bash (py3.10). All four must be green for a release, and that is **required by the release checklist (W12), not by GitHub**: `main` has no GitHub branch protection (`gh api repos/{owner}/{repo}/branches/main/protection` returns 404, measured 2026-09-25), so nothing on GitHub stops a push that has not passed. Owner decision D1 (b), 2026-09-24: the lanes stay on every push, and nobody waits on them synchronously — push, then check the run at the next gate that needs it (`gh run watch <id>` inside a background Monitor, or `gh run view <id>` on return). Owner decision D2 (b): a release may rerun once for a disclosed flake whose failure capture is saved into the release record. `concurrency: cancel-in-progress` means a superseded push gets no verdict.
+
+Failure evidence on Windows: the lane exports `PLAYBOOK_VERIFY_FULL_LOG`, so `scripts/verify` appends every child command's complete output — unittest at `-v`, and each shell fixture's full transcript, including the run inside unittest — to `verify-windows-full.txt`, uploaded with the console log `verify-windows.txt`. It is the failing run's own output. Until task 096 a second step re-ran the whole suite and both fixtures on every push (10.8-13.5 min, about half of the Windows job) and uploaded that second run instead.
+
 ## Tests
 
 `tests/` — stdlib-unittest suites (no external deps), one file per subsystem: invocation contracts for agy/grok, model-availability machinery, config resolution, mind-map sorting, merge ref-integrity, README-drift detection. Run any file directly: `python3 tests/test_<name>.py`.

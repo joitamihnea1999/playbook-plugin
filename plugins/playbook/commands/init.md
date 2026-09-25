@@ -107,9 +107,9 @@ Closing a task runs the project's declared `verify` command; if none is declared
    .claude/bin/tasks detect-verify
    ```
 
-   It inspects the repo's toolchains (Python `pytest`/`mypy`/`pyright`/`ruff`/`flake8`, Node `package.json` scripts, Rust `cargo`, Go `go test`+`vet`, a `Makefile` `test`/`check`/`lint` target) and prints a single command that runs *all* of them, chained with `&&`. If it detected nothing (a fresh/empty repo), it says so — then leave `verify` unset and tell the user close will refuse until it's set, rather than inventing a command.
+   It inspects the repo's toolchains (a `scripts/verify` entrypoint, Python `pytest` or a bare `unittest` suite/`mypy`/`pyright`/`ruff`/`flake8`, Node `package.json` scripts, Rust `cargo`, Go `go test`+`vet`, a `Makefile` `test`/`check`/`lint` target), in the project and in each `code_roots` checkout, and prints a single command that runs *all* of them, chained with `&&`. If it detected nothing (a fresh/empty repo), it says so — then leave `verify` unset and tell the user close will refuse until it's set, rather than inventing a command.
 
-2. **Confirm with the user.** Show the suggested command and ask (via `AskUserQuestion` or plainly) whether it runs everything or if a check is missing — the helper is a heuristic starting point, so this step exists to catch a **missed** check, never to narrow the bar. Correct it per their answer. (If the project's real suite runs a way the helper can't detect — e.g. `python3 -m unittest discover -s tests` — replace the suggestion with that.)
+2. **Confirm with the user.** Show the suggested command and ask (via `AskUserQuestion` or plainly) whether it runs everything or if a check is missing — the helper is a heuristic starting point, so this step exists to catch a **missed** check, never to narrow the bar. Correct it per their answer. (If the project's real suite runs a way the helper can't detect, replace the suggestion with that.)
 
 3. **Write it into `.agent/config.json`** under the `verify` key (a string that runs everything). Read the file, add/replace `verify`, keep every other key. Example result:
 

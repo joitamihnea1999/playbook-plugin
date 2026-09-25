@@ -167,46 +167,22 @@ jobs:
           fi
           export PLAYBOOK_VERIFY_BASH="$BASH_PATH"
           echo "PLAYBOOK_VERIFY_BASH=$BASH_PATH"
-          python scripts/verify | tee verify-windows.txt
-
-      # LEGIBILITY (Windows only): scripts/verify's console output caps the
-      # per-failure detail (`... and N more`), so on a broad Windows failure the
-      # GitHub log truncates and 400+ failures become unattributable. Capture the
-      # COMPLETE, uncapped detail to a file and upload it: the whole unittest
-      # suite at -v (every test id + full traceback) plus each shell fixture's
-      # full output. Diagnostic only — `|| true` keeps this step from failing the
-      # job; the real gate is the scripts/verify step above, and this step exists
-      # solely to make the artifact whole. Linux/macOS are untouched — this is a
-      # Windows-job-only step.
-      - name: Full failure detail (attributable artifact)
-        if: always()
-        run: |
-          # Match scripts/verify's env hygiene so a dogfooding logger cannot
-          # forge results (see scripts/verify `env()`).
-          unset BASH_ENV PLAYBOOK_SESSION_ID PLAYBOOK_ROLE PLAYBOOK_EVAL_CONFIG
-          # Same bash hand-off as the scripts/verify step above: the product's
-          # bash-spawning surfaces (audit sweeps, merge-verify) resolve `bash`
-          # from Python, where the System32 WSL stub shadows Git Bash. Point them
-          # at THIS shell's bash so those checks exercise a real bash instead of
-          # the stub (which would fail-close/false-green). Windows-only —
-          # Linux/macOS never reach this step.
-          BASH_PATH="$(command -v bash)"
+          # LEGIBILITY (task 096): scripts/verify's console output caps the
+          # per-failure detail (`... and N more`). With this set, verify ALSO
+          # appends every child command's complete output (unittest at -v, each
+          # shell fixture's full transcript — including the one run inside
+          # unittest) to this file, which is uploaded below. It is the failing
+          # run's own output — until 096 a second step re-ran the whole suite
+          # (10.8-13.5 min on every push) and uploaded THAT run instead. Absolute
+          # Windows path: the fixtures run in temp dirs, so a relative path would
+          # scatter the log.
+          FULL_LOG="$PWD/verify-windows-full.txt"
           if command -v cygpath >/dev/null 2>&1; then
-            BASH_PATH="$(cygpath -w "$BASH_PATH")"
+            FULL_LOG="$(cygpath -w "$FULL_LOG")"
           fi
-          export PLAYBOOK_VERIFY_BASH="$BASH_PATH"
-          echo "PLAYBOOK_VERIFY_BASH=$BASH_PATH"
-          {
-            echo "===== unittest discover -v (full, uncapped) ====="
-            python -m unittest discover -s tests -v 2>&1 || true
-            echo
-            echo "===== wrapper-multiuser-fixture.sh (full) ====="
-            ( cd "$(mktemp -d)" && bash "$GITHUB_WORKSPACE/tests/wrapper-multiuser-fixture.sh" 2>&1 ) || true
-            echo
-            echo "===== merge-verify-fixture.sh (full) ====="
-            ( cd "$(mktemp -d)" && bash "$GITHUB_WORKSPACE/tests/merge-verify-fixture.sh" 2>&1 ) || true
-          } > verify-windows-full.txt 2>&1
-          echo "wrote verify-windows-full.txt ($(wc -l < verify-windows-full.txt) lines)"
+          export PLAYBOOK_VERIFY_FULL_LOG="$FULL_LOG"
+          echo "PLAYBOOK_VERIFY_FULL_LOG=$FULL_LOG"
+          python scripts/verify | tee verify-windows.txt
 
       - name: Step summary
         if: always()

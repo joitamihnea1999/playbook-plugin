@@ -69,6 +69,7 @@ Additional fields:
 | `duration_ms` | int, optional | wall time of the judge subprocess in milliseconds (absent if unknown) |
 | `status`      | string        | `ok` \| `fail` \| `timeout` \| `dnf` (did-not-finish / spawn error)|
 | `usage`       | object        | token usage — see the usage note below                            |
+| `error`       | string, optional | why a non-`ok` invocation failed (task 096) — see below       |
 
 `seat` carries reasoning effort so spend can be attributed by `model:effort`
 (the owner's ask). codex and grok already encode effort in the model variant
@@ -103,6 +104,20 @@ Example:
 ```json
 {"ts":"2026-09-01T16:41:19Z","session_id":"pid-123","hook":"review","decision":"record","reason":"review spend","kind":"panel","seat":"claude:opus:high","task":"042","round":3,"duration_ms":48210,"status":"ok","usage":{"status":"unknown"}}
 ```
+
+### The `error` field
+
+Present only on a `fail`, `dnf` or `timeout` record, never on `ok`. It is the
+reason the invocation failed, in one line: `timed out after <limit>` for a timeout;
+the model-availability verdict (`MODEL_UNAVAILABLE` / `CLI_UPGRADE_REQUIRED`) when
+the failure matches one; otherwise `exit N: <first line of the failure output>`, or
+the output's first line (a spawn error such as `(error: claude CLI not found)`).
+It comes from a CLI's stderr, so it is sanitized: control characters are dropped,
+`"` becomes `'` and `\` becomes `/`, and token-shaped runs (an `sk-`/`xai-`/`ghp_`
+style key, or 32+ key characters in a row) become `<redacted>`. It is then cut to
+the bytes the rest of the record leaves under the 512-byte atomic-append floor, and
+left out when fewer than 8 bytes remain — the field can shorten, never lengthen a
+line past the floor.
 
 ### The `usage` field — honest bounds
 

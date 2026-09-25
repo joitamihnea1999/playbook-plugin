@@ -323,7 +323,7 @@ def cmd_doctor(cmd_args):
         warn("hooks: grok enforcement check ran", f"skipped ({e})")
 
     # 1h. Environment recommendations (1.5.15) — the optional tools that make
-    # playbook run smoothly/optimally: extra panel vendors, sandbox containment,
+    # playbook run smoothly/optimally: extra judge seats, sandbox containment,
     # the verify command's own tooling, command logging. Suggest-only, never a
     # FAIL — a thinner setup still works, it just isn't the full experience.
     try:

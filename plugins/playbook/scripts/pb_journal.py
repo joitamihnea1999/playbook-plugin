@@ -112,7 +112,8 @@ def append(agent_dir, hook, decision, reason, session_id="",
 
 
 def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
-                  kind="", duration_ms=None, status="", usage=None) -> None:
+                  kind="", duration_ms=None, status="", usage=None,
+                  error="") -> None:
     """Append one REVIEW-SPEND record and return None. Never raises.
 
     Same HARD CONTRACT as `append`: a write failure must NEVER change or break a
@@ -129,6 +130,12 @@ def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
       * `round`       — the review iteration this spend belongs to (int; 0 = unknown)
       * `duration_ms` — wall time of the judge subprocess, milliseconds (omitted if unknown)
       * `status`      — "ok" | "fail" | "timeout" | "dnf" (did-not-finish/spawn error)
+      * `error`       — task 096: WHY a non-`ok` invocation failed (`fail`/`dnf`/
+                        `timeout` only; never on `ok`). Sanitized (control chars
+                        dropped, `"`→`'`, `\\`→`/`, token-shaped strings
+                        redacted) and cut to the byte budget the rest of the
+                        record leaves under the 512-byte atomic floor; omitted
+                        when that budget is under 8 bytes.
       * `usage`       — token usage WHERE the CLI reports it, else the explicit
                         marker `{"status":"unknown"}`. Numbers are NEVER fabricated:
                         codex/grok judge seats carry the CLI's own per-call counts
@@ -163,9 +170,36 @@ def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
         if status:
             rec["status"] = _head(status, 16)
         rec["usage"] = _normalize_usage(usage)
+        if error and status and status != "ok":
+            _err = _fit_error(rec, error)
+            if _err:
+                rec["error"] = _err
         _write_record(agent_dir, rec)
     except Exception as exc:                # defence in depth: never propagate
         _warn(exc)
+
+
+# The atomic-append floor every journal line must stay under (PIPE_BUF's POSIX
+# minimum), newline included.
+_LINE_FLOOR = 512
+_TOKENISH = re.compile(r"\b(?:sk|xai|ghp|gho|ghs|glpat)[-_][A-Za-z0-9_\-]{8,}|[A-Za-z0-9+_\-]{32,}")  # no "/": paths stay readable
+
+
+def _fit_error(rec: dict, error) -> str:
+    """Task 096: the reason a judge invocation failed, fitted to what the rest of
+    `rec` leaves under the 512-byte floor. Control characters are dropped and
+    `"`/`\\` replaced, so the encoded length equals the byte length and the
+    budget is exact; token-shaped runs are redacted (the reason comes from a
+    CLI's stderr). Returns "" when fewer than 8 bytes remain."""
+    s = str(error).strip().split("\n", 1)[0]
+    s = "".join(ch for ch in s if ch >= " " and ch != "\x7f")
+    s = s.replace('"', "'").replace("\\", "/")
+    s = _TOKENISH.sub("<redacted>", s)
+    base = len((json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+    budget = _LINE_FLOOR - base - len(',"error":""'.encode("utf-8"))
+    if budget < 8:
+        return ""
+    return s.encode("utf-8")[:budget].decode("utf-8", "ignore")
 
 
 # Numeric magnitude cap (impl-panel round 2): the string fields are byte-capped,

@@ -86,6 +86,32 @@ class ProviderItemsTest(unittest.TestCase):
         self.assertIn("docs", items["agent CLI: agy"]["hint"])
 
 
+class ProviderLabelsMatchSupportMatrix(unittest.TestCase):
+    """Task 096 (PLAN S10, from 079): the report called every agent CLI a "panel
+    vendor" while docs/providers.md says codex and grok are supported JUDGE seats
+    and agy and pi are experimental. The WHOLE rendered report is checked — the
+    category title carried the phrase too — the way the S10 Done command greps it."""
+
+    def _rendered(self):
+        with mock.patch.object(env.shutil, "which", side_effect=_which(set())):
+            report = {"platform": "linux", "items": env._provider_items()}
+        return env.render_environment(report, show_ok=False)
+
+    def test_no_panel_vendor_wording_anywhere(self):
+        self.assertEqual(self._rendered().count("panel vendor"), 0)
+
+    def test_agy_and_pi_say_experimental_codex_and_grok_say_supported(self):
+        by_name = {}
+        with mock.patch.object(env.shutil, "which", side_effect=_which(set())):
+            for i in env._provider_items():
+                by_name[i["name"]] = i["why"]
+        for name in ("agent CLI: agy", "agent CLI: pi"):
+            self.assertIn("experimental", by_name[name], name)
+        for name in ("agent CLI: codex", "agent CLI: grok"):
+            self.assertIn("supported judge seat", by_name[name], name)
+            self.assertNotIn("experimental", by_name[name], name)
+
+
 class SandboxItemTest(unittest.TestCase):
     def test_linux_needs_bwrap(self):
         with mock.patch.object(env.platform, "system", return_value="Linux"), \

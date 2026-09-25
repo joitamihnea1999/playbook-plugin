@@ -122,5 +122,68 @@ class DetectVerify(unittest.TestCase):
             self.assertEqual(cli_detect_verify(["--nope"], Path("/tmp")), 2)
 
 
+class DetectsThisProjectsShape(unittest.TestCase):
+    """Task 096 (PLAN S10, from 079): `tasks detect-verify` found no toolchain for
+    this very workspace — its suite runs through `scripts/verify` inside a
+    `code_roots` checkout, and bare stdlib unittest was always read as pytest."""
+
+    PY = "#!/usr/bin/env python3\nprint('verify')\n"
+
+    def test_scripts_verify_is_the_only_component_for_its_root(self):
+        d = _mk({"scripts/verify": self.PY, "tests/test_x.py": "import unittest\n",
+                 "package.json": json.dumps({"scripts": {"test": "jest"}}), "Makefile": "test:\n"})
+        r = detect_verify(d)
+        self.assertEqual(r["command"], "python3 scripts/verify")
+        self.assertEqual(len(r["components"]), 1)
+
+    def test_scripts_verify_shell_shebang(self):
+        d = _mk({"scripts/verify": "#!/usr/bin/env bash\nset -e\n"})
+        self.assertEqual(detect_verify(d)["command"], "bash scripts/verify")
+
+    def test_bare_unittest_suite_on_positive_evidence(self):
+        d = _mk({"tests/test_a.py": "import unittest\n",
+                 "tests/test_b.py": "from unittest import mock\nimport unittest\n"})
+        self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
+
+    def test_mixed_or_unproven_suites_stay_pytest(self):
+        for files in (
+            {"tests/test_a.py": "import unittest\n", "tests/test_b.py": "import pytest\n"},
+            {"tests/test_a.py": "import unittest\n", "tests/test_b.py": "def test_x():\n    assert 1\n"},
+            {"tests/test_a.py": "import unittest\n", "tests/conftest.py": ""},
+            {"tests/test_a.py": "import unittest\n", "pytest.ini": ""},
+        ):
+            with self.subTest(files=sorted(files)):
+                self.assertEqual(detect_verify(_mk(files))["command"], "python3 -m pytest")
+
+    def test_this_workspace_shape_exact(self):
+        # outer project: no toolchain of its own, one code_root holding scripts/verify
+        d = _mk({".agent/config.json": json.dumps({"code_roots": ["playbook-plugin"]}),
+                 "playbook-plugin/scripts/verify": self.PY,
+                 "playbook-plugin/tests/test_x.py": "import unittest\n"})
+        self.assertEqual(detect_verify(d)["command"],
+                         "(cd playbook-plugin && python3 scripts/verify)")
+
+    def test_code_root_with_shell_metacharacters_is_quoted(self):
+        d = _mk({".agent/config.json": json.dumps({"code_roots": ["a b;x"]}),
+                 "a b;x/scripts/verify": self.PY})
+        self.assertEqual(detect_verify(d)["command"], "(cd 'a b;x' && python3 scripts/verify)")
+
+    def test_traversal_code_root_is_ignored(self):
+        outside = _mk({"scripts/verify": self.PY})
+        d = _mk({".agent/config.json": json.dumps(
+            {"code_roots": [f"../{outside.name}", str(outside)]})})
+        self.assertEqual(detect_verify(d)["command"], "")
+
+    def test_symlinked_code_root_resolving_outside_is_ignored(self):
+        import os
+        outside = _mk({"scripts/verify": self.PY})
+        d = _mk({".agent/config.json": json.dumps({"code_roots": ["link"]})})
+        try:
+            os.symlink(outside, d / "link", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable (unprivileged Windows)")
+        self.assertEqual(detect_verify(d)["command"], "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

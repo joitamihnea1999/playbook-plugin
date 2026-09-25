@@ -199,7 +199,7 @@ def _main():
 
     elif cmd == "environment":
         # Advisory: which optional tools would improve this setup + how to get
-        # them (extra panel vendors, sandbox containment, verify tooling,
+        # them (extra judge seats, sandbox containment, verify tooling,
         # command logging). Never fails — informational (1.5.15).
         from tasks.environment import cli_environment
         sys.exit(cli_environment(cmd_args, find_project_root()))

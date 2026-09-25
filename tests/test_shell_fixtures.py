@@ -99,6 +99,22 @@ def _failure_detail(lines: list[str]) -> str:
     return text
 
 
+def _full_log(name: str, rc: int, text: str) -> None:
+    """Task 096: when scripts/verify runs this suite with PLAYBOOK_VERIFY_FULL_LOG
+    set (the Windows CI job), append the fixture's FULL transcript there — the
+    failure message above is capped at 40 diagnostic lines per block, and this is
+    the failing invocation's own output. UTF-8 bytes; never raises."""
+    path = os.environ.get("PLAYBOOK_VERIFY_FULL_LOG")
+    if not path:
+        return
+    try:
+        with open(path, "ab") as fh:
+            fh.write(f"===== {name} (rc {rc}, inside unittest) =====\n{text}\n\n"
+                     .encode("utf-8", "replace"))
+    except Exception:
+        pass
+
+
 class ShellFixtures(unittest.TestCase):
     def test_shell_fixtures_pass(self):
         for name, needs in _FIXTURES.items():
@@ -127,8 +143,13 @@ class ShellFixtures(unittest.TestCase):
                             capture_output=True, text=True,
                             timeout=_PER_FIXTURE_TIMEOUT,
                         )
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as exc:
+                    _partial = exc.output or ""
+                    if isinstance(_partial, bytes):
+                        _partial = _partial.decode("utf-8", "replace")
+                    _full_log(name, -1, f"TIMED OUT after {_PER_FIXTURE_TIMEOUT}s\n{_partial}")
                     self.fail(f"{name}: timed out after {_PER_FIXTURE_TIMEOUT}s")
+                _full_log(name, r.returncode, r.stdout + r.stderr)
                 if r.returncode != 0:
                     lines = (r.stdout + r.stderr).splitlines()
                     self.fail(f"{name} failed (rc={r.returncode}):\n{_failure_detail(lines)}")

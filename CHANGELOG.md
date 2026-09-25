@@ -7,6 +7,7 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 Branch `fix/1.5.46-batch`. Task 085: the six defects parked by the 1.5.45 release panel (task 083)
 plus the tool defect found at its close. Task 086: PLAN S3. Task 087: PLAN S4. Task 088: PLAN S5. Task 093: PLAN S7b. Task 094: the `opus` alias moves to Opus 5.5.
 Task 095: owner decision H2 (any project-root `*.md` is a doc for tail certification).
+Task 096: PLAN S10 (CI + docs correspondence).
 Each fix was written against a test that failed first.
 
 ### Added
@@ -43,8 +44,34 @@ Each fix was written against a test that failed first.
   end-to-end proofs (root `PLAN.md` certifies; `sub/PLAN.md` blocks; a nested `code_roots` checkout's own
   root `PLAN.md` blocks). `docs/cli.md` names the widened class too.
 
+- **The Windows CI lane no longer re-runs the whole suite to collect failure evidence** (task 096, PLAN S10).
+  A second step re-ran `unittest discover -v` and both shell fixtures on every push, green or not — 10.8-13.5
+  min, about half of the Windows job over the last five runs — and uploaded that second run, which a flake can
+  pass. Now `scripts/verify` appends every child command's complete output to `$PLAYBOOK_VERIFY_FULL_LOG`
+  when it is set (unittest at `-v`, each fixture's full transcript, a timed-out child's partial output), and
+  `tests/test_shell_fixtures.py` appends the transcript of the fixture run inside unittest; the Windows lane
+  sets it and uploads the same `verify-windows-full.txt` as before. No test, check or lane was removed. The
+  log is written as UTF-8 bytes and a failure to write it never changes a verdict.
+- **`tasks detect-verify` finds a `scripts/verify` entrypoint, a bare unittest suite, and `code_roots`**
+  (task 096). A `scripts/verify` file is suggested alone for its root; `python3 -m unittest discover -s tests`
+  replaces the pytest guess only when every `tests/test_*.py` imports unittest and none imports pytest; each
+  `code_roots` checkout (validated like the freshness fingerprint, symlinks leaving the project skipped) is
+  inspected too, as `(cd <root> && …)`. For this workspace it now prints `(cd playbook-plugin && python3
+  scripts/verify)`; before, it found nothing.
+- **`tasks environment` and `tasks doctor` label the agent CLIs as the support matrix does** (task 096): codex
+  and grok are supported judge seats, agy and pi experimental; the "panel vendor" wording is gone.
+- **Review-spend records say why a judge failed** (task 096). A `fail`, `dnf` or `timeout` record carries
+  `error` — `timed out after <limit>`, a model-availability verdict, or `exit N: <first failure line>` —
+  sanitized, token-shaped strings redacted, and cut to the bytes left under the 512-byte line floor.
+- **`docs/architecture.md` has a CI section**: four lanes, required by the release checklist and not by GitHub
+  (`main` has no branch protection), push-then-check under owner decision D1 (b). The `/playbook` skill gains
+  the same CI-wait pattern.
+
 ### Fixed
 
+- **`scripts/verify` no longer crashes on a cp1252 Windows console** (task 096, parked by 086): a failure line
+  holding U+2260 raised `UnicodeEncodeError` and cut the failure list short (CI 35970907673). stdout and stderr
+  are re-encoded as UTF-8 with replacement.
 - **Re-running init no longer deletes a project's own `#` part from CLAUDE.md** (task 093, PLAN S7b). The merge
   split CLAUDE.md only at `## ` headings, so a level-1 `#` heading below a template section — and the `---`
   above it and everything up to the next `## ` — counted as that section's body, and refreshing the section
