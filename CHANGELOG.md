@@ -55,7 +55,9 @@ Each fix was written against a test that failed first.
 - **`tasks detect-verify` finds a `scripts/verify` entrypoint, a bare unittest suite, and `code_roots`**
   (task 096). A `scripts/verify` file is suggested alone for its root; `python3 -m unittest discover -s tests`
   replaces the pytest guess only when every `tests/test_*.py` imports unittest (not merely `unittest.mock`),
-  defines a TestCase and no bare `def test…`, none imports pytest and no `conftest.py` exists; each
+  defines a TestCase and no bare `def test…` or plain `class Test…`, none imports pytest, every test
+  subdirectory is a package, and no `conftest.py` or `*_test.py` exists (otherwise pytest, which runs
+  TestCases too); each
   `code_roots` checkout (validated like the freshness fingerprint, symlinks leaving the project skipped) is
   inspected too, as `(cd <root> && …)`. For this workspace it now prints `(cd playbook-plugin && python3
   scripts/verify)`; before, it found nothing.

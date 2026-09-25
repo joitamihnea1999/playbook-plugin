@@ -137,6 +137,31 @@ class ShellFixtureTranscript(unittest.TestCase):
         self.assertIn("out-part", text)
         self.assertIn("err-part", text)
 
+    def test_the_fixture_loop_writes_the_transcript_it_ran(self):
+        # impl r2 (opus): the helper is tested directly above; this guards the
+        # WIRING — deleting the loop's `_full_log` call must fail a test, since
+        # a failure seen only inside unittest (the S7 case) has no other copy.
+        import shutil as _sh
+        if _sh.which("bash") is None:
+            self.skipTest("needs bash")
+        d = Path(tempfile.mkdtemp())
+        (d / "fake-fixture.sh").write_text(
+            "echo 'line one of the fake fixture'\necho '  FAIL  S99 planted'\nexit 1\n",
+            encoding="utf-8")
+        log = d / "full.txt"
+        case = test_shell_fixtures.ShellFixtures("test_shell_fixtures_pass")
+        result = unittest.TestResult()
+        with mock.patch.object(test_shell_fixtures, "_HERE", d), \
+                mock.patch.object(test_shell_fixtures, "_FIXTURES", {"fake-fixture.sh": []}), \
+                mock.patch.dict(os.environ, {ENV: str(log)}):
+            case.run(result)
+        self.assertTrue(result.failures or result.errors or result.skipped, "the planted FAIL must fail")
+        if result.skipped:
+            self.skipTest(f"fixture runner skipped: {result.skipped[0][1]}")
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("fake-fixture.sh (rc 1, inside unittest)", text)
+        self.assertIn("line one of the fake fixture", text)
+
     def test_nothing_when_off_and_never_raises(self):
         env = {k: v for k, v in os.environ.items() if k != ENV}
         with mock.patch.dict(os.environ, env, clear=True):

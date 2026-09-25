@@ -48,6 +48,9 @@ _IMPORTS_UNITTEST = re.compile(r"^\s*(import\s+unittest\b(?!\.)|from\s+unittest\
 _TESTCASE_CLASS = re.compile(r"^\s*class\s+\w+\s*\([^)]*\b(?:TestCase|IsolatedAsyncioTestCase)\b", re.M)
 # a module-level pytest-style test function: unittest discover never runs it
 _BARE_TEST_FUNC = re.compile(r"^(?:async\s+)?def\s+test", re.M)
+# a `class Test…` whose bases do not name a TestCase — pytest collects it,
+# unittest discover does not (impl-panel r2, codex ×2 + grok, reproduced)
+_TEST_CLASS = re.compile(r"^\s*class\s+Test\w*\s*(?:\(([^)]*)\))?\s*:", re.M)
 
 
 def _unittest_only(root: Path) -> bool:
@@ -55,14 +58,18 @@ def _unittest_only(root: Path) -> bool:
     pytest. Unittest only on POSITIVE evidence that `unittest discover` runs
     every test: each `tests/test_*.py` imports unittest (not merely
     `unittest.mock`), defines a TestCase subclass, has no module-level
-    `def test…` (a pytest function discover would skip) and does not import
-    pytest; and no `conftest.py` anywhere under the project root or `tests/`.
-    A pytest test needs no import at all, so "no pytest import" proves nothing."""
+    `def test…` and no `class Test…` that is not a TestCase (pytest-only
+    tests discover would skip) and does not import pytest; no `*_test.py`
+    (pytest's other file pattern) and no `conftest.py` anywhere under the
+    project root or `tests/`; and every subdirectory holding a test file is a
+    package (`__init__.py`), or discover never enters it. A pytest test needs
+    no import at all, so "no pytest import" proves nothing — and when in doubt
+    pytest is the safe suggestion: it runs unittest TestCases too."""
     tests = root / "tests"
     if not tests.is_dir() or _has(root, "conftest.py"):
         return False
     try:
-        if any(tests.rglob("conftest.py")):
+        if any(tests.rglob("conftest.py")) or any(tests.rglob("*_test.py")):
             return False
         files = sorted(tests.rglob("test_*.py"))
     except OSError:
@@ -70,9 +77,15 @@ def _unittest_only(root: Path) -> bool:
     if not files:
         return False
     for f in files:
+        d = f.parent
+        while d != tests:
+            if not (d / "__init__.py").is_file():
+                return False
+            d = d.parent
         text = _read(f)
         if (_IMPORTS_PYTEST.search(text) or not _IMPORTS_UNITTEST.search(text)
-                or not _TESTCASE_CLASS.search(text) or _BARE_TEST_FUNC.search(text)):
+                or not _TESTCASE_CLASS.search(text) or _BARE_TEST_FUNC.search(text)
+                or any("TestCase" not in (m.group(1) or "") for m in _TEST_CLASS.finditer(text))):
             return False
     return True
 
@@ -228,7 +241,9 @@ def _code_root_dirs(root: Path) -> list[str]:
     try:
         from tasks.core import _code_roots
         rels = _code_roots(cfg)
-    except Exception:
+    except Exception as exc:
+        print(f"[playbook] detect-verify: code_roots not inspected ({type(exc).__name__}: {exc})",
+              file=sys.stderr)
         return []
     out: list[str] = []
     try:

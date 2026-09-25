@@ -160,9 +160,36 @@ class DetectsThisProjectsShape(unittest.TestCase):
             {"tests/test_a.py": self.TC + "\n\ndef test_bare():\n    assert 0\n"},
             # impl r1 (grok): a conftest.py below tests/ is pytest evidence
             {"tests/unit/test_a.py": self.TC, "tests/unit/conftest.py": ""},
+            # impl r2 (codex ×2): discover never enters a subdirectory without
+            # __init__.py — the nested test would silently not run
+            {"tests/test_a.py": self.TC, "tests/unit/test_b.py": self.TC},
+            # impl r2 (codex ×2, grok): a plain pytest `class Test…` beside a TestCase
+            {"tests/test_a.py": self.TC + "\n\nclass TestPlain:\n    def test_x(self):\n        assert 0\n"},
+            # impl r2 (grok): pytest's other default file pattern
+            {"tests/test_a.py": self.TC, "tests/widget_test.py": "def test_fails():\n    assert False\n"},
         ):
             with self.subTest(files=sorted(files)):
                 self.assertEqual(detect_verify(_mk(files))["command"], "python3 -m pytest")
+
+    def test_nested_unittest_package_is_still_unittest(self):
+        # control for the r2 rule: a nested dir WITH __init__.py is discoverable
+        d = _mk({"tests/test_a.py": self.TC, "tests/unit/__init__.py": "",
+                 "tests/unit/test_b.py": self.TC})
+        self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
+
+    def test_suggested_unittest_command_runs_every_detected_test(self):
+        # end to end (impl r2, codex-high): the suggestion must not pass by
+        # running fewer tests than the tree holds
+        import subprocess
+        import sys as _sys
+        body = ("import unittest\n\n\nclass T(unittest.TestCase):\n"
+                "    def test_one(self):\n        pass\n\n    def test_two(self):\n        pass\n")
+        d = _mk({"tests/test_a.py": body, "tests/unit/__init__.py": "", "tests/unit/test_b.py": body})
+        self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
+        r = subprocess.run([_sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+                           cwd=d, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Ran 4 tests", r.stderr)
 
     def test_this_workspace_shape_exact(self):
         # outer project: no toolchain of its own, one code_root holding scripts/verify
