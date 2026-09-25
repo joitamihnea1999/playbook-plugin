@@ -5609,10 +5609,31 @@
           "type": "executable integration",
           "path": "tests/test_init_claude_md.py",
           "reference": "ProjectPartAfterTemplateSections.test_workspace_project_part_survives_merge",
-          "boundary": "subprocess",
+          "boundary": "unit",
           "negative_control": null,
           "limitations": [
-            "Headings are ATX lines outside CLOSED fenced code blocks and CLOSED <!-- --> comments; Setext headings and headings indented by 1-3 spaces are not recognised (a Setext or indented `#` part below a template section is still deleted), and other HTML blocks (<div> ...) are not tracked, so a `#`/`##` line inside one counts as a heading. A template heading is refreshed only at its first occurrence outside the project's `#` parts; a template section the file lacks is inserted above the first such part, so a file an older merge gave a template section BELOW its part gets that section once more above it (duplicate template text once, then stable) (task 093)."
+            "Headings are ATX lines outside CLOSED fenced code blocks and CLOSED <!-- --> comments that start a line; Setext headings, headings indented by 1-3 spaces and ATX headings with closing hashes (`## CLI ##`) are not recognised or matched (a Setext or indented `#` part below a template section is still deleted), and other HTML blocks (<div> ...) and a comment opened mid-line are not tracked, so a `#`/`##` line inside one counts as a heading. A template heading is refreshed only at its first occurrence outside the project's `#` parts; a template section the file lacks is inserted above the first such part, so a file an older merge gave a template section BELOW its part — or a future template section named like one inside the part — gets that section once more above it (duplicate template text once, then stable). Parked for S11 (task 093 round 3): a fence or comment opened inside a template section and closed only after the project's `#` heading masks the heading and the part is deleted with the section; a `---` right under a list item or blockquote is taken as a Setext underline and deleted with a refreshed template section (task 093)."
+          ]
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_init_claude_md.py",
+          "reference": "ProjectPartAfterTemplateSections.test_template_named_section_only_inside_the_project_part_is_kept",
+          "boundary": "unit",
+          "negative_control": null,
+          "limitations": []
+        },
+        {
+          "type": "executable integration",
+          "path": "tests/test_init_claude_md.py",
+          "reference": "MainKeepsLineEndings.test_crlf_file_stays_crlf_through_main",
+          "boundary": "subprocess",
+          "negative_control": {
+            "path": "tests/test_init_claude_md.py",
+            "reference": "MainKeepsLineEndings.test_lf_file_stays_lf_through_main"
+          },
+          "limitations": [
+            "The write half (newline=\"\") is observable only on the Windows lane, where the default newline translation would write CRLF."
           ]
         },
         {
@@ -5661,7 +5682,7 @@
       "status": "verified_by_current_executable_evidence",
       "missing_evidence_or_limitation": [
         "Owner decision 2026-08-21: antigravity and pi are experimental everywhere (adapter code retained, no support claim, no live evidence) and are removed from applicable_providers here; supported providers are Claude (agent+judge) and grok/codex (judge-seat, live-verified 2026-08-22).",
-        "Corrected 2026-09-25 (task 093, PLAN S7b): until then this row read verified while the claim was false for a level-1 `#` part below a template section — the plugin's own dev workspace lost `---`, `# Project: playbook-plugin-dev` and its paragraph on the 2026-09-24 re-init, and init printed \"project content preserved\". A `## ` line inside a fenced block of a custom section could also be replaced by template text. Both reproduced red on the pre-fix code by the new tests; the fixture is that workspace's CLAUDE.md (tests/fixtures/playbook-plugin-dev_be73740_CLAUDE.md)."
+        "Corrected 2026-09-25 (task 093, PLAN S7b): until then this row read verified while the claim was false for a level-1 `#` part below a template section — the plugin's own dev workspace lost `---`, `# Project: playbook-plugin-dev` and its paragraph on the 2026-09-24 re-init, and init printed \"project content preserved\". A `## ` line inside a fenced block of a custom section could also be replaced by template text. Both reproduced red on the pre-fix code by the new tests; the fixture is that workspace's CLAUDE.md (tests/fixtures/playbook-plugin-dev_be73740_CLAUDE.md). The same task's review found two more Criticals in its own first fixes and closed them: a template-named `## CLI` inside the project's `#` part was deleted when no template `## CLI` came before it (round 2), and init lost a CRLF file's endings because the CLI read with universal newlines and wrote with os.linesep (round 2)."
       ],
       "follow_up_phases": [],
       "required_live_evidence": [],
