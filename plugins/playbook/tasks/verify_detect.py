@@ -13,7 +13,8 @@ step catches); it is never silently authoritative. Stdlib only; reads small
 config files and never executes the command it composes. Its ONE execution is
 a `python3 -m pytest --version` probe (owner decision, task 098), run only for
 a Python `tests/` tree with no pytest config, to decide between pytest and
-unittest — pytest is never suggested where it is not installed.
+unittest: pytest is suggested where the project CONFIGURES it (no probe) or
+where the probe finds it installed, never otherwise.
 """
 from __future__ import annotations
 
