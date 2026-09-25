@@ -9759,7 +9759,7 @@
     {
       "id": "PB-CLI-DETECT-VERIFY",
       "category": "cli-contracts",
-      "statement": "tasks detect-verify composes a suggested typecheck-and-test-and-lint command from the toolchains actually present, prints a note rather than a command for an empty project, emits valid JSON under --json, and never executes the command it composes; its one execution is a `python3 -m pytest --version` probe (task 098), run only for a Python tests/ tree with no pytest config, so pytest is suggested only where it is configured or installed and `python3 -m unittest discover -s tests` otherwise, with a note stating what discover can skip.",
+      "statement": "tasks detect-verify composes a suggested typecheck-and-test-and-lint command from the toolchains actually present, prints a note rather than a command for an empty project, emits valid JSON under --json, and never executes the command it composes; its only execution is a `python3 -m pytest --version` probe (task 098) — the `python3` on PATH, run in the inspected root, at most once per root, and only for a Python tests/ tree with no pytest config (a tox.ini counts as config only with a [pytest] section) — so pytest is suggested only where it is configured or installed and `python3 -m unittest discover -s tests` otherwise, with a note stating what discover can skip.",
       "owner": [
         {
           "path": "plugins/playbook/tasks/verify_detect.py",

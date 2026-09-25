@@ -10,11 +10,12 @@ ALL of them (typecheck AND tests AND lint), chained with ` && `.
 The goal is "everything runs" — the assembled command is a STARTING POINT the
 user confirms/corrects at init time (a missed tool is exactly what the confirm
 step catches); it is never silently authoritative. Stdlib only; reads small
-config files and never executes the command it composes. Its ONE execution is
-a `python3 -m pytest --version` probe (owner decision, task 098), run only for
-a Python `tests/` tree with no pytest config, to decide between pytest and
-unittest: pytest is suggested where the project CONFIGURES it (no probe) or
-where the probe finds it installed, never otherwise.
+config files and never executes the command it composes. Its only execution is
+a `python3 -m pytest --version` probe (owner decision, task 098) — at most one
+per inspected root, run IN that root, and only for a Python `tests/` tree with
+no pytest config — to decide between pytest and unittest: pytest is suggested
+where the project CONFIGURES it (no probe) or where the probe finds it
+installed, never otherwise.
 """
 from __future__ import annotations
 
@@ -56,8 +57,11 @@ _TEST_CLASS = re.compile(r"^\s*class\s+Test\w*\s*(?:\(([^)]*)\))?\s*:", re.M)
 # the base names that make a class a TestCase, compared exactly (task 098)
 _TESTCASE_BASES = frozenset({"TestCase", "unittest.TestCase",
                              "IsolatedAsyncioTestCase", "unittest.IsolatedAsyncioTestCase"})
-# a package `load_tests` hook: any mention of the name (def, assignment, import)
-_LOAD_TESTS = re.compile(r"\bload_tests\b")
+# a package `load_tests` hook BOUND by a def, an assignment or an import — a
+# comment or a string naming it is not a binding (impl panel r1, grok)
+_LOAD_TESTS = re.compile(r"^\s*(?:(?:async\s+)?def\s+load_tests\b"
+                         r"|load_tests\s*(?::[^=\n]*)?=(?!=)"
+                         r"|(?:from\s+\S+\s+)?import\s+[^#\n]*\bload_tests\b)", re.M)
 _STAR_IMPORT = re.compile(r"^\s*from\s+\S+\s+import\s+\*", re.M)
 # a module-level alias named like a test (`test_x = …`, `TestX = …`)
 _TEST_ALIAS = re.compile(r"^(?:test|Test)\w*\s*(?::[^=\n]*)?=(?!=)", re.M)
@@ -73,14 +77,19 @@ def _is_testcase_base(bases) -> bool:
     return any(b.strip() in _TESTCASE_BASES for b in (bases or "").split(","))
 
 
-def _pytest_available() -> bool:
-    """`python3 -m pytest --version` succeeds (owner decision, task 098: the one
-    execution this module makes). Any error, timeout or missing interpreter is
-    False — the answer then is unittest, never a pytest that is not there."""
-    exe = shutil.which("python3") or sys.executable
+def _pytest_available(root: Path) -> bool:
+    """`python3 -m pytest --version` succeeds when run IN `root` (owner decision,
+    task 098: the only execution this module makes). The interpreter is the
+    `python3` on PATH — the one the suggested command names — never a fallback
+    (impl panel r1, opus), and the cwd is the root whose command will run there
+    (codex-high: a directory-aware shim). A missing `python3`, any error or a
+    timeout is False: the answer is then unittest, never a pytest not there."""
+    exe = shutil.which("python3")
+    if not exe:
+        return False
     try:
         r = subprocess.run([exe, "-m", "pytest", "--version"], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30)
+                           stderr=subprocess.DEVNULL, timeout=30, cwd=str(root))
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
     return r.returncode == 0
@@ -123,9 +132,13 @@ def _discover_observations(root: Path) -> "list[str]":
                 seen.append(f"`{rel}` binds load_tests (discover stops recursing there)")
             elif _STAR_IMPORT.search(text):
                 seen.append(f"`{rel}` has an `import *` (it may bind load_tests)")
-        for extra in ("conftest.py", "*_test.py"):
-            for f in sorted(tests.rglob(extra)):
-                seen.append(f"`{f.relative_to(root).as_posix()}` is a pytest-only file")
+        for f in sorted(tests.rglob("conftest.py")):
+            seen.append(f"`{f.relative_to(root).as_posix()}` is a pytest-only file")
+        for f in sorted(tests.rglob("*.py")):
+            if f.name != "__init__.py" and f.name != "conftest.py" and not f.name.startswith("test"):
+                if f.name.endswith("_test.py"):
+                    seen.append(f"`{f.relative_to(root).as_posix()}` does not match discover's "
+                                "`test*.py` pattern (it is never loaded)")
         for f in sorted(tests.rglob("test_*.py")):
             rel = f.relative_to(root).as_posix()
             d = f.parent
@@ -153,16 +166,17 @@ def _discover_observations(root: Path) -> "list[str]":
     return uniq
 
 
-def _unittest_note(root: Path, prefix: str = "") -> str:
+def _unittest_note(root: Path) -> str:
     seen = _discover_observations(root)
     found = ("Seen in this tree: " + "; ".join(seen) + ".") if seen else \
         "None of these shapes was seen by a text scan — that is not a proof."
-    return (f"{prefix}`python3 -m unittest discover -s tests` is suggested because pytest is not "
+    return ("`python3 -m unittest discover -s tests` is suggested because pytest is not "
             "installed here. It is a STARTING POINT, not a complete runner: discover can skip "
             "tests without failing — a package `__init__.py` that binds `load_tests` (by def, "
             "assignment, import or `import *`), module-level aliases (`test_x = …`, "
-            "`TestX = …`), test files outside `tests/`, `class Test…` with an indirect base, "
-            "bare `def test…` functions, test directories without `__init__.py`. Confirm at "
+            "`TestX = …`), test files outside `tests/`, files not matching `test*.py` (e.g. "
+            "`*_test.py`), `class Test…` with an indirect base, bare `def test…` functions, "
+            "test directories without `__init__.py`. Confirm at "
             "init that its `Ran N tests` matches the suite. " + found)
 
 
@@ -171,12 +185,16 @@ def _python_components(root: Path, notes: "Optional[list[str]]" = None) -> list[
     # tests — pytest where the project has it (config, or it is installed); it
     # runs unittest TestCases too. Otherwise unittest discover, with its limits
     # stated (owner decision, task 098). Never a pytest that is not installed.
-    pytest_cfg = (_pyproject_has(root, "[tool.pytest") or _has(root, "pytest.ini", "tox.ini")
+    # `tox.ini` counts only with a pytest section — a bare `[tox]` made an
+    # uninstalled pytest the suggestion (impl panel r1, codex ×2 + grok)
+    _tox = _read(root / "tox.ini")
+    pytest_cfg = (_pyproject_has(root, "[tool.pytest") or _has(root, "pytest.ini")
+                  or "[pytest]" in _tox or "[tool:pytest]" in _tox
                   or "[tool:pytest]" in _read(root / "setup.cfg"))
     if pytest_cfg:
         out.append(_component("pytest", "python3 -m pytest", "pytest config"))
     elif (root / "tests").is_dir():
-        if _pytest_available():
+        if _pytest_available(root):
             out.append(_component("pytest", "python3 -m pytest",
                                   "pytest is installed; it runs unittest TestCases too"))
         else:

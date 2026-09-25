@@ -193,11 +193,67 @@ class DetectsThisProjectsShape(_NoPytest):
             return mock.Mock(returncode=1)
 
         with mock.patch.object(vd.subprocess, "run", side_effect=fake_run):
-            self.assertFalse(_REAL_PROBE())
+            self.assertFalse(_REAL_PROBE(Path('.')))
         self.assertEqual(calls[0][0][1:], ["-m", "pytest", "--version"])
         self.assertIs(calls[0][1]["stdout"], vd.subprocess.DEVNULL)
         with mock.patch.object(vd.subprocess, "run", side_effect=OSError("no python3")):
-            self.assertFalse(_REAL_PROBE())
+            self.assertFalse(_REAL_PROBE(Path('.')))
+
+    # ── task 098 impl panel round 1 ──
+    def test_probe_runs_python3_in_the_root_it_decides_for(self):
+        # opus: no sys.executable fallback (the suggestion says python3);
+        # codex-high: cwd = the root whose command will run there
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append((argv, kw))
+            return mock.Mock(returncode=0)
+
+        root = _mk({})
+        with mock.patch.object(vd.shutil, "which", return_value="/usr/bin/python3"), \
+                mock.patch.object(vd.subprocess, "run", side_effect=fake_run):
+            self.assertTrue(_REAL_PROBE(root))
+        self.assertEqual(calls[0][0], ["/usr/bin/python3", "-m", "pytest", "--version"])
+        self.assertEqual(calls[0][1]["cwd"], str(root))
+        with mock.patch.object(vd.shutil, "which", return_value=None), \
+                mock.patch.object(vd.subprocess, "run", side_effect=fake_run):
+            self.assertFalse(_REAL_PROBE(root))      # no python3 on PATH → no pytest claim
+        self.assertEqual(len(calls), 1)
+
+    def test_each_python_root_is_probed_in_its_own_directory(self):
+        # sonnet: "one execution" was false with several roots — it is one per root
+        d = _mk({".agent/config.json": json.dumps({"code_roots": ["a", "b"]}),
+                 "a/tests/test_x.py": self.TC, "b/tests/test_y.py": self.TC})
+        detect_verify(d)
+        self.assertEqual(sorted(Path(c.args[0]).name for c in self.probe.call_args_list), ["a", "b"])
+
+    def test_a_tox_ini_without_pytest_is_not_pytest_config(self):
+        # codex ×2, grok: a bare [tox] made an uninstalled pytest the suggestion
+        r = detect_verify(_mk({"tox.ini": "[tox]\nenvlist = py310\n", "tests/test_a.py": self.TC}))
+        self.assertEqual(r["command"], self.UD)
+        for cfg in ("[pytest]\naddopts = -q\n", "[tool:pytest]\n"):
+            with self.subTest(cfg=cfg.splitlines()[0]):
+                r = detect_verify(_mk({"tox.ini": cfg, "tests/test_a.py": self.TC}))
+                self.assertEqual(r["command"], "python3 -m pytest")
+
+    def test_a_comment_or_string_naming_load_tests_is_not_a_binding(self):
+        # grok: `# do not define load_tests` was reported as a hook
+        d = _mk({"tests/test_a.py": self.TC,
+                 "tests/pkg/__init__.py": "# do not define load_tests here\nNOTE = 'load_tests'\n",
+                 "tests/pkg/test_b.py": self.TC})
+        self.assertNotIn("binds load_tests", self._note(detect_verify(d)))
+
+    def test_a_file_outside_discovers_pattern_is_reported_as_such(self):
+        # grok: tests/widget_test.py (a TestCase!) is never loaded — discover ran 0 tests
+        import subprocess
+        import sys as _sys
+        d = _mk({"tests/widget_test.py": self.TC.replace("pass", "assert False")})
+        note = self._note(detect_verify(d))
+        self.assertIn("`tests/widget_test.py` does not match discover's `test*.py` pattern", note)
+        self.assertIn("files not matching `test*.py`", note)     # the standing limits say it too
+        r = subprocess.run([_sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+                           cwd=d, capture_output=True, text=True, timeout=120)
+        self.assertIn("Ran 0 tests", r.stderr)                    # the skip is real
 
     def test_suggested_unittest_command_runs_every_test_on_a_clean_tree(self):
         import subprocess
@@ -254,7 +310,7 @@ class DetectsThisProjectsShape(_NoPytest):
              {"tests/test_a.py": self.TC, "tests/unit/test_b.py": self.TC},
              "`tests/unit/` is not a package"),
             ("pytest's own files under tests/",
-             {"tests/test_a.py": self.TC, "tests/unit/conftest.py": "", "tests/widget_test.py": ""},
+             {"tests/test_a.py": self.TC, "tests/unit/conftest.py": ""},
              "is a pytest-only file"),
         ]
         for label, files, expect in cases:
