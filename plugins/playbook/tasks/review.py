@@ -144,9 +144,12 @@ def _judge_error(output, status, timeout_label=None):
     try:
         if status == "ok":
             return ""
-        if status == "timeout":
-            return f"timed out after {timeout_label}" if timeout_label else "timed out"
         text = (output or "").strip()
+        if status == "timeout":
+            if timeout_label:
+                return f"timed out after {timeout_label}"
+            # the judge's own text (tail-cert: `(error: … timed out)`), else bare
+            return text.splitlines()[0].strip() if text else "timed out"
         try:
             from tasks.models_check import classify_failure, OTHER
             verdict = classify_failure(text)
@@ -157,10 +160,25 @@ def _judge_error(output, status, timeout_label=None):
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         if not lines:
             return ""
-        m = re.match(r"\(FAILED\s*\S\s*exit (-?\d+)\)", lines[0])
+        failed = re.compile(r"\(FAILED\s*\S\s*exit (-?\d+)\)")
+        m = failed.match(lines[0])
         if m:
-            detail = next((ln for ln in lines[1:]
-                           if not (ln.startswith("[") and ln.endswith("]"))), "")
+            # impl-panel r1 (grok, codex-medium): prefer the STDERR tail — a
+            # stdout progress line is not the reason — and skip nested
+            # `(FAILED — exit N)` headers (the codex/grok single path arrives
+            # already formatted and is wrapped once more).
+            def _section(label):
+                on, out = False, []
+                for ln in lines[1:]:
+                    if ln.startswith("[") and ln.endswith("]"):
+                        on = ln == label
+                        continue
+                    if on and not failed.match(ln):
+                        out.append(ln)
+                return out
+            rest = [ln for ln in lines[1:]
+                    if not (ln.startswith("[") and ln.endswith("]")) and not failed.match(ln)]
+            detail = (_section("[stderr tail]") or _section("[stdout tail]") or rest or [""])[0]
             return f"exit {m.group(1)}: {detail}" if detail else f"exit {m.group(1)}"
         return lines[0]
     except Exception:

@@ -42,18 +42,28 @@ def _component(tool: str, cmd: str, reason: str) -> dict:
 
 
 _IMPORTS_PYTEST = re.compile(r"^\s*(import|from)\s+pytest\b", re.M)
-_IMPORTS_UNITTEST = re.compile(r"^\s*(import\s+unittest\b|from\s+unittest\b)", re.M)
+# `import unittest` / `from unittest import …` — NOT `unittest.mock`, which a
+# pytest suite uses too (impl-panel r1, grok: that tree ran 0 tests, exit 0).
+_IMPORTS_UNITTEST = re.compile(r"^\s*(import\s+unittest\b(?!\.)|from\s+unittest\s+import\b)", re.M)
+_TESTCASE_CLASS = re.compile(r"^\s*class\s+\w+\s*\([^)]*\b(?:TestCase|IsolatedAsyncioTestCase)\b", re.M)
+# a module-level pytest-style test function: unittest discover never runs it
+_BARE_TEST_FUNC = re.compile(r"^(?:async\s+)?def\s+test", re.M)
 
 
 def _unittest_only(root: Path) -> bool:
     """Task 096: a bare stdlib-unittest suite (this very project) was read as
-    pytest. Unittest only on POSITIVE evidence — every `tests/test_*.py` imports
-    unittest and none imports pytest, and no `conftest.py`: a pytest test
-    function needs no import at all, so "no pytest import" proves nothing."""
+    pytest. Unittest only on POSITIVE evidence that `unittest discover` runs
+    every test: each `tests/test_*.py` imports unittest (not merely
+    `unittest.mock`), defines a TestCase subclass, has no module-level
+    `def test…` (a pytest function discover would skip) and does not import
+    pytest; and no `conftest.py` anywhere under the project root or `tests/`.
+    A pytest test needs no import at all, so "no pytest import" proves nothing."""
     tests = root / "tests"
-    if not tests.is_dir() or _has(root, "conftest.py") or (tests / "conftest.py").exists():
+    if not tests.is_dir() or _has(root, "conftest.py"):
         return False
     try:
+        if any(tests.rglob("conftest.py")):
+            return False
         files = sorted(tests.rglob("test_*.py"))
     except OSError:
         return False
@@ -61,7 +71,8 @@ def _unittest_only(root: Path) -> bool:
         return False
     for f in files:
         text = _read(f)
-        if _IMPORTS_PYTEST.search(text) or not _IMPORTS_UNITTEST.search(text):
+        if (_IMPORTS_PYTEST.search(text) or not _IMPORTS_UNITTEST.search(text)
+                or not _TESTCASE_CLASS.search(text) or _BARE_TEST_FUNC.search(text)):
             return False
     return True
 

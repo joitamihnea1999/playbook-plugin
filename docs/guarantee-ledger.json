@@ -11645,7 +11645,7 @@
             "reference": "AppendReviewError.test_ok_record_never_carries_error"
           },
           "limitations": [
-            "Task 096: the panel runner is driven in-process with a stubbed ClaudeAdapter whose sonnet seat returns a `(FAILED — exit 1)` block; its JSONL line carries `error: exit 1: HTTP 402 Payment Required` and the ok seat's line carries none. The single-judge failure and timeout sites are pinned by SingleSpendErrorE2E; the tail-cert site calls the same `_judge_error` helper but has no dedicated error test. The whole-line bound is AppendReviewError.test_every_field_at_cap_plus_a_hostile_error_stays_within_512_bytes; the redaction is a pattern, not a secret scanner — a key shorter than 32 characters with no known prefix is not caught."
+            "Task 096: the panel runner is driven in-process with a stubbed ClaudeAdapter whose sonnet seat returns a `(FAILED — exit 1)` block; its JSONL line carries `error: exit 1: HTTP 402 Payment Required` and the ok seat's line carries none. The single-judge failure and timeout sites are pinned by SingleSpendErrorE2E, the codex/grok single path (already-formatted text, stderr beats a stdout progress line) by StructuredUsageE2E.test_single_grok_failure_records_the_stderr_reason_once, and the tail-cert site by the error assertions in StructuredUsageE2E.test_tail_cert_usage_is_per_call_never_stale (impl panel r1). The whole-line bound is AppendReviewError.test_every_field_at_cap_plus_a_hostile_error_stays_within_512_bytes; the redaction is a pattern, not a secret scanner — a key with no known prefix that is shorter than 32 characters, or contains `_`, is not caught (the trade that keeps paths and snake_case test ids readable)."
           ]
         },
         {

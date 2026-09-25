@@ -112,9 +112,13 @@ reason the invocation failed, in one line: `timed out after <limit>` for a timeo
 the model-availability verdict (`MODEL_UNAVAILABLE` / `CLI_UPGRADE_REQUIRED`) when
 the failure matches one; otherwise `exit N: <first line of the failure output>`, or
 the output's first line (a spawn error such as `(error: claude CLI not found)`).
+For an `exit N`, the first line of the stderr tail wins over the stdout tail (a
+progress line is not the reason); a timeout without a limit keeps the judge's
+own text (`(error: tail-cert judge timed out)`).
 It comes from a CLI's stderr, so it is sanitized: control characters are dropped,
 `"` becomes `'` and `\` becomes `/`, and token-shaped runs (an `sk-`/`xai-`/`ghp_`
-style key, or 32+ key characters in a row) become `<redacted>`. It is then cut to
+style key, or a 32+ run of letters and digits with no `_` or `/` — hex or
+base64-shaped; paths and snake_case test ids survive) become `<redacted>`. It is then cut to
 the bytes the rest of the record leaves under the 512-byte atomic-append floor
 (counting the newline as two bytes: on Windows the journal's text-mode write
 emits CRLF), and

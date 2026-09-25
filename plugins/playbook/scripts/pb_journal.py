@@ -182,15 +182,21 @@ def append_review(agent_dir, *, session_id="", seat="", task="", round_no=0,
 # The atomic-append floor every journal line must stay under (PIPE_BUF's POSIX
 # minimum), newline included.
 _LINE_FLOOR = 512
-_TOKENISH = re.compile(r"\b(?:sk|xai|ghp|gho|ghs|glpat)[-_][A-Za-z0-9_\-]{8,}|[A-Za-z0-9+_\-]{32,}")  # no "/": paths stay readable
+# A known key prefix, or a 32+ run of letters AND digits with no `_` or `/`
+# (hex / base64-shaped): paths and long snake_case test ids stay readable
+# (impl-panel r1, sonnet).
+_TOKENISH = re.compile(r"\b(?:sk|xai|ghp|gho|ghs|glpat)[-_][A-Za-z0-9_\-]{8,}"
+                       r"|(?=[A-Za-z0-9+\-]*[0-9])(?=[A-Za-z0-9+\-]*[A-Za-z])[A-Za-z0-9+\-]{32,}")
 
 
 def _fit_error(rec: dict, error) -> str:
     """Task 096: the reason a judge invocation failed, fitted to what the rest of
     `rec` leaves under the 512-byte floor. Control characters are dropped and
-    `"`/`\\` replaced, so the encoded length equals the byte length and the
-    budget is exact; token-shaped runs are redacted (the reason comes from a
-    CLI's stderr). Returns "" when fewer than 8 bytes remain."""
+    `"`/`\\` replaced, so the encoded length equals the byte length; the budget
+    counts the newline as two bytes (CRLF, what Windows writes), so it is exact
+    there and one byte conservative on POSIX. Token-shaped runs are redacted
+    (the reason comes from a CLI's stderr). Returns "" when fewer than 8 bytes
+    remain."""
     s = str(error).strip().split("\n", 1)[0]
     s = "".join(ch for ch in s if ch >= " " and ch != "\x7f")
     s = s.replace('"', "'").replace("\\", "/")

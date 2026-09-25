@@ -140,9 +140,11 @@ class DetectsThisProjectsShape(unittest.TestCase):
         d = _mk({"scripts/verify": "#!/usr/bin/env bash\nset -e\n"})
         self.assertEqual(detect_verify(d)["command"], "bash scripts/verify")
 
+    TC = "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n"
+
     def test_bare_unittest_suite_on_positive_evidence(self):
-        d = _mk({"tests/test_a.py": "import unittest\n",
-                 "tests/test_b.py": "from unittest import mock\nimport unittest\n"})
+        d = _mk({"tests/test_a.py": self.TC,
+                 "tests/test_b.py": "from unittest import mock, TestCase\n\n\nclass U(TestCase):\n    pass\n"})
         self.assertEqual(detect_verify(d)["command"], "python3 -m unittest discover -s tests")
 
     def test_mixed_or_unproven_suites_stay_pytest(self):
@@ -151,6 +153,13 @@ class DetectsThisProjectsShape(unittest.TestCase):
             {"tests/test_a.py": "import unittest\n", "tests/test_b.py": "def test_x():\n    assert 1\n"},
             {"tests/test_a.py": "import unittest\n", "tests/conftest.py": ""},
             {"tests/test_a.py": "import unittest\n", "pytest.ini": ""},
+            # impl r1 (grok Critical): `unittest.mock` is not a unittest suite —
+            # `unittest discover` ran 0 tests on this tree and exited 0
+            {"tests/test_a.py": "from unittest.mock import patch\n\n\ndef test_x():\n    assert patch\n"},
+            # impl r1 (codex ×2): a module-level pytest function beside a TestCase
+            {"tests/test_a.py": self.TC + "\n\ndef test_bare():\n    assert 0\n"},
+            # impl r1 (grok): a conftest.py below tests/ is pytest evidence
+            {"tests/unit/test_a.py": self.TC, "tests/unit/conftest.py": ""},
         ):
             with self.subTest(files=sorted(files)):
                 self.assertEqual(detect_verify(_mk(files))["command"], "python3 -m pytest")

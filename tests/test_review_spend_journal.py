@@ -678,8 +678,12 @@ class StructuredUsageE2E(_E2EBase):
         self.assertEqual(len(recs), 2, recs)
         self.assertEqual(recs[0]["usage"], self.GROK_USAGE)
         self.assertEqual(recs[1]["usage"], {"status": "unknown"}, "an erroring call must never reuse a prior usage")
+        # task 096 impl r1 (opus): the tail-cert site carries the reason too, and a
+        # timeout keeps the judge's own text rather than a bare "timed out"
+        self.assertNotIn("error", recs[0])
+        self.assertEqual(recs[1]["error"], "(error: tail-cert judge timed out)")
 
-    def _single(self, backend, stdout, *, rc=0, timeout_partial=None):
+    def _single(self, backend, stdout, *, rc=0, timeout_partial=None, stderr=""):
         import shutil
         import subprocess
         import types
@@ -691,7 +695,7 @@ class StructuredUsageE2E(_E2EBase):
             calls.append(list(args))
             if timeout_partial is not None:
                 raise subprocess.TimeoutExpired(cmd=agent, timeout=5, output=timeout_partial)
-            return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr="", args=list(args))
+            return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr, args=list(args))
         patches = [mock.patch.object(sandbox, "run", _run),
                    mock.patch.object(shutil, "which", lambda name: "/usr/bin/" + name)]
         for p in patches:
@@ -758,6 +762,16 @@ class StructuredUsageE2E(_E2EBase):
                 review.cmd_panel_review(["042", "--models", "claude:opus,grok:grok-4.6:medium"])
         recs = {r["seat"]: r for r in _read_journal(self.agent) if r["hook"] == "review"}
         self.assertEqual(recs["grok:grok-4.6:medium"]["status"], "fail", recs)
+
+    def test_single_grok_failure_records_the_stderr_reason_once(self):
+        # task 096 impl r1 (grok, codex-medium): the codex/grok single path already
+        # holds `(FAILED — exit N)` text and was formatted AGAIN for the spend
+        # record (`exit 1: (FAILED — exit 1)`), and a stdout progress line beat
+        # the stderr reason (`exit 1: reading files...`).
+        _calls, recs, _printed = self._single("grok", "reading files...\n", rc=1,
+                                              stderr="HTTP 402 Payment Required\n")
+        self.assertEqual(recs[0]["status"], "fail")
+        self.assertEqual(recs[0]["error"], "exit 1: HTTP 402 Payment Required")
 
     def test_single_structured_error_with_exit_0_is_a_failed_review(self):
         _calls, recs, _printed = self._single("grok", self._fixture("GROK_BAD"), rc=0)
@@ -887,6 +901,17 @@ class AppendReviewError(unittest.TestCase):
         r = _read_journal(self.agent)[0]
         self.assertEqual(r["error"], "exit 1: 'quota' / exceeded")
 
+    def test_long_identifiers_survive_hex_and_base64_runs_do_not(self):
+        # impl r1 (sonnet): a 32+ run rule also ate long test ids — the very text
+        # an error reason is for. Identifiers with `_` survive; a key-shaped run
+        # (letters AND digits, no `_`) is still redacted.
+        name = "test_every_field_at_cap_plus_a_hostile_error_stays_within_512_bytes"
+        pbj.append_review(self.agent, seat="codex:x", task="096", kind="single", status="fail",
+                          error=f"exit 1: FAIL: {name} 3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a")
+        err = _read_journal(self.agent)[0]["error"]
+        self.assertIn(name, err)
+        self.assertNotIn("3f9a8b7c6d5e4f3a2b1c", err)
+
     def test_token_shaped_strings_are_redacted(self):
         pbj.append_review(self.agent, seat="codex:x", task="096", kind="single", status="fail",
                           error="exit 1: invalid key sk-proj-AbCdEf0123456789AbCdEf0123 rejected")
@@ -906,6 +931,14 @@ class JudgeErrorReason(unittest.TestCase):
         self.assertEqual(
             review._judge_error("(FAILED — exit 2)\n[stderr tail]\nboom: bad flag\nmore", "fail"),
             "exit 2: boom: bad flag")
+        # impl r1: stderr's reason wins over a stdout progress line
+        self.assertEqual(
+            review._judge_error("(FAILED — exit 1)\n[stdout tail]\nreading files...\n"
+                                "[stderr tail]\nHTTP 402 Payment Required", "fail"),
+            "exit 1: HTTP 402 Payment Required")
+        # a timeout with the judge's own text keeps that text
+        self.assertEqual(review._judge_error("(error: tail-cert judge timed out)", "timeout"),
+                         "(error: tail-cert judge timed out)")
 
 
 class SpendErrorE2E(_E2EBase):

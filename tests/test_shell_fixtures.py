@@ -115,6 +115,18 @@ def _full_log(name: str, rc: int, text: str) -> None:
         pass
 
 
+def _timeout_transcript(exc) -> str:
+    """Both streams of a timed-out fixture (`capture_output=True` keeps them
+    apart; impl-panel r1, codex-high: only `exc.output` was saved)."""
+    parts = []
+    for chunk in (getattr(exc, "output", None), getattr(exc, "stderr", None)):
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode("utf-8", "replace")
+        if chunk:
+            parts.append(chunk)
+    return "\n".join(parts)
+
+
 class ShellFixtures(unittest.TestCase):
     def test_shell_fixtures_pass(self):
         for name, needs in _FIXTURES.items():
@@ -144,10 +156,8 @@ class ShellFixtures(unittest.TestCase):
                             timeout=_PER_FIXTURE_TIMEOUT,
                         )
                 except subprocess.TimeoutExpired as exc:
-                    _partial = exc.output or ""
-                    if isinstance(_partial, bytes):
-                        _partial = _partial.decode("utf-8", "replace")
-                    _full_log(name, -1, f"TIMED OUT after {_PER_FIXTURE_TIMEOUT}s\n{_partial}")
+                    _full_log(name, -1, f"TIMED OUT after {_PER_FIXTURE_TIMEOUT}s\n"
+                                        f"{_timeout_transcript(exc)}")
                     self.fail(f"{name}: timed out after {_PER_FIXTURE_TIMEOUT}s")
                 _full_log(name, r.returncode, r.stdout + r.stderr)
                 if r.returncode != 0:

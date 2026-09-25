@@ -5,9 +5,9 @@ Advisory ONLY: nothing here ever fails a gate or changes `tasks doctor`'s exit
 code. It answers "what would improve this setup, and how do I get it?" across
 four categories:
 
-  provider  extra agent CLIs (codex / agy / grok / pi) so the review panel can
-            span vendors — a single-vendor panel is the thing playbook exists to
-            avoid ("never trust one model; let them disagree").
+  provider  extra agent CLIs so a review panel can span vendors when you opt in
+            (the shipped default panel is all-Claude): codex and grok are
+            supported judge seats, agy and pi experimental (docs/providers.md).
   sandbox   the OS containment primitive `.claude/bin/sandbox` needs for its
             write-blast-radius guarantee (Linux bubblewrap / macOS seatbelt).
   verify    the command-word binaries the project's declared `verify` command

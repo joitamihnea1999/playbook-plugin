@@ -128,6 +128,15 @@ class ShellFixtureTranscript(unittest.TestCase):
         self.assertIn("S0 something", text)
         self.assertIn("S119 something", text)            # past the 40-line block cap
 
+    def test_a_timeout_keeps_stdout_and_stderr(self):
+        # impl r1 (codex-high): capture_output=True keeps the streams apart, and
+        # the timeout branch saved only exc.output
+        import subprocess as _sp
+        exc = _sp.TimeoutExpired(cmd="x", timeout=1, output=b"out-part\n", stderr="err-part\n")
+        text = test_shell_fixtures._timeout_transcript(exc)
+        self.assertIn("out-part", text)
+        self.assertIn("err-part", text)
+
     def test_nothing_when_off_and_never_raises(self):
         env = {k: v for k, v in os.environ.items() if k != ENV}
         with mock.patch.dict(os.environ, env, clear=True):
