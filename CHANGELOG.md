@@ -6,6 +6,7 @@ Notable changes to the playbook plugin. Follows [Keep a Changelog](https://keepa
 
 Branch `fix/1.5.46-batch`. Task 085: the six defects parked by the 1.5.45 release panel (task 083)
 plus the tool defect found at its close. Task 086: PLAN S3. Task 087: PLAN S4. Task 088: PLAN S5. Task 093: PLAN S7b. Task 094: the `opus` alias moves to Opus 5.5.
+Task 095: owner decision H2 (any project-root `*.md` is a doc for tail certification).
 Each fix was written against a test that failed first.
 
 ### Added
@@ -33,6 +34,13 @@ Each fix was written against a test that failed first.
   Opus 5.5, unless a project's `.agent/models.json` shadows the alias. Opus 4.8 stays reachable by an explicit
   pin: `claude:claude-opus-4-8[1m]`, or the named variant `claude:opus-4-8-1m`. The Claude adapter gains the
   named variant `opus-5-5-1m`, and its legacy fan-out uses it. A test pins the shipped mapping and both 4.8 pins.
+- **Tail certification treats any project-root `*.md` as a doc** (task 095, owner decision H2). Decision H made
+  the repo-root `CLAUDE.md` a doc for tail certification; H2 widens that to every `*.md` at the outer project
+  root, so a close whose only post-panel delta is, say, `PLAN.md` is certified by the single judge instead of
+  needing a fresh full panel or `--stale-panel-ok`. A `*.md` below the root keeps the old rule (a doc only under
+  `docs/` or when named `README*`/`CHANGELOG*`/`MIND_MAP*`), and so does a nested `code_roots` checkout's own
+  root `*.md`. Noted in docs/configuration.md and the `PB-PANEL-FRESHNESS` ledger row, which gains an
+  end-to-end proof (root `PLAN.md` certifies; `sub/PLAN.md` blocks).
 
 ### Fixed
 

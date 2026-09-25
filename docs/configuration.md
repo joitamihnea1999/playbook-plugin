@@ -385,7 +385,10 @@ done` computes the exact delta since the panel's tree state (F0), across the
 outer tree and every `code_roots` scope. If **every** changed path is in a
 **non-behavioral file class** — `*.md` under `docs/` or named
 `README*`/`CHANGELOG*`/`MIND_MAP*`, `*.json` under `docs/` (the guarantee
-ledger), the repo-root `CLAUDE.md`, anything under `tests/`, and task records
+ledger), any `*.md` at the project root (`CLAUDE.md`, `PLAN.md`, …; owner
+decision H2, 2026-09-25, widening H's root `CLAUDE.md` — the outer project
+root only: a nested `code_roots` checkout's own root `*.md`, and any `*.md`
+below the root, keep the rules before it), anything under `tests/`, and task records
 under `.agent/` (a `.py` under a `tests/` segment counts, by decision A — the
 test tree is non-behavioral; production source never does) — the **default
 single judge** re-reviews just that delta against the panel's verdict and
@@ -395,7 +398,8 @@ and the close is recorded as `STALE, but TAIL-CERTIFIED`.
 
 The safety property is that **any behavioral (code) delta still forces a fresh
 full panel** — a single changed line in a `.py` (even a comment), a `config.json`
-edit, a top-level doc that isn't a recognized doc name, or a rename that moves
+edit, a `.md` below the root that is neither under `docs/` nor a recognized doc
+name, or a rename that moves
 code into `docs/` (both endpoints are classified, so the deleted source is seen).
 The mechanism fails closed on every ambiguity: a missing/mismatched panel
 descriptor, a `code_roots` or `fingerprint_exclude` set that changed since the

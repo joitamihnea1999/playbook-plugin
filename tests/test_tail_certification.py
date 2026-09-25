@@ -138,9 +138,28 @@ class ClassifyDeltaPaths(unittest.TestCase):
         # changed inside it (a comment-only edit still needs a fresh panel).
         self._beh("tasks/lifecycle.py")
 
-    def test_toplevel_md_that_is_not_a_doc_name_is_behavioral(self):
-        self._beh("NOTES.md")
-        self._beh("design.md")
+    def test_root_md_is_nonbehavioral_outer_scope(self):   # owner decision H2
+        # H2 (2026-09-25): ANY *.md at the project root (scope-relative, no `/`)
+        # is a doc, like the root CLAUDE.md — PLAN.md is the case that motivated it
+        # (tail certification refused a root PLAN.md delta, PLAN §S6 open gap).
+        self.assertEqual(classify_delta_paths(["PLAN.md"]), ([], ["PLAN.md"]))
+        self._nb("NOTES.md")
+        self._nb("design.md")
+
+    def test_root_md_rule_is_outer_scope_and_root_only(self):   # H2 boundaries
+        # a nested code_roots checkout's own root PLAN.md keeps today's rule
+        self.assertEqual(classify_delta_paths(["PLAN.md"], is_outer_scope=False),
+                         (["PLAN.md"], []))
+        # a nested .md is unchanged
+        self._beh("sub/PLAN.md")
+        self._beh("plugins/playbook/skills/x/SKILL.md")
+        # the name must END in .md byte-exactly (a trailing space is a real byte)
+        self._beh("PLAN.md ")
+        self._beh("PLAN.md.py")
+        # a root non-.md stays behavioral
+        self._beh("PLAN.txt")
+        # same case rule as docs/*.md (suffix compared lower-cased)
+        self._nb("PLAN.MD")
 
     def test_nested_claude_md_is_behavioral(self):    # only ROOT CLAUDE.md (H)
         self._beh("subproject/CLAUDE.md")
@@ -624,6 +643,23 @@ class ClosePathTailCert(unittest.TestCase):
         self.assertIn("Task 001 done.", out, err)
         self.assertIn("tail-certified", err)
         self.assertIn("TAIL-CERTIFIED", self._receipt(td))
+
+    # (a') owner decision H2: a root PLAN.md-only delta certifies end-to-end
+    def test_root_plan_md_delta_certifies(self):
+        d, td, env = self._setup()
+        (d / "PLAN.md").write_text("# plan\n- [x] S9\n", encoding="utf-8")
+        out, err = self._close_inproc(d, "PASS")
+        self.assertIn("Task 001 done.", out, err)
+        self.assertIn("TAIL-CERTIFIED", self._receipt(td))
+
+    # (a'') control for H2: the same delta one directory down still blocks
+    def test_nested_plan_md_delta_blocks(self):
+        d, td, env = self._setup()
+        (d / "sub").mkdir()
+        (d / "sub" / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+        out, err = self._close_inproc(d, "PASS")
+        self.assertNotIn("Task 001 done.", out)
+        self.assertIn("pending", self._receipt(td))
 
     # (b) a code (.py) delta blocks BEFORE the judge — even if it would PASS
     def test_code_delta_blocks_even_with_pass_stub(self):

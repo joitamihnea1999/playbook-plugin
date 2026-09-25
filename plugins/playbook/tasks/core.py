@@ -1942,14 +1942,15 @@ def classify_delta_paths(paths: "list[str]", *,
       * (H) a doc `.json`: suffix `.json` AND under a `docs/` segment
         (the guarantee ledger + its baseline — claim-bearing, same safety
         property as the `.md` docs); NOT arbitrary `*.json` elsewhere;
-      * (H) the repo-ROOT `CLAUDE.md` (scope-relative path == `CLAUDE.md`, no
-        directory) — a claim-bearing doc — but ONLY in the OUTER scope
-        (`is_outer_scope`); a NESTED `code_roots` checkout's own `CLAUDE.md` stays
-        behavioral (owner H pinned only the project-root CLAUDE.md — impl-panel
-        grok#2), as does any `foo/CLAUDE.md`.
-    Everything else is BEHAVIORAL: `*.py`, `scripts/*`, a top-level `*.md` that
-    is not a doc name, `config.json`/lockfiles, unknown extensions. The DOC rules
-    (docs `.md`/`.json`, README/CHANGELOG/MIND_MAP, root CLAUDE.md) are
+      * (H, widened by H2 2026-09-25) ANY project-root `*.md` (scope-relative
+        path with no directory: `CLAUDE.md`, `PLAN.md`, `NOTES.md` …) — a
+        claim-bearing doc — but ONLY in the OUTER scope (`is_outer_scope`); a
+        NESTED `code_roots` checkout's own root `foo.md` keeps the rules above
+        (owner H pinned only the project root — impl-panel grok#2), as does any
+        `foo/bar.md` that is not a doc name or under root `docs/`.
+    Everything else is BEHAVIORAL: `*.py`, `scripts/*`, a nested `*.md` that is
+    not a doc name, `config.json`/lockfiles, unknown extensions. The DOC rules
+    (docs `.md`/`.json`, README/CHANGELOG/MIND_MAP, root `*.md`) are
     `.md`/`.json`-only by construction, so no DOC rule ever routes a code file into
     non_behavioral. The ONLY code that classifies non-behavioral is a `.py` under a
     `tests/` segment (owner decision A: the test tree is non-behavioral — a judge
@@ -1996,8 +1997,12 @@ def classify_delta_paths(paths: "list[str]", *,
                 is_nb = True
             elif any(base.startswith(p) for p in _DOC_BASENAME_PREFIXES):
                 is_nb = True
-            elif base == "CLAUDE.md" and not dir_segs and is_outer_scope:
-                is_nb = True                 # repo-ROOT CLAUDE.md, OUTER scope only
+            elif not dir_segs and is_outer_scope:
+                # H2: ANY project-root *.md (CLAUDE.md, PLAN.md, …), OUTER scope
+                # only — same suffix test as docs/*.md, so `CLAUDE.md ` (trailing
+                # space) never gets here. A nested scope's root `foo.md` keeps
+                # the rules above.
+                is_nb = True
         elif low.endswith(".json") and in_root_docs:  # r9 grok#2: per-scope (flagship ledger is in a code_root)
             # PER-SCOPE root docs/ (r9 grok#2, reversing r8 sonnet#1): owner H's
             # flagship guarantee ledger lives in a `code_roots` NESTED checkout in
